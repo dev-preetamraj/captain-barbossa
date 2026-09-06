@@ -1,0 +1,69 @@
+Use case: ui-mockup
+Asset type: second-version terminal UI design concept for Captain Barbossa.
+Input image: the provided image is the edit target and functional reference. Create an improved version of its interface. Preserve the two demonstrated views, captain/crew hierarchy, four crew identities and provider assignments, and dark terminal aesthetic. The user explicitly requests a cleaner, more spacious UI.
+Primary request: redesign the reference with significantly less visual noise and more usable breathing room. This must be an intentional design refinement, not simply the old picture with extra outer margins or smaller text.
+Composition: high-resolution landscape concept board, approximately 3200 x 1900. Two terminal views next to each other, overview about 55% width and expanded crew about 45%, both same height with a generous gap. Very small title at top "CAPTAIN BARBOSSA / V2". Modest captions "01  Overview" and "02  Crew conversation". Terminal windows occupy most of the canvas. Their contents must remain clearly readable.
+Design refinement:
+- Flat matte charcoal background, soft off-white text, muted slate metadata, restrained seafoam accent, amber for a pending question. Preserve the reference palette family.
+- Crisp regular monospace, consistent character size, comfortable line spacing, roomy 3-character horizontal padding and blank-line vertical spacing. Better hierarchy through spacing and restrained brightness.
+- Remove repeated "Task" and "Output" labels, workspace-path footers, repeated waiting messages, and unnecessary horizontal rules.
+- Remove nested bright boxes. Overview crew panes use slightly differentiated flat dark surfaces with no complete outlines; wide gutters divide the 2x2 grid. A thin seafoam LEFT rule identifies the selected tester pane. Outer terminal edge and major section separators are extremely subtle.
+- Status is a quiet short word aligned with each crew name, not a large badge. Role name is the strongest text in the tile; provider is secondary below it or alongside in muted text.
+- Each crew tile contains at most its name/provider/status, one task line, and one concise activity or question. Lots of clear space between these three levels. Do not fill space with decorative logs.
+- Captain gets a substantial, airy full-width chat area at the bottom, separated from crew by generous space and a single faint line; NO box around the whole captain area. A subtle filled composer bar with a named recipient anchors its bottom.
+- This is still a plausible Python terminal UI made of character cells, flat colored regions, text and thin box-drawing rules. No website buttons, pill chips, floating cards, shadows, glow, gradients, ornamental graphics, devices, or icon libraries.
+
+LEFT VIEW, OVERVIEW:
+Single clean top bar "captain / payments-api" and on right "4 crew".
+Upper area is precisely 2 columns by 2 rows.
+Tile upper-left:
+"Builder" and "Running"
+"Codex" (muted)
+"Implement rate limiter"
+"Editing src/limits.py" (muted activity)
+Tile upper-right:
+"Scout" and "Done"
+"Claude" (muted)
+"Inspect API patterns"
+"Found reusable middleware." (muted)
+Tile lower-left SELECTED with thin seafoam left edge:
+"Tester" and amber "Needs input"
+"Codex" (muted)
+"Write boundary tests"
+"Apply burst limits per user?"
+Tile lower-right:
+"Reviewer" and muted "Queued"
+"Claude" (muted)
+"Review final patch"
+"After builder and tester finish" (muted)
+Lower captain dock:
+Header "Captain" and muted "Claude".
+User attribution "You" (muted), next line "Add rate limiting to the API."
+Captain attribution "Captain" (seafoam), next line "Builder is implementing. Tester needs one decision."
+Keep attribution and text on separate lines for readable chat rhythm.
+Comfortable gap before a single composer strip reading "> Message captain..." with a small seafoam caret.
+Subtle one-line keyboard footer "Tab  Navigate     Enter  Expand     Ctrl+K  Commands".
+
+RIGHT VIEW, EXPANDED CREW:
+Clean top bar "captain / payments-api".
+Small compact status strip "Builder running   Scout done   Reviewer queued" in muted text.
+Large conversation area, no full box, with a restrained seafoam left accent.
+Header "Tester" then muted "Codex / Direct chat". Quiet tabs "Chat   Activity   Changes"; Chat subtly active.
+Task subtitle "Write boundary tests".
+Conversation with generous spacing between messages and separate attribution:
+"Tester"
+"Apply burst limits per user?"
+"You"
+"Yes. Cover per-user burst limits too."
+"Tester"
+"Got it. Adding boundary cases."
+Only one muted activity line "Running boundary tests..." below the conversation, separated by space rather than borders.
+At bottom of this crew area, a soft filled composer "> Message tester..." with seafoam caret.
+Immediately under input in small muted text "Instruction shared with captain".
+Keep the captain dock underneath, also without a full box, with room around its two lines:
+"Captain / Claude"
+"Tester resumed with your requirement."
+An unfocused composer strip "> Message captain..." beneath it. NO caret in this captain composer in the right screen.
+Footer "Esc  Overview     Ctrl+G  Captain".
+
+Maintain one active caret per screen, the same 4 crew members, and captain always visible at bottom. Do not add or remove functional regions. Make the difference from v1 unmistakable: less text, fewer borders, more whitespace INSIDE the UI, calmer hierarchy, careful alignment. Avoid gibberish and text running into pane boundaries.
