@@ -36,9 +36,9 @@ def herdr(*args, timeout=15):
 
 
 def current_pane():
-    if not all(os.environ.get(key) for key in (
-        "HERDR_WORKSPACE_ID", "HERDR_TAB_ID", "HERDR_PANE_ID"
-    )):
+    if not all(
+        os.environ.get(key) for key in ("HERDR_WORKSPACE_ID", "HERDR_TAB_ID", "HERDR_PANE_ID")
+    ):
         raise CaptainError("Run captain inside a Herdr workspace.")
     # Resolve the live pane: Herdr's launch-time IDs can be stale after a move.
     result = herdr("pane", "current", "--current")

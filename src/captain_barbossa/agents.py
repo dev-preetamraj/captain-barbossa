@@ -56,8 +56,12 @@ def launch(args, pane, project):
     write_json(directory / "captain.json", {"provider": provider, "pane": pane["pane_id"]})
     add_memory(directory / "graph.json", f"session:{meta['id']}", "captain", provider)
     herdr("tab", "rename", pane["tab_id"], "captain barbossa")
-    env = dict(os.environ, CAPTAIN_SESSION=meta["id"], CAPTAIN_PROJECT=str(project.resolve()),
-               CAPTAIN_MEMORY_ROOT=str(directory.parent.parent.parent))
+    env = dict(
+        os.environ,
+        CAPTAIN_SESSION=meta["id"],
+        CAPTAIN_PROJECT=str(project.resolve()),
+        CAPTAIN_MEMORY_ROOT=str(directory.parent.parent.parent),
+    )
     command = [binary, *native_args(provider, instructions)]
     if args.prompt:
         command.extend(["--", args.prompt])
@@ -85,16 +89,23 @@ def create_crew(args, pane, project):
     if not args.task.strip() or len(args.task) > 8000 or "\x00" in args.task:
         raise CaptainError("Provide a task of 1–8000 characters, without NUL bytes.")
     provider = choose(args.crew_agent, ("claude", "codex"), "Choose your crew agent", "--agent")
-    placement = choose(args.placement, ("pane", "tab"),
-                       "Where should the crew open?", "--placement")
+    placement = choose(
+        args.placement, ("pane", "tab"), "Where should the crew open?", "--placement"
+    )
     binary = executable(provider)
     directory, meta = session(project, pane, args.session)
     agent_name = f"c-{meta['id'][:8]}-{args.name}"
     launcher = directory / f"crew-{args.name}.sh"
-    environment = ["--env", f"CAPTAIN_SESSION={meta['id']}",
-                   "--env", f"CAPTAIN_PROJECT={project.resolve()}",
-                   "--env", f"CAPTAIN_MEMORY_ROOT={directory.parent.parent.parent}",
-                   "--env", f"CAPTAIN_CREW_LAUNCHER={launcher}"]
+    environment = [
+        "--env",
+        f"CAPTAIN_SESSION={meta['id']}",
+        "--env",
+        f"CAPTAIN_PROJECT={project.resolve()}",
+        "--env",
+        f"CAPTAIN_MEMORY_ROOT={directory.parent.parent.parent}",
+        "--env",
+        f"CAPTAIN_CREW_LAUNCHER={launcher}",
+    ]
     with lock(directory / "crew.lock"):
         meta = read_json(directory / "session.json")
         if args.name in meta["crew"]:
@@ -104,19 +115,45 @@ def create_crew(args, pane, project):
         launcher.write_text(f"#!/bin/sh\nexec {command}\n", encoding="utf-8")
         launcher.chmod(0o600)
         if placement == "tab":
-            created = herdr("tab", "create", "--workspace", pane["workspace_id"],
-                            "--cwd", str(project), "--label", args.name,
-                            "--no-focus", *environment)
+            created = herdr(
+                "tab",
+                "create",
+                "--workspace",
+                pane["workspace_id"],
+                "--cwd",
+                str(project),
+                "--label",
+                args.name,
+                "--no-focus",
+                *environment,
+            )
             new_pane = created.get("root_pane", {}).get("pane_id")
         else:
-            created = herdr("pane", "split", "--pane", pane["pane_id"],
-                            "--direction", "right", "--cwd", str(project),
-                            "--no-focus", *environment)
+            created = herdr(
+                "pane",
+                "split",
+                "--pane",
+                pane["pane_id"],
+                "--direction",
+                "right",
+                "--cwd",
+                str(project),
+                "--no-focus",
+                *environment,
+            )
             new_pane = created.get("pane", {}).get("pane_id")
         if not new_pane:
-            raise CaptainError("Herdr created a layout but returned no pane ID. Inspect the workspace before retrying.")
-        record = {"agent": agent_name, "provider": provider, "pane": new_pane,
-                  "placement": placement, "task": args.task, "status": "starting"}
+            raise CaptainError(
+                "Herdr created a layout but returned no pane ID. Inspect the workspace before retrying."
+            )
+        record = {
+            "agent": agent_name,
+            "provider": provider,
+            "pane": new_pane,
+            "placement": placement,
+            "task": args.task,
+            "status": "starting",
+        }
         meta["crew"][args.name] = record
         write_json(directory / "session.json", meta)
         try:

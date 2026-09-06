@@ -1,0 +1,88 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    name: Lint, format, and commits
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: "0.12.5"
+          python-version: "3.11"
+      - run: uv sync --locked
+      - run: uv run --locked pre-commit run --all-files --hook-stage pre-commit
+      - name: Validate commit messages and PR title
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
+            uv run --locked cz check --message-length-limit 72 --message "$PR_TITLE"
+          fi
+          if [ -n "$BASE_SHA" ] && [ "$BASE_SHA" != 0000000000000000000000000000000000000000 ]; then
+            uv run --locked cz check --message-length-limit 72 --rev-range "$BASE_SHA..$HEAD_SHA"
+          else
+            uv run --locked cz check --message-length-limit 72 --rev-range "$HEAD_SHA^..$HEAD_SHA"
+          fi
+
+  tests:
+    name: Tests (${{ matrix.os }}, Python ${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python: ["3.11", "3.14"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: "0.12.5"
+          python-version: ${{ matrix.python }}
+      - run: uv sync --locked
+      - run: uv run --locked python -m unittest discover -s tests -v
+
+  package:
+    name: Build and install wheel
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: "0.12.5"
+          python-version: "3.11"
+      - run: uv build
+      - name: Test installed entry points outside the checkout
+        run: |
+          uv venv "$RUNNER_TEMP/captain-wheel"
+          uv pip install --python "$RUNNER_TEMP/captain-wheel/bin/python" dist/*.whl
+          cd "$RUNNER_TEMP"
+          captain_wheel_python="$RUNNER_TEMP/captain-wheel/bin/python"
+          "$captain_wheel_python" -m captain_barbossa --help
+          "$RUNNER_TEMP/captain-wheel/bin/captain" --help

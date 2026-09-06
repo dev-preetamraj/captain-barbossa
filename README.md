@@ -1,5 +1,7 @@
 # Captain Barbossa
 
+[![CI](https://github.com/dev-preetamraj/captain-barbossa/actions/workflows/ci.yml/badge.svg)](https://github.com/dev-preetamraj/captain-barbossa/actions/workflows/ci.yml)
+
 A small Python launcher for native Codex and Claude Code sessions inside **Herdr**.
 
 ```sh
@@ -60,22 +62,25 @@ The OS may clear its temp folder. Set `CAPTAIN_MEMORY_ROOT` to another **outside
 
 **Development**
 
-The package uses a `src/` layout. Install it into a local environment before running tests or using the module entry point:
+See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, commit conventions, and the pull request workflow. The package uses a `src/` layout with locked development dependencies:
 
 ```sh
-uv venv
-uv pip install --editable .
-.venv/bin/python -m unittest discover -s tests -v
-.venv/bin/python -m captain_barbossa --help
-uv build
+uv sync --locked
+uv run --locked pre-commit install
+uv run --locked pre-commit run --all-files --hook-stage pre-push
 ```
 
-With pip, use `python3 -m venv .venv` and `.venv/bin/python -m pip install --editable .` for the first two steps. To refresh an existing tool installation after changes to packaging or entry points, run `uv tool install --editable . --force`.
+The installed hooks check formatting and lint before commits, validate commit messages, and run formatting, lint, and tests before pushes. To refresh an existing tool installation after changes to packaging or entry points, run `uv tool install --editable . --force`.
 
 ```text
 captain-barbossa/
 ├── pyproject.toml              # package metadata, build configuration, CLI entry point
+├── uv.lock                     # reproducible development dependencies
 ├── README.md
+├── CONTRIBUTING.md
+├── LICENSE                     # MIT
+├── .pre-commit-config.yaml      # commit and push checks
+├── .github/                    # CI, issue and pull request templates
 ├── src/
 │   └── captain_barbossa/
 │       ├── __init__.py
@@ -101,3 +106,5 @@ See the [current plan](docs/plan.md) for scope and the [archived proposal](docs/
 Checks cover agent and placement choices, both Herdr creation paths, readiness and failure preservation, memory isolation, concurrent graph writes, corruption handling, and package invocation outside the checkout. A real pseudo-terminal check verifies that long instructions reach a stand-in native executable intact; a real Graphify query runs when installed. Herdr mutations and model sessions are mocked in automated tests; live native CLI startup still needs manual qualification.
 
 Integration references: [Herdr CLI](https://herdr.dev/docs/cli-reference/), [Graphify CLI](https://graphify.com/docs/cli), [Codex additional instructions](https://learn.chatgpt.com/docs/config-file/config-reference).
+
+Licensed under [MIT](LICENSE).

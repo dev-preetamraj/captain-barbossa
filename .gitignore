@@ -3,3 +3,8 @@ __pycache__/
 .venv/
 build/
 dist/
+.ruff_cache/
+.DS_Store
+.env
+.env.*
+!.env.example

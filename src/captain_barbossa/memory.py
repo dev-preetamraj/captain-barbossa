@@ -1,16 +1,16 @@
 """Project and session graph storage outside the working repository."""
 
-from contextlib import contextmanager
 import fcntl
 import hashlib
 import json
 import os
-from pathlib import Path
 import re
 import shutil
 import subprocess
 import tempfile
 import uuid
+from contextlib import contextmanager
+from pathlib import Path
 
 from .runtime import CaptainError, executable
 
@@ -24,8 +24,11 @@ def project_root():
         return project
     if shutil.which("git"):
         result = subprocess.run(
-            ["git", "rev-parse", "--show-toplevel"], cwd=cwd,
-            capture_output=True, text=True, timeout=5,
+            ["git", "rev-parse", "--show-toplevel"],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=5,
         )
         if result.returncode == 0:
             return Path(result.stdout.strip()).resolve()
@@ -44,9 +47,16 @@ def private_dir(path):
 
 def storage(project):
     project = project.resolve()
-    root = Path(os.environ.get(
-        "CAPTAIN_MEMORY_ROOT", str(Path(tempfile.gettempdir()) / f"captain-barbossa-{os.getuid()}")
-    )).expanduser().absolute()
+    root = (
+        Path(
+            os.environ.get(
+                "CAPTAIN_MEMORY_ROOT",
+                str(Path(tempfile.gettempdir()) / f"captain-barbossa-{os.getuid()}"),
+            )
+        )
+        .expanduser()
+        .absolute()
+    )
     if root.resolve().is_relative_to(project):
         raise CaptainError("CAPTAIN_MEMORY_ROOT must be outside the project repository.")
     private_dir(root)
@@ -98,8 +108,13 @@ def add_memory(path, subject, relation, target):
             ids.append(node_id)
             if not any(node["id"] == node_id for node in graph["nodes"]):
                 graph["nodes"].append({"id": node_id, "label": label, "file_type": "memory"})
-        edge = {"source": ids[0], "target": ids[1], "key": relation,
-                "relation": relation, "confidence": 1.0}
+        edge = {
+            "source": ids[0],
+            "target": ids[1],
+            "key": relation,
+            "relation": relation,
+            "confidence": 1.0,
+        }
         if edge not in graph["links"]:
             graph["links"].append(edge)
         # ponytail: rewrite a small session graph; move to SQLite if this becomes large.
@@ -126,8 +141,12 @@ def session(project, pane, session_id=None, create=False):
             if meta["project"] != str(project) or meta["workspace"] != pane["workspace_id"]:
                 raise CaptainError("This session belongs to another project or Herdr workspace.")
         else:
-            meta = {"id": session_id, "project": str(project),
-                    "workspace": pane["workspace_id"], "crew": {}}
+            meta = {
+                "id": session_id,
+                "project": str(project),
+                "workspace": pane["workspace_id"],
+                "crew": {},
+            }
             write_json(meta_path, meta)
     return directory, meta
 
@@ -161,9 +180,18 @@ def memory(args, pane, project):
             else:
                 env = dict(os.environ, GRAPHIFY_OUT=str(snapshot), GRAPHIFY_QUERY_LOG_DISABLE="1")
                 result = subprocess.run(
-                    [executable("graphify"), "query", args.question, "--graph",
-                     str(snapshot / "graph.json"), "--budget", "2000"],
-                    cwd=snapshot, env=env, timeout=60,
+                    [
+                        executable("graphify"),
+                        "query",
+                        args.question,
+                        "--graph",
+                        str(snapshot / "graph.json"),
+                        "--budget",
+                        "2000",
+                    ],
+                    cwd=snapshot,
+                    env=env,
+                    timeout=60,
                 )
                 if result.returncode:
                     raise CaptainError(f"Graphify exited with status {result.returncode}.")

@@ -11,16 +11,24 @@ from captain_barbossa.runtime import CaptainError
 
 class SelectorTests(unittest.TestCase):
     def select(self, keys, options=("claude", "codex")):
-        with create_pipe_input() as keyboard, \
-                create_app_session(input=keyboard, output=DummyOutput()), \
-                patch("sys.stdin.isatty", return_value=True):
+        with (
+            create_pipe_input() as keyboard,
+            create_app_session(input=keyboard, output=DummyOutput()),
+            patch("sys.stdin.isatty", return_value=True),
+        ):
             keyboard.send_text(keys)
             return choose(None, options, "Choose your captain", "--agent")
 
     def test_navigation_and_enter_return_the_underlying_choice(self):
-        for keys, expected in (("\r", "claude"), ("j\r", "codex"), ("jk\r", "claude"),
-                               ("\x1b[B\r", "codex"), ("\x1b[B\x1b[A\r", "claude"),
-                               ("k\r", "codex"), ("xj\r", "codex")):
+        for keys, expected in (
+            ("\r", "claude"),
+            ("j\r", "codex"),
+            ("jk\r", "claude"),
+            ("\x1b[B\r", "codex"),
+            ("\x1b[B\x1b[A\r", "claude"),
+            ("k\r", "codex"),
+            ("xj\r", "codex"),
+        ):
             with self.subTest(keys=repr(keys)):
                 self.assertEqual(self.select(keys), expected)
         self.assertEqual(self.select("j\r", ("pane", "tab")), "tab")
@@ -34,5 +42,7 @@ class SelectorTests(unittest.TestCase):
 
     def test_explicit_choices_do_not_open_a_selector(self):
         with patch("captain_barbossa.prompts.questionary.select") as menu:
-            self.assertEqual(choose("codex", ("claude", "codex"), "Choose your captain", "--agent"), "codex")
+            self.assertEqual(
+                choose("codex", ("claude", "codex"), "Choose your captain", "--agent"), "codex"
+            )
             menu.assert_not_called()

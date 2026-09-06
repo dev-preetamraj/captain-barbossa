@@ -6,16 +6,17 @@ import questionary
 
 from .runtime import CaptainError
 
-
 LABELS = {"claude": "Claude Code", "codex": "Codex", "pane": "New pane", "tab": "New tab"}
-STYLE = questionary.Style([
-    ("qmark", "fg:#8bd5b5 bold"),
-    ("question", "bold"),
-    ("pointer", "fg:#8bd5b5 bold"),
-    ("highlighted", "fg:#8bd5b5 bold noreverse"),
-    ("answer", "fg:#8bd5b5 bold"),
-    ("separator", "fg:#808890"),
-])
+STYLE = questionary.Style(
+    [
+        ("qmark", "fg:#8bd5b5 bold"),
+        ("question", "bold"),
+        ("pointer", "fg:#8bd5b5 bold"),
+        ("highlighted", "fg:#8bd5b5 bold noreverse"),
+        ("answer", "fg:#8bd5b5 bold"),
+        ("separator", "fg:#808890"),
+    ]
+)
 
 
 def choose(value, options, question, flag):
@@ -28,12 +29,21 @@ def choose(value, options, question, flag):
         )
     choices = [questionary.Separator(" ")]
     for option in options:
-        choices.extend([questionary.Choice(LABELS[option], value=option), questionary.Separator(" ")])
+        choices.extend(
+            [questionary.Choice(LABELS[option], value=option), questionary.Separator(" ")]
+        )
     choices.append(questionary.Separator("↑/↓  j/k move · Enter select · Esc cancel"))
     prompt = questionary.select(
-        question, choices=choices, default=options[0],
-        qmark=" ◆", pointer="›", style=STYLE, instruction=" ",
-        use_arrow_keys=True, use_jk_keys=True, use_emacs_keys=False,
+        question,
+        choices=choices,
+        default=options[0],
+        qmark=" ◆",
+        pointer="›",
+        style=STYLE,
+        instruction=" ",
+        use_arrow_keys=True,
+        use_jk_keys=True,
+        use_emacs_keys=False,
     )
 
     @prompt.application.key_bindings.add("escape")

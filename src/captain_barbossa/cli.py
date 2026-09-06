@@ -12,16 +12,28 @@ from .runtime import CaptainError, current_pane
 
 def parser():
     root = argparse.ArgumentParser(description="Native captain and crew for Herdr workspaces.")
-    root.add_argument("--agent", choices=("codex", "claude"), help="captain CLI (asks when omitted)")
-    root.add_argument("--session", default=os.environ.get("CAPTAIN_SESSION"), help="reuse graph memory for this session")
+    root.add_argument(
+        "--agent", choices=("codex", "claude"), help="captain CLI (asks when omitted)"
+    )
+    root.add_argument(
+        "--session",
+        default=os.environ.get("CAPTAIN_SESSION"),
+        help="reuse graph memory for this session",
+    )
     root.add_argument("--prompt", help="initial captain prompt")
     commands = root.add_subparsers(dest="command")
     crew = commands.add_parser("crew", help="create a native crew after agent and pane/tab choices")
     crew.add_argument("name")
-    crew.add_argument("--agent", dest="crew_agent", choices=("codex", "claude"),
-                      help="crew CLI (asks when omitted)")
+    crew.add_argument(
+        "--agent",
+        dest="crew_agent",
+        choices=("codex", "claude"),
+        help="crew CLI (asks when omitted)",
+    )
     crew.add_argument("--task", required=True)
-    crew.add_argument("--placement", choices=("pane", "tab"), help="the placement explicitly chosen by the user")
+    crew.add_argument(
+        "--placement", choices=("pane", "tab"), help="the placement explicitly chosen by the user"
+    )
     mem = commands.add_parser("memory", help="project/session graph memory outside the repo")
     actions = mem.add_subparsers(dest="memory_command", required=True)
     add = actions.add_parser("add", help="remember a subject → relation → object")

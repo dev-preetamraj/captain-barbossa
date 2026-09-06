@@ -1,9 +1,7 @@
 import contextlib
-from concurrent.futures import ThreadPoolExecutor
 import io
 import json
 import os
-from pathlib import Path
 import pty
 import shlex
 import shutil
@@ -11,6 +9,8 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from unittest.mock import patch
 
 from captain_barbossa import agents, cli, memory, runtime
@@ -21,12 +21,18 @@ class CaptainFlowTests(unittest.TestCase):
         self.root = Path(self.enterContext(tempfile.TemporaryDirectory())).resolve()
         self.project = self.root / "project"
         self.project.mkdir()
-        self.enterContext(patch.dict(os.environ, {
-            "CAPTAIN_MEMORY_ROOT": str(self.root / "state"),
-            "CAPTAIN_PROJECT": str(self.project),
-            "HERDR_WORKSPACE_ID": "w1", "HERDR_TAB_ID": "w1:t1",
-            "HERDR_PANE_ID": "w1:p1",
-        }))
+        self.enterContext(
+            patch.dict(
+                os.environ,
+                {
+                    "CAPTAIN_MEMORY_ROOT": str(self.root / "state"),
+                    "CAPTAIN_PROJECT": str(self.project),
+                    "HERDR_WORKSPACE_ID": "w1",
+                    "HERDR_TAB_ID": "w1:t1",
+                    "HERDR_PANE_ID": "w1:p1",
+                },
+            )
+        )
         self.pane = {"workspace_id": "w1", "tab_id": "w1:t1", "pane_id": "w1:p1"}
         self.directory, self.meta = memory.session(self.project, self.pane, create=True)
         self.enterContext(contextlib.redirect_stdout(io.StringIO()))
@@ -44,18 +50,29 @@ class CaptainFlowTests(unittest.TestCase):
         instructions = agents.agent_instructions(self.directory, "captain")
         command = next(line.strip() for line in instructions.splitlines() if " crew NAME " in line)
         argv = shlex.split(command)
-        launcher = argv[:argv.index("crew")]
-        env = {key: value for key, value in os.environ.items()
-               if not key.startswith("HERDR_") and key != "PYTHONPATH"}
+        launcher = argv[: argv.index("crew")]
+        env = {
+            key: value
+            for key, value in os.environ.items()
+            if not key.startswith("HERDR_") and key != "PYTHONPATH"
+        }
         help_result = subprocess.run(
-            [*launcher, "--help"], cwd=self.project, env=env,
-            capture_output=True, text=True, timeout=10,
+            [*launcher, "--help"],
+            cwd=self.project,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
         self.assertEqual(help_result.returncode, 0, help_result.stderr)
         self.assertIn("create a native crew", help_result.stdout)
         guard_result = subprocess.run(
-            launcher, cwd=self.project, env=env,
-            capture_output=True, text=True, timeout=10,
+            launcher,
+            cwd=self.project,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
         self.assertEqual(guard_result.returncode, 1)
         self.assertIn("Run captain inside a Herdr workspace", guard_result.stderr)
@@ -63,11 +80,16 @@ class CaptainFlowTests(unittest.TestCase):
 
     def test_launcher_renames_live_tab_and_executes_native_cli(self):
         for provider in ("claude", "codex"):
-            with self.subTest(provider=provider), patch.object(agents, "herdr") as api, \
-                    patch.object(agents, "executable", return_value=f"/bin/{provider}"), \
-                    patch.object(os, "execvpe") as execute, \
-                    patch.object(sys.stdin, "isatty", return_value=True):
-                args = self.args("--agent", provider, "--prompt", "literal `touch /tmp/no` $(false)")
+            with (
+                self.subTest(provider=provider),
+                patch.object(agents, "herdr") as api,
+                patch.object(agents, "executable", return_value=f"/bin/{provider}"),
+                patch.object(os, "execvpe") as execute,
+                patch.object(sys.stdin, "isatty", return_value=True),
+            ):
+                args = self.args(
+                    "--agent", provider, "--prompt", "literal `touch /tmp/no` $(false)"
+                )
                 agents.launch(args, self.pane, self.project)
                 api.assert_called_once_with("tab", "rename", "w1:t1", "captain barbossa")
                 binary, argv, env = execute.call_args.args
@@ -79,18 +101,28 @@ class CaptainFlowTests(unittest.TestCase):
 
     def test_captain_requires_an_agent_selection(self):
         for provider in ("claude", "codex"):
-            with self.subTest(provider=provider), patch.object(agents, "herdr"), \
-                    patch.object(agents, "executable", side_effect=lambda name: f"/bin/{name}"), \
-                    patch.object(os, "execvpe") as execute, \
-                    patch.object(sys.stdin, "isatty", return_value=True), \
-                    patch("captain_barbossa.prompts.questionary.select",
-                          **{"return_value.unsafe_ask.return_value": provider}) as ask:
+            with (
+                self.subTest(provider=provider),
+                patch.object(agents, "herdr"),
+                patch.object(agents, "executable", side_effect=lambda name: f"/bin/{name}"),
+                patch.object(os, "execvpe") as execute,
+                patch.object(sys.stdin, "isatty", return_value=True),
+                patch(
+                    "captain_barbossa.prompts.questionary.select",
+                    **{"return_value.unsafe_ask.return_value": provider},
+                ) as ask,
+            ):
                 agents.launch(self.args(), self.pane, self.project)
                 self.assertEqual(execute.call_args.args[0], f"/bin/{provider}")
                 self.assertIn("Choose your captain", ask.call_args.args[0])
-        with patch.object(sys.stdin, "isatty", return_value=True), \
-                patch("captain_barbossa.prompts.questionary.select",
-                      **{"return_value.unsafe_ask.return_value": None}), patch.object(agents, "herdr") as api:
+        with (
+            patch.object(sys.stdin, "isatty", return_value=True),
+            patch(
+                "captain_barbossa.prompts.questionary.select",
+                **{"return_value.unsafe_ask.return_value": None},
+            ),
+            patch.object(agents, "herdr") as api,
+        ):
             with self.assertRaisesRegex(runtime.CaptainError, "cancelled"):
                 agents.launch(self.args(), self.pane, self.project)
             api.assert_not_called()
@@ -98,18 +130,27 @@ class CaptainFlowTests(unittest.TestCase):
     def test_crew_requires_choices_and_cancellation_creates_nothing(self):
         for flags in ((), ("--agent", "codex"), ("--placement", "pane")):
             args = self.args("crew", "builder", "--task", "build", *flags)
-            with self.subTest(flags=flags), patch.object(sys.stdin, "isatty", return_value=False), \
-                    patch.object(agents, "herdr") as api:
+            with (
+                self.subTest(flags=flags),
+                patch.object(sys.stdin, "isatty", return_value=False),
+                patch.object(agents, "herdr") as api,
+            ):
                 with self.assertRaisesRegex(runtime.CaptainError, "Ask the user"):
                     agents.create_crew(args, self.pane, self.project)
                 api.assert_not_called()
         for answers in ([None], ["claude", None]):
-            with patch.object(sys.stdin, "isatty", return_value=True), \
-                    patch("captain_barbossa.prompts.questionary.select",
-                          **{"return_value.unsafe_ask.side_effect": answers}), patch.object(agents, "herdr") as api:
+            with (
+                patch.object(sys.stdin, "isatty", return_value=True),
+                patch(
+                    "captain_barbossa.prompts.questionary.select",
+                    **{"return_value.unsafe_ask.side_effect": answers},
+                ),
+                patch.object(agents, "herdr") as api,
+            ):
                 with self.assertRaisesRegex(runtime.CaptainError, "cancelled"):
-                    agents.create_crew(self.args("crew", "builder", "--task", "build"),
-                                       self.pane, self.project)
+                    agents.create_crew(
+                        self.args("crew", "builder", "--task", "build"), self.pane, self.project
+                    )
                 api.assert_not_called()
 
     def test_crew_creates_chosen_topology_then_starts_native_agent(self):
@@ -117,17 +158,25 @@ class CaptainFlowTests(unittest.TestCase):
             with self.subTest(placement=placement):
                 task = 'Check quotes " and $() and `backticks`\nThen report.'
                 args = self.args("crew", placement, "--task", task)
-                created = {"pane": {"pane_id": "w1:p2", "agent": provider, "agent_status": "idle"},
-                           "root_pane": {"pane_id": "w1:p3"}}
-                with patch.object(agents, "herdr", return_value=created) as api, \
-                        patch.object(agents, "executable", return_value=f"/bin/{provider}"), \
-                        patch.object(sys.stdin, "isatty", return_value=True), \
-                        patch("captain_barbossa.prompts.questionary.select",
-                              **{"return_value.unsafe_ask.side_effect": [provider, placement]}) as ask:
+                created = {
+                    "pane": {"pane_id": "w1:p2", "agent": provider, "agent_status": "idle"},
+                    "root_pane": {"pane_id": "w1:p3"},
+                }
+                with (
+                    patch.object(agents, "herdr", return_value=created) as api,
+                    patch.object(agents, "executable", return_value=f"/bin/{provider}"),
+                    patch.object(sys.stdin, "isatty", return_value=True),
+                    patch(
+                        "captain_barbossa.prompts.questionary.select",
+                        **{"return_value.unsafe_ask.side_effect": [provider, placement]},
+                    ) as ask,
+                ):
                     agents.create_crew(args, self.pane, self.project)
                 calls = api.call_args_list
-                self.assertEqual(calls[0].args[:2],
-                                 ("pane", "split") if placement == "pane" else ("tab", "create"))
+                self.assertEqual(
+                    calls[0].args[:2],
+                    ("pane", "split") if placement == "pane" else ("tab", "create"),
+                )
                 self.assertIn(f"CAPTAIN_SESSION={self.meta['id']}", calls[0].args)
                 self.assertIn("Choose your crew agent", ask.call_args_list[0].args[0])
                 self.assertIn("Where should the crew open?", ask.call_args_list[-1].args[0])
@@ -147,62 +196,99 @@ class CaptainFlowTests(unittest.TestCase):
         native = self.root / "fake agent's cli"
         received = self.root / "received.json"
         capture = "import json, os, sys; from pathlib import Path; Path(os.environ['CAPTAIN_TEST_ARGS']).write_text(json.dumps(sys.argv[1:]))"
-        native.write_text("#!/bin/sh\nexec " + shlex.join([sys.executable, "-c", capture]) + ' "$@"\n')
+        native.write_text(
+            "#!/bin/sh\nexec " + shlex.join([sys.executable, "-c", capture]) + ' "$@"\n'
+        )
         native.chmod(0o700)
         for provider in ("codex", "claude"):
             with self.subTest(provider=provider):
-                instructions = "Long instructions: " + "quotes ' \" `false` $(false) \\ and newlines\n" * 100
-                args = self.args("crew", provider, "--agent", provider, "--task", "check", "--placement", "pane")
+                instructions = (
+                    "Long instructions: " + "quotes ' \" `false` $(false) \\ and newlines\n" * 100
+                )
+                args = self.args(
+                    "crew", provider, "--agent", provider, "--task", "check", "--placement", "pane"
+                )
                 created = {"pane": {"pane_id": "w1:p2", "agent": provider, "agent_status": "idle"}}
-                with patch.object(agents, "herdr", return_value=created) as api, \
-                        patch.object(agents, "executable", return_value=str(native)), \
-                        patch.object(agents, "agent_instructions", return_value=instructions):
+                with (
+                    patch.object(agents, "herdr", return_value=created) as api,
+                    patch.object(agents, "executable", return_value=str(native)),
+                    patch.object(agents, "agent_instructions", return_value=instructions),
+                ):
                     agents.create_crew(args, self.pane, self.project)
-                command = next(call.args[-1] for call in api.call_args_list if call.args[:2] == ("pane", "run"))
-                env = dict(os.environ, CAPTAIN_CREW_LAUNCHER=str(self.directory / f"crew-{provider}.sh"),
-                           CAPTAIN_TEST_ARGS=str(received))
+                command = next(
+                    call.args[-1] for call in api.call_args_list if call.args[:2] == ("pane", "run")
+                )
+                env = dict(
+                    os.environ,
+                    CAPTAIN_CREW_LAUNCHER=str(self.directory / f"crew-{provider}.sh"),
+                    CAPTAIN_TEST_ARGS=str(received),
+                )
                 master, slave = pty.openpty()
                 try:
                     self.assertLess(len(command.encode()), os.fpathconf(slave, "PC_MAX_CANON"))
                     # read waits in canonical mode, as a newly opened terminal can do.
-                    with subprocess.Popen(["/bin/sh", "-c", 'IFS= read -r command; eval "$command"'],
-                                          stdin=slave, stdout=slave, stderr=slave, env=env) as process:
+                    with subprocess.Popen(
+                        ["/bin/sh", "-c", 'IFS= read -r command; eval "$command"'],
+                        stdin=slave,
+                        stdout=slave,
+                        stderr=slave,
+                        env=env,
+                    ) as process:
                         try:
                             os.write(master, (command + "\n").encode())
                             self.assertEqual(process.wait(timeout=10), 0)
                         finally:
                             if process.poll() is None:
                                 process.kill()
-                    self.assertEqual(json.loads(received.read_text()), agents.native_args(provider, instructions))
+                    self.assertEqual(
+                        json.loads(received.read_text()), agents.native_args(provider, instructions)
+                    )
                 finally:
                     os.close(master)
                     os.close(slave)
 
     def test_startup_failure_preserves_pane_and_prevents_duplicate_retry(self):
-        args = self.args("crew", "broken", "--agent", "codex", "--task", "build", "--placement", "pane")
+        args = self.args(
+            "crew", "broken", "--agent", "codex", "--task", "build", "--placement", "pane"
+        )
+
         def api(*args, **kwargs):
             if args[:2] == ("pane", "run"):
                 raise runtime.CaptainError("agent_not_ready")
             return {"pane": {"pane_id": "w1:p2"}}
-        with patch.object(agents, "herdr", side_effect=api) as calls, \
-                patch.object(agents, "executable", return_value="/bin/codex"):
+
+        with (
+            patch.object(agents, "herdr", side_effect=api) as calls,
+            patch.object(agents, "executable", return_value="/bin/codex"),
+        ):
             with self.assertRaisesRegex(runtime.CaptainError, "pane was preserved"):
                 agents.create_crew(args, self.pane, self.project)
-            self.assertFalse(any(call.args[:2] == ("pane", "close") for call in calls.call_args_list))
-            self.assertFalse(any(call.args[:2] == ("agent", "prompt") for call in calls.call_args_list))
+            self.assertFalse(
+                any(call.args[:2] == ("pane", "close") for call in calls.call_args_list)
+            )
+            self.assertFalse(
+                any(call.args[:2] == ("agent", "prompt") for call in calls.call_args_list)
+            )
             with self.assertRaisesRegex(runtime.CaptainError, "already exists"):
                 agents.create_crew(args, self.pane, self.project)
         saved = memory.read_json(self.directory / "session.json")
         self.assertEqual(saved["crew"]["broken"]["status"], "needs_attention")
 
     def test_startup_waits_for_the_expected_native_agent(self):
-        states = [{}, {"agent": "claude", "agent_status": "idle"},
-                  {"agent": "codex", "agent_status": "working"},
-                  {"agent": "codex", "agent_status": "done"}]
+        states = [
+            {},
+            {"agent": "claude", "agent_status": "idle"},
+            {"agent": "codex", "agent_status": "working"},
+            {"agent": "codex", "agent_status": "done"},
+        ]
+
         def api(*args, **kwargs):
             return {"pane": states.pop(0)} if args[:2] == ("pane", "get") else {}
-        with patch.object(agents, "herdr", side_effect=api) as calls, \
-                patch.object(agents.time, "sleep"):
+
+        with (
+            patch.object(agents, "herdr", side_effect=api) as calls,
+            patch.object(agents.time, "sleep"),
+        ):
             agents.wait_for_crew("w1:p2", "codex", "builder")
         self.assertEqual(states, [])
         self.assertEqual(calls.call_args_list[-1].args, ("agent", "rename", "w1:p2", "builder"))
@@ -210,16 +296,24 @@ class CaptainFlowTests(unittest.TestCase):
     def test_blocked_or_timed_out_startup_never_submits_the_task(self):
         for status in ("blocked", "unknown"):
             with self.subTest(status=status):
-                args = self.args("crew", status, "--agent", "codex", "--task", "build", "--placement", "pane")
+                args = self.args(
+                    "crew", status, "--agent", "codex", "--task", "build", "--placement", "pane"
+                )
                 created = {"pane": {"pane_id": "w1:p2", "agent": "codex", "agent_status": status}}
-                with patch.object(agents, "herdr", return_value=created) as calls, \
-                        patch.object(agents, "executable", return_value="/bin/codex"), \
-                        patch.object(agents.time, "monotonic", side_effect=[0, 1, 31]), \
-                        patch.object(agents.time, "sleep"):
+                with (
+                    patch.object(agents, "herdr", return_value=created) as calls,
+                    patch.object(agents, "executable", return_value="/bin/codex"),
+                    patch.object(agents.time, "monotonic", side_effect=[0, 1, 31]),
+                    patch.object(agents.time, "sleep"),
+                ):
                     with self.assertRaisesRegex(runtime.CaptainError, "pane was preserved"):
                         agents.create_crew(args, self.pane, self.project)
-                self.assertFalse(any(call.args[:2] == ("agent", "prompt") for call in calls.call_args_list))
-                self.assertFalse(any(call.args[:2] == ("pane", "close") for call in calls.call_args_list))
+                self.assertFalse(
+                    any(call.args[:2] == ("agent", "prompt") for call in calls.call_args_list)
+                )
+                self.assertFalse(
+                    any(call.args[:2] == ("pane", "close") for call in calls.call_args_list)
+                )
                 saved = memory.read_json(self.directory / "session.json")["crew"][status]
                 self.assertEqual(saved["status"], "needs_attention")
 
@@ -236,14 +330,18 @@ class CaptainFlowTests(unittest.TestCase):
         project2 = self.root / "other-project"
         project2.mkdir()
         isolated, _ = memory.session(project2, self.pane, create=True)
-        self.assertEqual(memory.read_json(memory.memory_snapshot(isolated) / "graph.json")["nodes"], [])
+        self.assertEqual(
+            memory.read_json(memory.memory_snapshot(isolated) / "graph.json")["nodes"], []
+        )
         with self.assertRaisesRegex(runtime.CaptainError, "another project or Herdr workspace"):
             memory.session(self.project, dict(self.pane, workspace_id="w2"), self.meta["id"])
 
     def test_graph_concurrent_writes_and_corruption_preservation(self):
         graph_path = self.directory / "graph.json"
         with ThreadPoolExecutor(max_workers=8) as pool:
-            list(pool.map(lambda i: memory.add_memory(graph_path, "task", "has", str(i)), range(20)))
+            list(
+                pool.map(lambda i: memory.add_memory(graph_path, "task", "has", str(i)), range(20))
+            )
         self.assertEqual(len(memory.read_json(graph_path)["links"]), 20)
         graph_path.write_text("broken json")
         with self.assertRaisesRegex(runtime.CaptainError, "Cannot read memory"):
@@ -264,8 +362,18 @@ class CaptainFlowTests(unittest.TestCase):
         snapshot = memory.memory_snapshot(self.directory)
         env = dict(os.environ, GRAPHIFY_OUT=str(snapshot), GRAPHIFY_QUERY_LOG_DISABLE="1")
         result = subprocess.run(
-            [runtime.executable("graphify"), "query", "rate limiter", "--graph", str(snapshot / "graph.json")],
-            cwd=snapshot, env=env, capture_output=True, text=True, timeout=60,
+            [
+                runtime.executable("graphify"),
+                "query",
+                "rate limiter",
+                "--graph",
+                str(snapshot / "graph.json"),
+            ],
+            cwd=snapshot,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=60,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("per-user windows", result.stdout)

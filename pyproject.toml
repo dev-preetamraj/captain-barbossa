@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -7,8 +7,14 @@ name = "captain-barbossa"
 version = "0.1.0"
 description = "Launch a native captain and crew inside a Herdr workspace"
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.11"
 dependencies = ["questionary>=2.1,<3"]
+
+[project.urls]
+Repository = "https://github.com/dev-preetamraj/captain-barbossa"
+Issues = "https://github.com/dev-preetamraj/captain-barbossa/issues"
 
 [project.scripts]
 captain = "captain_barbossa.cli:main"
@@ -17,3 +23,20 @@ captain = "captain_barbossa.cli:main"
 where = ["src"]
 include = ["captain_barbossa*"]
 namespaces = false
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I"]
+
+[tool.commitizen]
+name = "cz_conventional_commits"
+
+[dependency-groups]
+dev = [
+    "commitizen>=4.18.0",
+    "pre-commit>=4.6.2",
+    "ruff>=0.16.6",
+]
