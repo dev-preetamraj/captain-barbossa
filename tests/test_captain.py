@@ -555,6 +555,65 @@ class CaptainFlowTests(unittest.TestCase):
             self.assertEqual(result["name"], "Jack")
             self.assertEqual(set(memory.read_json(other / "session.json")["crew"]), {"sparrow"})
 
+    def test_dismissed_crew_release_their_names_for_reuse(self):
+        self.meta["crew"] = {
+            "sparrow": {"status": "dismissed", "name": "Jack", "agent": "c-session-sparrow"},
+            "will-turner": {"status": "started"},
+            "elizabeth": {"status": "needs_attention"},
+        }
+        memory.write_json(self.directory / "session.json", self.meta)
+        created = {"pane": {"pane_id": "w1:p2", "agent": "codex", "agent_status": "idle"}}
+        with (
+            patch.object(agents, "herdr", return_value=created),
+            patch.object(agents, "executable", return_value="/bin/codex"),
+            patch.object(agents, "wait_for_crew"),
+            patch.object(agents, "confirm_task_started"),
+        ):
+            with contextlib.redirect_stdout(io.StringIO()) as output:
+                agents.create_crew(
+                    self.args(
+                        "crew", "--agent", "codex", "--task", "standby", "--placement", "pane"
+                    ),
+                    self.pane,
+                    self.project,
+                )
+            result = json.loads(output.getvalue())
+            self.assertEqual(
+                (result["id"], result["name"], result["status"]), ("sparrow", "Jack", "started")
+            )
+            roster = memory.read_json(self.directory / "session.json")["crew"]
+            self.assertEqual(set(roster), {"sparrow", "will-turner", "elizabeth"})
+            self.assertEqual(roster["sparrow"]["agent"], result["agent"])
+            self.assertEqual(
+                (roster["sparrow"]["task"], roster["sparrow"]["status"]), ("standby", "started")
+            )
+            with self.assertRaisesRegex(runtime.CaptainError, "already exists"):
+                agents.create_crew(
+                    self.args(
+                        "crew", "sparrow", "--agent", "codex", "--task", "x", "--placement", "pane"
+                    ),
+                    self.pane,
+                    self.project,
+                )
+            roster["sparrow"]["status"] = "dismissed"
+            memory.write_json(self.directory / "session.json", {**self.meta, "crew": roster})
+            with contextlib.redirect_stdout(io.StringIO()) as output:
+                agents.create_crew(
+                    self.args(
+                        "crew",
+                        "sparrow",
+                        "--agent",
+                        "codex",
+                        "--task",
+                        "again",
+                        "--placement",
+                        "pane",
+                    ),
+                    self.pane,
+                    self.project,
+                )
+            self.assertEqual(json.loads(output.getvalue())["name"], "Jack")
+
     def test_non_character_names_are_rejected_before_launch(self):
         for name in ("scout", "barbossa", "../../sparrow", "", "sparrow;ls", "sparrow-1234567890"):
             with self.subTest(name=name), patch.object(agents, "herdr") as api:

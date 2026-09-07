@@ -211,6 +211,10 @@ def dismiss_crew(args, pane, project):
     print(f"Dismissed {display_name}.")
 
 
+def name_reserved(meta, name):
+    return name in meta["crew"] and meta["crew"][name].get("status") != "dismissed"
+
+
 def create_crew(args, pane, project):
     if args.name is not None and (
         len(args.name) > 16
@@ -235,11 +239,11 @@ def create_crew(args, pane, project):
             for index, character in enumerate(cycle(CREW_NAMES)):
                 round_number = index // len(CREW_NAMES) + 1
                 name = f"{character}-{round_number}" if round_number > 1 else character
-                if name not in meta["crew"]:
+                if not name_reserved(meta, name):
                     break
         character, _, number = name.rpartition("-")
         display_name = f"{CREW_NAMES[character]}{number}" if number.isdigit() else CREW_NAMES[name]
-        if name in meta["crew"]:
+        if name_reserved(meta, name):
             raise CaptainError(f"Crew '{display_name}' already exists in this session.")
         agent_name = f"c-{meta['id'][:8]}-{name}"
         launcher = directory / f"crew-{name}.sh"
