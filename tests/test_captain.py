@@ -195,10 +195,9 @@ class CaptainFlowTests(unittest.TestCase):
         instructions = " ".join(agents.agent_instructions(self.directory, "captain").split())
         for phrase in (
             "Recruiting prints one canonical name; use it for CAPTAIN and Herdr commands",
+            "CAPTAIN wait 'NAME' [--timeout <seconds>]",
+            "Run every wait in the background; never block on a foreground wait",
             "herdr agent read <name>",
-            "herdr agent wait <name> --timeout <ms>",
-            "Run waits in background or use short bounded --timeout polls",
-            "never block on foreground waits or long polls",
             "herdr agent send-keys <name> y",
             "Read the pane before approving native permission prompts",
             "Claude Code may need Enter or a number instead of y",
@@ -223,13 +222,13 @@ class CaptainFlowTests(unittest.TestCase):
             self.assertIn(phrase, crew)
         captain = " ".join(agents.agent_instructions(self.directory, "Captain Barbossa").split())
         for phrase in (
-            "Wait returns on idle, done, or blocked; finished crew go idle",
-            "never wait on --until done alone",
-            "read the crew's report with CAPTAIN memory show",
-            "then herdr agent read <name> for detail",
+            "CAPTAIN wait 'NAME' [--timeout <seconds>]",
+            "Wait polls until the crew is idle, done, or blocked",
+            "records and prints its completion",
+            "the crew's own report, or its pane tail when it recorded none",
         ):
             self.assertIn(phrase, captain)
-        self.assertNotIn("--until done --until blocked", captain)
+        self.assertNotIn("herdr agent wait", captain)
 
     def test_instructions_give_every_role_the_shared_checkout_editing_contract(self):
         for role in ("Captain Barbossa", "crew member Gibbs"):
@@ -2023,6 +2022,152 @@ class CaptainFlowTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("per-user windows", result.stdout)
         self.assertEqual(list(self.project.iterdir()), [])
+
+    def wait_crew_record(self, status="started"):
+        agent_name = f"c-{self.meta['id'][:8]}-sparrow"
+        self.meta["crew"] = {
+            "sparrow": {
+                "id": "sparrow",
+                "name": "Sparrow",
+                "agent": agent_name,
+                "provider": "claude",
+                "pane": "w1:p2",
+                "tab": "w1:t1",
+                "status": status,
+            }
+        }
+        memory.write_json(self.directory / "session.json", self.meta)
+        return agent_name
+
+    def wait_api(self, statuses, tail="", report=None):
+        remaining = list(statuses)
+
+        def api(*args, **kwargs):
+            if args[:2] == ("agent", "get"):
+                status = remaining.pop(0) if remaining else "working"
+                if report and status in ("idle", "blocked"):
+                    # The crew records its report just before its pane settles.
+                    memory.add_memory(self.directory / "graph.json", "Sparrow", "report", report)
+                return {"agent": {"agent_status": status}}
+            if args[:2] == ("agent", "read"):
+                return tail
+            raise AssertionError(f"unexpected herdr call: {args}")
+
+        return api
+
+    def run_wait(self, statuses, tail="", timeout=60, report=None):
+        with (
+            patch.object(
+                agents, "herdr", side_effect=self.wait_api(statuses, tail, report)
+            ) as calls,
+            patch.object(agents.time, "sleep"),
+            contextlib.redirect_stdout(io.StringIO()) as output,
+        ):
+            agents.wait_crew(
+                self.args("wait", "Sparrow", "--timeout", str(timeout)), self.pane, self.project
+            )
+        return output.getvalue(), calls
+
+    def completions(self):
+        path = self.directory / "graph.json"
+        if not path.exists():
+            return []
+        graph = memory.read_json(path)
+        labels = {node["id"]: node["label"] for node in graph["nodes"]}
+        return [
+            labels[link["target"]]
+            for link in graph["links"]
+            if link["relation"] == "completed" and labels[link["source"]] == "Sparrow"
+        ]
+
+    def test_wait_records_and_prints_the_report_the_crew_wrote(self):
+        self.wait_crew_record()
+        printed, calls = self.run_wait(["working", "idle", "idle", "idle"], report="tests pass")
+        self.assertEqual(printed, "Sparrow idle.\nidle; reported: tests pass\n")
+        self.assertEqual(self.completions(), ["idle; reported: tests pass"])
+        self.assertNotIn(("agent", "read"), [call.args[:2] for call in calls.call_args_list])
+
+    def test_wait_records_the_pane_tail_when_the_crew_wrote_no_report(self):
+        agent_name = self.wait_crew_record()
+        printed, calls = self.run_wait(["idle", "idle", "idle"], tail="  ran 66 tests\n\nOK\n")
+        self.assertIn("no report recorded; pane tail: ran 66 tests\nOK", printed)
+        self.assertEqual(
+            self.completions(), ["idle; no report recorded; pane tail: ran 66 tests\nOK"]
+        )
+        read = [call for call in calls.call_args_list if call.args[:2] == ("agent", "read")]
+        self.assertEqual(read[0].args, ("agent", "read", agent_name, "--lines", "40"))
+        self.assertTrue(read[0].kwargs["raw"])
+
+    def test_wait_ignores_a_report_left_by_an_earlier_assignment(self):
+        self.wait_crew_record()
+        memory.add_memory(self.directory / "graph.json", "Sparrow", "report", "previous run")
+        printed, _ = self.run_wait(["idle", "idle", "idle"], tail="waiting")
+        self.assertIn("no report recorded; pane tail: waiting", printed)
+        self.assertNotIn("previous run", printed)
+
+    def test_wait_settles_only_after_consecutive_idle_polls(self):
+        self.wait_crew_record()
+        printed, calls = self.run_wait(["idle", "idle", "working", "idle", "idle", "idle"], "tail")
+        self.assertIn("Sparrow idle.", printed)
+        self.assertEqual(
+            len([c for c in calls.call_args_list if c.args[:2] == ("agent", "get")]), 6
+        )
+
+    def test_wait_reports_a_blocked_crew_with_its_pane_tail(self):
+        self.wait_crew_record()
+        printed, _ = self.run_wait(
+            ["working", "blocked"], tail="Do you want to proceed?", report="partial"
+        )
+        self.assertIn("Sparrow blocked.", printed)
+        self.assertIn("reported: partial", printed)
+        self.assertIn("pane tail: Do you want to proceed?", printed)
+        self.assertEqual(len(self.completions()), 1)
+
+    def test_wait_times_out_without_recording_a_completion(self):
+        self.wait_crew_record()
+        with (
+            patch.object(agents, "herdr", side_effect=self.wait_api(["working"])),
+            patch.object(agents.time, "sleep"),
+        ):
+            with self.assertRaisesRegex(runtime.CaptainError, "still working after 0.0 seconds"):
+                agents.wait_crew(
+                    self.args("wait", "Sparrow", "--timeout", "0"), self.pane, self.project
+                )
+        self.assertEqual(self.completions(), [])
+
+    def test_wait_rejects_unknown_crew_before_polling_herdr(self):
+        self.wait_crew_record()
+        with patch.object(agents, "herdr") as api:
+            with self.assertRaisesRegex(runtime.CaptainError, "No crew named 'Gibbs'"):
+                agents.wait_crew(self.args("wait", "Gibbs"), self.pane, self.project)
+        api.assert_not_called()
+
+    def test_wait_survives_an_unreadable_pane(self):
+        self.wait_crew_record()
+
+        def api(*args, **kwargs):
+            if args[:2] == ("agent", "read"):
+                raise runtime.CaptainError("pane closed")
+            return {"agent": {"agent_status": "idle"}}
+
+        with (
+            patch.object(agents, "herdr", side_effect=api),
+            patch.object(agents.time, "sleep"),
+            contextlib.redirect_stdout(io.StringIO()) as output,
+        ):
+            agents.wait_crew(self.args("wait", "Sparrow"), self.pane, self.project)
+        self.assertIn("pane tail: unreadable (pane closed)", output.getvalue())
+
+    def test_herdr_returns_terminal_reads_as_raw_text(self):
+        with (
+            patch.object(runtime, "executable", return_value="/bin/herdr"),
+            patch.object(
+                runtime.subprocess,
+                "run",
+                return_value=subprocess.CompletedProcess([], 0, "not JSON\n", ""),
+            ),
+        ):
+            self.assertEqual(runtime.herdr("agent", "read", "builder", raw=True), "not JSON\n")
 
 
 class ModelTests(unittest.TestCase):

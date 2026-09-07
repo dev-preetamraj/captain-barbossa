@@ -48,9 +48,13 @@ retain the full assignment. Crew end every assignment with a report (files chang
 checks run and their result, anything left or blocked), record it in session memory as
 `captain memory add "<Name>" "report" "<summary>"`, and print it as their final message.
 Going idle is the done signal: finished Claude Code crew return to idle rather than
-done, so the captain waits with `herdr agent wait <name> --timeout <ms>` (which returns
-on idle, done, or blocked), then reads the report from `captain memory show` and the
-pane.
+done. Completion does not depend on the crew remembering to report: the captain runs
+`captain wait <name> [--timeout <seconds>]`, which polls Herdr until the crew settles at
+idle (across consecutive polls, so a pause between tools is not mistaken for the end) or
+reports done or blocked. It then records a `<Name>` `completed` entry in session memory
+with the final status and the report the crew wrote during that wait, falling back to the
+tail of its pane when it wrote none, and prints the same entry. A crew that is still
+working when the timeout expires records nothing and reports an error.
 
 Tell the captain **“focus on Sparrow”**, **“switch to Turner”**, or **“take me to Elizabeth”** to bring that crew's pane and containing tab into focus. You can also use the command directly:
 

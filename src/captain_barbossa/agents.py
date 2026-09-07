@@ -35,6 +35,12 @@ POLL_INTERVAL = 0.2
 # Consecutive idle polls before a freshly drawn native TUI accepts a submitted prompt.
 READY_POLLS = 6
 PROMPT_TIMEOUT = 5
+WAIT_INTERVAL = 2
+# Consecutive idle polls before a crew that only paused between tools counts as finished.
+WAIT_POLLS = 3
+WAIT_TIMEOUT = 900
+TAIL_LINES = 40
+TAIL_LIMIT = 1500
 
 
 def agent_instructions(directory, role):
@@ -69,13 +75,11 @@ Trust the crew; omit background paragraphs, step lists, and restated context.
 Name the files each crew owns. Give simultaneous writers disjoint files; serialize
 same-file work and wait for the current owner's report before reassigning a file.
 Recruiting prints one canonical name; use it for CAPTAIN and Herdr commands:
-  herdr agent read <name>
-  herdr agent wait <name> --timeout <ms>
-Wait returns on idle, done, or blocked; finished crew go idle, so never wait on
---until done alone. Run waits in background or use short bounded --timeout polls;
-never block on foreground waits or long polls. Stay responsive; check when notified.
-When a wait returns, read the crew's report with CAPTAIN memory show (crew record it
-as 'NAME' 'report' '<summary>'), then herdr agent read <name> for detail.
+  CAPTAIN wait 'NAME' [--timeout <seconds>]
+Wait polls until the crew is idle, done, or blocked, then records and prints its
+completion: the crew's own report, or its pane tail when it recorded none. Run every
+wait in the background; never block on a foreground wait. Stay responsive; check when
+notified. For more detail: herdr agent read <name>
 Read the pane before approving native permission prompts:
   herdr agent send-keys <name> y
 Send the requested key: Claude Code may need Enter or a number instead of y.
@@ -244,6 +248,75 @@ def resolve_crew(meta, requested):
         targets = ", ".join(meta["crew"][crew_id]["agent"] for crew_id in matches)
         raise CaptainError(f"Crew name '{requested}' is ambiguous. Use an agent name: {targets}.")
     return matches[0]
+
+
+def crew_status(agent_name, timeout):
+    """Poll until the crew settles at idle or reports done or blocked; None on timeout.
+
+    A crew that pauses between tools reads as idle, so idle counts only after WAIT_POLLS
+    consecutive polls.
+    """
+    deadline = time.monotonic() + timeout
+    idle_polls = 0
+    while True:
+        status = herdr("agent", "get", agent_name, timeout=5).get("agent", {}).get("agent_status")
+        if status in ("done", "blocked"):
+            return status
+        idle_polls = idle_polls + 1 if status == "idle" else 0
+        if idle_polls >= WAIT_POLLS:
+            return "idle"
+        if time.monotonic() >= deadline:
+            return None
+        time.sleep(WAIT_INTERVAL)
+
+
+def pane_tail(agent_name):
+    """The end of the crew's terminal output, for crew that recorded no report."""
+    try:
+        output = herdr(
+            "agent", "read", agent_name, "--lines", str(TAIL_LINES), raw=True, timeout=10
+        )
+    except (CaptainError, subprocess.TimeoutExpired, OSError) as exc:
+        return f"unreadable ({exc})"
+    tail = "\n".join(line.strip() for line in output.splitlines() if line.strip())
+    return tail[-TAIL_LIMIT:] or "empty"
+
+
+def crew_reports(directory, names):
+    """Reports recorded under any of the crew's names, in the order they were written."""
+    path = directory / "graph.json"
+    if not path.exists():
+        return []
+    graph = read_json(path)
+    labels = {node["id"]: node["label"] for node in graph["nodes"]}
+    wanted = {name.casefold() for name in names if name}
+    return [
+        labels.get(link["target"], "")
+        for link in graph["links"]
+        if link.get("relation") == "report" and labels.get(link["source"], "").casefold() in wanted
+    ]
+
+
+def wait_crew(args, pane, project):
+    directory, meta = session(project, pane, args.session)
+    crew = meta["crew"][resolve_crew(meta, args.name)]
+    display_name = crew.get("name", args.name)
+    names = (display_name, crew.get("id"), crew["agent"])
+    # Only a report written during this wait belongs to the assignment being waited on.
+    before = len(crew_reports(directory, names))
+    status = crew_status(crew["agent"], max(args.timeout, 0))
+    if status is None:
+        raise CaptainError(
+            f"{display_name} was still working after {args.timeout} seconds. "
+            "Wait again, or read its pane with: herdr agent read " + crew["agent"]
+        )
+    reports = crew_reports(directory, names)[before:]
+    entry = f"{status}; reported: {reports[-1]}" if reports else f"{status}; no report recorded"
+    if not reports or status == "blocked":
+        entry += f"; pane tail: {pane_tail(crew['agent'])}"
+    add_memory(directory / "graph.json", display_name, "completed", entry[:8000])
+    print(f"{display_name} {status}.")
+    print(entry)
 
 
 def focus_crew(args, pane, project):

@@ -17,12 +17,15 @@ def executable(name):
     return path
 
 
-def herdr(*args, timeout=15, expect_output=True):
+def herdr(*args, timeout=15, expect_output=True, raw=False):
     result = subprocess.run(
         [executable("herdr"), *args], capture_output=True, text=True, timeout=timeout
     )
     if result.returncode:
         raise CaptainError(result.stderr.strip() or result.stdout.strip() or "Herdr failed.")
+    if raw:
+        # Terminal reads are plain text, not the JSON envelope every other command returns.
+        return result.stdout
     if not expect_output and not result.stdout:
         return {}
     try:

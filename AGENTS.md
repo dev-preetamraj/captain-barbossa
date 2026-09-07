@@ -17,7 +17,7 @@ repo; there is no daemon, custom UI, or tmux layer.
 
 ```text
 src/captain_barbossa/
-  cli.py       argparse entry point and dispatch (captain, crew, focus, dismiss, memory)
+  cli.py       argparse entry point and dispatch (captain, crew, wait, focus, dismiss, memory)
   agents.py    role instructions, native launch, crew create/wait/submit/focus/dismiss
   memory.py    session/project dirs, locks, atomic JSON, graph memory, Graphify snapshots
   runtime.py   herdr subprocess wrapper, JSON validation, current pane discovery

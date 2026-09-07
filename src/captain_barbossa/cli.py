@@ -6,7 +6,7 @@ import subprocess
 import sys
 
 from . import __version__
-from .agents import create_crew, dismiss_crew, focus_crew, launch
+from .agents import WAIT_TIMEOUT, create_crew, dismiss_crew, focus_crew, launch, wait_crew
 from .memory import memory, project_root
 from .runtime import CaptainError, current_pane
 
@@ -51,6 +51,16 @@ def parser():
         "from the current tab's layout (asks when omitted)",
     )
     crew.add_argument("--model", help="model name or alias, matched to the crew CLI's models")
+    wait = commands.add_parser(
+        "wait", help="wait for a crew to finish, then record and print its completion"
+    )
+    wait.add_argument("name", help="crew name or ID (case-insensitive)")
+    wait.add_argument(
+        "--timeout",
+        type=float,
+        default=WAIT_TIMEOUT,
+        help=f"seconds to wait before giving up (default {WAIT_TIMEOUT})",
+    )
     focus = commands.add_parser("focus", help="focus an existing crew's pane and tab")
     focus.add_argument("name", help="crew name or ID (case-insensitive)")
     dismiss = commands.add_parser("dismiss", help="close an existing crew's pane and retire it")
@@ -77,6 +87,8 @@ def main(argv=None):
         project = project_root()
         if args.command == "crew":
             create_crew(args, pane, project)
+        elif args.command == "wait":
+            wait_crew(args, pane, project)
         elif args.command == "focus":
             focus_crew(args, pane, project)
         elif args.command == "dismiss":
