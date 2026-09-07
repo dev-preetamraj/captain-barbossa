@@ -15,20 +15,26 @@ from .models import SMART, native_model_args, resolve_model
 from .prompts import LABELS, choose
 from .runtime import CaptainError, executable, herdr
 
-CREW_NAMES = {
-    "sparrow": "Jack",
-    "will-turner": "Will",
-    "elizabeth": "Elizabeth",
-    "gibbs": "Gibbs",
-    "anamaria": "Anamaria",
-    "pintel": "Pintel",
-    "ragetti": "Ragetti",
-    "cotton": "Cotton",
-    "marty": "Marty",
-    "tia-dalma": "Tia",
-    "davy-jones": "Davy",
-    "sao-feng": "Sao",
-}
+# One word each: the roster name is the crew ID, the display name, and the agent suffix.
+CREW_NAMES = (
+    "sparrow",
+    "turner",
+    "elizabeth",
+    "gibbs",
+    "anamaria",
+    "pintel",
+    "ragetti",
+    "cotton",
+    "marty",
+    "tia",
+    "davy",
+    "feng",
+)
+
+POLL_INTERVAL = 0.2
+# Consecutive idle polls before a freshly drawn native TUI accepts a submitted prompt.
+READY_POLLS = 6
+PROMPT_TIMEOUT = 5
 
 
 def agent_instructions(directory, role):
@@ -37,6 +43,11 @@ def agent_instructions(directory, role):
     duties = (
         """Only the captain manages crew. Send delegation requests to the captain;
 do not spawn crew.
+End every assignment with a report: files changed, checks run and their result, and
+anything left or blocked. Record it before you stop, under your own name:
+  CAPTAIN memory add 'NAME' 'report' '<summary>'
+Then print the same report as your final message. Going idle is your done signal, so
+never go idle mid-assignment; if you are truly blocked, record and report that instead.
 """
         if role.startswith("crew member ")
         else """You manage crew. Crew recruiting ruleset, for EVERY creation:
@@ -57,11 +68,14 @@ Keep crew prompts short: a few lines with goal, hard constraints, and expected r
 Trust the crew; omit background paragraphs, step lists, and restated context.
 Name the files each crew owns. Give simultaneous writers disjoint files; serialize
 same-file work and wait for the current owner's report before reassigning a file.
-Use the returned agent name for Herdr commands:
+Recruiting prints one canonical name; use it for CAPTAIN and Herdr commands:
   herdr agent read <name>
-  herdr agent wait <name> --until done --until blocked --timeout <ms>
-Run waits in background or use short bounded --timeout polls; never block on
-foreground waits or long polls. Stay responsive; check results when notified.
+  herdr agent wait <name> --timeout <ms>
+Wait returns on idle, done, or blocked; finished crew go idle, so never wait on
+--until done alone. Run waits in background or use short bounded --timeout polls;
+never block on foreground waits or long polls. Stay responsive; check when notified.
+When a wait returns, read the crew's report with CAPTAIN memory show (crew record it
+as 'NAME' 'report' '<summary>'), then herdr agent read <name> for detail.
 Read the pane before approving native permission prompts:
   herdr agent send-keys <name> y
 Send the requested key: Claude Code may need Enter or a number instead of y.
@@ -138,13 +152,20 @@ def launch(args, pane, project):
     os.execvpe(binary, command, env)
 
 
-def wait_for_crew(pane_id, provider, agent_name):
-    deadline = time.monotonic() + 30
+def wait_for_crew(pane_id, provider, agent_name, timeout=30):
+    """Wait for the native CLI to hold a settled idle state, not just to be detected.
+
+    A TUI that has only just drawn itself silently drops a submitted prompt, so idle is
+    trusted only after READY_POLLS consecutive polls.
+    """
+    deadline = time.monotonic() + timeout
+    idle_polls = 0
     while time.monotonic() < deadline:
         pane = herdr("pane", "get", pane_id, timeout=5).get("pane", {})
         if pane.get("agent") == provider:
             status = pane.get("agent_status")
-            if status in ("idle", "done", "blocked"):
+            idle_polls = idle_polls + 1 if status == "idle" else 0
+            if status in ("done", "blocked") or idle_polls >= READY_POLLS:
                 herdr("agent", "rename", pane_id, agent_name)
                 actual_name = herdr("agent", "get", pane_id).get("agent", {}).get("name")
                 if actual_name != agent_name:
@@ -155,8 +176,8 @@ def wait_for_crew(pane_id, provider, agent_name):
                 if status == "blocked":
                     raise CaptainError("The native agent is waiting for input or approval.")
                 return
-        time.sleep(0.2)
-    raise CaptainError(f"{provider} did not become ready within 30 seconds.")
+        time.sleep(POLL_INTERVAL)
+    raise CaptainError(f"{provider} did not become ready within {timeout} seconds.")
 
 
 def settled_status(agent_name, timeout):
@@ -168,31 +189,41 @@ def settled_status(agent_name, timeout):
         status = agent.get("agent_status")
         if status in ("working", "done", "blocked"):
             return status
-        time.sleep(0.2)
+        time.sleep(POLL_INTERVAL)
     return status
 
 
-def confirm_task_started(agent_name, timeout=5):
+def task_landed(agent_name, timeout=PROMPT_TIMEOUT):
+    """Return the settled status after a prompt, pressing Enter once for an unsent draft."""
     status = settled_status(agent_name, timeout)
     if status == "idle":
         # Claude Code can leave a submitted prompt as an unsent draft in its input box.
         herdr("agent", "send-keys", agent_name, "enter")
         status = settled_status(agent_name, timeout)
-        if status == "idle":
+    return status
+
+
+def submit_task(agent_name, task, attempts=2):
+    """Submit the task and verify it landed, resending once when the pane stayed idle."""
+    for _ in range(attempts):
+        herdr("agent", "prompt", agent_name, task)
+        status = task_landed(agent_name)
+        if status in ("working", "done"):
+            return
+        if status == "blocked":
             raise CaptainError(
-                f"{agent_name} did not start working after the task was submitted, even after "
-                "pressing Enter once. The task may still be an unsent draft in its input box."
+                f"{agent_name} is waiting for input or approval instead of starting the task. "
+                "Read its pane before sending any keys."
             )
-    if status in ("working", "done"):
-        return
-    if status == "blocked":
-        raise CaptainError(
-            f"{agent_name} is waiting for input or approval instead of starting the task. "
-            "Read its pane before sending any keys."
-        )
+        if status != "idle":
+            raise CaptainError(
+                f"{agent_name} reported status {status!r} after the task was submitted. "
+                "Inspect its pane before retrying."
+            )
     raise CaptainError(
-        f"{agent_name} reported status {status!r} after the task was submitted. "
-        "Inspect its pane before retrying."
+        f"{agent_name} did not start working after the task was submitted {attempts} times, "
+        "each followed by Enter. The task may still be an unsent draft in its input box; "
+        f"read the pane, then resend it with: herdr agent prompt {agent_name} '<task>'."
     )
 
 
@@ -442,8 +473,7 @@ def create_crew(args, pane, project):
                 name = f"{character}-{round_number}" if round_number > 1 else character
                 if not name_reserved(meta, name):
                     break
-        character, _, number = name.rpartition("-")
-        display_name = f"{CREW_NAMES[character]}{number}" if number.isdigit() else CREW_NAMES[name]
+        display_name = name.capitalize()
         if name_reserved(meta, name):
             raise CaptainError(f"Crew '{display_name}' already exists in this session.")
         agent_name = f"c-{meta['id'][:8]}-{name}"
@@ -531,8 +561,7 @@ def create_crew(args, pane, project):
             # A new shell may still be in canonical mode: keep terminal input short.
             herdr("pane", "run", new_pane, '/bin/sh "$CAPTAIN_CREW_LAUNCHER"', expect_output=False)
             wait_for_crew(new_pane, provider, agent_name)
-            herdr("agent", "prompt", agent_name, args.task)
-            confirm_task_started(agent_name)
+            submit_task(agent_name, args.task)
             record["status"] = "started"
         except (CaptainError, subprocess.TimeoutExpired, OSError) as exc:
             record["status"] = "needs_attention"
