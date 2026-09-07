@@ -47,8 +47,9 @@ design/debugging/multi-file -> strongest. Cheap to strong: {tiers}.
 Use every choice the user does state and keep the rest on these defaults. Ask at
 most one question, only when the user hands a choice back to you or names one too
 vaguely to map to a flag, and wait for the answer; never ask about a choice they did
-not raise. Auto picks pane and direction from the tab layout, or a new tab when
-crowded; the command lists every workspace pane by tab when --split-pane is missing.
+not raise. Auto picks pane and direction from the tab layout, splits the captain's
+pane down only as a last resort, or opens a new tab when crowded; the command lists
+every workspace pane by tab when --split-pane is missing.
 Run:
   CAPTAIN crew --agent codex|claude --task 'assignment' --placement pane|tab
     [--direction vertical|horizontal|auto --split-pane <pane-id>|auto] --model <model>

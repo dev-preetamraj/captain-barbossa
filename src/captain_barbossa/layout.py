@@ -51,7 +51,8 @@ def pick_split(geometry, captain, crew_panes, direction=None):
 
     Every feasible split keeps both halves at least MIN_WIDTH x MIN_HEIGHT. Among those, the
     split whose halves stay largest and squarest wins, then panes without crew, then panes
-    nearest the captain.
+    nearest the captain. Splitting the captain's own pane down is the last resort before a
+    new tab: it shrinks the pane the user is typing in.
     """
     directions = (direction,) if direction else tuple(HERDR_DIRECTIONS)
     anchor = center(geometry[captain]) if captain in geometry else None
@@ -65,7 +66,8 @@ def pick_split(geometry, captain, crew_panes, direction=None):
             width, height = half(rect, option)
             if width < MIN_WIDTH or height < MIN_HEIGHT:
                 continue
-            key = (-balance(width, height), pane_id in crew_panes, distance)
+            last_resort = pane_id == captain and option == "horizontal"
+            key = (last_resort, -balance(width, height), pane_id in crew_panes, distance)
             candidates.append((key, pane_id, option, width, height))
     if not candidates:
         return (
@@ -76,10 +78,12 @@ def pick_split(geometry, captain, crew_panes, direction=None):
                 f"when split{' ' + direction if direction else ''}"
             ),
         )
-    _, pane_id, option, width, height = min(candidates, key=lambda item: item[0])
+    key, pane_id, option, width, height = min(candidates, key=lambda item: item[0])
     _, _, full_width, full_height = geometry[pane_id]
     why = "largest balanced halves"
-    if pane_id == captain:
+    if key[0]:
+        why = "no other split fits, so the captain's pane is split down as a last resort"
+    elif pane_id == captain:
         why += ", captain's own pane"
     elif pane_id not in crew_panes:
         why += ", holds no crew"
