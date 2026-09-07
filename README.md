@@ -44,7 +44,13 @@ New crew panes/tabs open in the same workspace and project without stealing focu
 
 Captain and crew receive instructions for their own roles. Tasks are sent verbatim;
 the compact launch result omits the task echo, while `session.json` and graph memory
-retain the full assignment.
+retain the full assignment. Crew end every assignment with a report (files changed,
+checks run and their result, anything left or blocked), record it in session memory as
+`captain memory add "<Name>" "report" "<summary>"`, and print it as their final message.
+Going idle is the done signal: finished Claude Code crew return to idle rather than
+done, so the captain waits with `herdr agent wait <name> --timeout <ms>` (which returns
+on idle, done, or blocked), then reads the report from `captain memory show` and the
+pane.
 
 Tell the captain **“focus on Sparrow”**, **“switch to Turner”**, or **“take me to Elizabeth”** to bring that crew's pane and containing tab into focus. You can also use the command directly:
 
