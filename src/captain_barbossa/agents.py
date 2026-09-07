@@ -10,6 +10,7 @@ import time
 from itertools import cycle
 
 from .memory import add_memory, lock, read_json, session, write_json
+from .models import SMART, native_model_args, resolve_model
 from .prompts import choose
 from .runtime import CaptainError, executable, herdr
 
@@ -31,6 +32,7 @@ CREW_NAMES = {
 
 def agent_instructions(directory, role):
     command = shlex.join([sys.executable, "-m", "captain_barbossa", "--session", directory.name])
+    tiers = "; ".join(f"{agent} {'/'.join(names)}" for agent, names in SMART.items())
     duties = (
         """Only the captain manages crew. Send delegation requests to the captain;
 do not spawn crew.
@@ -39,11 +41,14 @@ do not spawn crew.
         else """You manage crew. Crew placement ruleset, for EVERY creation, no exceptions:
 1. Ask Claude Code or Codex. 2. Ask new pane or tab. 3. Pane only: ask vertical or
 horizontal. 4. Pane only, both directions: ask which pane to split; the command
-lists every workspace pane by tab when --split-pane is missing. Ask each choice
-alone, only after the one before it is answered, and wait. Never batch, infer,
-default, or reuse an earlier answer. Once all are supplied, run:
+lists every workspace pane by tab when --split-pane is missing. 5. Ask Manual
+select or Smart select. Manual: pass the user's model text as --model. Smart: pick
+it yourself by task: mechanical/small edits -> cheapest, normal features -> mid,
+design/debugging/multi-file -> strongest. Cheap to strong: {tiers}.
+Ask each choice alone, only after the one before it is answered, and wait. Never
+batch, infer, default, or reuse an earlier answer. Once all are supplied, run:
   CAPTAIN crew --agent codex|claude --task 'assignment' --placement pane|tab
-    [--direction vertical|horizontal --split-pane <pane-id>]
+    [--direction vertical|horizontal --split-pane <pane-id>] --model <model>
 Keep crew prompts short: a few lines with goal, hard constraints, and expected report.
 Trust the crew; omit background paragraphs, step lists, and restated context.
 Name the files each crew owns. Give simultaneous writers disjoint files; serialize
@@ -71,7 +76,7 @@ For "focus on", "switch to", or "take me to" NAME:
   CAPTAIN focus 'NAME'
 Names are case-insensitive; ask about unknown/ambiguous names. Focus only navigates
 to existing crew's pane/tab: do not recruit or send a task.
-"""
+""".replace("{tiers}", tiers)
     )
     return f"""You are {role} in a Captain Barbossa session inside Herdr.
 Use the native CLI normally; keep the user's requested scope minimal.
@@ -97,10 +102,12 @@ Keep Captain/Graphify state, generated instructions, and config outside the repo
 """
 
 
-def native_args(provider, instructions):
+def native_args(provider, instructions, model=None):
     if provider == "claude":
-        return ["--append-system-prompt", instructions]
-    return ["-c", "developer_instructions=" + json.dumps(instructions, ensure_ascii=False)]
+        flags = ["--append-system-prompt", instructions]
+    else:
+        flags = ["-c", "developer_instructions=" + json.dumps(instructions, ensure_ascii=False)]
+    return [*flags, *native_model_args(provider, model)]
 
 
 def launch(args, pane, project):
@@ -318,6 +325,9 @@ def create_crew(args, pane, project):
         args.placement, ("pane", "tab"), "Where should the crew open?", "--placement"
     )
     direction, split_pane, tab_id = choose_split(args, pane, placement)
+    model = resolve_model(provider, args.model) if args.model is not None else None
+    if model:
+        print(f"Model: {model} (from {args.model!r})", file=sys.stderr)
     binary = executable(provider)
     directory, meta = session(project, pane, args.session)
     with lock(directory / "crew.lock"):
@@ -346,7 +356,7 @@ def create_crew(args, pane, project):
             f"CAPTAIN_CREW_LAUNCHER={launcher}",
         ]
         instructions = agent_instructions(directory, f"crew member {display_name}")
-        command = shlex.join([binary, *native_args(provider, instructions)])
+        command = shlex.join([binary, *native_args(provider, instructions, model)])
         launcher.write_text(f"#!/bin/sh\nexec {command}\n", encoding="utf-8")
         launcher.chmod(0o600)
         if placement == "tab":
@@ -399,6 +409,7 @@ def create_crew(args, pane, project):
             "placement": placement,
             "direction": direction,
             "split_pane": split_pane,
+            "model": model,
             "task": args.task,
             "status": "starting",
         }
@@ -408,6 +419,8 @@ def create_crew(args, pane, project):
             add_memory(directory / "graph.json", f"session:{meta['id']}", "crew", agent_name)
             add_memory(directory / "graph.json", agent_name, "name", display_name)
             add_memory(directory / "graph.json", agent_name, "assigned", args.task)
+            if model:
+                add_memory(directory / "graph.json", agent_name, "model", model)
             herdr("pane", "rename", new_pane, display_name)
             # A new shell may still be in canonical mode: keep terminal input short.
             herdr("pane", "run", new_pane, '/bin/sh "$CAPTAIN_CREW_LAUNCHER"', expect_output=False)

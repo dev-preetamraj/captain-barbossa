@@ -18,7 +18,8 @@ from unittest.mock import patch
 
 import questionary
 
-from captain_barbossa import agents, cli, memory, runtime
+from captain_barbossa import agents, cli, memory, models, runtime
+from captain_barbossa.runtime import CaptainError
 
 
 class CaptainFlowTests(unittest.TestCase):
@@ -256,6 +257,7 @@ class CaptainFlowTests(unittest.TestCase):
                     )
                     for command in (" crew --agent", " dismiss ", " focus ", "herdr agent"):
                         self.assertNotIn(command, text)
+                    self.assertNotIn("--model", text)
                 else:
                     for phrase in (
                         "Crew placement ruleset, for EVERY creation, no exceptions",
@@ -265,7 +267,12 @@ class CaptainFlowTests(unittest.TestCase):
                         "lists every workspace pane by tab when --split-pane is missing",
                         "Ask each choice alone, only after the one before it is answered, and wait",
                         "Never batch, infer, default, or reuse an earlier answer",
-                        "--direction vertical|horizontal --split-pane <pane-id>",
+                        "--direction vertical|horizontal --split-pane <pane-id>] --model <model>",
+                        "5. Ask Manual select or Smart select.",
+                        "Manual: pass the user's model text as --model.",
+                        "mechanical/small edits -> cheapest, normal features -> mid,",
+                        "design/debugging/multi-file -> strongest.",
+                        "Cheap to strong: claude haiku/sonnet/opus; codex spark/terra/astra.",
                     ):
                         self.assertIn(phrase, instructions)
 
@@ -755,6 +762,91 @@ class CaptainFlowTests(unittest.TestCase):
                 finally:
                     os.close(master)
                     os.close(slave)
+
+    def test_crew_model_is_resolved_passed_to_the_native_cli_and_recorded(self):
+        for provider, name, text, model, flag in (
+            ("claude", "sparrow", "Opus", "claude-opus-5", "--model"),
+            ("codex", "gibbs", "5.6 terra", "gpt-5.6-terra", "-m"),
+        ):
+            with self.subTest(provider=provider):
+                args = self.args(
+                    "crew",
+                    name,
+                    "--agent",
+                    provider,
+                    "--task",
+                    "build",
+                    "--placement",
+                    "tab",
+                    "--model",
+                    text,
+                )
+                created = {
+                    "pane": {"pane_id": "w1:p2", "agent": provider, "agent_status": "idle"},
+                    "root_pane": {"pane_id": "w1:p3"},
+                    "tab_id": "w1:t9",
+                    "agent": {"name": f"c-{self.meta['id'][:8]}-{name}", "agent_status": "working"},
+                }
+                with (
+                    patch.object(agents, "herdr", return_value=created),
+                    patch.object(agents, "executable", return_value=f"/bin/{provider}"),
+                    contextlib.redirect_stdout(io.StringIO()) as output,
+                    contextlib.redirect_stderr(io.StringIO()) as errors,
+                ):
+                    agents.create_crew(args, self.pane, self.project)
+                self.assertEqual(json.loads(output.getvalue())["model"], model)
+                self.assertEqual(errors.getvalue(), f"Model: {model} (from {text!r})\n")
+                launcher = shlex.split((self.directory / f"crew-{name}.sh").read_text())
+                self.assertEqual(launcher[launcher.index(flag) + 1], model)
+                self.assertEqual(launcher.count(flag), 1)
+                saved = memory.read_json(self.directory / "session.json")["crew"][name]
+                self.assertEqual(saved["model"], model)
+                graph = memory.read_json(self.directory / "graph.json")
+                self.assertIn(model, [node["label"] for node in graph["nodes"]])
+
+    def test_crew_without_a_model_leaves_the_native_default(self):
+        args = self.args("crew", "--agent", "claude", "--task", "build", "--placement", "tab")
+        created = {
+            "pane": {"pane_id": "w1:p2", "agent": "claude", "agent_status": "idle"},
+            "root_pane": {"pane_id": "w1:p3"},
+            "tab_id": "w1:t9",
+            "agent": {"name": f"c-{self.meta['id'][:8]}-sparrow", "agent_status": "working"},
+        }
+        with (
+            patch.object(agents, "herdr", return_value=created),
+            patch.object(agents, "executable", return_value="/bin/claude"),
+            contextlib.redirect_stdout(io.StringIO()) as output,
+            contextlib.redirect_stderr(io.StringIO()) as errors,
+        ):
+            agents.create_crew(args, self.pane, self.project)
+        self.assertIsNone(json.loads(output.getvalue())["model"])
+        self.assertEqual(errors.getvalue(), "")
+        self.assertNotIn("--model", (self.directory / "crew-sparrow.sh").read_text())
+
+    def test_unmatched_or_ambiguous_model_lists_options_and_creates_nothing(self):
+        for provider, text, message in (
+            ("claude", "zzz", "No claude model matches 'zzz'. Options: claude-haiku-4-5, "),
+            ("codex", "gpt-5.6", "ambiguous for codex: gpt-5.6-luna, gpt-5.6-terra, gpt-5.6-sol"),
+            ("codex", " ", "Provide a model name. codex models: gpt-5.3-codex-spark"),
+        ):
+            with self.subTest(text=text):
+                args = self.args(
+                    "crew",
+                    "--agent",
+                    provider,
+                    "--task",
+                    "build",
+                    "--placement",
+                    "tab",
+                    "--model",
+                    text,
+                )
+                with patch.object(agents, "herdr") as api:
+                    with self.assertRaises(runtime.CaptainError) as error:
+                        agents.create_crew(args, self.pane, self.project)
+                self.assertIn(message, str(error.exception))
+                api.assert_not_called()
+                self.assertEqual(memory.read_json(self.directory / "session.json")["crew"], {})
 
     def test_startup_failure_preserves_pane_and_prevents_duplicate_retry(self):
         args = self.args(
@@ -1487,6 +1579,48 @@ class CaptainFlowTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("per-user windows", result.stdout)
         self.assertEqual(list(self.project.iterdir()), [])
+
+
+class ModelTests(unittest.TestCase):
+    def test_text_matches_exact_names_then_prefixes_substrings_and_close_spellings(self):
+        for provider, text, expected in (
+            ("claude", "claude-opus-5", "claude-opus-5"),
+            ("claude", "opus", "claude-opus-5"),
+            ("claude", "Claude Sonnet 5", "claude-sonnet-5"),
+            ("claude", "haiku_4_5", "claude-haiku-4-5"),
+            ("claude", "fable 5.1", "claude-fable-5-1"),
+            ("claude", "sonet", "claude-sonnet-5"),
+            ("codex", "gpt-5.5", "gpt-5.5"),
+            ("codex", "astra", "gpt-6-astra"),
+            ("codex", "gpt-6", "gpt-6-astra"),
+            ("codex", "codex", "gpt-5.3-codex-spark"),
+            ("codex", "terra", "gpt-5.6-terra"),
+        ):
+            with self.subTest(provider=provider, text=text):
+                self.assertEqual(models.resolve_model(provider, text), expected)
+
+    def test_unknown_and_ambiguous_text_list_the_provider_options(self):
+        with self.assertRaisesRegex(CaptainError, "No claude model matches 'gpt-6-astra'"):
+            models.resolve_model("claude", "gpt-6-astra")
+        with self.assertRaisesRegex(CaptainError, "ambiguous for codex: gpt-5.6-luna"):
+            models.resolve_model("codex", "gpt-5.6")
+        for provider in models.MODELS:
+            with self.subTest(provider=provider):
+                with self.assertRaises(CaptainError) as error:
+                    models.resolve_model(provider, "nonexistent-model-name")
+                for model in models.model_ids(provider):
+                    self.assertIn(model, str(error.exception))
+
+    def test_smart_tiers_and_native_flags_follow_the_model_table(self):
+        for provider, tiers in models.SMART.items():
+            ids = [models.resolve_model(provider, tier) for tier in tiers]
+            self.assertEqual(ids, sorted(ids, key=models.model_ids(provider).index))
+            self.assertEqual(ids[0], models.model_ids(provider)[0])
+        self.assertEqual(
+            models.native_model_args("claude", "claude-opus-5"), ["--model", "claude-opus-5"]
+        )
+        self.assertEqual(models.native_model_args("codex", "gpt-6-astra"), ["-m", "gpt-6-astra"])
+        self.assertEqual(models.native_model_args("codex", None), [])
 
 
 class VersionTests(unittest.TestCase):

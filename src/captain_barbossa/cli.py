@@ -48,6 +48,7 @@ def parser():
     crew.add_argument(
         "--split-pane", help="pane ID anywhere in the workspace to split (asks when omitted)"
     )
+    crew.add_argument("--model", help="model name or alias, matched to the crew CLI's models")
     focus = commands.add_parser("focus", help="focus an existing crew's pane and tab")
     focus.add_argument("name", help="crew name or ID (case-insensitive)")
     dismiss = commands.add_parser("dismiss", help="close an existing crew's pane and retire it")
