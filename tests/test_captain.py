@@ -126,6 +126,31 @@ class CaptainFlowTests(unittest.TestCase):
         ):
             self.assertIn(phrase, instructions)
 
+    def test_instructions_give_every_role_the_shared_checkout_editing_contract(self):
+        for role in ("Captain Barbossa", "crew member Gibbs"):
+            with self.subTest(role=role):
+                instructions = " ".join(agents.agent_instructions(self.directory, role).split())
+                for phrase in (
+                    "Crew share one checkout. Edit only files in your assignment",
+                    "Re-read a file right before each edit",
+                    "keep others' unexpected changes in place",
+                    "Stage and commit only your own files/hunks",
+                    "never git add -A or repo-wide formatting",
+                    "Finish or record a handoff before anyone else edits your file",
+                ):
+                    self.assertIn(phrase, instructions)
+        captain = " ".join(agents.agent_instructions(self.directory, "Captain Barbossa").split())
+        for phrase in (
+            "Name the files each crew owns",
+            "Give simultaneous writers disjoint files",
+            "wait for the current owner's report before reassigning a file",
+            "formatting of owned files",
+            "Commit only the user's leftover edits after crew have committed their own",
+        ):
+            self.assertIn(phrase, captain)
+        crew = agents.agent_instructions(self.directory, "crew member Gibbs")
+        self.assertNotIn("disjoint files", crew)
+
     def test_instructions_keep_shared_rules_and_scope_crew_management_to_captain(self):
         for role in ("Captain Barbossa", "crew member Gibbs"):
             with self.subTest(role=role):

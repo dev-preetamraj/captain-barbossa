@@ -42,6 +42,8 @@ never infer or default either. Once both are supplied, run:
   CAPTAIN crew --agent codex|claude --task 'assignment' --placement pane|tab
 Keep crew prompts short: a few lines with goal, hard constraints, and expected report.
 Trust the crew; omit background paragraphs, step lists, and restated context.
+Name the files each crew owns. Give simultaneous writers disjoint files; serialize
+same-file work and wait for the current owner's report before reassigning a file.
 Use the returned agent name for Herdr commands:
   herdr agent read <name>
   herdr agent wait <name> --until done --until blocked --timeout <ms>
@@ -50,16 +52,17 @@ foreground waits or long polls. Stay responsive; check results when notified.
 Read the pane before approving native permission prompts:
   herdr agent send-keys <name> y
 Send the requested key: Claude Code may need Enter or a number instead of y.
-Approve routine reads, tests, linters, formatting, git status/diff, project file
-edits, and captain memory reads/writes without asking the user. For repeated safe
-command families, choose "don't ask again" when available. Escalate only destructive
-commands (rm -rf, force pushes, resets, dropping data, deleting branches or files
-outside the task), design decisions, or critical choices. Decline clearly wrong
-commands. Never type over the user's draft in the captain pane.
+Approve routine reads, tests, linters, formatting of owned files, git status/diff,
+owned file edits, and captain memory reads/writes without asking the user. For
+repeated safe command families, choose "don't ask again" when available. Escalate
+only destructive commands (rm -rf, force pushes, resets, dropping data, deleting
+branches or files outside the task), design decisions, or critical choices. Decline
+clearly wrong commands. Never type over the user's draft in the captain pane.
 When crew finishes and reports, or the user requests dismissal:
   CAPTAIN dismiss 'NAME'
 This permanently closes the pane, retires crew, and records dismissal in memory.
 Confirm with the user first if work is unreported or uncommitted.
+Commit only the user's leftover edits after crew have committed their own.
 For "focus on", "switch to", or "take me to" NAME:
   CAPTAIN focus 'NAME'
 Names are case-insensitive; ask about unknown/ambiguous names. Focus only navigates
@@ -71,6 +74,10 @@ Use the native CLI normally; keep the user's requested scope minimal.
 Do not create Herdr panes/tabs yourself or substitute hidden built-in subagents.
 Use the launcher's unique Pirates of the Caribbean name exactly: one word, proper
 case, never a full name. Keep assignments separate from identity.
+Crew share one checkout. Edit only files in your assignment. Re-read a file right
+before each edit and keep others' unexpected changes in place. Stage and commit only
+your own files/hunks; never git add -A or repo-wide formatting. Finish or record a
+handoff before anyone else edits your file.
 Replace CAPTAIN in commands below with:
   {command}
 {duties}Read project/session memory at startup and after context compaction:
