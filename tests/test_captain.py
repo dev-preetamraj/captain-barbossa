@@ -139,6 +139,8 @@ class CaptainFlowTests(unittest.TestCase):
             "pane",
             "--direction",
             "vertical",
+            "--split-pane",
+            "w1:p1",
         )
         with (
             patch.object(runtime, "executable", return_value="/bin/herdr"),
@@ -394,33 +396,35 @@ class CaptainFlowTests(unittest.TestCase):
             ]
         }
 
-    def test_horizontal_split_lists_tab_panes_and_requires_a_split_pane(self):
-        args = self.args(
-            "crew",
-            "--agent",
-            "codex",
-            "--task",
-            "build",
-            "--placement",
-            "pane",
-            "--direction",
-            "horizontal",
-        )
-        with (
-            patch.object(sys.stdin, "isatty", return_value=False),
-            patch.object(agents, "herdr", return_value=self.pane_list()) as api,
-        ):
-            with self.assertRaisesRegex(runtime.CaptainError, "Ask the user") as error:
-                agents.create_crew(args, self.pane, self.project)
-        api.assert_called_once_with("pane", "list", "--workspace", "w1")
-        message = str(error.exception)
-        self.assertIn("Which pane should be split?", message)
-        self.assertIn("w1:p1 zsh (captain) / w1:p5 Will", message)
-        self.assertNotIn("w1:p9", message)
-        self.assertIn("--split-pane <choice>", message)
-        self.assertEqual(memory.read_json(self.directory / "session.json")["crew"], {})
+    def test_pane_split_lists_tab_panes_and_requires_a_split_pane(self):
+        for direction in ("vertical", "horizontal"):
+            args = self.args(
+                "crew",
+                "--agent",
+                "codex",
+                "--task",
+                "build",
+                "--placement",
+                "pane",
+                "--direction",
+                direction,
+            )
+            with (
+                self.subTest(direction=direction),
+                patch.object(sys.stdin, "isatty", return_value=False),
+                patch.object(agents, "herdr", return_value=self.pane_list()) as api,
+            ):
+                with self.assertRaisesRegex(runtime.CaptainError, "Ask the user") as error:
+                    agents.create_crew(args, self.pane, self.project)
+                api.assert_called_once_with("pane", "list", "--workspace", "w1")
+                message = str(error.exception)
+                self.assertIn("Which pane should be split?", message)
+                self.assertIn("w1:p1 zsh (captain) / w1:p5 Will", message)
+                self.assertNotIn("w1:p9", message)
+                self.assertIn("--split-pane <choice>", message)
+                self.assertEqual(memory.read_json(self.directory / "session.json")["crew"], {})
 
-    def test_horizontal_split_rejects_panes_outside_the_captain_tab(self):
+    def test_pane_split_rejects_panes_outside_the_captain_tab(self):
         for bad in ("w1:p9", "w2:p1"):
             args = self.args(
                 "crew",
@@ -443,7 +447,7 @@ class CaptainFlowTests(unittest.TestCase):
                     agents.create_crew(args, self.pane, self.project)
                 api.assert_called_once_with("pane", "list", "--workspace", "w1")
 
-    def test_horizontal_split_runs_split_down_on_the_chosen_pane(self):
+    def test_pane_split_uses_the_chosen_pane_and_direction(self):
         def api(*call, **_):
             if call[:2] == ("pane", "list"):
                 return self.pane_list()
@@ -452,13 +456,15 @@ class CaptainFlowTests(unittest.TestCase):
                 "agent": {"name": f"c-{self.meta['id'][:8]}-sparrow", "agent_status": "working"},
             }
 
-        for flags, answers in (
-            (("--split-pane", "w1:p5"), ["codex", "pane", "horizontal"]),
-            ((), ["codex", "pane", "horizontal", "w1:p5"]),
+        for direction, herdr_direction, flags, answers in (
+            ("horizontal", "down", ("--split-pane", "w1:p5"), ["codex", "pane", "horizontal"]),
+            ("horizontal", "down", (), ["codex", "pane", "horizontal", "w1:p5"]),
+            ("vertical", "right", ("--split-pane", "w1:p5"), ["codex", "pane", "vertical"]),
+            ("vertical", "right", (), ["codex", "pane", "vertical", "w1:p5"]),
         ):
             args = self.args("crew", "--task", "build", *flags)
             with (
-                self.subTest(flags=flags),
+                self.subTest(direction=direction, flags=flags),
                 patch.object(agents, "herdr", side_effect=api) as calls,
                 patch.object(agents, "executable", return_value="/bin/codex"),
                 patch.object(sys.stdin, "isatty", return_value=True),
@@ -473,7 +479,7 @@ class CaptainFlowTests(unittest.TestCase):
             split = calls.call_args_list[1].args
             self.assertEqual(split[:2], ("pane", "split"))
             self.assertEqual(split[split.index("--pane") + 1], "w1:p5")
-            self.assertEqual(split[split.index("--direction") + 1], "down")
+            self.assertEqual(split[split.index("--direction") + 1], herdr_direction)
             self.assertEqual(ask.call_args_list[2].args[0], "Split direction?")
             if not flags:
                 self.assertEqual(ask.call_args_list[3].args[0], "Which pane should be split?")
@@ -484,7 +490,7 @@ class CaptainFlowTests(unittest.TestCase):
                 ]
                 self.assertEqual(titles, ["zsh (captain)", "Will"])
             result = json.loads(output.getvalue())
-            self.assertEqual(result["direction"], "horizontal")
+            self.assertEqual(result["direction"], direction)
             self.assertEqual(result["split_pane"], "w1:p5")
             self.assertEqual(result["pane"], "w1:p6")
             memory.write_json(self.directory / "session.json", {**self.meta, "crew": {}})
@@ -506,14 +512,20 @@ class CaptainFlowTests(unittest.TestCase):
                     },
                 }
                 with (
-                    patch.object(agents, "herdr", return_value=created) as api,
+                    patch.object(
+                        agents,
+                        "herdr",
+                        side_effect=lambda *call, **_: (
+                            self.pane_list() if call[:2] == ("pane", "list") else created
+                        ),
+                    ) as api,
                     patch.object(agents, "executable", return_value=f"/bin/{provider}"),
                     patch.object(sys.stdin, "isatty", return_value=True),
                     patch(
                         "captain_barbossa.prompts.questionary.select",
                         **{
                             "return_value.unsafe_ask.side_effect": [provider, placement]
-                            + (["vertical"] if placement == "pane" else [])
+                            + (["vertical", "w1:p1"] if placement == "pane" else [])
                         },
                     ) as ask,
                     contextlib.redirect_stdout(io.StringIO()) as output,
@@ -528,6 +540,9 @@ class CaptainFlowTests(unittest.TestCase):
                 self.assertIn("Where should the crew open?", ask.call_args_list[1].args[0])
                 if placement == "pane":
                     self.assertIn("Split direction?", ask.call_args_list[2].args[0])
+                    self.assertIn("Which pane should be split?", ask.call_args_list[3].args[0])
+                    self.assertEqual(calls[0].args, ("pane", "list", "--workspace", "w1"))
+                    calls = calls[1:]
                     self.assertEqual(calls[0].args[:2], ("pane", "split"))
                     self.assertEqual(calls[0].args[calls[0].args.index("--pane") + 1], "w1:p1")
                     self.assertEqual(calls[0].args[calls[0].args.index("--direction") + 1], "right")
@@ -594,6 +609,8 @@ class CaptainFlowTests(unittest.TestCase):
                     "pane",
                     "--direction",
                     "vertical",
+                    "--split-pane",
+                    "w1:p1",
                 )
                 created = {"pane": {"pane_id": "w1:p2", "agent": provider, "agent_status": "idle"}}
                 created["agent"] = {"name": f"c-{self.meta['id'][:8]}-{name}"}
@@ -648,6 +665,8 @@ class CaptainFlowTests(unittest.TestCase):
             "pane",
             "--direction",
             "vertical",
+            "--split-pane",
+            "w1:p1",
         )
 
         def api(*args, **kwargs):
@@ -733,6 +752,8 @@ class CaptainFlowTests(unittest.TestCase):
                     "pane",
                     "--direction",
                     "vertical",
+                    "--split-pane",
+                    "w1:p1",
                 )
                 created = {"pane": {"pane_id": "w1:p2", "agent": "codex", "agent_status": status}}
                 created["agent"] = {"name": f"c-{self.meta['id'][:8]}-{name}"}
@@ -779,6 +800,8 @@ class CaptainFlowTests(unittest.TestCase):
             "pane",
             "--direction",
             "vertical",
+            "--split-pane",
+            "w1:p1",
         )
         agent_name, api = self.crew_status_api(iter(["idle", "idle", "working"]))
         with (
@@ -813,6 +836,8 @@ class CaptainFlowTests(unittest.TestCase):
             "pane",
             "--direction",
             "vertical",
+            "--split-pane",
+            "w1:p1",
         )
         agent_name, api = self.crew_status_api(repeat("idle"))
         with (
@@ -845,6 +870,8 @@ class CaptainFlowTests(unittest.TestCase):
             "pane",
             "--direction",
             "vertical",
+            "--split-pane",
+            "w1:p1",
         )
         agent_name, api = self.crew_status_api(repeat("blocked"))
         with (
@@ -937,6 +964,8 @@ class CaptainFlowTests(unittest.TestCase):
             "pane",
             "--direction",
             "vertical",
+            "--split-pane",
+            "w1:p1",
         )
         created = {"pane": {"pane_id": "w1:p2", "agent": "codex", "agent_status": "idle"}}
         with (
@@ -999,6 +1028,8 @@ class CaptainFlowTests(unittest.TestCase):
                         "pane",
                         "--direction",
                         "vertical",
+                        "--split-pane",
+                        "w1:p1",
                     ),
                     self.pane,
                     self.project,
@@ -1026,6 +1057,8 @@ class CaptainFlowTests(unittest.TestCase):
                         "pane",
                         "--direction",
                         "vertical",
+                        "--split-pane",
+                        "w1:p1",
                     ),
                     self.pane,
                     self.project,
@@ -1045,6 +1078,8 @@ class CaptainFlowTests(unittest.TestCase):
                         "pane",
                         "--direction",
                         "vertical",
+                        "--split-pane",
+                        "w1:p1",
                     ),
                     self.pane,
                     self.project,

@@ -37,10 +37,10 @@ do not spawn crew.
 """
         if role.startswith("crew member ")
         else """You manage crew. For EVERY creation, require the user's explicit choices:
-Claude Code or Codex, and a new pane or tab; for a pane, vertical or horizontal;
-for horizontal, which pane of this tab to split (the command lists them when
---split-pane is missing). Ask for missing choices and wait; never infer or default
-any. Once all are supplied, run:
+Claude Code or Codex, and a new pane or tab; for a pane, vertical or horizontal
+and which pane of this tab to split (the command lists them when --split-pane is
+missing). Ask for missing choices and wait; never infer or default any. Once all
+are supplied, run:
   CAPTAIN crew --agent codex|claude --task 'assignment' --placement pane|tab
     [--direction vertical|horizontal --split-pane <pane-id>]
 Keep crew prompts short: a few lines with goal, hard constraints, and expected report.
@@ -258,8 +258,8 @@ def choose_split(args, pane, placement):
     direction = choose(
         args.direction, ("vertical", "horizontal"), "Split direction?", "--direction"
     )
-    if direction == "vertical":
-        return direction, pane["pane_id"]
+    if args.split_pane == pane["pane_id"]:
+        return direction, args.split_pane
     panes = tab_panes(pane)
     split_pane = choose(
         args.split_pane, tuple(panes), "Which pane should be split?", "--split-pane", labels=panes
