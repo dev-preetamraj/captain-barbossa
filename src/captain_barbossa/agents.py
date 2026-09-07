@@ -7,10 +7,26 @@ import shlex
 import subprocess
 import sys
 import time
+from itertools import cycle
 
 from .memory import add_memory, lock, read_json, session, write_json
 from .prompts import choose
 from .runtime import CaptainError, executable, herdr
+
+CREW_NAMES = {
+    "sparrow": "Jack",
+    "will-turner": "Will",
+    "elizabeth": "Elizabeth",
+    "gibbs": "Gibbs",
+    "anamaria": "Anamaria",
+    "pintel": "Pintel",
+    "ragetti": "Ragetti",
+    "cotton": "Cotton",
+    "marty": "Marty",
+    "tia-dalma": "Tia",
+    "davy-jones": "Davy",
+    "sao-feng": "Sao",
+}
 
 
 def agent_instructions(directory, role):
@@ -22,11 +38,14 @@ Claude Code or Codex, and a new pane or a new tab. Ask for any missing choices a
 wait for the answer. Never infer or default the agent or placement.
 If you are a crew member, send delegation requests to the captain instead of spawning crew.
 After their answer, run:
-  {command} crew NAME --agent codex|claude --task 'assignment' --placement pane|tab
+  {command} crew --agent codex|claude --task 'assignment' --placement pane|tab
 Keep crew prompts short: a few lines stating the goal, the hard constraints, and
 the expected report. Trust the crew with the rest; do not write paragraphs of
 background, step lists, or restated context.
-Use short lowercase crew names. Do not create Herdr panes/tabs yourself, and do not
+The launcher assigns a unique Pirates of the Caribbean character name. Refer to
+crew by the returned one-word, properly cased name; do not expand it to a full name.
+Keep their assignment separate from their identity.
+Do not create Herdr panes/tabs yourself, and do not
 use hidden built-in subagents as a substitute for a requested crew.
 Crew lifecycle, always by the returned agent name:
   herdr agent read <name>              inspect a crew's terminal output
@@ -43,6 +62,11 @@ pane and retire it with:
   {command} dismiss 'NAME'
 Dismissal closes the pane for good and records it in session memory. Confirm with
 the user before dismissing crew whose work is unreported or uncommitted.
+When the user asks to "focus on NAME", "switch to NAME", or "take me to NAME",
+focus that existing crew's pane/tab with:
+  {command} focus 'NAME'
+Names are case-insensitive. If the name is unknown or ambiguous, ask the user to
+clarify. Focusing is navigation only; do not recruit crew or send them a task.
 When crew is blocked on a native permission prompt, the captain uses its own judgment.
 Approve routine reads, tests, linters, formatting, git status/diff, project-scoped
 file edits, and captain memory reads/writes without asking the user.
@@ -76,10 +100,10 @@ def launch(args, pane, project):
     provider = choose(args.agent, ("claude", "codex"), "Choose your captain", "--agent")
     binary = executable(provider)
     directory, meta = session(project, pane, args.session, create=args.session is None)
-    instructions = agent_instructions(directory, "captain")
+    instructions = agent_instructions(directory, "Captain Barbossa")
     write_json(directory / "captain.json", {"provider": provider, "pane": pane["pane_id"]})
     add_memory(directory / "graph.json", f"session:{meta['id']}", "captain", provider)
-    herdr("tab", "rename", pane["tab_id"], "captain barbossa")
+    herdr("tab", "rename", pane["tab_id"], "Captain Barbossa")
     env = dict(
         os.environ,
         CAPTAIN_SESSION=meta["id"],
@@ -155,6 +179,17 @@ def resolve_crew(meta, requested):
     return matches[0]
 
 
+def focus_crew(args, pane, project):
+    _, meta = session(project, pane, args.session)
+    crew = meta["crew"][resolve_crew(meta, args.name)]
+    display_name = crew.get("name", args.name)
+    try:
+        herdr("agent", "focus", crew["agent"])
+    except CaptainError as exc:
+        raise CaptainError(f"Could not focus {display_name}: {exc}") from exc
+    print(f"Focused {display_name}.")
+
+
 def dismiss_crew(args, pane, project):
     directory, meta = session(project, pane, args.session)
     with lock(directory / "crew.lock"):
@@ -177,8 +212,14 @@ def dismiss_crew(args, pane, project):
 
 
 def create_crew(args, pane, project):
-    if not re.fullmatch(r"[a-z][a-z0-9_-]{0,15}", args.name):
-        raise CaptainError("Crew names must be 1–16 lowercase letters, digits, '_' or '-'.")
+    if args.name is not None and (
+        len(args.name) > 16
+        or not re.fullmatch(rf"({'|'.join(CREW_NAMES)})(-[1-9][0-9]*)?", args.name)
+    ):
+        raise CaptainError(
+            "Use a Pirates of the Caribbean character name (e.g. sparrow or gibbs), "
+            "or omit NAME to assign one automatically. Names must be at most 16 characters."
+        )
     if not args.task.strip() or len(args.task) > 8000 or "\x00" in args.task:
         raise CaptainError("Provide a task of 1–8000 characters, without NUL bytes.")
     provider = choose(args.crew_agent, ("claude", "codex"), "Choose your crew agent", "--agent")
@@ -187,23 +228,32 @@ def create_crew(args, pane, project):
     )
     binary = executable(provider)
     directory, meta = session(project, pane, args.session)
-    agent_name = f"c-{meta['id'][:8]}-{args.name}"
-    launcher = directory / f"crew-{args.name}.sh"
-    environment = [
-        "--env",
-        f"CAPTAIN_SESSION={meta['id']}",
-        "--env",
-        f"CAPTAIN_PROJECT={project.resolve()}",
-        "--env",
-        f"CAPTAIN_MEMORY_ROOT={directory.parent.parent.parent}",
-        "--env",
-        f"CAPTAIN_CREW_LAUNCHER={launcher}",
-    ]
     with lock(directory / "crew.lock"):
         meta = read_json(directory / "session.json")
-        if args.name in meta["crew"]:
-            raise CaptainError(f"Crew '{args.name}' already exists in this session.")
-        instructions = agent_instructions(directory, f"crew member {args.name}")
+        name = args.name
+        if name is None:
+            for index, character in enumerate(cycle(CREW_NAMES)):
+                round_number = index // len(CREW_NAMES) + 1
+                name = f"{character}-{round_number}" if round_number > 1 else character
+                if name not in meta["crew"]:
+                    break
+        character, _, number = name.rpartition("-")
+        display_name = f"{CREW_NAMES[character]}{number}" if number.isdigit() else CREW_NAMES[name]
+        if name in meta["crew"]:
+            raise CaptainError(f"Crew '{display_name}' already exists in this session.")
+        agent_name = f"c-{meta['id'][:8]}-{name}"
+        launcher = directory / f"crew-{name}.sh"
+        environment = [
+            "--env",
+            f"CAPTAIN_SESSION={meta['id']}",
+            "--env",
+            f"CAPTAIN_PROJECT={project.resolve()}",
+            "--env",
+            f"CAPTAIN_MEMORY_ROOT={directory.parent.parent.parent}",
+            "--env",
+            f"CAPTAIN_CREW_LAUNCHER={launcher}",
+        ]
+        instructions = agent_instructions(directory, f"crew member {display_name}")
         command = shlex.join([binary, *native_args(provider, instructions)])
         launcher.write_text(f"#!/bin/sh\nexec {command}\n", encoding="utf-8")
         launcher.chmod(0o600)
@@ -216,7 +266,7 @@ def create_crew(args, pane, project):
                 "--cwd",
                 str(project),
                 "--label",
-                args.name,
+                display_name,
                 "--no-focus",
                 *environment,
             )
@@ -240,6 +290,8 @@ def create_crew(args, pane, project):
                 "Herdr created a layout but returned no pane ID. Inspect the workspace before retrying."
             )
         record = {
+            "id": name,
+            "name": display_name,
             "agent": agent_name,
             "provider": provider,
             "pane": new_pane,
@@ -247,12 +299,13 @@ def create_crew(args, pane, project):
             "task": args.task,
             "status": "starting",
         }
-        meta["crew"][args.name] = record
+        meta["crew"][name] = record
         write_json(directory / "session.json", meta)
         try:
             add_memory(directory / "graph.json", f"session:{meta['id']}", "crew", agent_name)
+            add_memory(directory / "graph.json", agent_name, "name", display_name)
             add_memory(directory / "graph.json", agent_name, "assigned", args.task)
-            herdr("pane", "rename", new_pane, args.name)
+            herdr("pane", "rename", new_pane, display_name)
             # A new shell may still be in canonical mode: keep terminal input short.
             herdr("pane", "run", new_pane, '/bin/sh "$CAPTAIN_CREW_LAUNCHER"', expect_output=False)
             wait_for_crew(new_pane, provider, agent_name)

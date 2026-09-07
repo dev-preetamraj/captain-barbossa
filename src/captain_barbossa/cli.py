@@ -5,7 +5,7 @@ import os
 import subprocess
 import sys
 
-from .agents import create_crew, dismiss_crew, launch
+from .agents import create_crew, dismiss_crew, focus_crew, launch
 from .memory import memory, project_root
 from .runtime import CaptainError, current_pane
 
@@ -23,7 +23,9 @@ def parser():
     root.add_argument("--prompt", help="initial captain prompt")
     commands = root.add_subparsers(dest="command")
     crew = commands.add_parser("crew", help="create a native crew after agent and pane/tab choices")
-    crew.add_argument("name")
+    crew.add_argument(
+        "name", nargs="?", help="Pirates character name (automatically assigned when omitted)"
+    )
     crew.add_argument(
         "--agent",
         dest="crew_agent",
@@ -34,6 +36,8 @@ def parser():
     crew.add_argument(
         "--placement", choices=("pane", "tab"), help="the placement explicitly chosen by the user"
     )
+    focus = commands.add_parser("focus", help="focus an existing crew's pane and tab")
+    focus.add_argument("name", help="crew name or ID (case-insensitive)")
     dismiss = commands.add_parser("dismiss", help="close an existing crew's pane and retire it")
     dismiss.add_argument("name", help="crew name or ID (case-insensitive)")
     mem = commands.add_parser("memory", help="project/session graph memory outside the repo")
@@ -57,6 +61,8 @@ def main(argv=None):
         project = project_root()
         if args.command == "crew":
             create_crew(args, pane, project)
+        elif args.command == "focus":
+            focus_crew(args, pane, project)
         elif args.command == "dismiss":
             dismiss_crew(args, pane, project)
         elif args.command == "memory":

@@ -9,7 +9,6 @@ from .runtime import CaptainError
 LABELS = {"claude": "Claude Code", "codex": "Codex", "pane": "New pane", "tab": "New tab"}
 STYLE = questionary.Style(
     [
-        ("qmark", "fg:#8bd5b5 bold"),
         ("question", "bold"),
         ("pointer", "fg:#8bd5b5 bold"),
         ("highlighted", "fg:#8bd5b5 bold noreverse"),
@@ -27,18 +26,19 @@ def choose(value, options, question, flag):
             f"Ask the user: {question} ({' / '.join(options)}). Wait for their answer, "
             f"then rerun with {flag} <choice>. Nothing was created."
         )
-    choices = [questionary.Separator(" ")]
-    for option in options:
-        choices.extend(
-            [questionary.Choice(LABELS[option], value=option), questionary.Separator(" ")]
-        )
-    choices.append(questionary.Separator("↑/↓  j/k move · Enter select · Esc cancel"))
+    choices = [
+        questionary.Separator(" "),
+        *(questionary.Choice(LABELS[option], value=option) for option in options),
+        questionary.Separator(" "),
+        questionary.Separator("↑↓ / j k   move"),
+        questionary.Separator("Enter select · Esc cancel"),
+        questionary.Separator(" "),
+    ]
     prompt = questionary.select(
         question,
         choices=choices,
-        default=options[0],
-        qmark=" ◆",
-        pointer="›",
+        qmark="\n ",
+        pointer="   ›",
         style=STYLE,
         instruction=" ",
         use_arrow_keys=True,

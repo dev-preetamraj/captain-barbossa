@@ -4,25 +4,40 @@
 
 A small Python launcher for native Codex and Claude Code sessions inside **Herdr**.
 
+Install [uv](https://docs.astral.sh/uv/getting-started/installation/) and Git, then install Captain directly from GitHub. No manual clone is needed; uv downloads the package and installs its dependencies in an isolated environment.
+
 ```sh
-uv tool install --editable .
+uv tool install git+https://github.com/dev-preetamraj/captain-barbossa.git
 captain                         # Ask which agent: Claude Code or Codex
 captain --agent codex            # Explicitly choose Codex
 captain --agent claude           # Claude Code in this pane
 captain --prompt "Inspect this project"
 ```
 
-Requires Python 3.11+, Herdr, and the chosen agent CLI, already signed in. Currently targets macOS/Linux. Launch it from an interactive terminal inside a Herdr workspace. It renames the current tab to `captain barbossa` and replaces itself with the native agent. Native input, history, permissions, and login stay with that agent.
+If your shell cannot find `captain`, run `uv tool update-shell` and restart the terminal.
+
+Requires Python 3.11+, Herdr, and the chosen agent CLI, already signed in. Currently targets macOS/Linux. Launch it from an interactive terminal inside a Herdr workspace. It renames the current tab to **Captain Barbossa** and replaces itself with the native agent. Native input, history, permissions, and login stay with that agent.
 
 Ask the captain to spin up a crew. Its startup instructions tell it to ask **Claude Code or Codex**, then **pane or tab**, wait for your choices, and run the crew command. You can also run the command directly from a shell associated with the Captain session:
 
 ```sh
-captain crew reviewer --task "Review the current changes"
+captain crew --task "Review the current changes"
 ```
+
+Every new crew gets a one-word Pirates of the Caribbean character name: **Jack**, **Will**, **Elizabeth**, **Gibbs**, **Anamaria**, **Pintel**, **Ragetti**, **Cotton**, **Marty**, **Tia**, **Davy**, or **Sao**. Names are assigned in that order, skipping names already used in the session, including failed launches. Once the roster is used, numbering starts at **Jack2**, keeping names to one word. Barbossa stays reserved for the captain. Properly cased names appear on panes/tabs and in the launch result, instructions, and memory. Command identifiers and filenames stay lowercase (`sparrow`, `will-turner`, `elizabeth`, etc.). You can request an available character explicitly with `captain crew gibbs --task "Review the current changes"`. Existing crew keep their names.
 
 In an interactive shell, both choices use a compact keyboard selector. Move with **↑/↓ or j/k**, press **Enter** to choose, or **Esc / Ctrl+C** to cancel. The highlighted row is only selected when you press Enter. An agent tool invocation without a terminal returns an instruction to ask you about any missing choice and creates nothing. After your answer, the captain supplies `--agent claude|codex` and `--placement pane|tab`. Explicit flags count as your choices, so they do not trigger another question.
 
 New crew panes/tabs open in the same workspace and project without stealing focus. Captain saves a private shell launcher beside the session memory, then uses Herdr's `pane run` to submit a short command. Full instructions are read from that file rather than pasted through the terminal input buffer. Captain waits for Herdr to detect the selected native agent as ready, names it, and only then submits the task. The command returns the Herdr agent name and pane ID. Startup failures or native approval screens preserve the pane for inspection and do not retry or discard work. Crew share the checkout in this initial version; give simultaneous writers separate file assignments.
+
+Tell the captain **“focus on Jack”**, **“switch to Will”**, or **“take me to Elizabeth”** to bring that crew's pane and containing tab into focus. You can also use the command directly:
+
+```sh
+captain focus Jack
+captain --session <session-id> focus Will
+```
+
+Names are case-insensitive; crew IDs and registered Herdr agent names also work. Lookup uses only the current Captain session. Focusing follows the registered agent if its pane moves, and does not send input or interrupt its work. An unknown or ambiguous name reports the available choices; an exited or closed agent reports a focus error. Existing captains can use the command immediately when told to. Restart with `captain --session <session-id>` to load the new navigation instructions while retaining the crew roster.
 
 **Memory is a graph outside the repository.** Captain stores graph relationships and launch metadata here:
 
@@ -50,7 +65,7 @@ These commands run inside the launched agent's environment. From a separate Herd
 
 ```sh
 captain --session <session-id> memory show
-captain --session <session-id> crew tester --task "Check boundary cases"
+captain --session <session-id> crew --task "Check boundary cases"
 captain --session <session-id> --agent codex
 ```
 

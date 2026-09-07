@@ -1,6 +1,7 @@
 import unittest
 from unittest.mock import patch
 
+import questionary
 from prompt_toolkit.application import create_app_session
 from prompt_toolkit.input import create_pipe_input
 from prompt_toolkit.output import DummyOutput
@@ -39,6 +40,44 @@ class SelectorTests(unittest.TestCase):
                 self.select(key)
         with self.assertRaises(KeyboardInterrupt):
             self.select("\x03")
+
+    def test_only_the_focused_choice_is_highlighted(self):
+        frames = []
+        select = questionary.select
+        with (
+            create_pipe_input() as keyboard,
+            create_app_session(input=keyboard, output=DummyOutput()),
+            patch("sys.stdin.isatty", return_value=True),
+        ):
+
+            def capture(*args, **kwargs):
+                prompt = select(*args, **kwargs)
+
+                def rendered(app):
+                    screen = app.renderer.last_rendered_screen
+                    if app.is_done or screen is None:
+                        return
+                    cells = [cell for row in screen.data_buffer.values() for cell in row.values()]
+                    frames.append(
+                        (
+                            "".join(c.char for c in cells if "class:highlighted" in c.style),
+                            any("class:selected" in c.style for c in cells),
+                            any(
+                                app.renderer.style.get_attrs_for_style_str(c.style).reverse
+                                for c in cells
+                            ),
+                        )
+                    )
+                    keyboard.send_text("j" if len(frames) == 1 else "\r")
+
+                prompt.application.after_render += rendered
+                return prompt
+
+            with patch("captain_barbossa.prompts.questionary.select", side_effect=capture):
+                self.assertEqual(
+                    choose(None, ("claude", "codex"), "Choose your captain", "--agent"), "codex"
+                )
+        self.assertEqual(frames, [("Claude Code", False, False), ("Codex", False, False)])
 
     def test_explicit_choices_do_not_open_a_selector(self):
         with patch("captain_barbossa.prompts.questionary.select") as menu:
