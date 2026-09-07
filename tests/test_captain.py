@@ -68,6 +68,9 @@ class CaptainFlowTests(unittest.TestCase):
             ('{"result": null}\n', {}),
             ("{}\n", {}),
             ("[]\n", {}),
+            ('{"result": {"pane": null}}\n', {}),
+            ('{"result": {"root_pane": "w1:p3"}}\n', {}),
+            ('{"result": {"agent": ["builder"]}}\n', {}),
         ):
             with (
                 self.subTest(stdout=stdout, options=options),
@@ -84,6 +87,62 @@ class CaptainFlowTests(unittest.TestCase):
                 self.assertIn(
                     f"Raw stdout:\n{stdout}\nStderr:\nCLI diagnostic", str(error.exception)
                 )
+
+    def herdr_stdout(self, responses):
+        def run(command, **kwargs):
+            payload = responses(tuple(command[1:]))
+            return subprocess.CompletedProcess(command, 0, json.dumps({"result": payload}), "")
+
+        return run
+
+    def test_null_nested_herdr_values_fail_as_captain_errors_in_every_caller(self):
+        for response in ({"pane": None}, {"pane": "w1:p1"}, {"agent": None}, {"agent": "x"}):
+            with (
+                self.subTest(response=response),
+                patch.object(runtime, "executable", return_value="/bin/herdr"),
+                patch.object(runtime.subprocess, "run", self.herdr_stdout(lambda _: response)),
+                patch.object(agents.time, "sleep"),
+            ):
+                with self.assertRaisesRegex(runtime.CaptainError, "unexpected response"):
+                    runtime.current_pane()
+                with self.assertRaisesRegex(runtime.CaptainError, "unexpected response"):
+                    agents.wait_for_crew("w1:p2", "codex", "builder")
+                with self.assertRaisesRegex(runtime.CaptainError, "unexpected response"):
+                    agents.confirm_task_started("builder")
+                with (
+                    patch.object(cli, "project_root", return_value=self.project),
+                    contextlib.redirect_stderr(io.StringIO()) as error,
+                ):
+                    self.assertEqual(cli.main(["--session", self.meta["id"], "focus", "Jack"]), 1)
+                self.assertIn("captain: Herdr returned an unexpected response", error.getvalue())
+
+    def test_null_nested_herdr_values_during_startup_preserve_the_pane(self):
+        def responses(call):
+            if call[:2] in (("pane", "split"), ("pane", "get")):
+                return {"pane": {"pane_id": "w1:p2", "agent": "codex", "agent_status": "idle"}}
+            if call[:2] == ("agent", "get"):
+                return {"agent": None}
+            return {}
+
+        args = self.args(
+            "crew", "sparrow", "--agent", "codex", "--task", "build", "--placement", "pane"
+        )
+        with (
+            patch.object(runtime, "executable", return_value="/bin/herdr"),
+            patch.object(agents, "executable", return_value="/bin/codex"),
+            patch.object(
+                runtime.subprocess, "run", side_effect=self.herdr_stdout(responses)
+            ) as run,
+            patch.object(agents.time, "sleep"),
+        ):
+            with self.assertRaisesRegex(runtime.CaptainError, "pane was preserved") as error:
+                agents.create_crew(args, self.pane, self.project)
+        self.assertIn("unexpected response", str(error.exception))
+        commands = [tuple(call.args[0][1:3]) for call in run.call_args_list]
+        self.assertNotIn(("pane", "close"), commands)
+        self.assertNotIn(("agent", "prompt"), commands)
+        saved = memory.read_json(self.directory / "session.json")["crew"]["sparrow"]
+        self.assertEqual(saved["status"], "needs_attention")
 
     def test_instructions_delegate_routine_crew_approvals_to_captain(self):
         instructions = " ".join(agents.agent_instructions(self.directory, "captain").split())
@@ -593,6 +652,85 @@ class CaptainFlowTests(unittest.TestCase):
         saved = memory.read_json(self.directory / "session.json")["crew"]["sparrow"]
         self.assertEqual(saved["status"], "needs_attention")
 
+    def test_blocked_agent_after_prompt_never_receives_enter(self):
+        args = self.args(
+            "crew", "sparrow", "--agent", "claude", "--task", "build", "--placement", "pane"
+        )
+        agent_name, api = self.crew_status_api(repeat("blocked"))
+        with (
+            patch.object(agents, "herdr", side_effect=api) as calls,
+            patch.object(agents, "executable", return_value="/bin/claude"),
+            patch.object(agents.time, "sleep"),
+            patch.object(agents.time, "monotonic", side_effect=count(0, 2)),
+        ):
+            with self.assertRaisesRegex(runtime.CaptainError, "pane was preserved") as error:
+                agents.create_crew(args, self.pane, self.project)
+        self.assertIn("waiting for input or approval", str(error.exception))
+        self.assertEqual(calls.call_args_list[-1].args, ("agent", "get", agent_name))
+        self.assertFalse(
+            any(call.args[:2] == ("agent", "send-keys") for call in calls.call_args_list)
+        )
+        saved = memory.read_json(self.directory / "session.json")["crew"]["sparrow"]
+        self.assertEqual(saved["status"], "needs_attention")
+
+    def test_done_or_working_agent_after_prompt_is_confirmed_without_enter(self):
+        for status in ("done", "working"):
+            with (
+                self.subTest(status=status),
+                patch.object(
+                    agents,
+                    "herdr",
+                    return_value={"agent": {"name": "builder", "agent_status": status}},
+                ) as api,
+                patch.object(agents.time, "sleep") as sleep,
+            ):
+                agents.confirm_task_started("builder")
+                api.assert_called_once_with("agent", "get", "builder", timeout=5)
+                sleep.assert_not_called()
+
+    def test_enter_that_leads_to_a_prompt_or_unknown_status_needs_attention(self):
+        for statuses, message in (
+            (["idle", "idle", "blocked"], "waiting for input or approval"),
+            (["idle", "idle", "idle", None], "reported status None"),
+        ):
+            with (
+                self.subTest(statuses=statuses),
+                patch.object(
+                    agents,
+                    "herdr",
+                    side_effect=lambda *call, statuses=iter(statuses), **kwargs: {
+                        "agent": {
+                            "name": "builder",
+                            "agent_status": next(statuses, None)
+                            if call[:2] == ("agent", "get")
+                            else "idle",
+                        }
+                    },
+                ) as api,
+                patch.object(agents.time, "sleep"),
+                patch.object(agents.time, "monotonic", side_effect=count(0, 2)),
+            ):
+                with self.assertRaisesRegex(runtime.CaptainError, message):
+                    agents.confirm_task_started("builder")
+                sent = [
+                    call.args
+                    for call in api.call_args_list
+                    if call.args[:2] == ("agent", "send-keys")
+                ]
+                self.assertEqual(sent, [("agent", "send-keys", "builder", "enter")])
+
+    def test_unknown_status_after_prompt_never_receives_enter(self):
+        with (
+            patch.object(agents, "herdr", return_value={"agent": {"name": "builder"}}) as api,
+            patch.object(agents.time, "sleep"),
+            patch.object(agents.time, "monotonic", side_effect=count(0, 2)),
+        ):
+            with self.assertRaisesRegex(runtime.CaptainError, "reported status None"):
+                agents.confirm_task_started("builder")
+        self.assertFalse(
+            any(call.args[:2] == ("agent", "send-keys") for call in api.call_args_list)
+        )
+
     def test_automatic_names_are_unique_across_concurrent_recruits_and_session_scoped(self):
         self.meta["crew"] = {
             "sparrow": {"status": "needs_attention"},
@@ -865,16 +1003,16 @@ class CaptainFlowTests(unittest.TestCase):
         memory.add_memory(self.directory / "graph.json", "task", "uses", "secret-session-fact")
         memory.add_memory(shared, "project", "tests_with", "Python")
         other, _ = memory.session(self.project, self.pane, create=True)
-        snapshot = memory.memory_snapshot(other)
-        graph = memory.read_json(snapshot / "graph.json")
+        with memory.memory_snapshot(other) as snapshot:
+            graph = memory.read_json(snapshot / "graph.json")
         self.assertEqual(len(graph["links"]), 2)
         self.assertNotIn("secret-session-fact", json.dumps(graph))
         project2 = self.root / "other-project"
         project2.mkdir()
         isolated, _ = memory.session(project2, self.pane, create=True)
-        self.assertEqual(
-            memory.read_json(memory.memory_snapshot(isolated) / "graph.json")["nodes"], []
-        )
+        with memory.memory_snapshot(isolated) as snapshot:
+            self.assertEqual(memory.read_json(snapshot / "graph.json")["nodes"], [])
+        self.assertEqual(list(isolated.glob("query-*")), [])
         with self.assertRaisesRegex(runtime.CaptainError, "another project or Herdr workspace"):
             memory.session(self.project, dict(self.pane, workspace_id="w2"), self.meta["id"])
 
@@ -897,9 +1035,8 @@ class CaptainFlowTests(unittest.TestCase):
         for path, fact in zip((shared, shared, local, local), facts):
             memory.add_memory(path, *fact)
         before = {path: path.read_bytes() for path in (shared, local)}
-        snapshot = memory.memory_snapshot(self.directory)
-        raw = (snapshot / "graph.json").read_text()
-        shutil.rmtree(snapshot)
+        with memory.memory_snapshot(self.directory) as snapshot:
+            raw = (snapshot / "graph.json").read_text()
 
         with contextlib.redirect_stdout(io.StringIO()) as output:
             memory.memory(self.args("memory", "show"), self.pane, self.project)
@@ -913,6 +1050,28 @@ class CaptainFlowTests(unittest.TestCase):
         self.assertEqual({path: path.read_bytes() for path in before}, before)
         self.assertEqual(list(self.directory.glob("query-*")), [])
         self.assertEqual(list(self.project.iterdir()), [])
+
+    def test_failed_snapshot_write_removes_the_query_directory(self):
+        memory.add_memory(self.directory / "graph.json", "task", "has", "fact")
+        for fail in (
+            patch.object(memory, "write_json", side_effect=OSError("No space left on device")),
+            patch.object(memory, "private_dir", side_effect=runtime.CaptainError("not private")),
+        ):
+            with self.subTest(fail=fail.attribute), fail:
+                with self.assertRaises((OSError, runtime.CaptainError)):
+                    memory.memory(self.args("memory", "show"), self.pane, self.project)
+                with self.assertRaises((OSError, runtime.CaptainError)):
+                    with memory.memory_snapshot(self.directory):
+                        self.fail("snapshot should not be yielded")
+            self.assertEqual(list(self.directory.glob("query-*")), [])
+        with (
+            patch.object(memory, "executable", return_value="/bin/graphify"),
+            patch.object(memory.subprocess, "run", return_value=subprocess.CompletedProcess([], 3)),
+        ):
+            with self.assertRaisesRegex(runtime.CaptainError, "status 3"):
+                memory.memory(self.args("memory", "query", "fact"), self.pane, self.project)
+        self.assertEqual(list(self.directory.glob("query-*")), [])
+        self.assertEqual(list(self.directory.glob(".captain-*")), [])
 
     def test_graph_concurrent_writes_and_corruption_preservation(self):
         graph_path = self.directory / "graph.json"
@@ -937,22 +1096,22 @@ class CaptainFlowTests(unittest.TestCase):
     @unittest.skipUnless(shutil.which("graphify"), "Graphify is optional")
     def test_real_graphify_reads_memory_without_writing_in_project(self):
         memory.add_memory(self.directory / "graph.json", "rate limiter", "uses", "per-user windows")
-        snapshot = memory.memory_snapshot(self.directory)
-        env = dict(os.environ, GRAPHIFY_OUT=str(snapshot), GRAPHIFY_QUERY_LOG_DISABLE="1")
-        result = subprocess.run(
-            [
-                runtime.executable("graphify"),
-                "query",
-                "rate limiter",
-                "--graph",
-                str(snapshot / "graph.json"),
-            ],
-            cwd=snapshot,
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=60,
-        )
+        with memory.memory_snapshot(self.directory) as snapshot:
+            env = dict(os.environ, GRAPHIFY_OUT=str(snapshot), GRAPHIFY_QUERY_LOG_DISABLE="1")
+            result = subprocess.run(
+                [
+                    runtime.executable("graphify"),
+                    "query",
+                    "rate limiter",
+                    "--graph",
+                    str(snapshot / "graph.json"),
+                ],
+                cwd=snapshot,
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("per-user windows", result.stdout)
         self.assertEqual(list(self.project.iterdir()), [])

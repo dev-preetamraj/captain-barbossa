@@ -142,26 +142,40 @@ def wait_for_crew(pane_id, provider, agent_name):
     raise CaptainError(f"{provider} did not become ready within 30 seconds.")
 
 
-def agent_working(agent_name, timeout):
+def settled_status(agent_name, timeout):
+    """Poll until the agent reports working, done, or blocked; return the last status seen."""
     deadline = time.monotonic() + timeout
+    status = None
     while time.monotonic() < deadline:
         agent = herdr("agent", "get", agent_name, timeout=5).get("agent", {})
-        if agent.get("agent_status") == "working":
-            return True
+        status = agent.get("agent_status")
+        if status in ("working", "done", "blocked"):
+            return status
         time.sleep(0.2)
-    return False
+    return status
 
 
 def confirm_task_started(agent_name, timeout=5):
-    if agent_working(agent_name, timeout):
+    status = settled_status(agent_name, timeout)
+    if status == "idle":
+        # Claude Code can leave a submitted prompt as an unsent draft in its input box.
+        herdr("agent", "send-keys", agent_name, "enter")
+        status = settled_status(agent_name, timeout)
+        if status == "idle":
+            raise CaptainError(
+                f"{agent_name} did not start working after the task was submitted, even after "
+                "pressing Enter once. The task may still be an unsent draft in its input box."
+            )
+    if status in ("working", "done"):
         return
-    # Claude Code can leave a submitted prompt as an unsent draft in its input box.
-    herdr("agent", "send-keys", agent_name, "enter")
-    if agent_working(agent_name, timeout):
-        return
+    if status == "blocked":
+        raise CaptainError(
+            f"{agent_name} is waiting for input or approval instead of starting the task. "
+            "Read its pane before sending any keys."
+        )
     raise CaptainError(
-        f"{agent_name} did not start working after the task was submitted, even after "
-        "pressing Enter once. The task may still be an unsent draft in its input box."
+        f"{agent_name} reported status {status!r} after the task was submitted. "
+        "Inspect its pane before retrying."
     )
 
 

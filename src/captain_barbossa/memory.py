@@ -151,6 +151,7 @@ def session(project, pane, session_id=None, create=False):
     return directory, meta
 
 
+@contextmanager
 def memory_snapshot(directory):
     combined = empty_graph()
     for path in (directory.parent.parent / "graph.json", directory / "graph.json"):
@@ -159,9 +160,13 @@ def memory_snapshot(directory):
             combined["nodes"].extend(graph["nodes"])
             combined["links"].extend(graph["links"])
     # Each reader gets its own snapshot so concurrent Graphify queries cannot replace it.
-    out = private_dir(Path(tempfile.mkdtemp(prefix="query-", dir=directory)))
-    write_json(out / "graph.json", combined)
-    return out
+    out = Path(tempfile.mkdtemp(prefix="query-", dir=directory))
+    try:
+        private_dir(out)
+        write_json(out / "graph.json", combined)
+        yield out
+    finally:
+        shutil.rmtree(out)
 
 
 def memory(args, pane, project):
@@ -173,8 +178,7 @@ def memory(args, pane, project):
     elif args.memory_command == "path":
         print(directory)
     else:
-        snapshot = memory_snapshot(directory)
-        try:
+        with memory_snapshot(directory) as snapshot:
             if args.memory_command == "show":
                 if args.json:
                     print((snapshot / "graph.json").read_text(encoding="utf-8"), end="")
@@ -207,5 +211,3 @@ def memory(args, pane, project):
                 )
                 if result.returncode:
                     raise CaptainError(f"Graphify exited with status {result.returncode}.")
-        finally:
-            shutil.rmtree(snapshot)
