@@ -6,7 +6,14 @@ import questionary
 
 from .runtime import CaptainError
 
-LABELS = {"claude": "Claude Code", "codex": "Codex", "pane": "New pane", "tab": "New tab"}
+LABELS = {
+    "claude": "Claude Code",
+    "codex": "Codex",
+    "pane": "New pane",
+    "tab": "New tab",
+    "vertical": "Vertical (side by side)",
+    "horizontal": "Horizontal (stacked)",
+}
 STYLE = questionary.Style(
     [
         ("question", "bold"),
@@ -18,17 +25,18 @@ STYLE = questionary.Style(
 )
 
 
-def choose(value, options, question, flag):
+def choose(value, options, question, flag, labels=None):
     if value:
         return value
     if not sys.stdin.isatty():
+        listed = options if labels is None else [f"{o} {labels[o]}" for o in options]
         raise CaptainError(
-            f"Ask the user: {question} ({' / '.join(options)}). Wait for their answer, "
+            f"Ask the user: {question} ({' / '.join(listed)}). Wait for their answer, "
             f"then rerun with {flag} <choice>. Nothing was created."
         )
     choices = [
         questionary.Separator(" "),
-        *(questionary.Choice(LABELS[option], value=option) for option in options),
+        *(questionary.Choice((labels or LABELS)[option], value=option) for option in options),
         questionary.Separator(" "),
         questionary.Separator("↑↓ / j k   move"),
         questionary.Separator("Enter select · Esc cancel"),

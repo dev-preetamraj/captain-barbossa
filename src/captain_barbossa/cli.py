@@ -40,6 +40,14 @@ def parser():
     crew.add_argument(
         "--placement", choices=("pane", "tab"), help="the placement explicitly chosen by the user"
     )
+    crew.add_argument(
+        "--direction",
+        choices=("vertical", "horizontal"),
+        help="pane split direction chosen by the user (asks when omitted)",
+    )
+    crew.add_argument(
+        "--split-pane", help="pane ID in the captain's tab to split for horizontal placement"
+    )
     focus = commands.add_parser("focus", help="focus an existing crew's pane and tab")
     focus.add_argument("name", help="crew name or ID (case-insensitive)")
     dismiss = commands.add_parser("dismiss", help="close an existing crew's pane and retire it")

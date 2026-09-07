@@ -79,6 +79,24 @@ class SelectorTests(unittest.TestCase):
                 )
         self.assertEqual(frames, [("Claude Code", False, False), ("Codex", False, False)])
 
+    def test_custom_labels_render_in_the_selector_and_the_non_tty_message(self):
+        panes = {"w1:p1": "zsh (captain)", "w1:p5": "Will"}
+        with (
+            create_pipe_input() as keyboard,
+            create_app_session(input=keyboard, output=DummyOutput()),
+            patch("sys.stdin.isatty", return_value=True),
+        ):
+            keyboard.send_text("j\r")
+            chosen = choose(
+                None, tuple(panes), "Which pane should be split?", "--split-pane", panes
+            )
+        self.assertEqual(chosen, "w1:p5")
+        with patch("sys.stdin.isatty", return_value=False):
+            with self.assertRaises(CaptainError) as error:
+                choose(None, tuple(panes), "Which pane should be split?", "--split-pane", panes)
+        self.assertIn("(w1:p1 zsh (captain) / w1:p5 Will)", str(error.exception))
+        self.assertIn("--split-pane <choice>", str(error.exception))
+
     def test_explicit_choices_do_not_open_a_selector(self):
         with patch("captain_barbossa.prompts.questionary.select") as menu:
             self.assertEqual(

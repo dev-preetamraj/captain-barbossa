@@ -16,6 +16,8 @@ from itertools import count, repeat
 from pathlib import Path
 from unittest.mock import patch
 
+import questionary
+
 from captain_barbossa import agents, cli, memory, runtime
 
 
@@ -127,7 +129,16 @@ class CaptainFlowTests(unittest.TestCase):
             return {}
 
         args = self.args(
-            "crew", "sparrow", "--agent", "codex", "--task", "build", "--placement", "pane"
+            "crew",
+            "sparrow",
+            "--agent",
+            "codex",
+            "--task",
+            "build",
+            "--placement",
+            "pane",
+            "--direction",
+            "vertical",
         )
         with (
             patch.object(runtime, "executable", return_value="/bin/herdr"),
@@ -247,7 +258,10 @@ class CaptainFlowTests(unittest.TestCase):
                     for phrase in (
                         "For EVERY creation, require the user's explicit choices",
                         "Claude Code or Codex, and a new pane or tab",
-                        "Ask for missing choices and wait; never infer or default either",
+                        "Ask for missing choices and wait; never infer or default any",
+                        "for a pane, vertical or horizontal",
+                        "which pane of this tab to split",
+                        "--direction vertical|horizontal --split-pane <pane-id>",
                     ):
                         self.assertIn(phrase, instructions)
 
@@ -340,7 +354,12 @@ class CaptainFlowTests(unittest.TestCase):
             api.assert_not_called()
 
     def test_crew_requires_choices_and_cancellation_creates_nothing(self):
-        for flags in ((), ("--agent", "codex"), ("--placement", "pane")):
+        for flags in (
+            (),
+            ("--agent", "codex"),
+            ("--placement", "pane"),
+            ("--agent", "codex", "--placement", "pane"),
+        ):
             args = self.args("crew", "--task", "build", *flags)
             with (
                 self.subTest(flags=flags),
@@ -365,6 +384,111 @@ class CaptainFlowTests(unittest.TestCase):
                     )
                 api.assert_not_called()
 
+    def pane_list(self):
+        return {
+            "panes": [
+                {"pane_id": "w1:p1", "tab_id": "w1:t1", "terminal_title_stripped": "zsh"},
+                {"pane_id": "w1:p5", "tab_id": "w1:t1", "label": "Will", "agent": "claude"},
+                {"pane_id": "w1:p9", "tab_id": "w1:t2", "label": "Other tab"},
+                {"pane_id": None, "tab_id": "w1:t1"},
+            ]
+        }
+
+    def test_horizontal_split_lists_tab_panes_and_requires_a_split_pane(self):
+        args = self.args(
+            "crew",
+            "--agent",
+            "codex",
+            "--task",
+            "build",
+            "--placement",
+            "pane",
+            "--direction",
+            "horizontal",
+        )
+        with (
+            patch.object(sys.stdin, "isatty", return_value=False),
+            patch.object(agents, "herdr", return_value=self.pane_list()) as api,
+        ):
+            with self.assertRaisesRegex(runtime.CaptainError, "Ask the user") as error:
+                agents.create_crew(args, self.pane, self.project)
+        api.assert_called_once_with("pane", "list", "--workspace", "w1")
+        message = str(error.exception)
+        self.assertIn("Which pane should be split?", message)
+        self.assertIn("w1:p1 zsh (captain) / w1:p5 Will", message)
+        self.assertNotIn("w1:p9", message)
+        self.assertIn("--split-pane <choice>", message)
+        self.assertEqual(memory.read_json(self.directory / "session.json")["crew"], {})
+
+    def test_horizontal_split_rejects_panes_outside_the_captain_tab(self):
+        for bad in ("w1:p9", "w2:p1"):
+            args = self.args(
+                "crew",
+                "--agent",
+                "codex",
+                "--task",
+                "build",
+                "--placement",
+                "pane",
+                "--direction",
+                "horizontal",
+                "--split-pane",
+                bad,
+            )
+            with (
+                self.subTest(pane=bad),
+                patch.object(agents, "herdr", return_value=self.pane_list()) as api,
+            ):
+                with self.assertRaisesRegex(runtime.CaptainError, "not in the captain's tab"):
+                    agents.create_crew(args, self.pane, self.project)
+                api.assert_called_once_with("pane", "list", "--workspace", "w1")
+
+    def test_horizontal_split_runs_split_down_on_the_chosen_pane(self):
+        def api(*call, **_):
+            if call[:2] == ("pane", "list"):
+                return self.pane_list()
+            return {
+                "pane": {"pane_id": "w1:p6", "agent": "codex", "agent_status": "idle"},
+                "agent": {"name": f"c-{self.meta['id'][:8]}-sparrow", "agent_status": "working"},
+            }
+
+        for flags, answers in (
+            (("--split-pane", "w1:p5"), ["codex", "pane", "horizontal"]),
+            ((), ["codex", "pane", "horizontal", "w1:p5"]),
+        ):
+            args = self.args("crew", "--task", "build", *flags)
+            with (
+                self.subTest(flags=flags),
+                patch.object(agents, "herdr", side_effect=api) as calls,
+                patch.object(agents, "executable", return_value="/bin/codex"),
+                patch.object(sys.stdin, "isatty", return_value=True),
+                patch(
+                    "captain_barbossa.prompts.questionary.select",
+                    **{"return_value.unsafe_ask.side_effect": answers},
+                ) as ask,
+                contextlib.redirect_stdout(io.StringIO()) as output,
+            ):
+                agents.create_crew(args, self.pane, self.project)
+            self.assertEqual(calls.call_args_list[0].args, ("pane", "list", "--workspace", "w1"))
+            split = calls.call_args_list[1].args
+            self.assertEqual(split[:2], ("pane", "split"))
+            self.assertEqual(split[split.index("--pane") + 1], "w1:p5")
+            self.assertEqual(split[split.index("--direction") + 1], "down")
+            self.assertEqual(ask.call_args_list[2].args[0], "Split direction?")
+            if not flags:
+                self.assertEqual(ask.call_args_list[3].args[0], "Which pane should be split?")
+                titles = [
+                    choice.title
+                    for choice in ask.call_args_list[3].kwargs["choices"]
+                    if not isinstance(choice, questionary.Separator)
+                ]
+                self.assertEqual(titles, ["zsh (captain)", "Will"])
+            result = json.loads(output.getvalue())
+            self.assertEqual(result["direction"], "horizontal")
+            self.assertEqual(result["split_pane"], "w1:p5")
+            self.assertEqual(result["pane"], "w1:p6")
+            memory.write_json(self.directory / "session.json", {**self.meta, "crew": {}})
+
     def test_crew_creates_chosen_topology_then_starts_native_agent(self):
         for placement, provider, name, display_name in (
             ("pane", "codex", "sparrow", "Jack"),
@@ -387,7 +511,10 @@ class CaptainFlowTests(unittest.TestCase):
                     patch.object(sys.stdin, "isatty", return_value=True),
                     patch(
                         "captain_barbossa.prompts.questionary.select",
-                        **{"return_value.unsafe_ask.side_effect": [provider, placement]},
+                        **{
+                            "return_value.unsafe_ask.side_effect": [provider, placement]
+                            + (["vertical"] if placement == "pane" else [])
+                        },
                     ) as ask,
                     contextlib.redirect_stdout(io.StringIO()) as output,
                 ):
@@ -397,13 +524,20 @@ class CaptainFlowTests(unittest.TestCase):
                 self.assertEqual(result["status"], "started")
                 self.assertNotIn("task", result)
                 calls = api.call_args_list
-                self.assertEqual(
-                    calls[0].args[:2],
-                    ("pane", "split") if placement == "pane" else ("tab", "create"),
-                )
-                self.assertIn(f"CAPTAIN_SESSION={self.meta['id']}", calls[0].args)
                 self.assertIn("Choose your crew agent", ask.call_args_list[0].args[0])
-                self.assertIn("Where should the crew open?", ask.call_args_list[-1].args[0])
+                self.assertIn("Where should the crew open?", ask.call_args_list[1].args[0])
+                if placement == "pane":
+                    self.assertIn("Split direction?", ask.call_args_list[2].args[0])
+                    self.assertEqual(calls[0].args[:2], ("pane", "split"))
+                    self.assertEqual(calls[0].args[calls[0].args.index("--pane") + 1], "w1:p1")
+                    self.assertEqual(calls[0].args[calls[0].args.index("--direction") + 1], "right")
+                    self.assertEqual(result["direction"], "vertical")
+                    self.assertEqual(result["split_pane"], "w1:p1")
+                else:
+                    self.assertEqual(len(ask.call_args_list), 2)
+                    self.assertEqual(calls[0].args[:2], ("tab", "create"))
+                    self.assertIsNone(result["direction"])
+                self.assertIn(f"CAPTAIN_SESSION={self.meta['id']}", calls[0].args)
                 run = next(call for call in calls if call.args[:2] == ("pane", "run"))
                 self.assertEqual(run.args[-1], '/bin/sh "$CAPTAIN_CREW_LAUNCHER"')
                 self.assertEqual(run.kwargs, {"expect_output": False})
@@ -450,7 +584,16 @@ class CaptainFlowTests(unittest.TestCase):
                     "Long instructions: " + "quotes ' \" `false` $(false) \\ and newlines\n" * 100
                 )
                 args = self.args(
-                    "crew", name, "--agent", provider, "--task", "check", "--placement", "pane"
+                    "crew",
+                    name,
+                    "--agent",
+                    provider,
+                    "--task",
+                    "check",
+                    "--placement",
+                    "pane",
+                    "--direction",
+                    "vertical",
                 )
                 created = {"pane": {"pane_id": "w1:p2", "agent": provider, "agent_status": "idle"}}
                 created["agent"] = {"name": f"c-{self.meta['id'][:8]}-{name}"}
@@ -495,7 +638,16 @@ class CaptainFlowTests(unittest.TestCase):
 
     def test_startup_failure_preserves_pane_and_prevents_duplicate_retry(self):
         args = self.args(
-            "crew", "sparrow", "--agent", "codex", "--task", "build", "--placement", "pane"
+            "crew",
+            "sparrow",
+            "--agent",
+            "codex",
+            "--task",
+            "build",
+            "--placement",
+            "pane",
+            "--direction",
+            "vertical",
         )
 
         def api(*args, **kwargs):
@@ -571,7 +723,16 @@ class CaptainFlowTests(unittest.TestCase):
         for status, name in (("blocked", "sparrow"), ("unknown", "gibbs")):
             with self.subTest(status=status):
                 args = self.args(
-                    "crew", name, "--agent", "codex", "--task", "build", "--placement", "pane"
+                    "crew",
+                    name,
+                    "--agent",
+                    "codex",
+                    "--task",
+                    "build",
+                    "--placement",
+                    "pane",
+                    "--direction",
+                    "vertical",
                 )
                 created = {"pane": {"pane_id": "w1:p2", "agent": "codex", "agent_status": status}}
                 created["agent"] = {"name": f"c-{self.meta['id'][:8]}-{name}"}
@@ -608,7 +769,16 @@ class CaptainFlowTests(unittest.TestCase):
 
     def test_unsent_draft_gets_one_enter_then_is_confirmed_working(self):
         args = self.args(
-            "crew", "sparrow", "--agent", "claude", "--task", "build", "--placement", "pane"
+            "crew",
+            "sparrow",
+            "--agent",
+            "claude",
+            "--task",
+            "build",
+            "--placement",
+            "pane",
+            "--direction",
+            "vertical",
         )
         agent_name, api = self.crew_status_api(iter(["idle", "idle", "working"]))
         with (
@@ -633,7 +803,16 @@ class CaptainFlowTests(unittest.TestCase):
 
     def test_task_that_never_starts_sends_enter_once_and_needs_attention(self):
         args = self.args(
-            "crew", "sparrow", "--agent", "claude", "--task", "build", "--placement", "pane"
+            "crew",
+            "sparrow",
+            "--agent",
+            "claude",
+            "--task",
+            "build",
+            "--placement",
+            "pane",
+            "--direction",
+            "vertical",
         )
         agent_name, api = self.crew_status_api(repeat("idle"))
         with (
@@ -656,7 +835,16 @@ class CaptainFlowTests(unittest.TestCase):
 
     def test_blocked_agent_after_prompt_never_receives_enter(self):
         args = self.args(
-            "crew", "sparrow", "--agent", "claude", "--task", "build", "--placement", "pane"
+            "crew",
+            "sparrow",
+            "--agent",
+            "claude",
+            "--task",
+            "build",
+            "--placement",
+            "pane",
+            "--direction",
+            "vertical",
         )
         agent_name, api = self.crew_status_api(repeat("blocked"))
         with (
@@ -739,7 +927,17 @@ class CaptainFlowTests(unittest.TestCase):
             "scout": {"status": "started"},
         }
         memory.write_json(self.directory / "session.json", self.meta)
-        args = self.args("crew", "--agent", "codex", "--task", "standby", "--placement", "pane")
+        args = self.args(
+            "crew",
+            "--agent",
+            "codex",
+            "--task",
+            "standby",
+            "--placement",
+            "pane",
+            "--direction",
+            "vertical",
+        )
         created = {"pane": {"pane_id": "w1:p2", "agent": "codex", "agent_status": "idle"}}
         with (
             patch.object(agents, "herdr", return_value=created),
@@ -792,7 +990,15 @@ class CaptainFlowTests(unittest.TestCase):
             with contextlib.redirect_stdout(io.StringIO()) as output:
                 agents.create_crew(
                     self.args(
-                        "crew", "--agent", "codex", "--task", "standby", "--placement", "pane"
+                        "crew",
+                        "--agent",
+                        "codex",
+                        "--task",
+                        "standby",
+                        "--placement",
+                        "pane",
+                        "--direction",
+                        "vertical",
                     ),
                     self.pane,
                     self.project,
@@ -810,7 +1016,16 @@ class CaptainFlowTests(unittest.TestCase):
             with self.assertRaisesRegex(runtime.CaptainError, "already exists"):
                 agents.create_crew(
                     self.args(
-                        "crew", "sparrow", "--agent", "codex", "--task", "x", "--placement", "pane"
+                        "crew",
+                        "sparrow",
+                        "--agent",
+                        "codex",
+                        "--task",
+                        "x",
+                        "--placement",
+                        "pane",
+                        "--direction",
+                        "vertical",
                     ),
                     self.pane,
                     self.project,
@@ -828,6 +1043,8 @@ class CaptainFlowTests(unittest.TestCase):
                         "again",
                         "--placement",
                         "pane",
+                        "--direction",
+                        "vertical",
                     ),
                     self.pane,
                     self.project,

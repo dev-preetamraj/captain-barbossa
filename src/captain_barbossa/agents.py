@@ -37,9 +37,12 @@ do not spawn crew.
 """
         if role.startswith("crew member ")
         else """You manage crew. For EVERY creation, require the user's explicit choices:
-Claude Code or Codex, and a new pane or tab. Ask for missing choices and wait;
-never infer or default either. Once both are supplied, run:
+Claude Code or Codex, and a new pane or tab; for a pane, vertical or horizontal;
+for horizontal, which pane of this tab to split (the command lists them when
+--split-pane is missing). Ask for missing choices and wait; never infer or default
+any. Once all are supplied, run:
   CAPTAIN crew --agent codex|claude --task 'assignment' --placement pane|tab
+    [--direction vertical|horizontal --split-pane <pane-id>]
 Keep crew prompts short: a few lines with goal, hard constraints, and expected report.
 Trust the crew; omit background paragraphs, step lists, and restated context.
 Name the files each crew owns. Give simultaneous writers disjoint files; serialize
@@ -230,6 +233,44 @@ def dismiss_crew(args, pane, project):
     print(f"Dismissed {display_name}.")
 
 
+def tab_panes(pane):
+    """Map pane IDs in the captain's tab to short labels for the split-pane choice."""
+    listed = herdr("pane", "list", "--workspace", pane["workspace_id"]).get("panes")
+    if not isinstance(listed, list):
+        raise CaptainError("Herdr returned no pane list for this workspace.")
+    panes = {}
+    for entry in listed:
+        if not isinstance(entry, dict) or entry.get("tab_id") != pane["tab_id"]:
+            continue
+        pane_id = entry.get("pane_id")
+        if not isinstance(pane_id, str) or not pane_id:
+            continue
+        title = entry.get("label") or entry.get("terminal_title_stripped") or pane_id
+        panes[pane_id] = f"{title} (captain)" if pane_id == pane["pane_id"] else title
+    if not panes:
+        raise CaptainError("Herdr listed no panes in the captain's tab.")
+    return panes
+
+
+def choose_split(args, pane, placement):
+    if placement != "pane":
+        return None, None
+    direction = choose(
+        args.direction, ("vertical", "horizontal"), "Split direction?", "--direction"
+    )
+    if direction == "vertical":
+        return direction, pane["pane_id"]
+    panes = tab_panes(pane)
+    split_pane = choose(
+        args.split_pane, tuple(panes), "Which pane should be split?", "--split-pane", labels=panes
+    )
+    if split_pane not in panes:
+        raise CaptainError(
+            f"Pane {split_pane} is not in the captain's tab. Panes: {', '.join(panes)}."
+        )
+    return direction, split_pane
+
+
 def name_reserved(meta, name):
     return name in meta["crew"] and meta["crew"][name].get("status") != "dismissed"
 
@@ -249,6 +290,7 @@ def create_crew(args, pane, project):
     placement = choose(
         args.placement, ("pane", "tab"), "Where should the crew open?", "--placement"
     )
+    direction, split_pane = choose_split(args, pane, placement)
     binary = executable(provider)
     directory, meta = session(project, pane, args.session)
     with lock(directory / "crew.lock"):
@@ -299,9 +341,9 @@ def create_crew(args, pane, project):
                 "pane",
                 "split",
                 "--pane",
-                pane["pane_id"],
+                split_pane,
                 "--direction",
-                "right",
+                "right" if direction == "vertical" else "down",
                 "--cwd",
                 str(project),
                 "--no-focus",
@@ -319,6 +361,8 @@ def create_crew(args, pane, project):
             "provider": provider,
             "pane": new_pane,
             "placement": placement,
+            "direction": direction,
+            "split_pane": split_pane,
             "task": args.task,
             "status": "starting",
         }
