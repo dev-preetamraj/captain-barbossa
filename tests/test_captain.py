@@ -268,23 +268,39 @@ class CaptainFlowTests(unittest.TestCase):
                     self.assertNotIn("--model", text)
                 else:
                     for phrase in (
-                        "Crew placement ruleset, for EVERY creation, no exceptions",
-                        "1. Ask Claude Code or Codex. 2. Ask new pane or tab.",
-                        "3. Pane only: ask vertical, horizontal, or auto.",
-                        "4. Pane only, any direction: ask which pane to split, or auto",
+                        "Crew recruiting ruleset, for EVERY creation",
                         "lists every workspace pane by tab when --split-pane is missing",
-                        "Auto picks pane and direction from the tab layout, or a new tab when crowded",
-                        "Ask each choice alone, only after the one before it is answered, and wait",
-                        "Never batch, infer, default, or reuse an earlier answer",
                         "--direction vertical|horizontal|auto --split-pane <pane-id>|auto] "
                         "--model <model>",
-                        "5. Ask Manual select or Smart select.",
-                        "Manual: pass the user's model text as --model.",
-                        "mechanical/small edits -> cheapest, normal features -> mid,",
-                        "design/debugging/multi-file -> strongest.",
-                        "Cheap to strong: claude haiku/sonnet/opus; codex spark/terra/astra.",
                     ):
                         self.assertIn(phrase, instructions)
+
+    def test_instructions_recruit_on_defaults_and_ask_at_most_one_question(self):
+        instructions = " ".join(
+            agents.agent_instructions(self.directory, "Captain Barbossa").split()
+        )
+        for phrase in (
+            "Recruit with no questions when the user states no preference.",
+            "--agent is the CLI you run as",
+            "--placement pane --direction auto --split-pane auto",
+            "--model picked by task: mechanical/small edits -> cheapest,",
+            "normal features -> mid, design/debugging/multi-file -> strongest.",
+            "Cheap to strong: claude haiku/sonnet/opus; codex spark/terra/astra.",
+            "Use every choice the user does state and keep the rest on these defaults.",
+            "Ask at most one question, only when the user hands a choice back to you "
+            "or names one too vaguely to map to a flag, and wait for the answer;",
+            "never ask about a choice they did not raise",
+            "Auto picks pane and direction from the tab layout, or a new tab when crowded",
+        ):
+            self.assertIn(phrase, instructions)
+        for gone in (
+            "Ask Claude Code or Codex",
+            "Ask new pane or tab",
+            "Ask Manual select or Smart select",
+            "Ask each choice alone",
+            "Never batch, infer, default, or reuse an earlier answer",
+        ):
+            self.assertNotIn(gone, instructions)
 
     def test_agent_commands_work_outside_the_source_checkout(self):
         instructions = agents.agent_instructions(self.directory, "captain")
@@ -666,6 +682,52 @@ class CaptainFlowTests(unittest.TestCase):
                     self.assertIn("halves", reason)
         self.assertIn("captain's own pane", layout.pick_split(fresh, "w1:p1", set())[2])
         self.assertIn("holds no crew", layout.pick_split(short_captain, "w1:p1", {"w1:p5"})[2])
+
+    def test_default_recruiting_flags_create_a_crew_without_any_selector(self):
+        created = {
+            "pane": {
+                "pane_id": "w1:p6",
+                "tab_id": "w1:t1",
+                "agent": "claude",
+                "agent_status": "idle",
+            },
+            "agent": {"name": f"c-{self.meta['id'][:8]}-sparrow", "agent_status": "working"},
+        }
+
+        def api(*call, **_):
+            if call[:2] == ("pane", "layout"):
+                return self.layout(("w1:p1", 0, 0, 156, 51))
+            return self.listing(*call) or created
+
+        args = self.args(
+            "crew",
+            "--agent",
+            "claude",
+            "--task",
+            "build",
+            "--placement",
+            "pane",
+            "--direction",
+            "auto",
+            "--split-pane",
+            "auto",
+            "--model",
+            "sonnet",
+        )
+        with (
+            patch.object(agents, "herdr", side_effect=api),
+            patch.object(agents, "executable", return_value="/bin/claude"),
+            patch.object(sys.stdin, "isatty", return_value=True),
+            patch.object(questionary, "select", side_effect=AssertionError("asked a question")),
+            contextlib.redirect_stdout(io.StringIO()) as output,
+            contextlib.redirect_stderr(io.StringIO()),
+        ):
+            agents.create_crew(args, self.pane, self.project)
+        result = json.loads(output.getvalue())
+        self.assertEqual(result["placement"], "pane")
+        self.assertEqual(result["split_pane"], "w1:p1")
+        self.assertEqual(result["direction"], "vertical")
+        self.assertEqual(result["model"], "claude-sonnet-5")
 
     def test_auto_placement_splits_from_the_layout_and_records_the_choice(self):
         created = {

@@ -39,16 +39,17 @@ def agent_instructions(directory, role):
 do not spawn crew.
 """
         if role.startswith("crew member ")
-        else """You manage crew. Crew placement ruleset, for EVERY creation, no exceptions:
-1. Ask Claude Code or Codex. 2. Ask new pane or tab. 3. Pane only: ask vertical,
-horizontal, or auto. 4. Pane only, any direction: ask which pane to split, or auto;
-the command lists every workspace pane by tab when --split-pane is missing. Auto
-picks pane and direction from the tab layout, or a new tab when crowded. 5. Ask
-Manual select or Smart select. Manual: pass the user's model text as --model. Smart:
-pick it yourself by task: mechanical/small edits -> cheapest, normal features -> mid,
+        else """You manage crew. Crew recruiting ruleset, for EVERY creation:
+Recruit with no questions when the user states no preference. Defaults: --agent is
+the CLI you run as, --placement pane --direction auto --split-pane auto, and --model
+picked by task: mechanical/small edits -> cheapest, normal features -> mid,
 design/debugging/multi-file -> strongest. Cheap to strong: {tiers}.
-Ask each choice alone, only after the one before it is answered, and wait. Never
-batch, infer, default, or reuse an earlier answer. Once all are supplied, run:
+Use every choice the user does state and keep the rest on these defaults. Ask at
+most one question, only when the user hands a choice back to you or names one too
+vaguely to map to a flag, and wait for the answer; never ask about a choice they did
+not raise. Auto picks pane and direction from the tab layout, or a new tab when
+crowded; the command lists every workspace pane by tab when --split-pane is missing.
+Run:
   CAPTAIN crew --agent codex|claude --task 'assignment' --placement pane|tab
     [--direction vertical|horizontal|auto --split-pane <pane-id>|auto] --model <model>
 Keep crew prompts short: a few lines with goal, hard constraints, and expected report.
