@@ -16,6 +16,16 @@ captain --prompt "Inspect this project"
 
 If your shell cannot find `captain`, run `uv tool update-shell` and restart the terminal.
 
+**Updating**
+
+`captain --version` prints the installed version. To update an existing GitHub install, run:
+
+```sh
+uv tool upgrade captain-barbossa
+```
+
+uv re-resolves the Git source recorded at install time and installs the latest commit on the default branch, even when the version number has not changed. Reinstalling with `uv tool install --force git+https://github.com/dev-preetamraj/captain-barbossa.git` does the same. Running captains keep the old code until they are restarted with `captain --session <session-id>`.
+
 Requires Python 3.11+, Herdr, and the chosen agent CLI, already signed in. Currently targets macOS/Linux. Launch it from an interactive terminal inside a Herdr workspace. It renames the current tab to **Captain Barbossa** and replaces itself with the native agent. Native input, history, permissions, and login stay with that agent.
 
 Ask the captain to spin up a crew. Its startup instructions tell it to ask **Claude Code or Codex**, then **pane or tab**, wait for your choices, and run the crew command. You can also run the command directly from a shell associated with the Captain session:

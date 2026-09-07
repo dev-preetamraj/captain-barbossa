@@ -1,4 +1,5 @@
 import contextlib
+import importlib.metadata
 import io
 import json
 import os
@@ -8,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import tomllib
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from itertools import count, repeat
@@ -1115,6 +1117,19 @@ class CaptainFlowTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("per-user windows", result.stdout)
         self.assertEqual(list(self.project.iterdir()), [])
+
+
+class VersionTests(unittest.TestCase):
+    def test_version_flag_reports_the_package_metadata_version(self):
+        expected = importlib.metadata.version("captain-barbossa")
+        with open(Path(__file__).parents[1] / "pyproject.toml", "rb") as handle:
+            self.assertEqual(tomllib.load(handle)["project"]["version"], expected)
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            with self.assertRaises(SystemExit) as exit_info:
+                cli.main(["--version"])
+        self.assertEqual(exit_info.exception.code, 0)
+        self.assertEqual(output.getvalue(), f"captain {expected}\n")
+        self.assertEqual(cli.__version__, expected)
 
 
 if __name__ == "__main__":

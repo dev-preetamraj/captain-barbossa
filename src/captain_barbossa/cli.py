@@ -5,13 +5,17 @@ import os
 import subprocess
 import sys
 
+from . import __version__
 from .agents import create_crew, dismiss_crew, focus_crew, launch
 from .memory import memory, project_root
 from .runtime import CaptainError, current_pane
 
 
 def parser():
-    root = argparse.ArgumentParser(description="Native captain and crew for Herdr workspaces.")
+    root = argparse.ArgumentParser(
+        prog="captain", description="Native captain and crew for Herdr workspaces."
+    )
+    root.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     root.add_argument(
         "--agent", choices=("codex", "claude"), help="captain CLI (asks when omitted)"
     )
