@@ -49,7 +49,8 @@ def parser():
     add.add_argument("--scope", choices=("session", "project"), default="session")
     query = actions.add_parser("query", help="search session and project memory with Graphify")
     query.add_argument("question")
-    actions.add_parser("show", help="show session and project graph data")
+    show = actions.add_parser("show", help="show session and project memory relationships")
+    show.add_argument("--json", action="store_true", help="show the full raw graph instead")
     actions.add_parser("path", help="print this session's memory directory")
     return root
 

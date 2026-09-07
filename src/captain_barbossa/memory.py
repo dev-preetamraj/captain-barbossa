@@ -169,14 +169,26 @@ def memory(args, pane, project):
     if args.memory_command == "add":
         path = (directory.parent.parent if args.scope == "project" else directory) / "graph.json"
         add_memory(path, args.subject, args.relation, args.target)
-        print(f"Saved {args.scope} memory: {path}")
+        print(f"Saved {args.scope} memory.")
     elif args.memory_command == "path":
         print(directory)
     else:
         snapshot = memory_snapshot(directory)
         try:
             if args.memory_command == "show":
-                print((snapshot / "graph.json").read_text(encoding="utf-8"), end="")
+                if args.json:
+                    print((snapshot / "graph.json").read_text(encoding="utf-8"), end="")
+                else:
+                    graph = read_json(snapshot / "graph.json")
+                    labels = {node["id"]: node["label"] for node in graph["nodes"]}
+                    print("Memory (subject, relation, object):")
+                    for link in graph["links"]:
+                        print(
+                            json.dumps(
+                                [labels[link["source"]], link["relation"], labels[link["target"]]],
+                                ensure_ascii=False,
+                            )
+                        )
             else:
                 env = dict(os.environ, GRAPHIFY_OUT=str(snapshot), GRAPHIFY_QUERY_LOG_DISABLE="1")
                 result = subprocess.run(

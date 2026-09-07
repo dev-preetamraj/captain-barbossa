@@ -30,6 +30,10 @@ In an interactive shell, both choices use a compact keyboard selector. Move with
 
 New crew panes/tabs open in the same workspace and project without stealing focus. Captain saves a private shell launcher beside the session memory, then uses Herdr's `pane run` to submit a short command. Full instructions are read from that file rather than pasted through the terminal input buffer. Captain waits for Herdr to detect the selected native agent as ready, names it, and only then submits the task. The command returns the Herdr agent name and pane ID. Startup failures or native approval screens preserve the pane for inspection and do not retry or discard work. Crew share the checkout in this initial version; give simultaneous writers separate file assignments.
 
+Captain and crew receive instructions for their own roles. Tasks are sent verbatim;
+the compact launch result omits the task echo, while `session.json` and graph memory
+retain the full assignment.
+
 Tell the captain **“focus on Jack”**, **“switch to Will”**, or **“take me to Elizabeth”** to bring that crew's pane and containing tab into focus. You can also use the command directly:
 
 ```sh
@@ -60,6 +64,11 @@ captain memory add "project" "test command" "python -m unittest" --scope project
 captain memory show
 captain memory query "rate limiter"
 ```
+
+`memory show` prints every relationship as a compact `[subject, relation, object]`
+JSON line, preserving full values without graph IDs or metadata. Use
+`captain memory show --json` for the original raw graph format. Saved graphs and
+Graphify queries are unchanged.
 
 These commands run inside the launched agent's environment. From a separate Herdr shell in the same project/workspace, pass the session explicitly:
 
