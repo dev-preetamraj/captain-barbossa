@@ -32,7 +32,7 @@ def herdr(*args, timeout=15, expect_output=True):
         payload = response["result"]
         if not isinstance(payload, dict):
             raise ValueError("result must be an object")
-        for key in ("pane", "root_pane", "agent"):
+        for key in ("pane", "root_pane", "agent", "layout"):
             if key in payload and not isinstance(payload[key], dict):
                 raise ValueError(f"{key} must be an object")
         return payload

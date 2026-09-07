@@ -13,6 +13,7 @@ LABELS = {
     "tab": "New tab",
     "vertical": "Vertical (side by side)",
     "horizontal": "Horizontal (stacked)",
+    "auto": "Auto (balanced by layout)",
 }
 STYLE = questionary.Style(
     [

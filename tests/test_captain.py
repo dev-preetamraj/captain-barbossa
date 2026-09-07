@@ -18,7 +18,7 @@ from unittest.mock import patch
 
 import questionary
 
-from captain_barbossa import agents, cli, memory, models, runtime
+from captain_barbossa import agents, cli, layout, memory, models, runtime
 from captain_barbossa.runtime import CaptainError
 
 
@@ -101,7 +101,13 @@ class CaptainFlowTests(unittest.TestCase):
         return run
 
     def test_null_nested_herdr_values_fail_as_captain_errors_in_every_caller(self):
-        for response in ({"pane": None}, {"pane": "w1:p1"}, {"agent": None}, {"agent": "x"}):
+        for response in (
+            {"pane": None},
+            {"pane": "w1:p1"},
+            {"agent": None},
+            {"agent": "x"},
+            {"layout": []},
+        ):
             with (
                 self.subTest(response=response),
                 patch.object(runtime, "executable", return_value="/bin/herdr"),
@@ -262,12 +268,14 @@ class CaptainFlowTests(unittest.TestCase):
                     for phrase in (
                         "Crew placement ruleset, for EVERY creation, no exceptions",
                         "1. Ask Claude Code or Codex. 2. Ask new pane or tab.",
-                        "3. Pane only: ask vertical or horizontal.",
-                        "4. Pane only, both directions: ask which pane to split",
+                        "3. Pane only: ask vertical, horizontal, or auto.",
+                        "4. Pane only, any direction: ask which pane to split, or auto",
                         "lists every workspace pane by tab when --split-pane is missing",
+                        "Auto picks pane and direction from the tab layout, or a new tab when crowded",
                         "Ask each choice alone, only after the one before it is answered, and wait",
                         "Never batch, infer, default, or reuse an earlier answer",
-                        "--direction vertical|horizontal --split-pane <pane-id>] --model <model>",
+                        "--direction vertical|horizontal|auto --split-pane <pane-id>|auto] "
+                        "--model <model>",
                         "5. Ask Manual select or Smart select.",
                         "Manual: pass the user's model text as --model.",
                         "mechanical/small edits -> cheapest, normal features -> mid,",
@@ -426,7 +434,8 @@ class CaptainFlowTests(unittest.TestCase):
 
     LISTING_CALLS = (("tab", "list", "--workspace", "w1"), ("pane", "list", "--workspace", "w1"))
     LISTED_PANES = (
-        "Captain Barbossa: w1:p1 zsh (captain) / w1:p5 Will; Tab 2: w1:p9 vim; w1:t3: w1:p8 w1:p8"
+        "auto Auto (balanced by layout); Captain Barbossa: w1:p1 zsh (captain) / w1:p5 Will; "
+        "Tab 2: w1:p9 vim; w1:t3: w1:p8 w1:p8"
     )
 
     def test_pane_split_lists_workspace_panes_by_tab_and_requires_a_split_pane(self):
@@ -593,7 +602,7 @@ class CaptainFlowTests(unittest.TestCase):
                 self.assertIn("Captain Barbossa", rows)
                 self.assertEqual(
                     [row.title for row in rows if isinstance(row, questionary.Choice)],
-                    ["zsh (captain)", "Will", "vim", "w1:p8"],
+                    ["Auto (balanced by layout)", "zsh (captain)", "Will", "vim", "w1:p8"],
                 )
                 self.assertLess(rows.index("Captain Barbossa"), rows.index("Tab 2"))
                 self.assertLess(rows.index("Tab 2"), rows.index("w1:t3"))
@@ -603,6 +612,159 @@ class CaptainFlowTests(unittest.TestCase):
             self.assertEqual(result["tab"], tab)
             self.assertEqual(result["pane"], "w1:p6")
             memory.write_json(self.directory / "session.json", {**self.meta, "crew": {}})
+
+    @staticmethod
+    def layout(*panes):
+        """Build a Herdr pane layout from (pane_id, x, y, width, height) rows."""
+        return {
+            "layout": {
+                "panes": [
+                    {"pane_id": pane_id, "rect": {"x": x, "y": y, "width": w, "height": h}}
+                    for pane_id, x, y, w, h in panes
+                ]
+                + [{"pane_id": None, "rect": {}}, "junk"]
+            }
+        }
+
+    def test_auto_split_balances_the_tab_and_falls_back_when_crowded(self):
+        fresh = {"w1:p1": (0, 0, 156, 51)}
+        slivers = {"w1:p1": (0, 0, 78, 51), "w1:p2": (78, 0, 78, 51), "w1:p5": (156, 0, 78, 51)}
+        rows = {"w1:p1": (0, 0, 156, 17), "w1:p2": (0, 17, 156, 17), "w1:p5": (0, 34, 156, 17)}
+        short_captain = {
+            "w1:p1": (0, 0, 78, 25),
+            "w1:p3": (0, 25, 78, 26),
+            "w1:p2": (78, 0, 78, 51),
+            "w1:p5": (156, 0, 78, 51),
+        }
+        far_shell = {"w1:p2": (0, 0, 78, 51), "w1:p5": (78, 0, 78, 51), "w1:p1": (156, 0, 78, 51)}
+        grid = {
+            "w1:p1": (0, 0, 78, 25),
+            "w1:p2": (78, 0, 78, 25),
+            "w1:p3": (0, 25, 78, 26),
+            "w1:p5": (78, 25, 78, 26),
+        }
+        for geometry, direction, expected in (
+            (fresh, None, ("w1:p1", "vertical")),
+            (fresh, "horizontal", ("w1:p1", "horizontal")),
+            (slivers, None, ("w1:p1", "horizontal")),
+            (slivers, "vertical", (None, None)),
+            (rows, None, ("w1:p1", "vertical")),
+            (rows, "horizontal", (None, None)),
+            (short_captain, None, ("w1:p2", "horizontal")),
+            (far_shell, None, ("w1:p1", "horizontal")),
+            (grid, None, (None, None)),
+        ):
+            with self.subTest(geometry=geometry, direction=direction):
+                pane_id, chosen, reason = layout.pick_split(geometry, "w1:p1", {"w1:p5"}, direction)
+                self.assertEqual((pane_id, chosen), expected)
+                if pane_id is None:
+                    self.assertIn("below 60x15 cells", reason)
+                else:
+                    self.assertIn(f"pane {pane_id} split", reason)
+                    self.assertIn("halves", reason)
+        self.assertIn("captain's own pane", layout.pick_split(fresh, "w1:p1", set())[2])
+        self.assertIn("holds no crew", layout.pick_split(short_captain, "w1:p1", {"w1:p5"})[2])
+
+    def test_auto_placement_splits_from_the_layout_and_records_the_choice(self):
+        created = {
+            "pane": {
+                "pane_id": "w1:p6",
+                "tab_id": "w1:t1",
+                "agent": "codex",
+                "agent_status": "idle",
+            },
+            "root_pane": {"pane_id": "w1:p6", "tab_id": "w1:t9"},
+            "tab_id": "w1:t9",
+            "agent": {"name": f"c-{self.meta['id'][:8]}-sparrow", "agent_status": "working"},
+        }
+        fresh = self.layout(("w1:p1", 0, 0, 156, 51))
+        two = self.layout(("w1:p1", 0, 0, 78, 51), ("w1:p5", 78, 0, 78, 51))
+        grid = self.layout(
+            ("w1:p1", 0, 0, 78, 25),
+            ("w1:p2", 78, 0, 78, 25),
+            ("w1:p3", 0, 25, 78, 26),
+            ("w1:p5", 78, 25, 78, 26),
+        )
+        base = ("crew", "--agent", "codex", "--task", "build", "--placement", "pane")
+        for flags, response, layout_pane, expected, chosen in (
+            (("--split-pane", "auto"), fresh, "w1:p1", ("split", "w1:p1", "right"), "vertical"),
+            (
+                ("--split-pane", "auto", "--direction", "auto"),
+                two,
+                "w1:p1",
+                ("split", "w1:p1", "down"),
+                "horizontal",
+            ),
+            (
+                ("--split-pane", "auto", "--direction", "horizontal"),
+                two,
+                "w1:p1",
+                ("split", "w1:p1", "down"),
+                "horizontal",
+            ),
+            (
+                ("--split-pane", "w1:p5", "--direction", "auto"),
+                two,
+                "w1:p5",
+                ("split", "w1:p5", "down"),
+                "horizontal",
+            ),
+            (("--split-pane", "auto", "--direction", "vertical"), two, "w1:p1", ("tab",), None),
+            (("--split-pane", "auto"), grid, "w1:p1", ("tab",), None),
+        ):
+
+            def api(*call, **_):
+                if call[:2] == ("pane", "layout"):
+                    return response
+                return self.listing(*call) or created
+
+            with (
+                self.subTest(flags=flags),
+                patch.object(agents, "herdr", side_effect=api) as calls,
+                patch.object(agents, "executable", return_value="/bin/codex"),
+                patch.object(sys.stdin, "isatty", return_value=False),
+                contextlib.redirect_stdout(io.StringIO()) as output,
+                contextlib.redirect_stderr(io.StringIO()) as notice,
+            ):
+                agents.create_crew(self.args(*base, *flags), self.pane, self.project)
+            made = [call.args for call in calls.call_args_list]
+            listing = list(self.LISTING_CALLS) if layout_pane != "w1:p1" else []
+            self.assertEqual(made[: len(listing)], listing)
+            self.assertEqual(made[len(listing)], ("pane", "layout", "--pane", layout_pane))
+            creation = made[len(listing) + 1]
+            result = json.loads(output.getvalue())
+            if expected[0] == "split":
+                self.assertEqual(creation[:2], ("pane", "split"))
+                self.assertEqual(creation[creation.index("--pane") + 1], expected[1])
+                self.assertEqual(creation[creation.index("--direction") + 1], expected[2])
+                self.assertEqual(result["placement"], "pane")
+                self.assertEqual(result["split_pane"], expected[1])
+                self.assertEqual(result["direction"], chosen)
+                self.assertTrue(result["auto"].startswith(f"split {expected[1]} {chosen}"))
+                self.assertIn(f"Auto placement: split {expected[1]} {chosen}", notice.getvalue())
+            else:
+                self.assertEqual(creation[:2], ("tab", "create"))
+                self.assertEqual(result["placement"], "tab")
+                self.assertEqual(result["tab"], "w1:t9")
+                self.assertIsNone(result["split_pane"])
+                self.assertTrue(result["auto"].startswith("new tab; every pane"))
+                self.assertIn("Auto placement: new tab; every pane", notice.getvalue())
+            self.assertNotIn("--direction", notice.getvalue())
+            graph = memory.read_json(self.directory / "graph.json")
+            self.assertIn(f"auto: {result['auto']}", [node["label"] for node in graph["nodes"]])
+            memory.write_json(self.directory / "session.json", {**self.meta, "crew": {}})
+            memory.write_json(self.directory / "graph.json", {"nodes": [], "links": []})
+        for response in ({}, {"layout": {}}, {"layout": {"panes": [{"pane_id": "w1:p9"}]}}):
+            with (
+                self.subTest(response=response),
+                patch.object(agents, "herdr", return_value=response),
+                patch.object(sys.stdin, "isatty", return_value=False),
+            ):
+                with self.assertRaisesRegex(runtime.CaptainError, "layout"):
+                    agents.create_crew(
+                        self.args(*base, "--split-pane", "auto"), self.pane, self.project
+                    )
+                self.assertEqual(memory.read_json(self.directory / "session.json")["crew"], {})
 
     def test_crew_creates_chosen_topology_then_starts_native_agent(self):
         for placement, provider, name, display_name in (

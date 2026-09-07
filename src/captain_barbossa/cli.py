@@ -42,11 +42,13 @@ def parser():
     )
     crew.add_argument(
         "--direction",
-        choices=("vertical", "horizontal"),
-        help="pane split direction chosen by the user (asks when omitted)",
+        choices=("vertical", "horizontal", "auto"),
+        help="pane split direction chosen by the user, or auto (asks when omitted)",
     )
     crew.add_argument(
-        "--split-pane", help="pane ID anywhere in the workspace to split (asks when omitted)"
+        "--split-pane",
+        help="pane ID anywhere in the workspace to split, or auto to pick pane and direction "
+        "from the current tab's layout (asks when omitted)",
     )
     crew.add_argument("--model", help="model name or alias, matched to the crew CLI's models")
     focus = commands.add_parser("focus", help="focus an existing crew's pane and tab")

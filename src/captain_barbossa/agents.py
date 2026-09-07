@@ -9,9 +9,10 @@ import sys
 import time
 from itertools import cycle
 
+from .layout import HERDR_DIRECTIONS, pick_split, tab_panes
 from .memory import add_memory, lock, read_json, session, write_json
 from .models import SMART, native_model_args, resolve_model
-from .prompts import choose
+from .prompts import LABELS, choose
 from .runtime import CaptainError, executable, herdr
 
 CREW_NAMES = {
@@ -39,16 +40,17 @@ do not spawn crew.
 """
         if role.startswith("crew member ")
         else """You manage crew. Crew placement ruleset, for EVERY creation, no exceptions:
-1. Ask Claude Code or Codex. 2. Ask new pane or tab. 3. Pane only: ask vertical or
-horizontal. 4. Pane only, both directions: ask which pane to split; the command
-lists every workspace pane by tab when --split-pane is missing. 5. Ask Manual
-select or Smart select. Manual: pass the user's model text as --model. Smart: pick
-it yourself by task: mechanical/small edits -> cheapest, normal features -> mid,
+1. Ask Claude Code or Codex. 2. Ask new pane or tab. 3. Pane only: ask vertical,
+horizontal, or auto. 4. Pane only, any direction: ask which pane to split, or auto;
+the command lists every workspace pane by tab when --split-pane is missing. Auto
+picks pane and direction from the tab layout, or a new tab when crowded. 5. Ask
+Manual select or Smart select. Manual: pass the user's model text as --model. Smart:
+pick it yourself by task: mechanical/small edits -> cheapest, normal features -> mid,
 design/debugging/multi-file -> strongest. Cheap to strong: {tiers}.
 Ask each choice alone, only after the one before it is answered, and wait. Never
 batch, infer, default, or reuse an earlier answer. Once all are supplied, run:
   CAPTAIN crew --agent codex|claude --task 'assignment' --placement pane|tab
-    [--direction vertical|horizontal --split-pane <pane-id>] --model <model>
+    [--direction vertical|horizontal|auto --split-pane <pane-id>|auto] --model <model>
 Keep crew prompts short: a few lines with goal, hard constraints, and expected report.
 Trust the crew; omit background paragraphs, step lists, and restated context.
 Name the files each crew owns. Give simultaneous writers disjoint files; serialize
@@ -276,33 +278,60 @@ def workspace_panes(pane):
     return groups
 
 
-def choose_split(args, pane, placement):
+def auto_split(pane, crew_panes, direction=None, target=None, tab_id=None):
+    """Pick a split from the tab layout; a None pane means fall back to a new tab."""
+    origin = target or pane["pane_id"]
+    geometry = tab_panes(herdr("pane", "layout", "--pane", origin), origin)
+    if target:
+        geometry = {target: geometry[target]}
+    split_pane, chosen, reason = pick_split(geometry, pane["pane_id"], crew_panes, direction)
+    if split_pane is None:
+        choice = "new tab"
+    else:
+        choice = f"split {split_pane} {chosen} ({HERDR_DIRECTIONS[chosen]})"
+    print(f"Auto placement: {choice}; {reason}.", file=sys.stderr)
+    return chosen, split_pane, tab_id or pane["tab_id"], f"{choice}; {reason}"
+
+
+def choose_split(args, pane, placement, crew_panes):
+    """Return (direction, split pane, tab, auto reason); a None pane with a reason means new tab."""
     if placement != "pane":
         if args.direction or args.split_pane:
             raise CaptainError("--direction and --split-pane apply only to --placement pane.")
-        return None, None, None
+        return None, None, None, None
+    if args.split_pane == "auto":
+        return auto_split(pane, crew_panes, None if args.direction == "auto" else args.direction)
     direction = choose(
-        args.direction, ("vertical", "horizontal"), "Split direction?", "--direction"
+        args.direction, ("vertical", "horizontal", "auto"), "Split direction?", "--direction"
     )
+    free = None if direction == "auto" else direction
     if args.split_pane == pane["pane_id"]:
-        return direction, args.split_pane, pane["tab_id"]
-    groups = workspace_panes(pane)
-    labels = {pane_id: title for _, panes in groups.values() for pane_id, title in panes.items()}
-    if args.split_pane and args.split_pane not in labels:
-        raise CaptainError(
-            f"Pane {args.split_pane} is not in this workspace (closed or mistyped). "
-            f"Panes: {', '.join(labels)}. Ask the user again."
+        split_pane, tab_id = args.split_pane, pane["tab_id"]
+    else:
+        groups = workspace_panes(pane)
+        labels = {"auto": LABELS["auto"]}
+        labels.update(
+            (pane_id, title) for _, panes in groups.values() for pane_id, title in panes.items()
         )
-    split_pane = choose(
-        args.split_pane,
-        tuple(labels),
-        "Which pane should be split?",
-        "--split-pane",
-        labels=labels,
-        groups=[(name, tuple(panes)) for name, panes in groups.values()],
-    )
-    tab_id = next(tab for tab, (_, panes) in groups.items() if split_pane in panes)
-    return direction, split_pane, tab_id
+        if args.split_pane and args.split_pane not in labels:
+            raise CaptainError(
+                f"Pane {args.split_pane} is not in this workspace (closed or mistyped). "
+                f"Panes: {', '.join(labels)}. Ask the user again."
+            )
+        split_pane = choose(
+            args.split_pane,
+            tuple(labels),
+            "Which pane should be split?",
+            "--split-pane",
+            labels=labels,
+            groups=[(None, ("auto",)), *((name, tuple(panes)) for name, panes in groups.values())],
+        )
+        if split_pane == "auto":
+            return auto_split(pane, crew_panes, free)
+        tab_id = next(tab for tab, (_, panes) in groups.items() if split_pane in panes)
+    if direction == "auto":
+        return auto_split(pane, crew_panes, None, split_pane, tab_id)
+    return direction, split_pane, tab_id, None
 
 
 def name_reserved(meta, name):
@@ -324,12 +353,19 @@ def create_crew(args, pane, project):
     placement = choose(
         args.placement, ("pane", "tab"), "Where should the crew open?", "--placement"
     )
-    direction, split_pane, tab_id = choose_split(args, pane, placement)
+    directory, meta = session(project, pane, args.session)
+    crew_panes = {
+        crew["pane"]
+        for crew in meta["crew"].values()
+        if crew.get("pane") and crew.get("status") != "dismissed"
+    }
+    direction, split_pane, tab_id, auto = choose_split(args, pane, placement, crew_panes)
+    if auto and split_pane is None:
+        placement = "tab"
     model = resolve_model(provider, args.model) if args.model is not None else None
     if model:
         print(f"Model: {model} (from {args.model!r})", file=sys.stderr)
     binary = executable(provider)
-    directory, meta = session(project, pane, args.session)
     with lock(directory / "crew.lock"):
         meta = read_json(directory / "session.json")
         name = args.name
@@ -409,6 +445,7 @@ def create_crew(args, pane, project):
             "placement": placement,
             "direction": direction,
             "split_pane": split_pane,
+            "auto": auto,
             "model": model,
             "task": args.task,
             "status": "starting",
@@ -421,6 +458,8 @@ def create_crew(args, pane, project):
             add_memory(directory / "graph.json", agent_name, "assigned", args.task)
             if model:
                 add_memory(directory / "graph.json", agent_name, "model", model)
+            if auto:
+                add_memory(directory / "graph.json", agent_name, "placement", f"auto: {auto}")
             herdr("pane", "rename", new_pane, display_name)
             # A new shell may still be in canonical mode: keep terminal input short.
             herdr("pane", "run", new_pane, '/bin/sh "$CAPTAIN_CREW_LAUNCHER"', expect_output=False)
