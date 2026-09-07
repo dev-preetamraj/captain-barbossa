@@ -34,7 +34,7 @@ Ask the captain to spin up a crew. Its startup instructions carry a recruiting r
 captain crew --task "Review the current changes"
 ```
 
-Every new crew gets a one-word Pirates of the Caribbean character name: **Jack**, **Will**, **Elizabeth**, **Gibbs**, **Anamaria**, **Pintel**, **Ragetti**, **Cotton**, **Marty**, **Tia**, **Davy**, or **Sao**. Names are assigned in that order, skipping names held by active crew or by launches that need attention. Dismissing crew returns the name to the pool, so the next recruit takes the lowest free roster name again (Jack after Jack is dismissed). Only when every roster name is held does numbering start at **Jack2**, keeping names to one word. Barbossa stays reserved for the captain. Properly cased names appear on panes/tabs and in the launch result, instructions, and memory. Command identifiers and filenames stay lowercase (`sparrow`, `will-turner`, `elizabeth`, etc.). You can request an available character explicitly with `captain crew gibbs --task "Review the current changes"`. Existing crew keep their names.
+Every new crew gets a one-word Pirates of the Caribbean character name: **Sparrow**, **Turner**, **Elizabeth**, **Gibbs**, **Anamaria**, **Pintel**, **Ragetti**, **Cotton**, **Marty**, **Tia**, **Davy**, or **Feng**. Names are assigned in that order, skipping names held by active crew or by launches that need attention. Dismissing crew returns the name to the pool, so the next recruit takes the lowest free roster name again (Sparrow after Sparrow is dismissed). Only when every roster name is held does numbering start at **Sparrow-2**, keeping names to one word. Barbossa stays reserved for the captain. Each name is canonical: the same word is the crew ID, the display name on panes/tabs, and the name in the launch result, instructions, and memory, so recruiting, focus, and dismissal all print it identically. Command identifiers and filenames are its lowercase form (`sparrow`, `turner`, `elizabeth`, etc.). You can request an available character explicitly with `captain crew gibbs --task "Review the current changes"`. Existing crew keep their names.
 
 In an interactive shell, every choice uses a compact keyboard selector. Move with **↑/↓ or j/k**, press **Enter** to choose, or **Esc / Ctrl+C** to cancel. The highlighted row is only selected when you press Enter. An agent tool invocation without a terminal returns an instruction to ask you about any missing choice and creates nothing; for a pane placement that message lists every workspace pane by tab, ID, and label. The captain supplies `--agent claude|codex`, `--placement pane|tab`, for a pane `--direction vertical|horizontal|auto` with `--split-pane <pane-id>|auto`, and `--model <text>`. `--split-pane auto` needs no direction; a fixed direction with `--split-pane auto` only chooses the pane, and `--direction auto` with a pane ID only chooses the direction. Explicit flags count as your choices, so they do not trigger another question.
 
@@ -46,11 +46,11 @@ Captain and crew receive instructions for their own roles. Tasks are sent verbat
 the compact launch result omits the task echo, while `session.json` and graph memory
 retain the full assignment.
 
-Tell the captain **“focus on Jack”**, **“switch to Will”**, or **“take me to Elizabeth”** to bring that crew's pane and containing tab into focus. You can also use the command directly:
+Tell the captain **“focus on Sparrow”**, **“switch to Turner”**, or **“take me to Elizabeth”** to bring that crew's pane and containing tab into focus. You can also use the command directly:
 
 ```sh
-captain focus Jack
-captain --session <session-id> focus Will
+captain focus Sparrow
+captain --session <session-id> focus Turner
 ```
 
 Names are case-insensitive; crew IDs and registered Herdr agent names also work. Lookup uses only the current Captain session. Focusing switches to the crew's tab first when it differs from the captain's, follows the registered agent if its pane moves, and does not send input or interrupt its work. An unknown or ambiguous name reports the available choices; an exited or closed agent reports a focus error. Existing captains can use the command immediately when told to. Restart with `captain --session <session-id>` to load the new navigation instructions while retaining the crew roster.
