@@ -17,12 +17,14 @@ def executable(name):
     return path
 
 
-def herdr(*args, timeout=15):
+def herdr(*args, timeout=15, expect_output=True):
     result = subprocess.run(
         [executable("herdr"), *args], capture_output=True, text=True, timeout=timeout
     )
     if result.returncode:
         raise CaptainError(result.stderr.strip() or result.stdout.strip() or "Herdr failed.")
+    if not expect_output and not result.stdout:
+        return {}
     try:
         response = json.loads(result.stdout)
         if "error" in response:
@@ -32,7 +34,10 @@ def herdr(*args, timeout=15):
             raise ValueError("result must be an object")
         return payload
     except (ValueError, KeyError, TypeError) as exc:
-        raise CaptainError("Herdr returned an unexpected response; check its version.") from exc
+        raise CaptainError(
+            f"Herdr returned an unexpected response for herdr {' '.join(args[:2])}; "
+            f"check its version. Raw stdout:\n{result.stdout}\nStderr:\n{result.stderr}"
+        ) from exc
 
 
 def current_pane():

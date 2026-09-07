@@ -46,6 +46,53 @@ class CaptainFlowTests(unittest.TestCase):
                 runtime.current_pane()
             api.assert_not_called()
 
+    def test_pane_run_accepts_empty_stdout_when_output_is_not_expected(self):
+        with (
+            patch.object(runtime, "executable", return_value="/bin/herdr"),
+            patch.object(
+                runtime.subprocess,
+                "run",
+                return_value=subprocess.CompletedProcess([], 0, "", ""),
+            ),
+        ):
+            self.assertEqual(
+                runtime.herdr("pane", "run", "w1:p2", "echo hello", expect_output=False), {}
+            )
+
+    def test_unexpected_herdr_response_names_command_and_includes_output(self):
+        for stdout, options in (
+            ("", {}),
+            ("", {"expect_output": True}),
+            ("not JSON\n", {"expect_output": False}),
+            ('{"result": null}\n', {}),
+            ("{}\n", {}),
+            ("[]\n", {}),
+        ):
+            with (
+                self.subTest(stdout=stdout, options=options),
+                patch.object(runtime, "executable", return_value="/bin/herdr"),
+                patch.object(
+                    runtime.subprocess,
+                    "run",
+                    return_value=subprocess.CompletedProcess([], 0, stdout, "CLI diagnostic"),
+                ),
+            ):
+                with self.assertRaisesRegex(runtime.CaptainError, "unexpected response") as error:
+                    runtime.herdr("pane", "run", "w1:p2", "echo hello", **options)
+                self.assertIn("herdr pane run", str(error.exception))
+                self.assertIn(
+                    f"Raw stdout:\n{stdout}\nStderr:\nCLI diagnostic", str(error.exception)
+                )
+
+    def test_instructions_delegate_routine_crew_approvals_to_captain(self):
+        instructions = " ".join(agents.agent_instructions(self.directory, "captain").split())
+        self.assertIn("captain memory reads/writes without asking the user", instructions)
+        self.assertIn("herdr agent send-keys <name> y", instructions)
+        self.assertIn('choose "don\'t ask again" when available', instructions)
+        self.assertIn("Escalate only destructive commands", instructions)
+        self.assertIn("Decline commands that are clearly wrong for the task", instructions)
+        self.assertIn("Never type over the user's own draft in the captain pane", instructions)
+
     def test_agent_commands_work_outside_the_source_checkout(self):
         instructions = agents.agent_instructions(self.directory, "captain")
         command = next(line.strip() for line in instructions.splitlines() if " crew NAME " in line)
@@ -161,6 +208,7 @@ class CaptainFlowTests(unittest.TestCase):
                 created = {
                     "pane": {"pane_id": "w1:p2", "agent": provider, "agent_status": "idle"},
                     "root_pane": {"pane_id": "w1:p3"},
+                    "agent": {"name": f"c-{self.meta['id'][:8]}-{placement}"},
                 }
                 with (
                     patch.object(agents, "herdr", return_value=created) as api,
@@ -182,8 +230,13 @@ class CaptainFlowTests(unittest.TestCase):
                 self.assertIn("Where should the crew open?", ask.call_args_list[-1].args[0])
                 run = next(call for call in calls if call.args[:2] == ("pane", "run"))
                 self.assertEqual(run.args[-1], '/bin/sh "$CAPTAIN_CREW_LAUNCHER"')
-                self.assertEqual(calls[-2].args[:2], ("agent", "rename"))
-                self.assertEqual(calls[-1].args[-1], task)
+                self.assertEqual(run.kwargs, {"expect_output": False})
+                self.assertEqual(calls[-3].args[:2], ("agent", "rename"))
+                self.assertEqual(calls[-2].args, ("agent", "get", run.args[2]))
+                self.assertEqual(
+                    calls[-1].args,
+                    ("agent", "prompt", f"c-{self.meta['id'][:8]}-{placement}", task),
+                )
                 saved = memory.read_json(self.directory / "session.json")["crew"][placement]
                 self.assertEqual(saved["status"], "started")
                 self.assertEqual(saved["provider"], provider)
@@ -209,6 +262,7 @@ class CaptainFlowTests(unittest.TestCase):
                     "crew", provider, "--agent", provider, "--task", "check", "--placement", "pane"
                 )
                 created = {"pane": {"pane_id": "w1:p2", "agent": provider, "agent_status": "idle"}}
+                created["agent"] = {"name": f"c-{self.meta['id'][:8]}-{provider}"}
                 with (
                     patch.object(agents, "herdr", return_value=created) as api,
                     patch.object(agents, "executable", return_value=str(native)),
@@ -283,7 +337,11 @@ class CaptainFlowTests(unittest.TestCase):
         ]
 
         def api(*args, **kwargs):
-            return {"pane": states.pop(0)} if args[:2] == ("pane", "get") else {}
+            return (
+                {"pane": states.pop(0)}
+                if args[:2] == ("pane", "get")
+                else {"agent": {"name": "builder"}}
+            )
 
         with (
             patch.object(agents, "herdr", side_effect=api) as calls,
@@ -291,7 +349,31 @@ class CaptainFlowTests(unittest.TestCase):
         ):
             agents.wait_for_crew("w1:p2", "codex", "builder")
         self.assertEqual(states, [])
-        self.assertEqual(calls.call_args_list[-1].args, ("agent", "rename", "w1:p2", "builder"))
+        self.assertEqual(calls.call_args_list[-2].args, ("agent", "rename", "w1:p2", "builder"))
+        self.assertEqual(calls.call_args_list[-1].args, ("agent", "get", "w1:p2"))
+
+    def test_startup_rejects_unverified_agent_name(self):
+        for response in ({"agent": {"name": "other"}}, {"agent": {}}, {}):
+            with (
+                self.subTest(response=response),
+                patch.object(
+                    agents,
+                    "herdr",
+                    side_effect=[
+                        {"pane": {"agent": "codex", "agent_status": "idle"}},
+                        {},
+                        response,
+                    ],
+                ) as api,
+                patch.object(agents.time, "sleep") as sleep,
+            ):
+                with self.assertRaisesRegex(runtime.CaptainError, "rename failed for pane w1:p2"):
+                    agents.wait_for_crew("w1:p2", "codex", "builder")
+                self.assertEqual(
+                    [call.args for call in api.call_args_list[-2:]],
+                    [("agent", "rename", "w1:p2", "builder"), ("agent", "get", "w1:p2")],
+                )
+                sleep.assert_not_called()
 
     def test_blocked_or_timed_out_startup_never_submits_the_task(self):
         for status in ("blocked", "unknown"):
@@ -300,13 +382,15 @@ class CaptainFlowTests(unittest.TestCase):
                     "crew", status, "--agent", "codex", "--task", "build", "--placement", "pane"
                 )
                 created = {"pane": {"pane_id": "w1:p2", "agent": "codex", "agent_status": status}}
+                created["agent"] = {"name": f"c-{self.meta['id'][:8]}-{status}"}
                 with (
                     patch.object(agents, "herdr", return_value=created) as calls,
                     patch.object(agents, "executable", return_value="/bin/codex"),
                     patch.object(agents.time, "monotonic", side_effect=[0, 1, 31]),
                     patch.object(agents.time, "sleep"),
                 ):
-                    with self.assertRaisesRegex(runtime.CaptainError, "pane was preserved"):
+                    message = "input or approval" if status == "blocked" else "did not become ready"
+                    with self.assertRaisesRegex(runtime.CaptainError, message):
                         agents.create_crew(args, self.pane, self.project)
                 self.assertFalse(
                     any(call.args[:2] == ("agent", "prompt") for call in calls.call_args_list)

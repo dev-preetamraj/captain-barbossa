@@ -26,7 +26,18 @@ After their answer, run:
 Use short lowercase crew names. Do not create Herdr panes/tabs yourself, and do not
 use hidden built-in subagents as a substitute for a requested crew.
 For existing crew, use Herdr's agent read/wait commands by the returned agent name.
-Never submit follow-up text over a user's draft or native approval prompt.
+Never run herdr agent wait or any long crew poll in the foreground. Run waits as
+background commands, or use short bounded --timeout polls, so the captain stays
+responsive to the user. Check results when notified.
+When crew is blocked on a native permission prompt, the captain uses its own judgment.
+Approve routine reads, tests, linters, formatting, git status/diff, project-scoped
+file edits, and captain memory reads/writes without asking the user:
+  herdr agent send-keys <name> y
+For repeated safe command families, choose "don't ask again" when available.
+Escalate only destructive commands (rm -rf, force pushes, resets, dropping data,
+deleting branches or files outside the task), design decisions, or other critical choices.
+Decline commands that are clearly wrong for the task.
+Never type over the user's own draft in the captain pane.
 Project and session graph memory is outside the repo: {directory}
 At the start of work and after context compaction, read:
   {command} memory show
@@ -76,6 +87,12 @@ def wait_for_crew(pane_id, provider, agent_name):
             status = pane.get("agent_status")
             if status in ("idle", "done", "blocked"):
                 herdr("agent", "rename", pane_id, agent_name)
+                actual_name = herdr("agent", "get", pane_id).get("agent", {}).get("name")
+                if actual_name != agent_name:
+                    raise CaptainError(
+                        f"Agent rename failed for pane {pane_id}: "
+                        f"expected {agent_name!r}, got {actual_name!r}."
+                    )
                 if status == "blocked":
                     raise CaptainError("The native agent is waiting for input or approval.")
                 return
@@ -161,9 +178,9 @@ def create_crew(args, pane, project):
             add_memory(directory / "graph.json", agent_name, "assigned", args.task)
             herdr("pane", "rename", new_pane, args.name)
             # A new shell may still be in canonical mode: keep terminal input short.
-            herdr("pane", "run", new_pane, '/bin/sh "$CAPTAIN_CREW_LAUNCHER"')
+            herdr("pane", "run", new_pane, '/bin/sh "$CAPTAIN_CREW_LAUNCHER"', expect_output=False)
             wait_for_crew(new_pane, provider, agent_name)
-            herdr("agent", "prompt", agent_name, "--", args.task)
+            herdr("agent", "prompt", agent_name, args.task)
             record["status"] = "started"
         except (CaptainError, subprocess.TimeoutExpired, OSError) as exc:
             record["status"] = "needs_attention"
