@@ -47,9 +47,9 @@ design/debugging/multi-file -> strongest. Cheap to strong: {tiers}.
 Use every choice the user does state and keep the rest on these defaults. Ask at
 most one question, only when the user hands a choice back to you or names one too
 vaguely to map to a flag, and wait for the answer; never ask about a choice they did
-not raise. Auto picks pane and direction from the tab layout, splits the captain's
-pane down only as a last resort, or opens a new tab when crowded; the command lists
-every workspace pane by tab when --split-pane is missing.
+not raise. Auto searches crew tabs for the best split (current tab first), splits the
+captain's pane down only as a last resort, or opens a new tab when crowded; the command
+lists every workspace pane by tab when --split-pane is missing.
 Run:
   CAPTAIN crew --agent codex|claude --task 'assignment' --placement pane|tab
     [--direction vertical|horizontal|auto --split-pane <pane-id>|auto] --model <model>
@@ -282,29 +282,90 @@ def workspace_panes(pane):
     return groups
 
 
-def auto_split(pane, crew_panes, direction=None, target=None, tab_id=None):
-    """Pick a split from the tab layout; a None pane means fall back to a new tab."""
+def auto_split(
+    pane, crew_panes, direction=None, target=None, tab_id=None, crew_tabs=None, pane_to_tab=None
+):
+    """Pick a split from crew tabs; a None pane means fall back to a new tab.
+
+    Searches tabs in order (current tab first), using only tabs with crew from this session.
+    """
     origin = target or pane["pane_id"]
-    geometry = tab_panes(herdr("pane", "layout", "--pane", origin), origin)
+    captain_pane = pane["pane_id"]
+
     if target:
+        geometry = tab_panes(herdr("pane", "layout", "--pane", origin), origin)
         geometry = {target: geometry[target]}
-    split_pane, chosen, reason = pick_split(geometry, pane["pane_id"], crew_panes, direction)
-    if split_pane is None:
-        choice = "new tab"
+        split_pane, chosen, reason = pick_split(geometry, captain_pane, crew_panes, direction)
+        if split_pane is None:
+            choice = "new tab"
+        else:
+            choice = f"split {split_pane} {chosen} ({HERDR_DIRECTIONS[chosen]})"
+        print(f"Auto placement: {choice}; {reason}.", file=sys.stderr)
+        return chosen, split_pane, tab_id or pane["tab_id"], f"{choice}; {reason}"
+
+    tabs_to_search = []
+    if crew_tabs:
+        current_tab = pane["tab_id"]
+        if current_tab in crew_tabs:
+            tabs_to_search.append(current_tab)
+        tabs_to_search.extend(t for t in crew_tabs if t != current_tab)
     else:
-        choice = f"split {split_pane} {chosen} ({HERDR_DIRECTIONS[chosen]})"
+        tabs_to_search = [pane["tab_id"]]
+
+    last_reason = None
+    for search_tab in tabs_to_search:
+        try:
+            if search_tab == pane["tab_id"]:
+                geometry = tab_panes(herdr("pane", "layout", "--pane", origin), origin)
+            else:
+                sample_pane = next(
+                    p for p in crew_panes if pane_to_tab and pane_to_tab.get(p) == search_tab
+                )
+                all_geo = tab_panes(herdr("pane", "layout", "--pane", sample_pane), sample_pane)
+                geometry = {p: all_geo[p] for p in crew_panes if p in all_geo}
+
+            split_pane, chosen, reason = pick_split(geometry, captain_pane, crew_panes, direction)
+            if split_pane is not None:
+                choice = f"split {split_pane} {chosen} ({HERDR_DIRECTIONS[chosen]})"
+                print(f"Auto placement: {choice}; {reason}.", file=sys.stderr)
+                return chosen, split_pane, search_tab, f"{choice}; {reason}"
+            last_reason = reason
+        except CaptainError:
+            continue
+
+    choice = "new tab"
+    reason = last_reason or "no feasible split"
     print(f"Auto placement: {choice}; {reason}.", file=sys.stderr)
-    return chosen, split_pane, tab_id or pane["tab_id"], f"{choice}; {reason}"
+    return None, None, tab_id or pane["tab_id"], f"{choice}; {reason}"
 
 
-def choose_split(args, pane, placement, crew_panes):
+def choose_split(args, pane, placement, crew_panes, meta=None):
     """Return (direction, split pane, tab, auto reason); a None pane with a reason means new tab."""
     if placement != "pane":
         if args.direction or args.split_pane:
             raise CaptainError("--direction and --split-pane apply only to --placement pane.")
         return None, None, None, None
+
+    crew_tabs = None
+    pane_to_tab = {}
+    if meta:
+        crew_tabs = {
+            crew["tab"]
+            for crew in meta["crew"].values()
+            if crew.get("tab") and crew.get("status") != "dismissed"
+        }
+        for crew in meta["crew"].values():
+            if crew.get("pane") and crew.get("tab") and crew.get("status") != "dismissed":
+                pane_to_tab[crew["pane"]] = crew["tab"]
+
     if args.split_pane == "auto":
-        return auto_split(pane, crew_panes, None if args.direction == "auto" else args.direction)
+        return auto_split(
+            pane,
+            crew_panes,
+            None if args.direction == "auto" else args.direction,
+            crew_tabs=crew_tabs,
+            pane_to_tab=pane_to_tab,
+        )
     direction = choose(
         args.direction, ("vertical", "horizontal", "auto"), "Split direction?", "--direction"
     )
@@ -331,10 +392,12 @@ def choose_split(args, pane, placement, crew_panes):
             groups=[(None, ("auto",)), *((name, tuple(panes)) for name, panes in groups.values())],
         )
         if split_pane == "auto":
-            return auto_split(pane, crew_panes, free)
+            return auto_split(pane, crew_panes, free, crew_tabs=crew_tabs, pane_to_tab=pane_to_tab)
         tab_id = next(tab for tab, (_, panes) in groups.items() if split_pane in panes)
     if direction == "auto":
-        return auto_split(pane, crew_panes, None, split_pane, tab_id)
+        return auto_split(
+            pane, crew_panes, None, split_pane, tab_id, crew_tabs=crew_tabs, pane_to_tab=pane_to_tab
+        )
     return direction, split_pane, tab_id, None
 
 
@@ -363,7 +426,7 @@ def create_crew(args, pane, project):
         for crew in meta["crew"].values()
         if crew.get("pane") and crew.get("status") != "dismissed"
     }
-    direction, split_pane, tab_id, auto = choose_split(args, pane, placement, crew_panes)
+    direction, split_pane, tab_id, auto = choose_split(args, pane, placement, crew_panes, meta)
     if auto and split_pane is None:
         placement = "tab"
     model = resolve_model(provider, args.model) if args.model is not None else None

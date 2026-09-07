@@ -290,7 +290,7 @@ class CaptainFlowTests(unittest.TestCase):
             "Ask at most one question, only when the user hands a choice back to you "
             "or names one too vaguely to map to a flag, and wait for the answer;",
             "never ask about a choice they did not raise",
-            "Auto picks pane and direction from the tab layout, splits the captain's",
+            "Auto searches crew tabs for the best split (current tab first), splits the captain's",
             "pane down only as a last resort, or opens a new tab when crowded",
         ):
             self.assertIn(phrase, instructions)
@@ -844,6 +844,62 @@ class CaptainFlowTests(unittest.TestCase):
                         self.args(*base, "--split-pane", "auto"), self.pane, self.project
                     )
                 self.assertEqual(memory.read_json(self.directory / "session.json")["crew"], {})
+
+    def test_auto_placement_searches_crew_tabs_before_creating_new_tab(self):
+        """When current tab is full, auto splits a pane in an existing crew tab."""
+        created = {
+            "pane": {
+                "pane_id": "w1:p10",
+                "tab_id": "w1:t2",
+                "agent": "claude",
+                "agent_status": "idle",
+            },
+            "agent": {"name": f"c-{self.meta['id'][:8]}-will-turner", "agent_status": "working"},
+        }
+
+        grid = self.layout(
+            ("w1:p1", 0, 0, 78, 25),
+            ("w1:p2", 78, 0, 78, 25),
+            ("w1:p3", 0, 25, 78, 26),
+            ("w1:p5", 78, 25, 78, 26),
+        )
+        spacious = self.layout(("w1:p9", 0, 0, 156, 51))
+
+        meta = memory.read_json(self.directory / "session.json")
+        meta["crew"]["sparrow"] = {
+            "id": "sparrow",
+            "name": "Jack",
+            "agent": f"c-{meta['id'][:8]}-sparrow",
+            "pane": "w1:p9",
+            "tab": "w1:t2",
+            "status": "started",
+        }
+        memory.write_json(self.directory / "session.json", meta)
+
+        def api(*call, **_):
+            if call[:2] == ("pane", "layout"):
+                if call[3] == "w1:p1":
+                    return grid
+                elif call[3] == "w1:p9":
+                    return spacious
+            return self.listing(*call) or created
+
+        base = ("crew", "--agent", "claude", "--task", "review code", "--placement", "pane")
+        with (
+            patch.object(agents, "herdr", side_effect=api),
+            patch.object(agents, "executable", return_value="/bin/claude"),
+            patch.object(sys.stdin, "isatty", return_value=False),
+            contextlib.redirect_stdout(io.StringIO()) as output,
+            contextlib.redirect_stderr(io.StringIO()) as notice,
+        ):
+            agents.create_crew(self.args(*base, "--split-pane", "auto"), self.pane, self.project)
+
+        result = json.loads(output.getvalue())
+        self.assertEqual(result["placement"], "pane")
+        self.assertEqual(result["split_pane"], "w1:p9")
+        self.assertEqual(result["tab"], "w1:t2")
+        self.assertIn("Auto placement: split w1:p9", notice.getvalue())
+        self.assertNotIn("Auto placement: new tab", notice.getvalue())
 
     def test_crew_creates_chosen_topology_then_starts_native_agent(self):
         for placement, provider, name, display_name in (
