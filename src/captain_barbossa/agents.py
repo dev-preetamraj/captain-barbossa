@@ -28,14 +28,24 @@ the expected report. Trust the crew with the rest; do not write paragraphs of
 background, step lists, or restated context.
 Use short lowercase crew names. Do not create Herdr panes/tabs yourself, and do not
 use hidden built-in subagents as a substitute for a requested crew.
-For existing crew, use Herdr's agent read/wait commands by the returned agent name.
+Crew lifecycle, always by the returned agent name:
+  herdr agent read <name>              inspect a crew's terminal output
+  herdr agent wait <name> --until done --until blocked --timeout <ms>
 Never run herdr agent wait or any long crew poll in the foreground. Run waits as
 background commands, or use short bounded --timeout polls, so the captain stays
 responsive to the user. Check results when notified.
+Approve native permission prompts with:
+  herdr agent send-keys <name> y
+Claude Code prompts often expect Enter or a numbered choice (for example 1 or 2)
+instead of y; read the pane first and send what the prompt asks for.
+When crew is finished and reported, or the user asks to dismiss NAME, close its
+pane and retire it with:
+  {command} dismiss 'NAME'
+Dismissal closes the pane for good and records it in session memory. Confirm with
+the user before dismissing crew whose work is unreported or uncommitted.
 When crew is blocked on a native permission prompt, the captain uses its own judgment.
 Approve routine reads, tests, linters, formatting, git status/diff, project-scoped
-file edits, and captain memory reads/writes without asking the user:
-  herdr agent send-keys <name> y
+file edits, and captain memory reads/writes without asking the user.
 For repeated safe command families, choose "don't ask again" when available.
 Escalate only destructive commands (rm -rf, force pushes, resets, dropping data,
 deleting branches or files outside the task), design decisions, or other critical choices.
@@ -101,6 +111,69 @@ def wait_for_crew(pane_id, provider, agent_name):
                 return
         time.sleep(0.2)
     raise CaptainError(f"{provider} did not become ready within 30 seconds.")
+
+
+def agent_working(agent_name, timeout):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        agent = herdr("agent", "get", agent_name, timeout=5).get("agent", {})
+        if agent.get("agent_status") == "working":
+            return True
+        time.sleep(0.2)
+    return False
+
+
+def confirm_task_started(agent_name, timeout=5):
+    if agent_working(agent_name, timeout):
+        return
+    # Claude Code can leave a submitted prompt as an unsent draft in its input box.
+    herdr("agent", "send-keys", agent_name, "enter")
+    if agent_working(agent_name, timeout):
+        return
+    raise CaptainError(
+        f"{agent_name} did not start working after the task was submitted, even after "
+        "pressing Enter once. The task may still be an unsent draft in its input box."
+    )
+
+
+def resolve_crew(meta, requested):
+    name = requested.strip().casefold()
+    matches = [
+        crew_id
+        for crew_id, crew in meta["crew"].items()
+        if name
+        in {crew_id.casefold(), crew.get("name", crew_id).casefold(), crew["agent"].casefold()}
+    ]
+    if not matches:
+        available = ", ".join(crew.get("name", key) for key, crew in meta["crew"].items())
+        raise CaptainError(
+            f"No crew named '{requested}' in this session. Available crew: {available or 'none'}."
+        )
+    if len(matches) > 1:
+        targets = ", ".join(meta["crew"][crew_id]["agent"] for crew_id in matches)
+        raise CaptainError(f"Crew name '{requested}' is ambiguous. Use an agent name: {targets}.")
+    return matches[0]
+
+
+def dismiss_crew(args, pane, project):
+    directory, meta = session(project, pane, args.session)
+    with lock(directory / "crew.lock"):
+        meta = read_json(directory / "session.json")
+        crew_id = resolve_crew(meta, args.name)
+        crew = meta["crew"][crew_id]
+        display_name = crew.get("name", args.name)
+        if crew.get("status") == "dismissed":
+            raise CaptainError(f"{display_name} was already dismissed.")
+        if not crew.get("pane"):
+            raise CaptainError(f"{display_name} has no recorded pane to close.")
+        try:
+            herdr("pane", "close", crew["pane"])
+        except CaptainError as exc:
+            raise CaptainError(f"Could not dismiss {display_name}: {exc}") from exc
+        crew["status"] = "dismissed"
+        write_json(directory / "session.json", meta)
+        add_memory(directory / "graph.json", f"session:{meta['id']}", "dismissed", crew["agent"])
+    print(f"Dismissed {display_name}.")
 
 
 def create_crew(args, pane, project):
@@ -184,6 +257,7 @@ def create_crew(args, pane, project):
             herdr("pane", "run", new_pane, '/bin/sh "$CAPTAIN_CREW_LAUNCHER"', expect_output=False)
             wait_for_crew(new_pane, provider, agent_name)
             herdr("agent", "prompt", agent_name, args.task)
+            confirm_task_started(agent_name)
             record["status"] = "started"
         except (CaptainError, subprocess.TimeoutExpired, OSError) as exc:
             record["status"] = "needs_attention"

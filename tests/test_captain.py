@@ -10,6 +10,7 @@ import sys
 import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from itertools import count, repeat
 from pathlib import Path
 from unittest.mock import patch
 
@@ -103,6 +104,21 @@ class CaptainFlowTests(unittest.TestCase):
             "a few lines stating the goal, the hard constraints, and the expected report",
             "Trust the crew with the rest",
             "do not write paragraphs of background, step lists, or restated context",
+        ):
+            self.assertIn(phrase, instructions)
+
+    def test_instructions_cover_the_crew_lifecycle(self):
+        instructions = " ".join(agents.agent_instructions(self.directory, "captain").split())
+        command = shlex.join([sys.executable, "-m", "captain_barbossa", "--session"])
+        for phrase in (
+            "Crew lifecycle, always by the returned agent name",
+            "herdr agent read <name>",
+            "herdr agent wait <name> --until done --until blocked --timeout <ms>",
+            "herdr agent send-keys <name> y",
+            "Claude Code prompts often expect Enter or a numbered choice",
+            "instead of y; read the pane first",
+            f"{command} {self.directory.name} dismiss 'NAME'",
+            "Confirm with the user before dismissing crew whose work is unreported",
         ):
             self.assertIn(phrase, instructions)
 
@@ -221,7 +237,10 @@ class CaptainFlowTests(unittest.TestCase):
                 created = {
                     "pane": {"pane_id": "w1:p2", "agent": provider, "agent_status": "idle"},
                     "root_pane": {"pane_id": "w1:p3"},
-                    "agent": {"name": f"c-{self.meta['id'][:8]}-{placement}"},
+                    "agent": {
+                        "name": f"c-{self.meta['id'][:8]}-{placement}",
+                        "agent_status": "working",
+                    },
                 }
                 with (
                     patch.object(agents, "herdr", return_value=created) as api,
@@ -244,12 +263,12 @@ class CaptainFlowTests(unittest.TestCase):
                 run = next(call for call in calls if call.args[:2] == ("pane", "run"))
                 self.assertEqual(run.args[-1], '/bin/sh "$CAPTAIN_CREW_LAUNCHER"')
                 self.assertEqual(run.kwargs, {"expect_output": False})
-                self.assertEqual(calls[-3].args[:2], ("agent", "rename"))
-                self.assertEqual(calls[-2].args, ("agent", "get", run.args[2]))
-                self.assertEqual(
-                    calls[-1].args,
-                    ("agent", "prompt", f"c-{self.meta['id'][:8]}-{placement}", task),
-                )
+                agent_name = f"c-{self.meta['id'][:8]}-{placement}"
+                self.assertEqual(calls[-4].args[:2], ("agent", "rename"))
+                self.assertEqual(calls[-3].args, ("agent", "get", run.args[2]))
+                self.assertEqual(calls[-2].args, ("agent", "prompt", agent_name, task))
+                self.assertEqual(calls[-1].args, ("agent", "get", agent_name))
+                self.assertFalse(any(call.args[:2] == ("agent", "send-keys") for call in calls))
                 saved = memory.read_json(self.directory / "session.json")["crew"][placement]
                 self.assertEqual(saved["status"], "started")
                 self.assertEqual(saved["provider"], provider)
@@ -280,6 +299,7 @@ class CaptainFlowTests(unittest.TestCase):
                     patch.object(agents, "herdr", return_value=created) as api,
                     patch.object(agents, "executable", return_value=str(native)),
                     patch.object(agents, "agent_instructions", return_value=instructions),
+                    patch.object(agents, "confirm_task_started"),
                 ):
                     agents.create_crew(args, self.pane, self.project)
                 command = next(
@@ -413,6 +433,142 @@ class CaptainFlowTests(unittest.TestCase):
                 )
                 saved = memory.read_json(self.directory / "session.json")["crew"][status]
                 self.assertEqual(saved["status"], "needs_attention")
+
+    def crew_status_api(self, statuses):
+        agent_name = f"c-{self.meta['id'][:8]}-sparrow"
+
+        def api(*call, **kwargs):
+            if call[:2] == ("agent", "get") and call[2] == agent_name:
+                return {"agent": {"name": agent_name, "agent_status": next(statuses)}}
+            return {
+                "pane": {"pane_id": "w1:p2", "agent": "claude", "agent_status": "idle"},
+                "agent": {"name": agent_name},
+            }
+
+        return agent_name, api
+
+    def test_unsent_draft_gets_one_enter_then_is_confirmed_working(self):
+        args = self.args(
+            "crew", "sparrow", "--agent", "claude", "--task", "build", "--placement", "pane"
+        )
+        agent_name, api = self.crew_status_api(iter(["idle", "idle", "working"]))
+        with (
+            patch.object(agents, "herdr", side_effect=api) as calls,
+            patch.object(agents, "executable", return_value="/bin/claude"),
+            patch.object(agents.time, "sleep"),
+            patch.object(agents.time, "monotonic", side_effect=count(0, 2)),
+        ):
+            agents.create_crew(args, self.pane, self.project)
+        self.assertEqual(
+            [call.args for call in calls.call_args_list[-5:]],
+            [
+                ("agent", "prompt", agent_name, "build"),
+                ("agent", "get", agent_name),
+                ("agent", "get", agent_name),
+                ("agent", "send-keys", agent_name, "enter"),
+                ("agent", "get", agent_name),
+            ],
+        )
+        saved = memory.read_json(self.directory / "session.json")["crew"]["sparrow"]
+        self.assertEqual(saved["status"], "started")
+
+    def test_task_that_never_starts_sends_enter_once_and_needs_attention(self):
+        args = self.args(
+            "crew", "sparrow", "--agent", "claude", "--task", "build", "--placement", "pane"
+        )
+        agent_name, api = self.crew_status_api(repeat("idle"))
+        with (
+            patch.object(agents, "herdr", side_effect=api) as calls,
+            patch.object(agents, "executable", return_value="/bin/claude"),
+            patch.object(agents.time, "sleep"),
+            patch.object(agents.time, "monotonic", side_effect=count(0, 2)),
+        ):
+            with self.assertRaisesRegex(runtime.CaptainError, "pane was preserved") as error:
+                agents.create_crew(args, self.pane, self.project)
+        for phrase in ("did not start working", "pressing Enter once", "unsent draft"):
+            self.assertIn(phrase, str(error.exception))
+        sent = [
+            call.args for call in calls.call_args_list if call.args[:2] == ("agent", "send-keys")
+        ]
+        self.assertEqual(sent, [("agent", "send-keys", agent_name, "enter")])
+        self.assertFalse(any(call.args[:2] == ("pane", "close") for call in calls.call_args_list))
+        saved = memory.read_json(self.directory / "session.json")["crew"]["sparrow"]
+        self.assertEqual(saved["status"], "needs_attention")
+
+    def test_dismiss_closes_pane_marks_record_and_records_memory(self):
+        self.meta["crew"] = {
+            "sparrow": {
+                "name": "Jack",
+                "agent": "c-session-sparrow",
+                "pane": "w1:p2",
+                "placement": "pane",
+                "status": "started",
+            },
+            "will-turner": {
+                "name": "Will",
+                "agent": "c-session-will-turner",
+                "pane": "w1:p3",
+                "placement": "tab",
+                "status": "started",
+            },
+        }
+        memory.write_json(self.directory / "session.json", self.meta)
+        with (
+            patch.object(cli, "current_pane", return_value=self.pane),
+            patch.object(cli, "project_root", return_value=self.project),
+            patch.object(agents, "herdr", return_value={}) as api,
+            contextlib.redirect_stdout(io.StringIO()) as output,
+        ):
+            self.assertEqual(cli.main(["--session", self.meta["id"], "dismiss", " jAcK "]), 0)
+        api.assert_called_once_with("pane", "close", "w1:p2")
+        self.assertEqual(output.getvalue(), "Dismissed Jack.\n")
+        saved = memory.read_json(self.directory / "session.json")
+        self.assertEqual(saved["crew"]["sparrow"]["status"], "dismissed")
+        self.assertEqual(saved["crew"]["sparrow"]["pane"], "w1:p2")
+        self.assertEqual(saved["crew"]["will-turner"], self.meta["crew"]["will-turner"])
+        graph = memory.read_json(self.directory / "graph.json")
+        labels = {node["id"]: node["label"] for node in graph["nodes"]}
+        self.assertEqual(
+            [
+                (labels[link["source"]], link["relation"], labels[link["target"]])
+                for link in graph["links"]
+            ],
+            [(f"session:{self.meta['id']}", "dismissed", "c-session-sparrow")],
+        )
+        with patch.object(agents, "herdr") as api:
+            with self.assertRaisesRegex(runtime.CaptainError, "already dismissed"):
+                agents.dismiss_crew(self.args("dismiss", "Jack"), self.pane, self.project)
+            api.assert_not_called()
+
+    def test_dismiss_failures_leave_the_record_and_memory_untouched(self):
+        self.meta["crew"] = {
+            "sparrow": {"name": "Jack", "agent": "c-session-sparrow", "pane": "w1:p2"},
+            "legacy-jack": {"name": "Jack", "agent": "c-session-legacy-jack", "pane": "w1:p3"},
+            "cotton": {"name": "Cotton", "agent": "c-session-cotton"},
+        }
+        memory.write_json(self.directory / "session.json", self.meta)
+        with patch.object(agents, "herdr") as api:
+            for name, message in (
+                ("Elizabeth", "Available crew"),
+                ("Jack", "ambiguous"),
+                ("Cotton", "no recorded pane"),
+            ):
+                with self.subTest(name=name), self.assertRaisesRegex(runtime.CaptainError, message):
+                    agents.dismiss_crew(self.args("dismiss", name), self.pane, self.project)
+                api.assert_not_called()
+        with (
+            patch.object(cli, "current_pane", return_value=self.pane),
+            patch.object(cli, "project_root", return_value=self.project),
+            patch.object(
+                agents, "herdr", side_effect=runtime.CaptainError("pane_not_found")
+            ) as api,
+            contextlib.redirect_stderr(io.StringIO()) as error,
+        ):
+            self.assertEqual(cli.main(["--session", self.meta["id"], "dismiss", "sparrow"]), 1)
+            self.assertIn("Could not dismiss Jack: pane_not_found", error.getvalue())
+            api.assert_called_once_with("pane", "close", "w1:p2")
+        self.assertEqual(memory.read_json(self.directory / "session.json"), self.meta)
+        self.assertFalse((self.directory / "graph.json").exists())
 
     def test_graph_scopes_projects_sessions_and_parallel_relationships(self):
         shared = self.directory.parent.parent / "graph.json"

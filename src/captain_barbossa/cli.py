@@ -5,7 +5,7 @@ import os
 import subprocess
 import sys
 
-from .agents import create_crew, launch
+from .agents import create_crew, dismiss_crew, launch
 from .memory import memory, project_root
 from .runtime import CaptainError, current_pane
 
@@ -34,6 +34,8 @@ def parser():
     crew.add_argument(
         "--placement", choices=("pane", "tab"), help="the placement explicitly chosen by the user"
     )
+    dismiss = commands.add_parser("dismiss", help="close an existing crew's pane and retire it")
+    dismiss.add_argument("name", help="crew name or ID (case-insensitive)")
     mem = commands.add_parser("memory", help="project/session graph memory outside the repo")
     actions = mem.add_subparsers(dest="memory_command", required=True)
     add = actions.add_parser("add", help="remember a subject → relation → object")
@@ -55,6 +57,8 @@ def main(argv=None):
         project = project_root()
         if args.command == "crew":
             create_crew(args, pane, project)
+        elif args.command == "dismiss":
+            dismiss_crew(args, pane, project)
         elif args.command == "memory":
             memory(args, pane, project)
         else:
