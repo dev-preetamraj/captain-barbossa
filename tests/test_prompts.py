@@ -97,6 +97,29 @@ class SelectorTests(unittest.TestCase):
         self.assertIn("(w1:p1 zsh (captain) / w1:p5 Will)", str(error.exception))
         self.assertIn("--split-pane <choice>", str(error.exception))
 
+    def test_groups_render_as_titled_sections_and_in_the_non_tty_message(self):
+        panes = {"w1:p1": "zsh (captain)", "w1:p5": "Will", "w1:p9": "vim"}
+        groups = [("Captain Barbossa", ("w1:p1", "w1:p5")), ("Tab 2", ("w1:p9",))]
+        with (
+            create_pipe_input() as keyboard,
+            create_app_session(input=keyboard, output=DummyOutput()),
+            patch("sys.stdin.isatty", return_value=True),
+        ):
+            keyboard.send_text("jj\r")
+            chosen = choose(
+                None, tuple(panes), "Which pane should be split?", "--split-pane", panes, groups
+            )
+        self.assertEqual(chosen, "w1:p9")
+        with patch("sys.stdin.isatty", return_value=False):
+            with self.assertRaises(CaptainError) as error:
+                choose(
+                    None, tuple(panes), "Which pane should be split?", "--split-pane", panes, groups
+                )
+        self.assertIn(
+            "(Captain Barbossa: w1:p1 zsh (captain) / w1:p5 Will; Tab 2: w1:p9 vim)",
+            str(error.exception),
+        )
+
     def test_explicit_choices_do_not_open_a_selector(self):
         with patch("captain_barbossa.prompts.questionary.select") as menu:
             self.assertEqual(

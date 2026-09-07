@@ -36,11 +36,12 @@ def agent_instructions(directory, role):
 do not spawn crew.
 """
         if role.startswith("crew member ")
-        else """You manage crew. For EVERY creation, require the user's explicit choices:
-Claude Code or Codex, and a new pane or tab; for a pane, vertical or horizontal
-and which pane of this tab to split (the command lists them when --split-pane is
-missing). Ask for missing choices and wait; never infer or default any. Once all
-are supplied, run:
+        else """You manage crew. Crew placement ruleset, for EVERY creation, no exceptions:
+1. Ask Claude Code or Codex. 2. Ask new pane or tab. 3. Pane only: ask vertical or
+horizontal. 4. Pane only, both directions: ask which pane to split; the command
+lists every workspace pane by tab when --split-pane is missing. Ask each choice
+alone, only after the one before it is answered, and wait. Never batch, infer,
+default, or reuse an earlier answer. Once all are supplied, run:
   CAPTAIN crew --agent codex|claude --task 'assignment' --placement pane|tab
     [--direction vertical|horizontal --split-pane <pane-id>]
 Keep crew prompts short: a few lines with goal, hard constraints, and expected report.
@@ -206,6 +207,11 @@ def focus_crew(args, pane, project):
     crew = meta["crew"][resolve_crew(meta, args.name)]
     display_name = crew.get("name", args.name)
     try:
+        agent = herdr("agent", "get", crew["agent"]).get("agent", {})
+        # The live agent wins over the recorded tab when its pane has moved.
+        tab_id = agent.get("tab_id") or crew.get("tab")
+        if tab_id and tab_id != pane["tab_id"]:
+            herdr("tab", "focus", tab_id)
         herdr("agent", "focus", crew["agent"])
     except CaptainError as exc:
         raise CaptainError(f"Could not focus {display_name}: {exc}") from exc
@@ -233,42 +239,63 @@ def dismiss_crew(args, pane, project):
     print(f"Dismissed {display_name}.")
 
 
-def tab_panes(pane):
-    """Map pane IDs in the captain's tab to short labels for the split-pane choice."""
-    listed = herdr("pane", "list", "--workspace", pane["workspace_id"]).get("panes")
-    if not isinstance(listed, list):
-        raise CaptainError("Herdr returned no pane list for this workspace.")
-    panes = {}
+def workspace_panes(pane):
+    """List workspace panes grouped by tab: {tab_id: (tab name, {pane_id: label})}."""
+    workspace = pane["workspace_id"]
+    tabs = herdr("tab", "list", "--workspace", workspace).get("tabs")
+    listed = herdr("pane", "list", "--workspace", workspace).get("panes")
+    if not isinstance(tabs, list) or not isinstance(listed, list):
+        raise CaptainError("Herdr returned no tab or pane list for this workspace.")
+    names = {}
+    for tab in tabs:
+        if isinstance(tab, dict) and isinstance(tab.get("tab_id"), str):
+            number = tab.get("number")
+            names[tab["tab_id"]] = tab.get("label") or (
+                f"Tab {number}" if number is not None else tab["tab_id"]
+            )
+    groups = {}
     for entry in listed:
-        if not isinstance(entry, dict) or entry.get("tab_id") != pane["tab_id"]:
+        if not isinstance(entry, dict):
             continue
-        pane_id = entry.get("pane_id")
-        if not isinstance(pane_id, str) or not pane_id:
+        pane_id, tab_id = entry.get("pane_id"), entry.get("tab_id")
+        if not (isinstance(pane_id, str) and pane_id and isinstance(tab_id, str) and tab_id):
             continue
         title = entry.get("label") or entry.get("terminal_title_stripped") or pane_id
-        panes[pane_id] = f"{title} (captain)" if pane_id == pane["pane_id"] else title
-    if not panes:
-        raise CaptainError("Herdr listed no panes in the captain's tab.")
-    return panes
+        if pane_id == pane["pane_id"]:
+            title += " (captain)"
+        groups.setdefault(tab_id, (names.get(tab_id, tab_id), {}))[1][pane_id] = title
+    if not groups:
+        raise CaptainError("Herdr listed no panes in this workspace.")
+    return groups
 
 
 def choose_split(args, pane, placement):
     if placement != "pane":
-        return None, None
+        if args.direction or args.split_pane:
+            raise CaptainError("--direction and --split-pane apply only to --placement pane.")
+        return None, None, None
     direction = choose(
         args.direction, ("vertical", "horizontal"), "Split direction?", "--direction"
     )
     if args.split_pane == pane["pane_id"]:
-        return direction, args.split_pane
-    panes = tab_panes(pane)
-    split_pane = choose(
-        args.split_pane, tuple(panes), "Which pane should be split?", "--split-pane", labels=panes
-    )
-    if split_pane not in panes:
+        return direction, args.split_pane, pane["tab_id"]
+    groups = workspace_panes(pane)
+    labels = {pane_id: title for _, panes in groups.values() for pane_id, title in panes.items()}
+    if args.split_pane and args.split_pane not in labels:
         raise CaptainError(
-            f"Pane {split_pane} is not in the captain's tab. Panes: {', '.join(panes)}."
+            f"Pane {args.split_pane} is not in this workspace (closed or mistyped). "
+            f"Panes: {', '.join(labels)}. Ask the user again."
         )
-    return direction, split_pane
+    split_pane = choose(
+        args.split_pane,
+        tuple(labels),
+        "Which pane should be split?",
+        "--split-pane",
+        labels=labels,
+        groups=[(name, tuple(panes)) for name, panes in groups.values()],
+    )
+    tab_id = next(tab for tab, (_, panes) in groups.items() if split_pane in panes)
+    return direction, split_pane, tab_id
 
 
 def name_reserved(meta, name):
@@ -290,7 +317,7 @@ def create_crew(args, pane, project):
     placement = choose(
         args.placement, ("pane", "tab"), "Where should the crew open?", "--placement"
     )
-    direction, split_pane = choose_split(args, pane, placement)
+    direction, split_pane, tab_id = choose_split(args, pane, placement)
     binary = executable(provider)
     directory, meta = session(project, pane, args.session)
     with lock(directory / "crew.lock"):
@@ -336,20 +363,28 @@ def create_crew(args, pane, project):
                 *environment,
             )
             new_pane = created.get("root_pane", {}).get("pane_id")
+            tab_id = created.get("tab_id") or created.get("root_pane", {}).get("tab_id")
         else:
-            created = herdr(
-                "pane",
-                "split",
-                "--pane",
-                split_pane,
-                "--direction",
-                "right" if direction == "vertical" else "down",
-                "--cwd",
-                str(project),
-                "--no-focus",
-                *environment,
-            )
+            try:
+                created = herdr(
+                    "pane",
+                    "split",
+                    "--pane",
+                    split_pane,
+                    "--direction",
+                    "right" if direction == "vertical" else "down",
+                    "--cwd",
+                    str(project),
+                    "--no-focus",
+                    *environment,
+                )
+            except CaptainError as exc:
+                raise CaptainError(
+                    f"Could not split pane {split_pane}; it may have closed: {exc}. "
+                    "Ask the user which pane to split again."
+                ) from exc
             new_pane = created.get("pane", {}).get("pane_id")
+            tab_id = created.get("pane", {}).get("tab_id") or tab_id
         if not new_pane:
             raise CaptainError(
                 "Herdr created a layout but returned no pane ID. Inspect the workspace before retrying."
@@ -360,6 +395,7 @@ def create_crew(args, pane, project):
             "agent": agent_name,
             "provider": provider,
             "pane": new_pane,
+            "tab": tab_id,
             "placement": placement,
             "direction": direction,
             "split_pane": split_pane,

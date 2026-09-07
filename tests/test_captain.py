@@ -258,11 +258,13 @@ class CaptainFlowTests(unittest.TestCase):
                         self.assertNotIn(command, text)
                 else:
                     for phrase in (
-                        "For EVERY creation, require the user's explicit choices",
-                        "Claude Code or Codex, and a new pane or tab",
-                        "Ask for missing choices and wait; never infer or default any",
-                        "for a pane, vertical or horizontal",
-                        "which pane of this tab to split",
+                        "Crew placement ruleset, for EVERY creation, no exceptions",
+                        "1. Ask Claude Code or Codex. 2. Ask new pane or tab.",
+                        "3. Pane only: ask vertical or horizontal.",
+                        "4. Pane only, both directions: ask which pane to split",
+                        "lists every workspace pane by tab when --split-pane is missing",
+                        "Ask each choice alone, only after the one before it is answered, and wait",
+                        "Never batch, infer, default, or reuse an earlier answer",
                         "--direction vertical|horizontal --split-pane <pane-id>",
                     ):
                         self.assertIn(phrase, instructions)
@@ -391,12 +393,36 @@ class CaptainFlowTests(unittest.TestCase):
             "panes": [
                 {"pane_id": "w1:p1", "tab_id": "w1:t1", "terminal_title_stripped": "zsh"},
                 {"pane_id": "w1:p5", "tab_id": "w1:t1", "label": "Will", "agent": "claude"},
-                {"pane_id": "w1:p9", "tab_id": "w1:t2", "label": "Other tab"},
+                {"pane_id": "w1:p9", "tab_id": "w1:t2", "terminal_title_stripped": "vim"},
+                {"pane_id": "w1:p8", "tab_id": "w1:t3"},
                 {"pane_id": None, "tab_id": "w1:t1"},
+                {"pane_id": "w1:p7", "tab_id": None},
+                "junk",
             ]
         }
 
-    def test_pane_split_lists_tab_panes_and_requires_a_split_pane(self):
+    def tab_list(self):
+        return {
+            "tabs": [
+                {"tab_id": "w1:t1", "label": "Captain Barbossa", "number": 1},
+                {"tab_id": "w1:t2", "number": 2},
+                {"tab_id": None, "label": "ghost"},
+            ]
+        }
+
+    def listing(self, *call, **_):
+        if call[:2] == ("tab", "list"):
+            return self.tab_list()
+        if call[:2] == ("pane", "list"):
+            return self.pane_list()
+        return None
+
+    LISTING_CALLS = (("tab", "list", "--workspace", "w1"), ("pane", "list", "--workspace", "w1"))
+    LISTED_PANES = (
+        "Captain Barbossa: w1:p1 zsh (captain) / w1:p5 Will; Tab 2: w1:p9 vim; w1:t3: w1:p8 w1:p8"
+    )
+
+    def test_pane_split_lists_workspace_panes_by_tab_and_requires_a_split_pane(self):
         for direction in ("vertical", "horizontal"):
             args = self.args(
                 "crew",
@@ -412,20 +438,72 @@ class CaptainFlowTests(unittest.TestCase):
             with (
                 self.subTest(direction=direction),
                 patch.object(sys.stdin, "isatty", return_value=False),
-                patch.object(agents, "herdr", return_value=self.pane_list()) as api,
+                patch.object(agents, "herdr", side_effect=self.listing) as api,
             ):
                 with self.assertRaisesRegex(runtime.CaptainError, "Ask the user") as error:
                     agents.create_crew(args, self.pane, self.project)
-                api.assert_called_once_with("pane", "list", "--workspace", "w1")
+                self.assertEqual(
+                    [call.args for call in api.call_args_list], list(self.LISTING_CALLS)
+                )
                 message = str(error.exception)
                 self.assertIn("Which pane should be split?", message)
-                self.assertIn("w1:p1 zsh (captain) / w1:p5 Will", message)
-                self.assertNotIn("w1:p9", message)
+                self.assertIn(f"({self.LISTED_PANES})", message)
+                self.assertNotIn("w1:p7", message)
                 self.assertIn("--split-pane <choice>", message)
                 self.assertEqual(memory.read_json(self.directory / "session.json")["crew"], {})
+        for response in ({}, {"tabs": [], "panes": []}, {"tabs": [], "panes": ["x"]}):
+            with (
+                self.subTest(response=response),
+                patch.object(sys.stdin, "isatty", return_value=False),
+                patch.object(agents, "herdr", return_value=response),
+            ):
+                with self.assertRaisesRegex(runtime.CaptainError, "no (tab or pane list|panes)"):
+                    agents.create_crew(args, self.pane, self.project)
 
-    def test_pane_split_rejects_panes_outside_the_captain_tab(self):
-        for bad in ("w1:p9", "w2:p1"):
+    def test_split_flags_are_rejected_with_tab_placement_before_any_herdr_call(self):
+        for flags in (("--split-pane", "w1:p1"), ("--direction", "vertical")):
+            args = self.args(
+                "crew", "--agent", "codex", "--task", "build", "--placement", "tab", *flags
+            )
+            with self.subTest(flags=flags), patch.object(agents, "herdr") as api:
+                with self.assertRaisesRegex(runtime.CaptainError, "apply only to --placement pane"):
+                    agents.create_crew(args, self.pane, self.project)
+                api.assert_not_called()
+
+    def test_pane_split_that_fails_asks_for_the_pane_again_and_creates_nothing(self):
+        def api(*call, **_):
+            if call[:2] == ("pane", "split"):
+                raise runtime.CaptainError("pane_not_found")
+            return self.listing(*call)
+
+        args = self.args(
+            "crew",
+            "--agent",
+            "codex",
+            "--task",
+            "build",
+            "--placement",
+            "pane",
+            "--direction",
+            "vertical",
+            "--split-pane",
+            "w1:p9",
+        )
+        with (
+            patch.object(agents, "herdr", side_effect=api) as calls,
+            patch.object(agents, "executable", return_value="/bin/codex"),
+        ):
+            with self.assertRaisesRegex(
+                runtime.CaptainError, "Could not split pane w1:p9"
+            ) as error:
+                agents.create_crew(args, self.pane, self.project)
+        self.assertIn("pane_not_found", str(error.exception))
+        self.assertIn("Ask the user which pane to split again", str(error.exception))
+        self.assertEqual(calls.call_args_list[-1].args[:2], ("pane", "split"))
+        self.assertEqual(memory.read_json(self.directory / "session.json")["crew"], {})
+
+    def test_pane_split_rejects_panes_missing_from_the_workspace(self):
+        for bad in ("w1:p7", "w2:p1", "w1:p1 "):
             args = self.args(
                 "crew",
                 "--agent",
@@ -441,26 +519,42 @@ class CaptainFlowTests(unittest.TestCase):
             )
             with (
                 self.subTest(pane=bad),
-                patch.object(agents, "herdr", return_value=self.pane_list()) as api,
+                patch.object(agents, "herdr", side_effect=self.listing) as api,
             ):
-                with self.assertRaisesRegex(runtime.CaptainError, "not in the captain's tab"):
+                with self.assertRaisesRegex(runtime.CaptainError, "not in this workspace") as error:
                     agents.create_crew(args, self.pane, self.project)
-                api.assert_called_once_with("pane", "list", "--workspace", "w1")
+                self.assertEqual(
+                    [call.args for call in api.call_args_list], list(self.LISTING_CALLS)
+                )
+                self.assertIn("w1:p1, w1:p5, w1:p9, w1:p8", str(error.exception))
+                self.assertIn("Ask the user again", str(error.exception))
 
-    def test_pane_split_uses_the_chosen_pane_and_direction(self):
+    def test_pane_split_uses_the_chosen_pane_and_direction_in_any_tab(self):
         def api(*call, **_):
-            if call[:2] == ("pane", "list"):
-                return self.pane_list()
-            return {
+            return self.listing(*call) or {
                 "pane": {"pane_id": "w1:p6", "agent": "codex", "agent_status": "idle"},
                 "agent": {"name": f"c-{self.meta['id'][:8]}-sparrow", "agent_status": "working"},
             }
 
-        for direction, herdr_direction, flags, answers in (
-            ("horizontal", "down", ("--split-pane", "w1:p5"), ["codex", "pane", "horizontal"]),
-            ("horizontal", "down", (), ["codex", "pane", "horizontal", "w1:p5"]),
-            ("vertical", "right", ("--split-pane", "w1:p5"), ["codex", "pane", "vertical"]),
-            ("vertical", "right", (), ["codex", "pane", "vertical", "w1:p5"]),
+        for direction, herdr_direction, flags, answers, target, tab in (
+            (
+                "horizontal",
+                "down",
+                ("--split-pane", "w1:p5"),
+                ["codex", "pane", "horizontal"],
+                "w1:p5",
+                "w1:t1",
+            ),
+            ("horizontal", "down", (), ["codex", "pane", "horizontal", "w1:p9"], "w1:p9", "w1:t2"),
+            (
+                "vertical",
+                "right",
+                ("--split-pane", "w1:p8"),
+                ["codex", "pane", "vertical"],
+                "w1:p8",
+                "w1:t3",
+            ),
+            ("vertical", "right", (), ["codex", "pane", "vertical", "w1:p5"], "w1:p5", "w1:t1"),
         ):
             args = self.args("crew", "--task", "build", *flags)
             with (
@@ -475,23 +569,31 @@ class CaptainFlowTests(unittest.TestCase):
                 contextlib.redirect_stdout(io.StringIO()) as output,
             ):
                 agents.create_crew(args, self.pane, self.project)
-            self.assertEqual(calls.call_args_list[0].args, ("pane", "list", "--workspace", "w1"))
-            split = calls.call_args_list[1].args
+            self.assertEqual(
+                [call.args for call in calls.call_args_list[:2]], list(self.LISTING_CALLS)
+            )
+            split = calls.call_args_list[2].args
             self.assertEqual(split[:2], ("pane", "split"))
-            self.assertEqual(split[split.index("--pane") + 1], "w1:p5")
+            self.assertEqual(split[split.index("--pane") + 1], target)
             self.assertEqual(split[split.index("--direction") + 1], herdr_direction)
             self.assertEqual(ask.call_args_list[2].args[0], "Split direction?")
             if not flags:
                 self.assertEqual(ask.call_args_list[3].args[0], "Which pane should be split?")
-                titles = [
-                    choice.title
+                rows = [
+                    choice.title if isinstance(choice, questionary.Separator) else choice
                     for choice in ask.call_args_list[3].kwargs["choices"]
-                    if not isinstance(choice, questionary.Separator)
                 ]
-                self.assertEqual(titles, ["zsh (captain)", "Will"])
+                self.assertIn("Captain Barbossa", rows)
+                self.assertEqual(
+                    [row.title for row in rows if isinstance(row, questionary.Choice)],
+                    ["zsh (captain)", "Will", "vim", "w1:p8"],
+                )
+                self.assertLess(rows.index("Captain Barbossa"), rows.index("Tab 2"))
+                self.assertLess(rows.index("Tab 2"), rows.index("w1:t3"))
             result = json.loads(output.getvalue())
             self.assertEqual(result["direction"], direction)
-            self.assertEqual(result["split_pane"], "w1:p5")
+            self.assertEqual(result["split_pane"], target)
+            self.assertEqual(result["tab"], tab)
             self.assertEqual(result["pane"], "w1:p6")
             memory.write_json(self.directory / "session.json", {**self.meta, "crew": {}})
 
@@ -506,6 +608,7 @@ class CaptainFlowTests(unittest.TestCase):
                 created = {
                     "pane": {"pane_id": "w1:p2", "agent": provider, "agent_status": "idle"},
                     "root_pane": {"pane_id": "w1:p3"},
+                    "tab_id": "w1:t9",
                     "agent": {
                         "name": f"c-{self.meta['id'][:8]}-{name}",
                         "agent_status": "working",
@@ -515,9 +618,7 @@ class CaptainFlowTests(unittest.TestCase):
                     patch.object(
                         agents,
                         "herdr",
-                        side_effect=lambda *call, **_: (
-                            self.pane_list() if call[:2] == ("pane", "list") else created
-                        ),
+                        side_effect=lambda *call, **_: self.listing(*call) or created,
                     ) as api,
                     patch.object(agents, "executable", return_value=f"/bin/{provider}"),
                     patch.object(sys.stdin, "isatty", return_value=True),
@@ -541,17 +642,19 @@ class CaptainFlowTests(unittest.TestCase):
                 if placement == "pane":
                     self.assertIn("Split direction?", ask.call_args_list[2].args[0])
                     self.assertIn("Which pane should be split?", ask.call_args_list[3].args[0])
-                    self.assertEqual(calls[0].args, ("pane", "list", "--workspace", "w1"))
-                    calls = calls[1:]
+                    self.assertEqual([call.args for call in calls[:2]], list(self.LISTING_CALLS))
+                    calls = calls[2:]
                     self.assertEqual(calls[0].args[:2], ("pane", "split"))
                     self.assertEqual(calls[0].args[calls[0].args.index("--pane") + 1], "w1:p1")
                     self.assertEqual(calls[0].args[calls[0].args.index("--direction") + 1], "right")
                     self.assertEqual(result["direction"], "vertical")
                     self.assertEqual(result["split_pane"], "w1:p1")
+                    self.assertEqual(result["tab"], "w1:t1")
                 else:
                     self.assertEqual(len(ask.call_args_list), 2)
                     self.assertEqual(calls[0].args[:2], ("tab", "create"))
                     self.assertIsNone(result["direction"])
+                    self.assertEqual(result["tab"], "w1:t9")
                 self.assertIn(f"CAPTAIN_SESSION={self.meta['id']}", calls[0].args)
                 run = next(call for call in calls if call.args[:2] == ("pane", "run"))
                 self.assertEqual(run.args[-1], '/bin/sh "$CAPTAIN_CREW_LAUNCHER"')
@@ -1108,32 +1211,40 @@ class CaptainFlowTests(unittest.TestCase):
                 "name": "Will",
                 "agent": "c-session-will-turner",
                 "pane": "w1:p3",
+                "tab": "w1:t2",
                 "placement": "tab",
                 "status": "started",
             },
             "sparrow-2": {"name": "Jack2", "agent": "c-session-sparrow-2", "pane": "w1:p4"},
-            "scout": {"agent": "c-session-scout", "pane": "w1:p5"},
+            "scout": {"agent": "c-session-scout", "pane": "w1:p5", "tab": "w1:t1"},
         }
         memory.write_json(self.directory / "session.json", self.meta)
-        for name, crew_id in (
-            ("Jack", "sparrow"),
-            (" jAcK ", "sparrow"),
-            ("sparrow", "sparrow"),
-            ("c-session-sparrow", "sparrow"),
-            ("will", "will-turner"),
-            ("Jack2", "sparrow-2"),
-            ("SCOUT", "scout"),
+        live = {"c-session-sparrow-2": {"agent": {"tab_id": "w1:t3"}}}
+        for name, crew_id, tab in (
+            ("Jack", "sparrow", None),
+            (" jAcK ", "sparrow", None),
+            ("sparrow", "sparrow", None),
+            ("c-session-sparrow", "sparrow", None),
+            ("will", "will-turner", "w1:t2"),
+            ("Jack2", "sparrow-2", "w1:t3"),
+            ("SCOUT", "scout", None),
         ):
+            crew = self.meta["crew"][crew_id]
             with (
                 self.subTest(name=name),
                 patch.object(cli, "current_pane", return_value=self.pane),
                 patch.object(cli, "project_root", return_value=self.project),
-                patch.object(agents, "herdr", return_value={}) as api,
+                patch.object(
+                    agents, "herdr", side_effect=lambda *call, **_: live.get(call[2], {})
+                ) as api,
                 contextlib.redirect_stdout(io.StringIO()) as output,
             ):
                 self.assertEqual(cli.main(["--session", self.meta["id"], "focus", name]), 0)
-                crew = self.meta["crew"][crew_id]
-                api.assert_called_once_with("agent", "focus", crew["agent"])
+                expected = [("agent", "get", crew["agent"])]
+                if tab:
+                    expected.append(("tab", "focus", tab))
+                expected.append(("agent", "focus", crew["agent"]))
+                self.assertEqual([call.args for call in api.call_args_list], expected)
                 self.assertIn("Focused", output.getvalue())
         self.assertEqual(memory.read_json(self.directory / "session.json"), self.meta)
         with (
@@ -1148,7 +1259,7 @@ class CaptainFlowTests(unittest.TestCase):
             self.assertEqual(cli.main(["--session", self.meta["id"], "focus", "Jack"]), 1)
             self.assertIn("Could not focus Jack", error.getvalue())
             self.assertEqual(output.getvalue(), "")
-            api.assert_called_once_with("agent", "focus", "c-session-sparrow")
+            api.assert_called_once_with("agent", "get", "c-session-sparrow")
 
     def test_focus_rejects_unknown_and_ambiguous_names_without_leaving_the_session(self):
         self.meta["crew"] = {
@@ -1173,8 +1284,15 @@ class CaptainFlowTests(unittest.TestCase):
             with self.assertRaisesRegex(runtime.CaptainError, "Start captain first"):
                 agents.focus_crew(args, self.pane, self.project)
             api.assert_not_called()
+            api.return_value = {}
             agents.focus_crew(self.args("focus", "c-session-legacy-jack"), self.pane, self.project)
-            api.assert_called_once_with("agent", "focus", "c-session-legacy-jack")
+            self.assertEqual(
+                [call.args for call in api.call_args_list],
+                [
+                    ("agent", "get", "c-session-legacy-jack"),
+                    ("agent", "focus", "c-session-legacy-jack"),
+                ],
+            )
 
     def test_dismiss_closes_pane_marks_record_and_records_memory(self):
         self.meta["crew"] = {

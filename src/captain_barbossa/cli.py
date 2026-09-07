@@ -46,7 +46,7 @@ def parser():
         help="pane split direction chosen by the user (asks when omitted)",
     )
     crew.add_argument(
-        "--split-pane", help="pane ID in the captain's tab to split (asks when omitted)"
+        "--split-pane", help="pane ID anywhere in the workspace to split (asks when omitted)"
     )
     focus = commands.add_parser("focus", help="focus an existing crew's pane and tab")
     focus.add_argument("name", help="crew name or ID (case-insensitive)")

@@ -25,18 +25,28 @@ STYLE = questionary.Style(
 )
 
 
-def choose(value, options, question, flag, labels=None):
+def choose(value, options, question, flag, labels=None, groups=None):
+    """Pick one of options; groups is an optional list of (title, options) for grouped display."""
     if value:
         return value
+    grouped = groups or [(None, options)]
     if not sys.stdin.isatty():
-        listed = options if labels is None else [f"{o} {labels[o]}" for o in options]
+        listed = []
+        for title, members in grouped:
+            items = " / ".join(o if labels is None else f"{o} {labels[o]}" for o in members)
+            listed.append(f"{title}: {items}" if title else items)
         raise CaptainError(
-            f"Ask the user: {question} ({' / '.join(listed)}). Wait for their answer, "
+            f"Ask the user: {question} ({'; '.join(listed)}). Wait for their answer, "
             f"then rerun with {flag} <choice>. Nothing was created."
         )
-    choices = [
-        questionary.Separator(" "),
-        *(questionary.Choice((labels or LABELS)[option], value=option) for option in options),
+    choices = [questionary.Separator(" ")]
+    for title, members in grouped:
+        if title:
+            choices.append(questionary.Separator(title))
+        choices.extend(
+            questionary.Choice((labels or LABELS)[option], value=option) for option in members
+        )
+    choices += [
         questionary.Separator(" "),
         questionary.Separator("↑↓ / j k   move"),
         questionary.Separator("Enter select · Esc cancel"),
