@@ -2098,6 +2098,70 @@ class CaptainFlowTests(unittest.TestCase):
         self.assertEqual(read[0].args, ("agent", "read", agent_name, "--lines", "40"))
         self.assertTrue(read[0].kwargs["raw"])
 
+    def test_wait_strips_claude_code_tui_chrome_from_the_pane_tail(self):
+        # A real `herdr agent read` capture of an idle Claude Code pane: prose, a
+        # spinner tagline, the prompt box (rule, non-empty prompt, rule), and the
+        # bottom status bar.
+        rule = "─" * 89
+        tail = "\n".join(
+            [
+                "Main is at 2bca137 with version 0.9.0, one commit ahead of origin and still",
+                "unpushed.",
+                "",
+                "✻ Worked for 35s · done 2:02 AM · 1 shell still running",
+                "",
+                rule,
+                "❯ push it once Sparrow is done",
+                rule,
+                "  ⏵⏵ auto mode on · 1 shell · ← for agents · ↓ to manage",
+            ]
+        )
+        self.wait_crew_record()
+        printed, _ = self.run_wait(["idle", "idle", "idle"], tail=tail)
+        entry = "pane tail: " + "\n".join(
+            [
+                "Main is at 2bca137 with version 0.9.0, one commit ahead of origin and still",
+                "unpushed.",
+                "✻ Worked for 35s · done 2:02 AM · 1 shell still running",
+                "❯ push it once Sparrow is done",
+            ]
+        )
+        self.assertIn(entry, printed)
+        self.assertNotIn("mode on", printed)
+        self.assertNotIn(rule, printed)
+
+    def test_wait_strips_codex_tui_chrome_from_the_pane_tail(self):
+        # A real `herdr agent read` capture of an idle Codex pane: a completion
+        # line, a rule, a "recap" header rule, prose, the empty prompt placeholder,
+        # and the bottom status bar.
+        rule = "─" * 108
+        tail = "\n".join(
+            [
+                "• Lean already. Ship.",
+                "",
+                rule,
+                "",
+                "─ Conversation recap " + "─" * 88,
+                "",
+                "  Timestamp fields were updated to UTC Unix epoch milliseconds using PostgreSQL "
+                "bigint and TypeScript",
+                "  numbers. The Ponytail review is complete and found the changes lean and ready to ship.",
+                "",
+                "",
+                "› Ask Codex to do anything",
+                "",
+                "  gpt-6-astra high · ~/code/projects/hrly",
+            ]
+        )
+        self.wait_crew_record()
+        printed, _ = self.run_wait(["idle", "idle", "idle"], tail=tail)
+        self.assertIn("pane tail: • Lean already. Ship.", printed)
+        self.assertIn("Conversation recap", printed)
+        self.assertIn("Timestamp fields were updated", printed)
+        self.assertNotIn("Ask Codex to do anything", printed)
+        self.assertNotIn("gpt-6-astra", printed)
+        self.assertNotIn(rule, printed)
+
     def test_wait_ignores_a_report_left_by_an_earlier_assignment(self):
         self.wait_crew_record()
         memory.add_memory(self.directory / "graph.json", "Sparrow", "report", "previous run")

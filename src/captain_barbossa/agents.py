@@ -41,6 +41,13 @@ WAIT_POLLS = 3
 WAIT_TIMEOUT = 900
 TAIL_LINES = 40
 TAIL_LIMIT = 1500
+# Pane chrome shared by the Claude Code and Codex TUIs: a bare box-drawing rule, an
+# empty input prompt (Codex shows a fixed placeholder; Claude shows just the glyph),
+# and the bottom status bar, which is always the last line and never starts like
+# real transcript content (a bullet, a tree glyph, a spinner).
+PANE_RULE = re.compile(r"^[─\-=━]+$")
+PANE_EMPTY_PROMPT = re.compile(r"^[❯›]\s*(Ask Codex to do anything)?$")
+PANE_STATUS_BAR_PREFIXES = ("•", "⏺", "└", "│", "✻", "✳", "?", "…", "❯", "›", "⎿")
 
 
 def agent_instructions(directory, role):
@@ -278,7 +285,13 @@ def pane_tail(agent_name):
         )
     except (CaptainError, subprocess.TimeoutExpired, OSError) as exc:
         return f"unreadable ({exc})"
-    tail = "\n".join(line.strip() for line in output.splitlines() if line.strip())
+    lines = [line.strip() for line in output.splitlines() if line.strip()]
+    if lines and "·" in lines[-1] and not lines[-1].startswith(PANE_STATUS_BAR_PREFIXES):
+        lines = lines[:-1]
+    lines = [
+        line for line in lines if not PANE_RULE.match(line) and not PANE_EMPTY_PROMPT.match(line)
+    ]
+    tail = "\n".join(lines)
     return tail[-TAIL_LIMIT:] or "empty"
 
 
