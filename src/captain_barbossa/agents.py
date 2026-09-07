@@ -23,6 +23,9 @@ wait for the answer. Never infer or default the agent or placement.
 If you are a crew member, send delegation requests to the captain instead of spawning crew.
 After their answer, run:
   {command} crew NAME --agent codex|claude --task 'assignment' --placement pane|tab
+Keep crew prompts short: a few lines stating the goal, the hard constraints, and
+the expected report. Trust the crew with the rest; do not write paragraphs of
+background, step lists, or restated context.
 Use short lowercase crew names. Do not create Herdr panes/tabs yourself, and do not
 use hidden built-in subagents as a substitute for a requested crew.
 For existing crew, use Herdr's agent read/wait commands by the returned agent name.

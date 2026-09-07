@@ -93,6 +93,19 @@ class CaptainFlowTests(unittest.TestCase):
         self.assertIn("Decline commands that are clearly wrong for the task", instructions)
         self.assertIn("Never type over the user's own draft in the captain pane", instructions)
 
+    def test_instructions_keep_crew_prompts_short(self):
+        instructions = " ".join(agents.agent_instructions(self.directory, "captain").split())
+        crew_command = instructions.index("--placement pane|tab")
+        rule = instructions.index("Keep crew prompts short")
+        self.assertGreater(rule, crew_command)
+        self.assertLess(rule - crew_command, 200)
+        for phrase in (
+            "a few lines stating the goal, the hard constraints, and the expected report",
+            "Trust the crew with the rest",
+            "do not write paragraphs of background, step lists, or restated context",
+        ):
+            self.assertIn(phrase, instructions)
+
     def test_agent_commands_work_outside_the_source_checkout(self):
         instructions = agents.agent_instructions(self.directory, "captain")
         command = next(line.strip() for line in instructions.splitlines() if " crew NAME " in line)
