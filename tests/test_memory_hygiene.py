@@ -1,11 +1,14 @@
 """Tests for memory.py hygiene: lock file permissions and temp dir cleanup."""
 
+import os
 import stat
 import tempfile
+import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
-from captain_barbossa.memory import lock, memory_snapshot
+from captain_barbossa.memory import STALE_QUERY_SECONDS, lock, memory_snapshot, session
 
 
 class TestLockFilePermissions(unittest.TestCase):
@@ -67,15 +70,22 @@ class TestMemorySnapshotCleanup(unittest.TestCase):
 
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
+    def _age(self, path, seconds):
+        old = time.time() - seconds
+        os.utime(path, (old, old))
+
     def test_stray_query_dirs_cleaned_up(self):
-        """Stray query-* directories should be cleaned up at snapshot start."""
-        # Create stray query directories
+        """Stale stray query-* directories should be cleaned up at snapshot start."""
+        # Create stray query directories old enough that no concurrent reader
+        # could still own them.
         stray1 = self.session_dir / "query-stray1"
         stray2 = self.session_dir / "query-stray2"
         stray1.mkdir()
         stray2.mkdir()
         (stray1 / "file.txt").write_text("content")
         (stray2 / "file.txt").write_text("content")
+        self._age(stray1, STALE_QUERY_SECONDS + 60)
+        self._age(stray2, STALE_QUERY_SECONDS + 60)
 
         self.assertTrue(stray1.exists())
         self.assertTrue(stray2.exists())
@@ -89,6 +99,19 @@ class TestMemorySnapshotCleanup(unittest.TestCase):
 
         # Snapshot should also be cleaned up after context
         self.assertFalse(snapshot.exists(), "Snapshot directory should be cleaned up after context")
+
+    def test_recent_query_dir_not_swept(self):
+        """A fresh query-* dir from a concurrent reader must survive another's sweep."""
+        concurrent = self.session_dir / "query-concurrent"
+        concurrent.mkdir()
+        (concurrent / "graph.json").write_text("{}")
+
+        with memory_snapshot(self.session_dir):
+            pass
+
+        self.assertTrue(
+            concurrent.exists(), "A recent query-* dir must not be swept by another snapshot"
+        )
 
     def test_cleanup_in_finally_block(self):
         """Cleanup should happen in finally block even if exception occurs."""
@@ -130,6 +153,28 @@ class TestMemorySnapshotCleanup(unittest.TestCase):
             # Snapshot should contain valid graph
             graph_file = snapshot / "graph.json"
             self.assertTrue(graph_file.exists())
+
+
+class TestSessionsDirPermissions(unittest.TestCase):
+    """The sessions/ parent directory must be private, not just its children."""
+
+    def setUp(self):
+        self.temp_dir = Path(tempfile.mkdtemp())
+        self.project = self.temp_dir / "project"
+        self.project.mkdir()
+        self.enterContext(
+            patch.dict(os.environ, {"CAPTAIN_MEMORY_ROOT": str(self.temp_dir / "state")})
+        )
+
+    def tearDown(self):
+        import shutil
+
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_sessions_parent_dir_is_private(self):
+        directory, _ = session(self.project, {"workspace_id": "w1"}, create=True)
+        mode = stat.S_IMODE(directory.parent.stat().st_mode)
+        self.assertEqual(mode, 0o700, f"sessions/ has mode {oct(mode)}, expected 0700")
 
 
 if __name__ == "__main__":

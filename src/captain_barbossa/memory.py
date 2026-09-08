@@ -190,7 +190,7 @@ def session(project, pane, session_id=None, create=False):
     if not SESSION_ID.fullmatch(session_id):
         raise CaptainError("Invalid captain session ID.")
     base = storage(project)
-    directory = base / "sessions" / session_id
+    directory = private_dir(base / "sessions") / session_id
     if not create and not (directory / "session.json").is_file():
         raise CaptainError("This session does not exist for the current project.")
     private_dir(directory)
@@ -225,11 +225,16 @@ def project_and_session_graphs(directory):
     return project_graph, session_graph
 
 
+STALE_QUERY_SECONDS = 600
+
+
 @contextmanager
 def memory_snapshot(directory):
-    # Clean up any stray query-* directories from interrupted previous runs
+    # Clean up stray query-* directories from interrupted previous runs, but only
+    # once they're old enough that no concurrent `memory query` could still own one.
+    cutoff = time.time() - STALE_QUERY_SECONDS
     for item in directory.iterdir():
-        if item.is_dir() and item.name.startswith("query-"):
+        if item.is_dir() and item.name.startswith("query-") and item.stat().st_mtime < cutoff:
             shutil.rmtree(item, ignore_errors=True)
     combined = empty_graph()
     for graph in project_and_session_graphs(directory):
@@ -249,6 +254,7 @@ def memory_snapshot(directory):
 
 
 SHOW_LIMIT = 25
+PROJECT_RESERVE = 5
 
 
 def _scoped_rows(graph, scope):
@@ -261,9 +267,14 @@ def _scoped_rows(graph, scope):
 
 def show_memory(directory, show_all):
     project_graph, session_graph = project_and_session_graphs(directory)
-    rows = _scoped_rows(session_graph, "session") + _scoped_rows(project_graph, "project")
+    session_rows = _scoped_rows(session_graph, "session")
+    project_rows = _scoped_rows(project_graph, "project")
     if not show_all:
-        rows = rows[:SHOW_LIMIT]
+        # Reserve a project slice so a busy session can't crowd durable project
+        # facts off the end; session rows fill whatever project leaves unused.
+        project_rows = project_rows[:PROJECT_RESERVE]
+        session_rows = session_rows[: SHOW_LIMIT - len(project_rows)]
+    rows = session_rows + project_rows
     print("Memory (subject, relation, object):")
     for scope, subject, relation, target in rows:
         print(f"[{scope}] " + json.dumps([subject, relation, target], ensure_ascii=False))
