@@ -1,6 +1,7 @@
 """Graph labels stay short; the full text spills to a session-local note file."""
 
 import contextlib
+import hashlib
 import io
 import json
 import shutil
@@ -84,6 +85,18 @@ class ShortLabelTests(unittest.TestCase):
         memory.add_memory(self.path, "Will", "report", report)
         self.assertEqual(len(list((self.directory / "notes").iterdir())), 1)
 
+    def test_long_relation_is_capped_and_spilled_like_a_label(self):
+        relation = "reported " + "r" * 5000
+        memory.add_memory(self.path, "Jack", relation, "done")
+        [link] = memory.read_json(self.path)["links"]
+        self.assertEqual(len(link["relation"]), memory.LABEL_LIMIT)
+        self.assertEqual(link["key"], link["relation"])
+        self.assertTrue(link["relation"].endswith(f"... see notes/{memory.note_name(relation)}"))
+        self.assertEqual(
+            (self.directory / "notes" / memory.note_name(relation)).read_text(encoding="utf-8"),
+            relation,
+        )
+
     def test_show_and_raw_json_keep_their_shape(self):
         memory.add_memory(self.path, "Jack", "report", "q" * 4000)
         with contextlib.redirect_stdout(io.StringIO()) as output:
@@ -99,6 +112,78 @@ class ShortLabelTests(unittest.TestCase):
             graph = memory.read_json(snapshot / "graph.json")
         self.assertEqual(set(graph), set(memory.empty_graph()))
         self.assertEqual(sorted(self.labels()), sorted(node["label"] for node in graph["nodes"]))
+
+
+class GraphMigrationTests(unittest.TestCase):
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+        self.directory = memory.private_dir(self.root / "sessions" / ("a" * 32))
+        self.path = self.directory / "graph.json"
+
+    def legacy_graph(self, path, labels, relation="has"):
+        """A graph keyed the old way: sha256("<graph path>:<label>")."""
+        ids = [hashlib.sha256(f"{path}:{label}".encode()).hexdigest() for label in labels]
+        graph = memory.empty_graph()
+        graph["nodes"] = [
+            {"id": i, "label": label, "file_type": "memory"}
+            for i, label in zip(ids, labels, strict=True)
+        ]
+        graph["links"] = [
+            {
+                "source": ids[0],
+                "target": ids[1],
+                "key": relation,
+                "relation": relation,
+                "confidence": 1.0,
+            }
+        ]
+        memory.write_json(path, graph)
+        return graph
+
+    def test_node_ids_do_not_depend_on_the_graph_path(self):
+        other = memory.private_dir(self.root / "elsewhere") / "graph.json"
+        memory.add_memory(self.path, "Jack", "report", "done")
+        memory.add_memory(other, "Jack", "report", "done")
+        ids = [{node["id"] for node in memory.read_json(p)["nodes"]} for p in (self.path, other)]
+        self.assertEqual(*ids)
+        self.assertEqual(ids[0], {memory.node_id("Jack"), memory.node_id("done")})
+
+    def test_legacy_path_keyed_graph_is_rekeyed_on_load(self):
+        self.legacy_graph(self.path, ["Jack", "done"])
+        graph = memory.load_graph(self.path)
+        self.assertEqual(
+            [node["id"] for node in graph["nodes"]],
+            [memory.node_id("Jack"), memory.node_id("done")],
+        )
+        [link] = graph["links"]
+        self.assertEqual(
+            (link["source"], link["target"]), (memory.node_id("Jack"), memory.node_id("done"))
+        )
+        self.assertEqual(memory.read_json(self.path), graph)  # rewritten to disk
+        self.assertFalse(memory.migrate_graph(self.path, memory.read_json(self.path)))
+
+    def test_legacy_long_label_spills_to_a_note_on_load(self):
+        report = "old report " + "o" * 4000
+        self.legacy_graph(self.path, ["Jack", report], relation="report")
+        graph = memory.load_graph(self.path)
+        [label] = [node["label"] for node in graph["nodes"] if node["label"] != "Jack"]
+        name = memory.note_name(report)
+        self.assertEqual(len(label), memory.LABEL_LIMIT)
+        self.assertTrue(label.endswith(f"... see notes/{name}"))
+        self.assertEqual((self.directory / "notes" / name).read_text(encoding="utf-8"), report)
+
+    def test_a_dangling_link_is_skipped_not_fatal(self):
+        memory.add_memory(self.path, "Jack", "report", "done")
+        graph = memory.read_json(self.path)
+        graph["links"].append(
+            {**graph["links"][0], "source": "missing", "key": "orphan", "relation": "orphan"}
+        )
+        memory.write_json(self.path, graph)
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            memory.show_memory(self.directory, show_all=True)
+        rows = output.getvalue().splitlines()[1:]
+        self.assertEqual(rows, ['[session] ["Jack", "report", "done"]'])
 
 
 if __name__ == "__main__":

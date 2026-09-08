@@ -96,6 +96,25 @@ class MemoryShowBoundTests(unittest.TestCase):
         graph = json.loads(output.getvalue())
         self.assertEqual(len(graph["links"]), 30)
 
+    def test_json_warns_with_counts_and_size_on_stderr(self):
+        self._seed(project_count=0, session_count=3)
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            with contextlib.redirect_stderr(io.StringIO()) as err:
+                memory.memory(self.args("memory", "show", "--json"), self.pane, self.project)
+        [warning] = [line for line in err.getvalue().splitlines() if "dumping" in line]
+        graph = json.loads(out.getvalue())
+        self.assertIn(f"{len(graph['nodes'])} nodes", warning)
+        self.assertIn(f"{len(graph['links'])} links", warning)
+        self.assertIn(f"{len(out.getvalue().encode('utf-8'))} bytes", warning)
+
+    def test_a_label_shared_across_scopes_is_one_node(self):
+        memory.add_memory(memory.state_storage(self.project) / "graph.json", "task", "has", "one")
+        memory.add_memory(self.directory / "graph.json", "task", "has", "two")
+        with memory.memory_snapshot(self.directory) as snapshot:
+            graph = memory.read_json(snapshot / "graph.json")
+        self.assertEqual(len(graph["nodes"]), 3)
+        self.assertEqual(len({node["id"] for node in graph["nodes"]}), 3)
+
     def test_scope_prefix_on_single_session_fact(self):
         memory.add_memory(self.directory / "graph.json", "task", "has", "fact")
         lines = self.show()

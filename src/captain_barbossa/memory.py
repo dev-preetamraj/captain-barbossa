@@ -202,18 +202,67 @@ def store_label(path, label):
     return truncate_label(label, LABEL_LIMIT - len(marker)) + marker
 
 
+def node_id(label):
+    """Hash the label alone, so ids stay stable across memory roots and scopes."""
+    return hashlib.sha256(label.encode("utf-8")).hexdigest()
+
+
+def migrate_graph(path, graph):
+    """Bring an on-disk graph up to the current id/label scheme. True if it changed.
+
+    Ids used to hash "<graph path>:<label>", so moving a root orphaned every edge and
+    the same label was two unrelated nodes across scopes. Labels and relations written
+    before the notes/ spill keep their full text, which has no recovery pointer.
+    """
+    changed = False
+    rekeyed = {}
+    for node in graph["nodes"]:
+        label = store_label(path, node["label"])
+        new_id = node_id(label)
+        if label != node["label"] or new_id != node["id"]:
+            changed = True
+            rekeyed[node["id"]] = new_id
+            node["label"], node["id"] = label, new_id
+    for link in graph["links"]:
+        updated = {
+            "source": rekeyed.get(link["source"], link["source"]),
+            "target": rekeyed.get(link["target"], link["target"]),
+            "relation": store_label(path, link["relation"]),
+        }
+        if any(link[field] != value for field, value in updated.items()):
+            changed = True
+            link.update(updated, key=updated["relation"])
+    return changed
+
+
+def load_graph(path):
+    """Read a graph, migrating it to the current id/label scheme once, under lock."""
+    if not path.exists():
+        return empty_graph()
+    graph = read_json(path)
+    if not migrate_graph(path, graph):
+        return graph
+    with lock(path.with_suffix(".lock")):
+        graph = read_json(path)  # re-read: a writer may have won the race to the lock
+        migrate_graph(path, graph)
+        write_json(path, graph)
+    return graph
+
+
 def add_memory(path, subject, relation, target):
     for text in (subject, relation, target):
         if not text.strip() or len(text) > 8000 or "\x00" in text:
             raise CaptainError("Memory values must contain 1–8000 characters and no NUL bytes.")
     with lock(path.with_suffix(".lock")):
         graph = read_json(path) if path.exists() else empty_graph()
+        migrate_graph(path, graph)
         ids = []
         for label in (store_label(path, subject), store_label(path, target)):
-            node_id = hashlib.sha256(f"{path}:{label}".encode()).hexdigest()
-            ids.append(node_id)
-            if not any(node["id"] == node_id for node in graph["nodes"]):
-                graph["nodes"].append({"id": node_id, "label": label, "file_type": "memory"})
+            new_id = node_id(label)
+            ids.append(new_id)
+            if not any(node["id"] == new_id for node in graph["nodes"]):
+                graph["nodes"].append({"id": new_id, "label": label, "file_type": "memory"})
+        relation = store_label(path, relation)
         edge = {
             "source": ids[0],
             "target": ids[1],
@@ -274,9 +323,7 @@ def project_and_session_graphs(directory):
     project_id = directory.parent.parent.name
     project_path = state_root() / project_id / "graph.json"
     session_path = directory / "graph.json"
-    project_graph = read_json(project_path) if project_path.exists() else empty_graph()
-    session_graph = read_json(session_path) if session_path.exists() else empty_graph()
-    return project_graph, session_graph
+    return load_graph(project_path), load_graph(session_path)
 
 
 STALE_QUERY_SECONDS = 600
@@ -291,8 +338,12 @@ def memory_snapshot(directory):
         if item.is_dir() and item.name.startswith("query-") and item.stat().st_mtime < cutoff:
             shutil.rmtree(item, ignore_errors=True)
     combined = empty_graph()
+    seen = set()
     for graph in project_and_session_graphs(directory):
-        combined["nodes"].extend(graph["nodes"])
+        # Ids key on the label alone, so a label shared across scopes is one node.
+        combined["nodes"].extend(
+            node for node in graph["nodes"] if node["id"] not in seen and not seen.add(node["id"])
+        )
         combined["links"].extend(graph["links"])
     # Truncate labels in snapshot for graphify query to prevent keyword-BFS on long labels
     for node in combined["nodes"]:
@@ -316,6 +367,7 @@ def _scoped_rows(graph, scope):
     return [
         (scope, labels[link["source"]], link["relation"], labels[link["target"]])
         for link in reversed(graph["links"])
+        if link["source"] in labels and link["target"] in labels
     ]
 
 
@@ -431,7 +483,14 @@ def memory(args, pane, project):
         with memory_snapshot(directory) as snapshot:
             if args.memory_command == "show":
                 if args.json:
-                    print((snapshot / "graph.json").read_text(encoding="utf-8"), end="")
+                    raw = (snapshot / "graph.json").read_text(encoding="utf-8")
+                    graph = json.loads(raw)
+                    print(
+                        f"captain: dumping the whole graph: {len(graph['nodes'])} nodes, "
+                        f"{len(graph['links'])} links, {len(raw.encode('utf-8'))} bytes.",
+                        file=sys.stderr,
+                    )
+                    print(raw, end="")
                 else:
                     show_memory(directory, args.all)
             else:
