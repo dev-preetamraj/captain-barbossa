@@ -120,7 +120,7 @@ class CaptainFlowTests(unittest.TestCase):
                 with self.assertRaisesRegex(runtime.CaptainError, "unexpected response"):
                     agents.wait_for_crew("w1:p2", "codex", "builder")
                 with self.assertRaisesRegex(runtime.CaptainError, "unexpected response"):
-                    agents.submit_task("builder", "build")
+                    agents.submit_task("builder", "build", "claude")
                 with (
                     patch.object(cli, "project_root", return_value=self.project),
                     contextlib.redirect_stderr(io.StringIO()) as error,
@@ -1483,7 +1483,7 @@ class CaptainFlowTests(unittest.TestCase):
                 ) as api,
                 patch.object(agents.time, "sleep") as sleep,
             ):
-                agents.submit_task("builder", "build")
+                agents.submit_task("builder", "build", "claude")
                 self.assertEqual(
                     [call.args for call in api.call_args_list],
                     [("agent", "prompt", "builder", "build"), ("agent", "get", "builder")],
@@ -1513,7 +1513,7 @@ class CaptainFlowTests(unittest.TestCase):
                 patch.object(agents.time, "monotonic", side_effect=count(0, 2)),
             ):
                 with self.assertRaisesRegex(runtime.CaptainError, message):
-                    agents.submit_task("builder", "build")
+                    agents.submit_task("builder", "build", "claude")
                 sent = [
                     call.args
                     for call in api.call_args_list
@@ -1528,10 +1528,46 @@ class CaptainFlowTests(unittest.TestCase):
             patch.object(agents.time, "monotonic", side_effect=count(0, 2)),
         ):
             with self.assertRaisesRegex(runtime.CaptainError, "reported status None"):
-                agents.submit_task("builder", "build")
+                agents.submit_task("builder", "build", "claude")
         self.assertFalse(
             any(call.args[:2] == ("agent", "send-keys") for call in api.call_args_list)
         )
+
+    def prompt_api(self, statuses, tail=""):
+        def api(*call, **kwargs):
+            if call[:2] == ("agent", "read"):
+                return tail
+            return {"agent": {"name": "builder", "agent_status": next(statuses, None)}}
+
+        return api
+
+    def test_a_codex_choice_modal_after_a_prompt_needs_attention_without_enter(self):
+        with (
+            patch.object(
+                agents,
+                "herdr",
+                side_effect=self.prompt_api(repeat("idle"), self.rate_limit_modal()),
+            ) as api,
+            patch.object(agents.time, "sleep"),
+            patch.object(agents.time, "monotonic", side_effect=count(0, 2)),
+        ):
+            with self.assertRaisesRegex(runtime.CaptainError, "waiting for input or approval"):
+                agents.submit_task("builder", "build", "codex")
+        self.assertFalse(
+            any(call.args[:2] == ("agent", "send-keys") for call in api.call_args_list)
+        )
+
+    def test_an_idle_codex_pane_is_resent_the_task_instead_of_enter(self):
+        with (
+            patch.object(agents, "herdr", side_effect=self.prompt_api(repeat("idle"))) as api,
+            patch.object(agents.time, "sleep"),
+            patch.object(agents.time, "monotonic", side_effect=count(0, 2)),
+        ):
+            with self.assertRaisesRegex(runtime.CaptainError, "did not start working"):
+                agents.submit_task("builder", "build", "codex")
+        sent = [call.args[:2] for call in api.call_args_list]
+        self.assertEqual(sent.count(("agent", "prompt")), 2)
+        self.assertNotIn(("agent", "send-keys"), sent)
 
     def test_automatic_names_are_unique_across_concurrent_recruits_and_session_scoped(self):
         self.meta["crew"] = {
@@ -2082,10 +2118,10 @@ class CaptainFlowTests(unittest.TestCase):
 
     def test_wait_records_and_prints_the_report_the_crew_wrote(self):
         self.wait_crew_record()
-        printed, calls = self.run_wait(["working", "idle", "idle", "idle"], report="tests pass")
+        printed, _ = self.run_wait(["working", "idle", "idle", "idle"], report="tests pass")
         self.assertEqual(printed, "Sparrow idle.\nidle; reported: tests pass\n")
         self.assertEqual(self.completions(), ["idle; reported: tests pass"])
-        self.assertNotIn(("agent", "read"), [call.args[:2] for call in calls.call_args_list])
+        self.assertNotIn("pane tail", printed)
 
     def test_wait_records_the_pane_tail_when_the_crew_wrote_no_report(self):
         agent_name = self.wait_crew_record()
@@ -2161,6 +2197,60 @@ class CaptainFlowTests(unittest.TestCase):
         self.assertNotIn("Ask Codex to do anything", printed)
         self.assertNotIn("gpt-6-astra", printed)
         self.assertNotIn(rule, printed)
+
+    def rate_limit_modal(self):
+        """A real `herdr agent read` capture of a Codex pane that Herdr reports idle."""
+        return "\n".join(
+            [
+                "• Ran uv run --locked python -m unittest -q (with UV_CACHE_DIR=/tmp/uv-cache to avoid",
+                "a local permission issue).",
+                "77 tests ran, all passed (OK).",
+                "Approaching rate limits",
+                "Switch to gpt-5.6-luna for lower credit usage?",
+                "› 1. Switch to gpt-5.6-luna                 Fast and affordable agentic coding",
+                "model.",
+                "2. Keep current model",
+                "3. Keep current model (never show again)  Hide future rate limit reminders about",
+                "switching models.",
+                "Press enter to confirm or esc to go back",
+            ]
+        )
+
+    def test_wait_reports_a_rate_limit_modal_as_blocked_not_completed(self):
+        self.wait_crew_record()
+        printed, _ = self.run_wait(["idle", "idle", "idle"], tail=self.rate_limit_modal())
+        self.assertIn("Sparrow blocked.", printed)
+        self.assertIn("blocked; no report recorded", printed)
+        self.assertEqual(len(self.completions()), 1)
+        self.assertTrue(self.completions()[0].startswith("blocked;"))
+
+    def test_wait_strips_a_trailing_choice_modal_from_the_pane_tail(self):
+        self.wait_crew_record()
+        printed, _ = self.run_wait(["idle", "idle", "idle"], tail=self.rate_limit_modal())
+        entry = "pane tail: " + "\n".join(
+            [
+                "• Ran uv run --locked python -m unittest -q (with UV_CACHE_DIR=/tmp/uv-cache to avoid",
+                "a local permission issue).",
+                "77 tests ran, all passed (OK).",
+            ]
+        )
+        self.assertIn(entry, printed)
+        for text in ("Approaching rate limits", "Keep current model", "Press enter to confirm"):
+            self.assertNotIn(text, printed)
+
+    def test_a_numbered_list_in_crew_output_is_not_read_as_a_modal(self):
+        tail = "\n".join(
+            [
+                "⏺ Remaining work:",
+                "1. Bump the version",
+                "2. Run the gate",
+                "Press enter to continue reading the diff",
+            ]
+        )
+        self.wait_crew_record()
+        printed, _ = self.run_wait(["idle", "idle", "idle"], tail=tail)
+        self.assertIn("Sparrow idle.", printed)
+        self.assertIn("1. Bump the version", printed)
 
     def test_wait_ignores_a_report_left_by_an_earlier_assignment(self):
         self.wait_crew_record()

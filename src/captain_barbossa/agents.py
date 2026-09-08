@@ -48,6 +48,13 @@ TAIL_LIMIT = 1500
 PANE_RULE = re.compile(r"^[─\-=━]+$")
 PANE_EMPTY_PROMPT = re.compile(r"^[❯›]\s*(Ask Codex to do anything)?$")
 PANE_STATUS_BAR_PREFIXES = ("•", "⏺", "└", "│", "✻", "✳", "?", "…", "❯", "›", "⎿")
+# Codex draws rate-limit and approval choices as a numbered list closed by a confirm
+# line and keeps reporting the pane idle while one is showing. Enter would accept the
+# default (silently switching the model), so a modal is needs-attention, not output.
+PANE_MODAL_CONFIRM = re.compile(r"^Press enter to confirm or esc to \w+")
+PANE_MODAL_OPTION = re.compile(r"^[›»]?\s*[1-9]\.\s+\S")
+PANE_MODAL_LINES = 20
+PANE_MODAL_HEADER_LINES = 4
 
 
 def agent_instructions(directory, role):
@@ -204,21 +211,25 @@ def settled_status(agent_name, timeout):
     return status
 
 
-def task_landed(agent_name, timeout=PROMPT_TIMEOUT):
-    """Return the settled status after a prompt, pressing Enter once for an unsent draft."""
+def task_landed(agent_name, provider, timeout=PROMPT_TIMEOUT):
+    """Return the settled status after a prompt, pressing Enter once for an unsent Claude draft."""
     status = settled_status(agent_name, timeout)
-    if status == "idle":
+    if status != "idle":
+        return status
+    if provider == "claude":
         # Claude Code can leave a submitted prompt as an unsent draft in its input box.
         herdr("agent", "send-keys", agent_name, "enter")
-        status = settled_status(agent_name, timeout)
+        return settled_status(agent_name, timeout)
+    if choice_modal(agent_name):
+        return "blocked"
     return status
 
 
-def submit_task(agent_name, task, attempts=2):
+def submit_task(agent_name, task, provider, attempts=2):
     """Submit the task and verify it landed, resending once when the pane stayed idle."""
     for _ in range(attempts):
         herdr("agent", "prompt", agent_name, task)
-        status = task_landed(agent_name)
+        status = task_landed(agent_name, provider)
         if status in ("working", "done"):
             return
         if status == "blocked":
@@ -232,8 +243,8 @@ def submit_task(agent_name, task, attempts=2):
                 "Inspect its pane before retrying."
             )
     raise CaptainError(
-        f"{agent_name} did not start working after the task was submitted {attempts} times, "
-        "each followed by Enter. The task may still be an unsent draft in its input box; "
+        f"{agent_name} did not start working after the task was submitted {attempts} times. "
+        "The task may still be an unsent draft in its input box; "
         f"read the pane, then resend it with: herdr agent prompt {agent_name} '<task>'."
     )
 
@@ -271,23 +282,63 @@ def crew_status(agent_name, timeout):
             return status
         idle_polls = idle_polls + 1 if status == "idle" else 0
         if idle_polls >= WAIT_POLLS:
-            return "idle"
+            return "blocked" if choice_modal(agent_name) else "idle"
         if time.monotonic() >= deadline:
             return None
         time.sleep(WAIT_INTERVAL)
 
 
+def pane_lines(agent_name):
+    """The non-blank tail of the crew's pane, as stripped lines."""
+    output = herdr("agent", "read", agent_name, "--lines", str(TAIL_LINES), raw=True, timeout=10)
+    return [line.strip() for line in output.splitlines() if line.strip()]
+
+
+def modal_header(line):
+    """Whether a line above the option list is the modal's banner or question, not output.
+
+    Wrapped transcript text ends a sentence or carries a TUI glyph; a modal header is a
+    short standalone line.
+    """
+    if line.startswith(PANE_STATUS_BAR_PREFIXES):
+        return False
+    return line.endswith("?") or (len(line) <= 48 and not line.endswith((".", "!", ")")))
+
+
+def modal_start(lines):
+    """Index where a trailing native choice modal begins, or None when there is none."""
+    if not lines or not PANE_MODAL_CONFIRM.match(lines[-1]):
+        return None
+    window = range(max(len(lines) - PANE_MODAL_LINES, 0), len(lines) - 1)
+    options = [index for index in window if PANE_MODAL_OPTION.match(lines[index])]
+    if not options:
+        return None
+    start = options[0]
+    limit = max(start - PANE_MODAL_HEADER_LINES, 0)
+    while start > limit and modal_header(lines[start - 1]):
+        start -= 1
+    return start
+
+
+def choice_modal(agent_name):
+    """Whether the pane is showing a native choice modal, which reads as idle to Herdr."""
+    try:
+        return modal_start(pane_lines(agent_name)) is not None
+    except (CaptainError, subprocess.TimeoutExpired, OSError):
+        return False
+
+
 def pane_tail(agent_name):
     """The end of the crew's terminal output, for crew that recorded no report."""
     try:
-        output = herdr(
-            "agent", "read", agent_name, "--lines", str(TAIL_LINES), raw=True, timeout=10
-        )
+        lines = pane_lines(agent_name)
     except (CaptainError, subprocess.TimeoutExpired, OSError) as exc:
         return f"unreadable ({exc})"
-    lines = [line.strip() for line in output.splitlines() if line.strip()]
     if lines and "·" in lines[-1] and not lines[-1].startswith(PANE_STATUS_BAR_PREFIXES):
         lines = lines[:-1]
+    start = modal_start(lines)
+    if start is not None:
+        lines = lines[:start]
     lines = [
         line for line in lines if not PANE_RULE.match(line) and not PANE_EMPTY_PROMPT.match(line)
     ]
@@ -647,7 +698,7 @@ def create_crew(args, pane, project):
             # A new shell may still be in canonical mode: keep terminal input short.
             herdr("pane", "run", new_pane, '/bin/sh "$CAPTAIN_CREW_LAUNCHER"', expect_output=False)
             wait_for_crew(new_pane, provider, agent_name)
-            submit_task(agent_name, args.task)
+            submit_task(agent_name, args.task, provider)
             record["status"] = "started"
         except (CaptainError, subprocess.TimeoutExpired, OSError) as exc:
             record["status"] = "needs_attention"
