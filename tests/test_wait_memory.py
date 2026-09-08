@@ -87,9 +87,13 @@ class WaitCrewMemoryTests(unittest.TestCase):
 
     def test_completion_with_a_report_omits_the_pane_tail(self):
         printed = self.run_wait(["idle", "idle", "idle"], report="tests pass")
-        self.assertEqual(self.edges("completed"), ["idle; reported: tests pass"])
+        self.assertIn("idle; reported: tests pass", printed)
         self.assertEqual(self.edges("tail"), [])
         self.assertNotIn("pane tail", printed)
+
+    def test_completion_with_a_report_does_not_duplicate_the_report_text(self):
+        self.run_wait(["idle", "idle", "idle"], report="tests pass")
+        self.assertEqual(self.edges("completed"), ["idle; reported"])
 
     def test_completion_writes_exactly_once(self):
         self.run_wait(["idle", "idle", "idle"], report="tests pass")

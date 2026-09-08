@@ -430,13 +430,16 @@ def wait_crew(args, pane, project):
         printed = (
             f"{entry}; pane tail: {pane_tail(crew['agent'])}" if status == "blocked" else entry
         )
+        # The report text already lives on its own "report" edge; don't duplicate it here.
+        completed = f"{status}; reported"
     else:
         tail = pane_tail(crew["agent"])
         # Kept short: the full tail already went to stdout, this is just a debugging breadcrumb.
         add_memory(directory / "graph.json", display_name, "tail", truncate_label(tail))
         entry = f"{status}; no report recorded"
         printed = f"{entry}; pane tail: {tail}"
-    add_memory(directory / "graph.json", display_name, "completed", entry[:8000])
+        completed = entry
+    add_memory(directory / "graph.json", display_name, "completed", completed[:8000])
     print(f"{display_name} {status}.")
     print(printed)
 
