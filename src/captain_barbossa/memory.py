@@ -101,8 +101,7 @@ def write_text(path, text):
             os.fsync(file.fileno())
         os.replace(name, path)
     finally:
-        if os.path.exists(name):
-            os.unlink(name)
+        Path(name).unlink(missing_ok=True)
 
 
 def write_json(path, data):
@@ -112,11 +111,9 @@ def write_json(path, data):
 @contextmanager
 def lock(path):
     path.parent.mkdir(parents=True, exist_ok=True)
-    if not path.exists():
-        fd = os.open(str(path), os.O_CREAT | os.O_WRONLY, 0o600)
-        os.close(fd)
-    else:
-        path.chmod(0o600)
+    fd = os.open(str(path), os.O_CREAT | os.O_WRONLY, 0o600)
+    os.close(fd)
+    path.chmod(0o600)
     with path.open("a") as file:
         fcntl.flock(file, fcntl.LOCK_EX)
         yield

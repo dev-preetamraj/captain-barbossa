@@ -576,14 +576,13 @@ def choose_split(args, pane, placement, crew_panes, meta=None):
     crew_tabs = None
     pane_to_tab = {}
     if meta:
-        crew_tabs = {
-            crew["tab"]
-            for crew in meta["crew"].values()
-            if crew.get("tab") and crew.get("status") != "dismissed"
-        }
+        crew_tabs = set()
         for crew in meta["crew"].values():
-            if crew.get("pane") and crew.get("tab") and crew.get("status") != "dismissed":
-                pane_to_tab[crew["pane"]] = crew["tab"]
+            if crew.get("status") != "dismissed":
+                if crew.get("tab"):
+                    crew_tabs.add(crew["tab"])
+                if crew.get("pane") and crew.get("tab"):
+                    pane_to_tab[crew["pane"]] = crew["tab"]
 
     if args.split_pane == "auto":
         return auto_split(
