@@ -19,6 +19,10 @@ class ChildMemoryRootTests(unittest.TestCase):
         self.project.mkdir()
         self.home = self.root / "home"
         self.home.mkdir()
+        self.state_root = self.root / "state"
+        self.state_root.mkdir()
+        self.temp_root = self.root / "temp"
+        self.temp_root.mkdir()
         self.pane = {"workspace_id": "w1", "tab_id": "w1:t1", "pane_id": "w1:p1"}
         self.enterContext(
             patch.dict(
@@ -28,6 +32,8 @@ class ChildMemoryRootTests(unittest.TestCase):
                     "HERDR_WORKSPACE_ID": "w1",
                     "HERDR_TAB_ID": "w1:t1",
                     "HERDR_PANE_ID": "w1:p1",
+                    "CAPTAIN_STATE_ROOT": str(self.state_root),
+                    "CAPTAIN_TEMP_ROOT": str(self.temp_root),
                 },
                 clear=True,
             )
