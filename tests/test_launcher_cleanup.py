@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from captain_barbossa import agents, cli, memory, runtime
+from captain_barbossa import agents, cli, memory
 
 
 class LauncherCleanupTests(unittest.TestCase):
@@ -59,25 +59,6 @@ class LauncherCleanupTests(unittest.TestCase):
 
         with patch.object(agents, "herdr", return_value={}):
             agents.dismiss_crew(self.args("dismiss", "jack"), self.pane, self.project)
-        self.assertFalse(launcher.exists())
-
-    def test_failed_startup_deletes_the_crew_launcher_script(self):
-        create_args = self.args(
-            "crew", "jack", "--agent", "codex", "--task", "build", "--placement", "tab"
-        )
-
-        def api(*call, **_):
-            if call[:2] == ("pane", "run"):
-                raise runtime.CaptainError("agent_not_ready")
-            return {"root_pane": {"pane_id": "w1:p6"}, "tab_id": "w1:t9"}
-
-        with (
-            patch.object(agents, "herdr", side_effect=api),
-            patch.object(agents, "executable", return_value="/bin/codex"),
-        ):
-            with self.assertRaisesRegex(runtime.CaptainError, "pane was preserved"):
-                agents.create_crew(create_args, self.pane, self.project)
-        launcher = self.directory / "crew-jack.sh"
         self.assertFalse(launcher.exists())
 
 

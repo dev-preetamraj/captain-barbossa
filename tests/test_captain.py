@@ -1242,6 +1242,7 @@ class CaptainFlowTests(unittest.TestCase):
                 agents.create_crew(args, self.pane, self.project)
         saved = memory.read_json(self.directory / "session.json")
         self.assertEqual(saved["crew"]["jack"]["status"], "needs_attention")
+        self.assertFalse((self.directory / "crew-jack.sh").exists())
 
     def test_startup_waits_for_the_expected_native_agent(self):
         states = [
@@ -2340,7 +2341,9 @@ class CaptainFlowTests(unittest.TestCase):
         self.assertIn("Jack blocked.", printed)
         self.assertIn("reported: partial", printed)
         self.assertIn("pane tail: Do you want to proceed?", printed)
-        self.assertEqual(len(self.completions()), 1)
+        # The tail is shown to the captain but not persisted, since a report already was.
+        self.assertEqual(self.completions(), ["blocked; reported: partial"])
+        self.assertEqual(self.tails(), [])
 
     def test_wait_times_out_without_recording_a_completion(self):
         self.wait_crew_record()

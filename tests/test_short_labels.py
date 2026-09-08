@@ -11,6 +11,32 @@ from pathlib import Path
 from captain_barbossa import memory
 
 
+class TruncateLabelTests(unittest.TestCase):
+    def test_truncate_label_short(self):
+        short = "This is a short label"
+        self.assertEqual(memory.truncate_label(short), short)
+        self.assertEqual(memory.truncate_label(short, maxlen=300), short)
+
+    def test_truncate_label_at_boundary(self):
+        label = "x" * 300
+        self.assertEqual(memory.truncate_label(label, maxlen=300), label)
+        self.assertEqual(len(memory.truncate_label(label, maxlen=300)), 300)
+
+    def test_truncate_label_over_limit(self):
+        long_label = "x" * 350
+        truncated = memory.truncate_label(long_label, maxlen=300)
+        self.assertEqual(len(truncated), 300)
+        self.assertTrue(truncated.endswith("..."))
+        self.assertEqual(truncated, "x" * 297 + "...")
+
+    def test_truncate_label_custom_maxlen(self):
+        long_label = "abcdefghij" * 20
+        truncated = memory.truncate_label(long_label, maxlen=50)
+        self.assertEqual(len(truncated), 50)
+        self.assertTrue(truncated.endswith("..."))
+        self.assertEqual(truncated[:47], long_label[:47])
+
+
 class ShortLabelTests(unittest.TestCase):
     def setUp(self):
         self.root = Path(tempfile.mkdtemp())

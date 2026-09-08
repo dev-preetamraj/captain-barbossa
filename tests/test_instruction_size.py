@@ -1,12 +1,8 @@
-import contextlib
-import io
-import os
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
 
-from captain_barbossa import agents, cli, memory
+from captain_barbossa import agents
 
 
 class InstructionSizeTests(unittest.TestCase):
@@ -44,82 +40,6 @@ class InstructionSizeTests(unittest.TestCase):
             text = agents.agent_instructions(self.directory, role)
             query_line = next(line for line in text.splitlines() if "memory query" in line)
             self.assertIn("if Graphify is installed", query_line)
-
-
-class WaitCrewBlockedTailTests(unittest.TestCase):
-    """Regression tests for wait_crew showing the pane tail on a blocked status."""
-
-    def setUp(self):
-        self.root = Path(self.enterContext(tempfile.TemporaryDirectory())).resolve()
-        self.project = self.root / "project"
-        self.project.mkdir()
-        self.enterContext(
-            patch.dict(
-                os.environ,
-                {
-                    "CAPTAIN_MEMORY_ROOT": str(self.root / "state"),
-                    "CAPTAIN_PROJECT": str(self.project),
-                    "HERDR_WORKSPACE_ID": "w1",
-                    "HERDR_TAB_ID": "w1:t1",
-                    "HERDR_PANE_ID": "w1:p1",
-                },
-            )
-        )
-        self.pane = {"workspace_id": "w1", "tab_id": "w1:t1", "pane_id": "w1:p1"}
-        self.directory, self.meta = memory.session(self.project, self.pane, create=True)
-        self.enterContext(contextlib.redirect_stdout(io.StringIO()))
-        agent_name = f"c-{self.meta['id'][:8]}-jack"
-        self.meta["crew"] = {
-            "jack": {
-                "id": "jack",
-                "name": "Jack",
-                "agent": agent_name,
-                "provider": "claude",
-                "pane": "w1:p2",
-                "tab": "w1:t1",
-                "status": "started",
-            }
-        }
-        memory.write_json(self.directory / "session.json", self.meta)
-
-    def args(self, *args):
-        return cli.parser().parse_args(["--session", self.meta["id"], *args])
-
-    def wait_api(self, tail, report):
-        def api(*call, **kwargs):
-            if call[:2] == ("agent", "get"):
-                memory.add_memory(self.directory / "graph.json", "Jack", "report", report)
-                return {"agent": {"agent_status": "blocked"}}
-            if call[:2] == ("agent", "read"):
-                return tail
-            raise AssertionError(f"unexpected herdr call: {call}")
-
-        return api
-
-    def edges(self, relation):
-        graph = memory.read_json(self.directory / "graph.json")
-        labels = {node["id"]: node["label"] for node in graph["nodes"]}
-        return [
-            labels[link["target"]]
-            for link in graph["links"]
-            if link["relation"] == relation and labels[link["source"]] == "Jack"
-        ]
-
-    def test_blocked_with_a_report_still_prints_the_pane_tail(self):
-        with (
-            patch.object(
-                agents, "herdr", side_effect=self.wait_api("needs approval", "tests pass")
-            ),
-            patch.object(agents.time, "sleep"),
-            contextlib.redirect_stdout(io.StringIO()) as output,
-        ):
-            agents.wait_crew(self.args("wait", "Jack", "--timeout", "60"), self.pane, self.project)
-        printed = output.getvalue()
-        self.assertIn("reported: tests pass", printed)
-        self.assertIn("pane tail: needs approval", printed)
-        # The tail is shown to the captain but not persisted, since a report already was.
-        self.assertEqual(self.edges("tail"), [])
-        self.assertEqual(self.edges("completed"), ["blocked; reported: tests pass"])
 
 
 if __name__ == "__main__":
