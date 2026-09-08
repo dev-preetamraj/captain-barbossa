@@ -7,6 +7,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 import uuid
@@ -61,11 +62,25 @@ def temp_root():
     )
 
 
+_warned_temp_state_root = False
+
+
 def state_root():
     """Durable root for project-scope graph.json; survives OS temp cleanup."""
     xdg = os.environ.get("XDG_STATE_HOME")
     base = Path(xdg).expanduser() if xdg else Path.home() / ".local" / "state"
-    return _root("CAPTAIN_STATE_ROOT", str(base / "captain-barbossa"))
+    root = _root("CAPTAIN_STATE_ROOT", str(base / "captain-barbossa"))
+    global _warned_temp_state_root
+    if not _warned_temp_state_root and root.is_relative_to(Path(tempfile.gettempdir())):
+        # A captain launched before the state/temp split exported one root into its
+        # children, so the "durable" graph lands where the OS reclaims it.
+        _warned_temp_state_root = True
+        print(
+            f"captain: durable memory root {root} is inside the OS temp directory; "
+            "restart the captain so project memory outlives temp cleanup.",
+            file=sys.stderr,
+        )
+    return root
 
 
 def rooted_storage(root, project):
@@ -83,6 +98,40 @@ def storage(project):
 
 def state_storage(project):
     return rooted_storage(state_root(), project)
+
+
+def migrate_project_graph(project):
+    """Copy a pre-split project graph from the temp root into the state root, once."""
+    source = storage(project) / "graph.json"
+    if not source.is_file():
+        return
+    destination = state_storage(project) / "graph.json"
+    if source == destination or destination.exists():
+        return
+    with lock(destination.parent / "graph.lock"):
+        if not destination.exists():
+            shutil.copyfile(source, destination)
+            destination.chmod(0o600)
+
+
+def backfill_terminal_id(directory, pane):
+    """Record the Herdr terminal ID on a captain.json written before it was tracked.
+
+    Without it prune_sessions cannot tell a live pre-fix captain from a dead one.
+    Crew run the same commands, so only the captain's own pane may claim it.
+    """
+    path = directory / "captain.json"
+    terminal_id = pane.get("terminal_id")
+    if not terminal_id or not path.is_file():
+        return
+    try:
+        data = read_json(path)
+    except CaptainError:
+        return
+    if not isinstance(data, dict) or data.get("terminal_id"):
+        return
+    if data.get("pane") == pane["pane_id"]:
+        write_json(path, {**data, "terminal_id": terminal_id})
 
 
 def read_json(path):
@@ -208,6 +257,11 @@ def session(project, pane, session_id=None, create=False):
                 "crew": {},
             }
             write_json(meta_path, meta)
+        backfill_terminal_id(directory, pane)
+    try:
+        migrate_project_graph(project)
+    except (CaptainError, OSError):
+        pass  # migration is housekeeping; never block a command on it
     return directory, meta
 
 

@@ -207,6 +207,25 @@ class PruneTests(unittest.TestCase):
         execute.assert_called_once()
         self.assertTrue(blocked.is_dir())
 
+    def test_backfills_a_missing_captain_terminal_id_from_the_captain_pane(self):
+        directory = self.make_session("a" * 32, 30, captain_pane="w1:p1")
+        memory.session(self.project, dict(self.pane, terminal_id="term_live"), "a" * 32)
+        self.assertEqual(memory.session_terminal_id(directory), "term_live")
+
+        stamp = time.time() - 30 * 86400
+        for path in (*directory.rglob("*"), directory):
+            os.utime(path, (stamp, stamp))
+        live = agent_list({"pane_id": "w1:p1", "agent": "claude", "terminal_id": "term_live"})
+        with patch.object(memory, "herdr", return_value=live):
+            self.assertEqual(memory.prune_sessions(self.project, days=7), [])
+        self.assertTrue(directory.is_dir())
+
+    def test_crew_pane_never_claims_the_captain_terminal_id(self):
+        directory = self.make_session("a" * 32, 30, captain_pane="w1:p4")
+        crew = dict(self.pane, pane_id="w1:p9", terminal_id="term_crew")
+        memory.session(self.project, crew, "a" * 32)
+        self.assertIsNone(memory.session_terminal_id(directory))
+
     def test_launch_records_captain_terminal_id(self):
         pane = dict(self.pane, terminal_id="term_captain")
         args = cli.parser().parse_args(["--agent", "claude"])

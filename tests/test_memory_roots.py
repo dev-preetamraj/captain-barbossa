@@ -46,6 +46,47 @@ class MemoryRootTests(unittest.TestCase):
             self.assertEqual(memory.state_root(), override)
             self.assertEqual(memory.temp_root(), override)
 
+    def test_warns_once_when_the_state_root_sits_inside_os_temp(self):
+        stderr = io.StringIO()
+        with (
+            self.clean_env(CAPTAIN_STATE_ROOT=str(Path(tempfile.gettempdir()) / "captain-test")),
+            patch.object(memory, "_warned_temp_state_root", False),
+            contextlib.redirect_stderr(stderr),
+        ):
+            memory.state_root()
+            memory.state_root()
+        self.assertEqual(stderr.getvalue().count("inside the OS temp directory"), 1)
+
+        quiet = io.StringIO()
+        with (
+            self.clean_env(),
+            patch.object(memory, "_warned_temp_state_root", False),
+            contextlib.redirect_stderr(quiet),
+        ):
+            memory.state_root()
+        self.assertEqual(quiet.getvalue(), "")
+
+    def test_session_migrates_a_legacy_project_graph_out_of_the_temp_root(self):
+        env = {
+            "CAPTAIN_TEMP_ROOT": str(self.root / "temp"),
+            "CAPTAIN_STATE_ROOT": str(self.root / "state"),
+        }
+        with self.clean_env(**env):
+            legacy = memory.storage(self.project) / "graph.json"
+            memory.add_memory(legacy, "project", "uses", "Python")
+            _, meta = memory.session(self.project, self.pane, create=True)
+            migrated = memory.state_storage(self.project) / "graph.json"
+            self.assertIn("Python", migrated.read_text())
+            self.assertEqual(migrated.stat().st_mode & 0o777, 0o600)
+
+            # a state root that already holds a graph is never overwritten
+            memory.add_memory(migrated, "project", "runs", "unittest")
+            memory.add_memory(legacy, "project", "uses", "Rust")
+            memory.session(self.project, self.pane, meta["id"])
+            text = migrated.read_text()
+        self.assertIn("unittest", text)
+        self.assertNotIn("Rust", text)
+
     def test_state_storage_rejects_root_inside_project(self):
         with self.clean_env(CAPTAIN_MEMORY_ROOT=str(self.project / ".memory")):
             with self.assertRaisesRegex(CaptainError, "outside the project"):
