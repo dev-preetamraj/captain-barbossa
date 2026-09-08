@@ -2187,7 +2187,7 @@ class CaptainFlowTests(unittest.TestCase):
         self.wait_crew_record()
         printed, _ = self.run_wait(["working", "idle", "idle", "idle"], report="tests pass")
         self.assertEqual(printed, "Jack idle.\nidle; reported: tests pass\n")
-        self.assertEqual(self.completions(), ["idle; reported: tests pass"])
+        self.assertEqual(self.completions(), ["idle; reported"])
         self.assertNotIn("pane tail", printed)
 
     def test_wait_records_the_pane_tail_when_the_crew_wrote_no_report(self):
@@ -2342,7 +2342,7 @@ class CaptainFlowTests(unittest.TestCase):
         self.assertIn("reported: partial", printed)
         self.assertIn("pane tail: Do you want to proceed?", printed)
         # The tail is shown to the captain but not persisted, since a report already was.
-        self.assertEqual(self.completions(), ["blocked; reported: partial"])
+        self.assertEqual(self.completions(), ["blocked; reported"])
         self.assertEqual(self.tails(), [])
 
     def test_wait_times_out_without_recording_a_completion(self):
