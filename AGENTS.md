@@ -30,8 +30,10 @@ Key facts:
 
 - Herdr is driven only through `herdr` subprocesses in `runtime.herdr`, which
   validates the JSON response. Never shell out to Herdr elsewhere.
-- Memory lives under `<OS temp>/captain-barbossa-<uid>/<project hash>/`, never in
-  the checkout. `graph.json` there is project scope; `sessions/<id>/` is session scope.
+- Memory lives outside the checkout, split by durability: project-scope `graph.json`
+  under `~/.local/state/captain-barbossa/<project hash>/` (or `$XDG_STATE_HOME`),
+  session-scope `sessions/<id>/` under `<OS temp>/captain-barbossa-<uid>/<project hash>/`.
+  `CAPTAIN_MEMORY_ROOT` overrides both roots at once.
 - Crew share one checkout. Generated instructions carry the editing contract
   (disjoint files, re-read before edit, stage only owned hunks). Nothing locks files.
 - Generated instructions are token-budgeted. Every added line costs context in every

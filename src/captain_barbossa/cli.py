@@ -7,7 +7,7 @@ import sys
 
 from . import __version__
 from .agents import WAIT_TIMEOUT, create_crew, dismiss_crew, focus_crew, launch, wait_crew
-from .memory import memory, project_root
+from .memory import PRUNE_DAYS, memory, project_root
 from .runtime import CaptainError, current_pane
 
 
@@ -76,7 +76,18 @@ def parser():
     query.add_argument("question")
     show = actions.add_parser("show", help="show session and project memory relationships")
     show.add_argument("--json", action="store_true", help="show the full raw graph instead")
+    show.add_argument(
+        "--all", action="store_true", help="show every link instead of the most recent 25"
+    )
     actions.add_parser("path", help="print this session's memory directory")
+    prune = actions.add_parser("prune", help="remove finished sessions' memory directories")
+    prune.add_argument(
+        "--older-than",
+        type=float,
+        default=PRUNE_DAYS,
+        metavar="DAYS",
+        help=f"age in days a session must exceed to be removed (default {PRUNE_DAYS})",
+    )
     return root
 
 

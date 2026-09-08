@@ -8,11 +8,12 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
 
-from .runtime import CaptainError, executable
+from .runtime import CaptainError, executable, herdr
 
 
 def project_root():
@@ -45,23 +46,43 @@ def private_dir(path):
     return path
 
 
-def storage(project):
-    project = project.resolve()
-    root = (
-        Path(
-            os.environ.get(
-                "CAPTAIN_MEMORY_ROOT",
-                str(Path(tempfile.gettempdir()) / f"captain-barbossa-{os.getuid()}"),
-            )
-        )
-        .expanduser()
-        .absolute()
+def _root(env_var, default):
+    # CAPTAIN_STATE_ROOT/CAPTAIN_TEMP_ROOT let a launched child pin the exact roots its
+    # parent resolved, so a default (no CAPTAIN_MEMORY_ROOT) parent doesn't get collapsed
+    # onto one root when re-resolving XDG_STATE_HOME/tempfile defaults in the child's env.
+    value = os.environ.get(env_var, os.environ.get("CAPTAIN_MEMORY_ROOT", default))
+    return Path(value).expanduser().absolute()
+
+
+def temp_root():
+    """Ephemeral root for session data; the OS may reclaim it between reboots."""
+    return _root(
+        "CAPTAIN_TEMP_ROOT", str(Path(tempfile.gettempdir()) / f"captain-barbossa-{os.getuid()}")
     )
+
+
+def state_root():
+    """Durable root for project-scope graph.json; survives OS temp cleanup."""
+    xdg = os.environ.get("XDG_STATE_HOME")
+    base = Path(xdg).expanduser() if xdg else Path.home() / ".local" / "state"
+    return _root("CAPTAIN_STATE_ROOT", str(base / "captain-barbossa"))
+
+
+def rooted_storage(root, project):
+    project = project.resolve()
     if root.resolve().is_relative_to(project):
-        raise CaptainError("CAPTAIN_MEMORY_ROOT must be outside the project repository.")
+        raise CaptainError("Memory root must be outside the project repository.")
     private_dir(root)
     project_id = hashlib.sha256(os.fsencode(project)).hexdigest()
     return private_dir(root / project_id)
+
+
+def storage(project):
+    return rooted_storage(temp_root(), project)
+
+
+def state_storage(project):
+    return rooted_storage(state_root(), project)
 
 
 def read_json(path):
@@ -71,12 +92,11 @@ def read_json(path):
         raise CaptainError(f"Cannot read memory at {path}: {exc}") from exc
 
 
-def write_json(path, data):
+def write_text(path, text):
     fd, name = tempfile.mkstemp(prefix=".captain-", dir=path.parent)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as file:
-            json.dump(data, file, ensure_ascii=False, indent=2)
-            file.write("\n")
+            file.write(text)
             file.flush()
             os.fsync(file.fileno())
         os.replace(name, path)
@@ -85,8 +105,18 @@ def write_json(path, data):
             os.unlink(name)
 
 
+def write_json(path, data):
+    write_text(path, json.dumps(data, ensure_ascii=False, indent=2) + "\n")
+
+
 @contextmanager
 def lock(path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if not path.exists():
+        fd = os.open(str(path), os.O_CREAT | os.O_WRONLY, 0o600)
+        os.close(fd)
+    else:
+        path.chmod(0o600)
     with path.open("a") as file:
         fcntl.flock(file, fcntl.LOCK_EX)
         yield
@@ -96,6 +126,36 @@ def empty_graph():
     return {"directed": True, "multigraph": True, "graph": {}, "nodes": [], "links": []}
 
 
+LABEL_LIMIT = 300
+
+
+def truncate_label(label, maxlen=LABEL_LIMIT):
+    """Truncate label to maxlen chars with ellipsis if needed."""
+    if len(label) <= maxlen:
+        return label
+    return label[: maxlen - 3] + "..."
+
+
+def note_name(label):
+    return hashlib.sha256(label.encode("utf-8")).hexdigest()[:12] + ".txt"
+
+
+def store_label(path, label):
+    """Cap a stored label, spilling the full text to a note file beside the graph.
+
+    Long labels drown Graphify keyword queries and cost context in every `memory show`;
+    the marker keeps the full text one file read away.
+    """
+    if len(label) <= LABEL_LIMIT:
+        return label
+    name = note_name(label)
+    marker = f" see notes/{name}"
+    note = private_dir(path.parent / "notes") / name
+    if not note.exists():
+        write_text(note, label)
+    return truncate_label(label, LABEL_LIMIT - len(marker)) + marker
+
+
 def add_memory(path, subject, relation, target):
     for text in (subject, relation, target):
         if not text.strip() or len(text) > 8000 or "\x00" in text:
@@ -103,7 +163,7 @@ def add_memory(path, subject, relation, target):
     with lock(path.with_suffix(".lock")):
         graph = read_json(path) if path.exists() else empty_graph()
         ids = []
-        for label in (subject, target):
+        for label in (store_label(path, subject), store_label(path, target)):
             node_id = hashlib.sha256(f"{path}:{label}".encode()).hexdigest()
             ids.append(node_id)
             if not any(node["id"] == node_id for node in graph["nodes"]):
@@ -121,13 +181,16 @@ def add_memory(path, subject, relation, target):
         write_json(path, graph)
 
 
+SESSION_ID = re.compile(r"[a-f0-9]{32}")
+
+
 def session(project, pane, session_id=None, create=False):
     project = project.resolve()
     if session_id is None:
         if not create:
             raise CaptainError("Start captain first, or pass --session <id>.")
         session_id = uuid.uuid4().hex
-    if not re.fullmatch(r"[a-f0-9]{32}", session_id):
+    if not SESSION_ID.fullmatch(session_id):
         raise CaptainError("Invalid captain session ID.")
     base = storage(project)
     directory = base / "sessions" / session_id
@@ -151,14 +214,33 @@ def session(project, pane, session_id=None, create=False):
     return directory, meta
 
 
+def project_and_session_graphs(directory):
+    """Read the project-scope and session-scope graphs backing `directory` separately.
+
+    directory is <temp_root>/<project_id>/sessions/<id>; project-scope data lives
+    under the same project_id in the (possibly different) durable state root.
+    """
+    project_id = directory.parent.parent.name
+    project_path = state_root() / project_id / "graph.json"
+    session_path = directory / "graph.json"
+    project_graph = read_json(project_path) if project_path.exists() else empty_graph()
+    session_graph = read_json(session_path) if session_path.exists() else empty_graph()
+    return project_graph, session_graph
+
+
 @contextmanager
 def memory_snapshot(directory):
+    # Clean up any stray query-* directories from interrupted previous runs
+    for item in directory.iterdir():
+        if item.is_dir() and item.name.startswith("query-"):
+            shutil.rmtree(item, ignore_errors=True)
     combined = empty_graph()
-    for path in (directory.parent.parent / "graph.json", directory / "graph.json"):
-        if path.exists():
-            graph = read_json(path)
-            combined["nodes"].extend(graph["nodes"])
-            combined["links"].extend(graph["links"])
+    for graph in project_and_session_graphs(directory):
+        combined["nodes"].extend(graph["nodes"])
+        combined["links"].extend(graph["links"])
+    # Truncate labels in snapshot for graphify query to prevent keyword-BFS on long labels
+    for node in combined["nodes"]:
+        node["label"] = truncate_label(node["label"])
     # Each reader gets its own snapshot so concurrent Graphify queries cannot replace it.
     out = Path(tempfile.mkdtemp(prefix="query-", dir=directory))
     try:
@@ -166,14 +248,123 @@ def memory_snapshot(directory):
         write_json(out / "graph.json", combined)
         yield out
     finally:
-        shutil.rmtree(out)
+        shutil.rmtree(out, ignore_errors=True)
+
+
+SHOW_LIMIT = 25
+
+
+def _scoped_rows(graph, scope):
+    labels = {node["id"]: truncate_label(node["label"]) for node in graph["nodes"]}
+    return [
+        (scope, labels[link["source"]], link["relation"], labels[link["target"]])
+        for link in reversed(graph["links"])
+    ]
+
+
+def show_memory(directory, show_all):
+    project_graph, session_graph = project_and_session_graphs(directory)
+    rows = _scoped_rows(session_graph, "session") + _scoped_rows(project_graph, "project")
+    if not show_all:
+        rows = rows[:SHOW_LIMIT]
+    print("Memory (subject, relation, object):")
+    for scope, subject, relation, target in rows:
+        print(f"[{scope}] " + json.dumps([subject, relation, target], ensure_ascii=False))
+
+
+PRUNE_DAYS = 7
+
+
+def newest_mtime(directory):
+    newest = directory.stat().st_mtime
+    for path in directory.rglob("*"):
+        try:
+            newest = max(newest, path.lstat().st_mtime)
+        except OSError:
+            continue
+    return newest
+
+
+def live_agents():
+    """Pane IDs and agent names Herdr reports, or None when Herdr cannot be reached."""
+    try:
+        agents = herdr("agent", "list", timeout=10).get("agents") or []
+    except (CaptainError, OSError, subprocess.TimeoutExpired):
+        return None
+    return (
+        {agent.get("pane_id") for agent in agents if agent.get("pane_id")},
+        {agent.get("name") for agent in agents if agent.get("name")},
+    )
+
+
+def session_panes(directory):
+    panes = set()
+    for name in ("captain.json", "session.json"):
+        path = directory / name
+        if not path.is_file():
+            continue
+        try:
+            data = read_json(path)
+        except CaptainError:
+            continue
+        if isinstance(data, dict):
+            if isinstance(data.get("pane"), str):
+                panes.add(data["pane"])
+            crew = data.get("crew")
+            if isinstance(crew, dict):
+                panes.update(
+                    record["pane"]
+                    for record in crew.values()
+                    if isinstance(record, dict) and isinstance(record.get("pane"), str)
+                )
+    return panes
+
+
+def prune_sessions(project, days=PRUNE_DAYS, current=None):
+    """Remove session directories older than `days` that hold no live Herdr agent.
+
+    Herdr being unreachable makes liveness unknowable, so the cutoff doubles rather
+    than guessing. Returns the directories removed.
+    """
+    sessions = storage(project) / "sessions"
+    if not sessions.is_dir():
+        return []
+    agents = live_agents()
+    cutoff = time.time() - days * 86400 * (2 if agents is None else 1)
+    removed = []
+    for directory in sorted(sessions.iterdir()):
+        if directory.is_symlink() or not directory.is_dir():
+            continue
+        if not SESSION_ID.fullmatch(directory.name) or directory.name == current:
+            continue
+        if newest_mtime(directory) >= cutoff:
+            continue
+        if agents is not None:
+            panes, names = agents
+            prefix = f"c-{directory.name[:8]}-"
+            if panes & session_panes(directory) or any(name.startswith(prefix) for name in names):
+                continue
+        shutil.rmtree(directory, ignore_errors=True)
+        if not directory.exists():
+            removed.append(directory)
+    return removed
 
 
 def memory(args, pane, project):
+    if args.memory_command == "prune":
+        removed = prune_sessions(project, args.older_than, args.session)
+        if not removed:
+            print(f"No session memory older than {args.older_than} days to prune.")
+        else:
+            noun = "directory" if len(removed) == 1 else "directories"
+            print(f"Pruned {len(removed)} session {noun}:")
+            for directory in removed:
+                print(f"  {directory}")
+        return
     directory, _ = session(project, pane, args.session)
     if args.memory_command == "add":
-        path = (directory.parent.parent if args.scope == "project" else directory) / "graph.json"
-        add_memory(path, args.subject, args.relation, args.target)
+        base = state_storage(project) if args.scope == "project" else directory
+        add_memory(base / "graph.json", args.subject, args.relation, args.target)
         print(f"Saved {args.scope} memory.")
     elif args.memory_command == "path":
         print(directory)
@@ -183,16 +374,7 @@ def memory(args, pane, project):
                 if args.json:
                     print((snapshot / "graph.json").read_text(encoding="utf-8"), end="")
                 else:
-                    graph = read_json(snapshot / "graph.json")
-                    labels = {node["id"]: node["label"] for node in graph["nodes"]}
-                    print("Memory (subject, relation, object):")
-                    for link in graph["links"]:
-                        print(
-                            json.dumps(
-                                [labels[link["source"]], link["relation"], labels[link["target"]]],
-                                ensure_ascii=False,
-                            )
-                        )
+                    show_memory(directory, args.all)
             else:
                 env = dict(os.environ, GRAPHIFY_OUT=str(snapshot), GRAPHIFY_QUERY_LOG_DISABLE="1")
                 result = subprocess.run(
@@ -202,8 +384,6 @@ def memory(args, pane, project):
                         args.question,
                         "--graph",
                         str(snapshot / "graph.json"),
-                        "--budget",
-                        "2000",
                     ],
                     cwd=snapshot,
                     env=env,

@@ -65,11 +65,13 @@ captain --session <session-id> focus Will
 
 Names are case-insensitive; crew IDs and registered Herdr agent names also work. Lookup uses only the current Captain session. Focusing switches to the crew's tab first when it differs from the captain's, follows the registered agent if its pane moves, and does not send input or interrupt its work. An unknown or ambiguous name reports the available choices; an exited or closed agent reports a focus error. Existing captains can use the command immediately when told to. Restart with `captain --session <session-id>` to load the new navigation instructions while retaining the crew roster.
 
-**Memory is a graph outside the repository.** Captain stores graph relationships and launch metadata here:
+**Memory is a graph outside the repository.** Captain stores graph relationships and launch metadata here, split so durable project facts survive OS temp cleanup while ephemeral session state does not:
 
 ```text
+~/.local/state/captain-barbossa/<hash of canonical project path>/
+  graph.json                      # explicitly saved project facts (--scope project)
+
 <OS temp>/captain-barbossa-<uid>/<hash of canonical project path>/
-  graph.json                      # explicitly saved project facts
   sessions/<session-id>/
     session.json                  # workspace and crew references
     captain.json
@@ -77,7 +79,7 @@ Names are case-insensitive; crew IDs and registered Herdr agent names also work.
     graph.json                    # only this session's memory
 ```
 
-Git repositories use their checkout root as project identity; other directories use the launch directory. New launches get new session IDs. Crew inherit their captain's project and session. Only explicitly saved project facts carry into other sessions. Directories are private to your OS user; graph updates use file locks and atomic replacement.
+`$XDG_STATE_HOME` is honored in place of `~/.local/state` when set. Git repositories use their checkout root as project identity; other directories use the launch directory. New launches get new session IDs. Crew inherit their captain's project and session. Only explicitly saved project facts carry into other sessions. Directories are private to your OS user; graph updates use file locks and atomic replacement.
 
 ```sh
 captain memory path
@@ -92,6 +94,21 @@ JSON line, preserving full values without graph IDs or metadata. Use
 `captain memory show --json` for the original raw graph format. Saved graphs and
 Graphify queries are unchanged.
 
+Session directories accumulate as sessions end, so `captain memory prune` removes
+those of finished sessions along with their launcher scripts:
+
+```sh
+captain memory prune
+captain memory prune --older-than 30
+```
+
+A session directory is removed when nothing in it has been touched for `--older-than`
+days (7 by default) and Herdr reports no live agent in its captain or crew panes. The
+current session, and the durable project-scope `graph.json`, are never removed. When
+Herdr cannot be reached, liveness is unknown, so only directories older than twice the
+cutoff are removed. Captain runs the same prune once at launch, silently and
+best-effort, so an unreachable Herdr or an unreadable directory never blocks startup.
+
 These commands run inside the launched agent's environment. From a separate Herdr shell in the same project/workspace, pass the session explicitly:
 
 ```sh
@@ -104,7 +121,7 @@ captain --session <session-id> --agent codex
 
 Graphify is optional for graph queries: install it with `uv tool install graphifyy` if needed. `memory query` invokes the installed `graphify query` against an isolated snapshot of project and current-session memory. Graphify output/cache goes into that temporary directory, query logging is disabled, and the snapshot is removed afterwards. No Graphify installation hooks, repo files, code extraction, API calls, or global graphs are configured by Captain. Graph relationships can still be added/read without Graphify.
 
-The OS may clear its temp folder. Set `CAPTAIN_MEMORY_ROOT` to another **outside-repo** location before starting Captain if you want different retention. Provider-native histories and credentials continue to use the providers' own storage.
+Set `CAPTAIN_MEMORY_ROOT` to another **outside-repo** location before starting Captain to redirect both the state and temp roots there (used for test isolation and custom retention). Provider-native histories and credentials continue to use the providers' own storage.
 
 **Development**
 
