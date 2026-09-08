@@ -384,6 +384,14 @@ class CaptainFlowTests(unittest.TestCase):
                 self.assertEqual(env["CAPTAIN_PROJECT"], str(self.project))
                 self.assertEqual(list(self.project.iterdir()), [])
 
+    def test_native_args_disables_claude_attribution_only(self):
+        claude_args = agents.native_args("claude", "instructions")
+        self.assertIn("--settings", claude_args)
+        settings = json.loads(claude_args[claude_args.index("--settings") + 1])
+        self.assertEqual(settings, {"attribution": {"commit": "", "pr": "", "sessionUrl": False}})
+        codex_args = agents.native_args("codex", "instructions")
+        self.assertNotIn("--settings", codex_args)
+
     def test_captain_requires_an_agent_selection(self):
         for provider in ("claude", "codex"):
             with (

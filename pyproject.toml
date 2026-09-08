@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "captain-barbossa"
-version = "0.9.3"
+version = "0.9.4"
 description = "Launch a native captain and crew inside a Herdr workspace"
 readme = "README.md"
 license = "MIT"
