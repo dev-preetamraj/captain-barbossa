@@ -176,6 +176,17 @@ class CaptainFlowTests(unittest.TestCase):
         self.assertIn("Decline clearly wrong commands", instructions)
         self.assertIn("Never type over the user's draft in the captain pane", instructions)
 
+    def test_instructions_require_captain_to_delegate_user_tasks_to_new_crew(self):
+        rule = (
+            "When the user asks you to do a task, recruit new crew and assign it "
+            "instead of doing it yourself; do it yourself only if the user explicitly "
+            "says to, with no new crew."
+        )
+        captain = " ".join(agents.agent_instructions(self.directory, "Captain Barbossa").split())
+        self.assertIn(rule, captain)
+        crew = " ".join(agents.agent_instructions(self.directory, "crew member Gibbs").split())
+        self.assertNotIn(rule, crew)
+
     def test_instructions_keep_crew_prompts_short(self):
         instructions = " ".join(agents.agent_instructions(self.directory, "captain").split())
         crew_command = instructions.index("--placement pane|tab")

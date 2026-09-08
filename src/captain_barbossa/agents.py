@@ -70,7 +70,10 @@ Then print the same report as your final message. Going idle is your done signal
 never go idle mid-assignment; if you are truly blocked, record and report that instead.
 """
         if role.startswith("crew member ")
-        else """You manage crew. Crew recruiting ruleset, for EVERY creation:
+        else """You manage crew. When the user asks you to do a task, recruit new crew
+and assign it instead of doing it yourself; do it yourself only if the user
+explicitly says to, with no new crew.
+Crew recruiting ruleset, for EVERY creation:
 Crew names are first names, or a character's only known name (e.g. Gibbs); never a
 surname. Barbossa stays reserved for the captain.
 Recruit with no questions when the user states no preference. Defaults: --agent is
