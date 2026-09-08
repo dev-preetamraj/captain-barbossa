@@ -23,7 +23,7 @@ src/captain_barbossa/
   runtime.py   herdr subprocess wrapper, JSON validation, current pane discovery
   prompts.py   keyboard selectors for agent and placement choices
 tests/         unittest suite; Herdr and model sessions are mocked, a real PTY is used
-docs/          plan.md is current scope; archive/ is historical design only
+docs/          plan.md is current scope
 ```
 
 Key facts:

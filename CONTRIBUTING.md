@@ -98,7 +98,7 @@ checklist. Maintainers should merge only after the CI checks pass.
 
 Keep runtime state outside the repository, preserve native agent permissions,
 and ask the user for missing agent and pane/tab choices. Follow the current
-[plan](docs/plan.md); the archived UI proposals are design history.
+[plan](docs/plan.md).
 
 When changing dependencies, use `uv add` (or `uv add --dev`) and commit both
 `pyproject.toml` and `uv.lock`. Validate packaging changes with `uv build`.

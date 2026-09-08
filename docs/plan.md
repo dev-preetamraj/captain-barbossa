@@ -7,6 +7,6 @@ The current implementation follows the Herdr-only flow in [README.md](../README.
 - Focus existing crew by name with `captain focus Jack`, including natural-language navigation requests to the captain.
 - Store graph memory outside the repo, separated by canonical project path and Captain session. Query it using the installed Graphify CLI.
 
-There is no custom terminal UI, tmux layer, chat server, or background orchestration daemon. The earlier images and [original plan](archive/plan-v1.md) are historical design artifacts, not current requirements.
+There is no custom terminal UI, tmux layer, chat server, or background orchestration daemon.
 
 The native agents use the small CLI commands through their existing tools. Follow-up scheduling, automatic integration of parallel edits, and provider transcript resume are outside this first implementation. See the README for exact behavior, setup, memory retention, and verification limits.

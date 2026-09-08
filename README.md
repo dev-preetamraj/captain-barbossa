@@ -158,13 +158,10 @@ captain-barbossa/
 │   ├── test_captain.py          # flow, storage, and package invocation checks
 │   └── test_prompts.py          # real selector key handling
 └── docs/
-    ├── plan.md                 # current implementation scope
-    └── archive/
-        ├── plan-v1.md          # original UI proposal
-        └── assets/             # preserved UI concepts and prompts
+    └── plan.md                 # current implementation scope
 ```
 
-See the [current plan](docs/plan.md) for scope and the [archived proposal](docs/archive/plan-v1.md) for design history. Runtime memory stays outside this tree.
+See the [current plan](docs/plan.md) for scope. Runtime memory stays outside this tree.
 
 Checks cover agent, placement, direction, and split-pane choices across tabs, both Herdr creation paths, cross-tab focus, readiness and failure preservation, memory isolation, concurrent graph writes, corruption handling, and package invocation outside the checkout. A real pseudo-terminal check verifies that long instructions reach a stand-in native executable intact; a real Graphify query runs when installed. Herdr mutations and model sessions are mocked in automated tests; live native CLI startup still needs manual qualification.
 
