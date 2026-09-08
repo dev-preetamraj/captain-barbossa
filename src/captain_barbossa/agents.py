@@ -17,8 +17,8 @@ from .runtime import CaptainError, executable, herdr
 
 # One word each: the roster name is the crew ID, the display name, and the agent suffix.
 CREW_NAMES = (
-    "sparrow",
-    "turner",
+    "jack",
+    "will",
     "elizabeth",
     "gibbs",
     "anamaria",
@@ -28,7 +28,7 @@ CREW_NAMES = (
     "marty",
     "tia",
     "davy",
-    "feng",
+    "sao",
 )
 
 POLL_INTERVAL = 0.2
@@ -71,6 +71,8 @@ never go idle mid-assignment; if you are truly blocked, record and report that i
 """
         if role.startswith("crew member ")
         else """You manage crew. Crew recruiting ruleset, for EVERY creation:
+Crew names are first names, or a character's only known name (e.g. Gibbs); never a
+surname. Barbossa stays reserved for the captain.
 Recruit with no questions when the user states no preference. Defaults: --agent is
 the CLI you run as, --placement pane --direction auto --split-pane auto, and --model
 picked by task: mechanical/small edits -> cheapest, normal features -> mid,
@@ -579,7 +581,7 @@ def create_crew(args, pane, project):
         or not re.fullmatch(rf"({'|'.join(CREW_NAMES)})(-[1-9][0-9]*)?", args.name)
     ):
         raise CaptainError(
-            "Use a Pirates of the Caribbean character name (e.g. sparrow or gibbs), "
+            "Use a Pirates of the Caribbean character name (e.g. jack or gibbs), "
             "or omit NAME to assign one automatically. Names must be at most 16 characters."
         )
     if not args.task.strip() or len(args.task) > 8000 or "\x00" in args.task:
