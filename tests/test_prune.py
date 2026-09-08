@@ -41,7 +41,9 @@ class PruneTests(unittest.TestCase):
         self.pane = {"workspace_id": "w1", "tab_id": "w1:t1", "pane_id": "w1:p1"}
         self.sessions = memory.storage(self.project) / "sessions"
 
-    def make_session(self, session_id, age_days, captain_pane=None, crew_pane=None):
+    def make_session(
+        self, session_id, age_days, captain_pane=None, crew_pane=None, captain_terminal=None
+    ):
         directory = self.sessions / session_id
         directory.mkdir(parents=True)
         meta = {"id": session_id, "project": str(self.project), "workspace": "w1", "crew": {}}
@@ -53,9 +55,10 @@ class PruneTests(unittest.TestCase):
             }
         memory.write_json(directory / "session.json", meta)
         if captain_pane:
-            memory.write_json(
-                directory / "captain.json", {"provider": "claude", "pane": captain_pane}
-            )
+            captain = {"provider": "claude", "pane": captain_pane}
+            if captain_terminal:
+                captain["terminal_id"] = captain_terminal
+            memory.write_json(directory / "captain.json", captain)
         (directory / "crew-jack.sh").write_text("#!/bin/sh\nexec claude\n", encoding="utf-8")
         memory.add_memory(directory / "graph.json", "jack", "report", "done")
         stamp = time.time() - age_days * 86400
@@ -80,17 +83,38 @@ class PruneTests(unittest.TestCase):
 
     def test_keeps_stale_sessions_that_still_hold_a_live_agent(self):
         by_name = self.make_session("a" * 32, 30, crew_pane="w1:p9")
-        by_pane = self.make_session("b" * 32, 30, captain_pane="w1:p4")
-        gone = self.make_session("c" * 32, 30, captain_pane="w1:p8")
+        by_terminal = self.make_session(
+            "b" * 32, 30, captain_pane="w1:p4", captain_terminal="term_live"
+        )
+        gone = self.make_session("c" * 32, 30, captain_pane="w1:p8", captain_terminal="term_dead")
         live = agent_list(
-            {"pane_id": "w1:p2", "name": f"c-{'a' * 8}-jack"},
-            {"pane_id": "w1:p4", "agent": "claude"},
+            {"pane_id": "w1:p2", "name": f"c-{'a' * 8}-jack", "terminal_id": "term_jack"},
+            {"pane_id": "w1:p4", "agent": "claude", "terminal_id": "term_live"},
         )
         with patch.object(memory, "herdr", return_value=live):
             removed = memory.prune_sessions(self.project, days=7)
         self.assertEqual(removed, [gone])
         self.assertTrue(by_name.is_dir())
-        self.assertTrue(by_pane.is_dir())
+        self.assertTrue(by_terminal.is_dir())
+
+    def test_recycled_captain_pane_id_does_not_keep_a_dead_session_alive(self):
+        """Regression: Herdr reassigned pane 'w1:p4' to a new, unrelated terminal.
+
+        Every stale session below recorded captain pane 'w1:p4' from a past captain
+        that ran there; only the live terminal_id tells them apart from the current
+        occupant.
+        """
+        recycled_a = self.make_session(
+            "a" * 32, 30, captain_pane="w1:p4", captain_terminal="term_old_a"
+        )
+        recycled_b = self.make_session(
+            "b" * 32, 30, captain_pane="w1:p4", captain_terminal="term_old_b"
+        )
+        no_terminal_recorded = self.make_session("c" * 32, 30, captain_pane="w1:p4")
+        live = agent_list({"pane_id": "w1:p4", "agent": "claude", "terminal_id": "term_new"})
+        with patch.object(memory, "herdr", return_value=live):
+            removed = memory.prune_sessions(self.project, days=7)
+        self.assertEqual(removed, [recycled_a, recycled_b, no_terminal_recorded])
 
     def test_unreachable_herdr_only_prunes_beyond_twice_the_cutoff(self):
         young = self.make_session("a" * 32, 10)
@@ -182,6 +206,23 @@ class PruneTests(unittest.TestCase):
             agents.launch(args, self.pane, self.project)
         execute.assert_called_once()
         self.assertTrue(blocked.is_dir())
+
+    def test_launch_records_captain_terminal_id(self):
+        pane = dict(self.pane, terminal_id="term_captain")
+        args = cli.parser().parse_args(["--agent", "claude"])
+        before = set(self.sessions.iterdir()) if self.sessions.is_dir() else set()
+        with (
+            patch.object(agents, "herdr"),
+            patch.object(memory, "herdr", return_value=agent_list()),
+            patch.object(agents, "executable", return_value="/bin/claude"),
+            patch.object(os, "execvpe"),
+            patch.object(sys.stdin, "isatty", return_value=True),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            agents.launch(args, pane, self.project)
+        (new_session,) = set(self.sessions.iterdir()) - before
+        captain = memory.read_json(new_session / "captain.json")
+        self.assertEqual(captain["terminal_id"], "term_captain")
 
 
 if __name__ == "__main__":

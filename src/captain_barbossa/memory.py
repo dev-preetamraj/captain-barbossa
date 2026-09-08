@@ -286,38 +286,32 @@ def newest_mtime(directory):
 
 
 def live_agents():
-    """Pane IDs and agent names Herdr reports, or None when Herdr cannot be reached."""
+    """Terminal IDs and agent names Herdr reports, or None when Herdr cannot be reached."""
     try:
         agents = herdr("agent", "list", timeout=10).get("agents") or []
     except (CaptainError, OSError, subprocess.TimeoutExpired):
         return None
     return (
-        {agent.get("pane_id") for agent in agents if agent.get("pane_id")},
+        {agent.get("terminal_id") for agent in agents if agent.get("terminal_id")},
         {agent.get("name") for agent in agents if agent.get("name")},
     )
 
 
-def session_panes(directory):
-    panes = set()
-    for name in ("captain.json", "session.json"):
-        path = directory / name
-        if not path.is_file():
-            continue
-        try:
-            data = read_json(path)
-        except CaptainError:
-            continue
-        if isinstance(data, dict):
-            if isinstance(data.get("pane"), str):
-                panes.add(data["pane"])
-            crew = data.get("crew")
-            if isinstance(crew, dict):
-                panes.update(
-                    record["pane"]
-                    for record in crew.values()
-                    if isinstance(record, dict) and isinstance(record.get("pane"), str)
-                )
-    return panes
+def session_terminal_id(directory):
+    """The captain's recorded Herdr terminal ID, or None if never recorded.
+
+    Pane IDs are position-in-layout and Herdr recycles them across terminals, so
+    liveness cannot key on the pane; the terminal ID is stable for the process.
+    """
+    path = directory / "captain.json"
+    if not path.is_file():
+        return None
+    try:
+        data = read_json(path)
+    except CaptainError:
+        return None
+    terminal_id = data.get("terminal_id") if isinstance(data, dict) else None
+    return terminal_id if isinstance(terminal_id, str) else None
 
 
 def prune_sessions(project, days=PRUNE_DAYS, current=None):
@@ -340,9 +334,12 @@ def prune_sessions(project, days=PRUNE_DAYS, current=None):
         if newest_mtime(directory) >= cutoff:
             continue
         if agents is not None:
-            panes, names = agents
+            terminal_ids, names = agents
             prefix = f"c-{directory.name[:8]}-"
-            if panes & session_panes(directory) or any(name.startswith(prefix) for name in names):
+            terminal_id = session_terminal_id(directory)
+            if (terminal_id and terminal_id in terminal_ids) or any(
+                name.startswith(prefix) for name in names
+            ):
                 continue
         shutil.rmtree(directory, ignore_errors=True)
         if not directory.exists():

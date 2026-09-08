@@ -200,7 +200,10 @@ def launch(args, pane, project):
     except (CaptainError, OSError, subprocess.TimeoutExpired):
         pass  # retention is housekeeping; never block a launch on it
     instructions = agent_instructions(directory, "Captain Barbossa")
-    write_json(directory / "captain.json", {"provider": provider, "pane": pane["pane_id"]})
+    write_json(
+        directory / "captain.json",
+        {"provider": provider, "pane": pane["pane_id"], "terminal_id": pane.get("terminal_id")},
+    )
     add_memory(directory / "graph.json", f"session:{meta['id']}", "captain", provider)
     herdr("tab", "rename", pane["tab_id"], "Captain Barbossa")
     env = dict(
