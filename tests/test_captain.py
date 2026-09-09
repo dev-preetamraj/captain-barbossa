@@ -181,14 +181,30 @@ class CaptainFlowTests(unittest.TestCase):
 
     def test_instructions_require_captain_to_delegate_user_tasks_to_new_crew(self):
         rule = (
-            "When the user asks you to do a task, recruit new crew and assign it "
-            "instead of doing it yourself; do it yourself only if the user explicitly "
-            "says to, with no new crew."
+            "Any task request (do/fix/add/check/investigate X) means recruit crew and "
+            "assign it; never work on it yourself. Only reading memory, answering "
+            "questions, and captain commands (crew/wait/focus/dismiss/memory) are done "
+            'directly. Do the task yourself only if the user explicitly says "yourself", '
+            '"no crew", or "do not recruit".'
         )
         captain = " ".join(agents.agent_instructions(self.directory, "Captain Barbossa").split())
         self.assertIn(rule, captain)
         crew = " ".join(agents.agent_instructions(self.directory, "crew member Gibbs").split())
         self.assertNotIn(rule, crew)
+
+    def test_instructions_require_explicit_ask_before_commit_or_version_bump(self):
+        shared_rule = (
+            "Never commit or bump the version unless the user explicitly asks; "
+            "otherwise leave the work in the working tree and report the diff."
+        )
+        captain = " ".join(agents.agent_instructions(self.directory, "Captain Barbossa").split())
+        crew = " ".join(agents.agent_instructions(self.directory, "crew member Gibbs").split())
+        self.assertIn(shared_rule, captain)
+        self.assertIn(shared_rule, crew)
+        self.assertIn(
+            "never add a commit step to a crew assignment unless the user asked for one",
+            captain,
+        )
 
     def test_instructions_keep_crew_prompts_short(self):
         instructions = " ".join(agents.agent_instructions(self.directory, "captain").split())
@@ -261,7 +277,7 @@ class CaptainFlowTests(unittest.TestCase):
             "Give simultaneous writers disjoint files",
             "wait for the current owner's report before reassigning a file",
             "formatting of owned files",
-            "Commit only the user's leftover edits after crew have committed their own",
+            "commit the user's leftover edits after crew have committed their own",
         ):
             self.assertIn(phrase, captain)
         crew = agents.agent_instructions(self.directory, "crew member Gibbs")
