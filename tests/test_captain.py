@@ -328,7 +328,7 @@ class CaptainFlowTests(unittest.TestCase):
                         "Crew recruiting ruleset, for EVERY creation",
                         "lists every workspace pane by tab when --split-pane is missing",
                         "--direction vertical|horizontal|auto --split-pane <pane-id>|auto] "
-                        "--model <model>",
+                        "--model cheap|mid|strong|<model>",
                         "Save concise, meaningful decisions, findings, and handoffs",
                         "Default scope is session",
                         "Use --scope project ONLY for durable facts for future sessions",
@@ -351,9 +351,12 @@ class CaptainFlowTests(unittest.TestCase):
             "Recruit with no questions when the user states no preference.",
             "--agent is the CLI you run as",
             "--placement pane --direction auto --split-pane auto",
-            "--model picked by task: mechanical/small edits -> cheapest,",
-            "normal features -> mid, design/debugging/multi-file -> strongest.",
-            "Cheap to strong: claude haiku/sonnet/opus; codex spark/terra/astra.",
+            "--model a tier picked from the task: cheap (mechanical edits, renames, "
+            "formatting, docs), mid (normal features, tests, work inside one area), "
+            "strong (design, debugging, multi-file changes, long-context or many-file reads).",
+            "Each agent resolves the tier to its own model; an exact model name still works.",
+            "Step up a tier when the task is ambiguous, risky, or has already failed once; "
+            "step down for narrow mechanical follow-ups.",
             "Use every choice the user does state and keep the rest on these defaults.",
             "Ask at most one question, only when the user hands a choice back to you "
             "or names one too vaguely to map to a flag, and wait for the answer;",
@@ -1198,9 +1201,14 @@ class CaptainFlowTests(unittest.TestCase):
 
     def test_unmatched_or_ambiguous_model_lists_options_and_creates_nothing(self):
         for provider, text, message in (
-            ("claude", "zzz", "No claude model matches 'zzz'. Options: claude-haiku-4-5, "),
+            (
+                "claude",
+                "zzz",
+                "No claude model matches 'zzz'. Tiers: cheap, mid, strong. "
+                "Options: claude-haiku-4-5, ",
+            ),
             ("codex", "gpt-5.6", "ambiguous for codex: gpt-5.6-luna, gpt-5.6-terra, gpt-5.6-sol"),
-            ("codex", " ", "Provide a model name. codex models: gpt-5.3-codex-spark"),
+            ("codex", " ", "Provide a tier (cheap|mid|strong) or model name. codex models:"),
         ):
             with self.subTest(text=text):
                 args = self.args(
@@ -2438,11 +2446,7 @@ class ModelTests(unittest.TestCase):
                 for model in models.model_ids(provider):
                     self.assertIn(model, str(error.exception))
 
-    def test_smart_tiers_and_native_flags_follow_the_model_table(self):
-        for provider, tiers in models.SMART.items():
-            ids = [models.resolve_model(provider, tier) for tier in tiers]
-            self.assertEqual(ids, sorted(ids, key=models.model_ids(provider).index))
-            self.assertEqual(ids[0], models.model_ids(provider)[0])
+    def test_native_flags_follow_the_model_table(self):
         self.assertEqual(
             models.native_model_args("claude", "claude-opus-5"), ["--model", "claude-opus-5"]
         )
