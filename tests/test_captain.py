@@ -916,6 +916,7 @@ class CaptainFlowTests(unittest.TestCase):
             with (
                 self.subTest(response=response),
                 patch.object(agents, "herdr", return_value=response),
+                patch.object(agents, "executable", return_value="/bin/codex"),
                 patch.object(sys.stdin, "isatty", return_value=False),
             ):
                 with self.assertRaisesRegex(runtime.CaptainError, "layout"):

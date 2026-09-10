@@ -60,6 +60,9 @@ class MemoryRootTests(unittest.TestCase):
         quiet = io.StringIO()
         with (
             self.clean_env(),
+            # This test's HOME is itself under the OS temp dir; move the temp dir away
+            # so the default state root is genuinely outside it on every platform.
+            patch.object(tempfile, "gettempdir", return_value=str(self.root / "elsewhere")),
             patch.object(memory, "_warned_temp_state_root", False),
             contextlib.redirect_stderr(quiet),
         ):
