@@ -3,7 +3,7 @@
 [![CI](https://github.com/dev-preetamraj/captain-barbossa/actions/workflows/ci.yml/badge.svg)](https://github.com/dev-preetamraj/captain-barbossa/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/captain-barbossa)](https://pypi.org/project/captain-barbossa/)
 
-Captain Barbossa launches a native agent CLI (Claude Code or Codex) as a
+Captain Barbossa launches a native agent CLI (Claude Code, Codex, or pi) as a
 **captain** inside a [Herdr](https://herdr.dev) workspace. The captain recruits
 further native agents as **crew** in new Herdr panes or tabs, so a team of
 native agent sessions can work on the same checkout at once. There is no
@@ -15,7 +15,7 @@ graph memory stored outside the repo.
 - macOS or Linux, Python 3.11+
 - [uv](https://docs.astral.sh/uv/getting-started/installation/)
 - [Herdr](https://herdr.dev/docs/cli-reference/), as your terminal workspace
-- Claude Code and/or Codex, installed and already signed in
+- Claude Code, Codex, and/or pi, installed and already signed in
 
 ## Install
 
@@ -55,6 +55,7 @@ Launch `captain` from an interactive terminal inside a Herdr workspace:
 captain                         # asks: Claude Code or Codex?
 captain --agent claude          # Claude Code in this pane
 captain --agent codex           # Codex in this pane
+captain --agent pi              # pi in this pane
 captain --prompt "Inspect this project"
 ```
 
@@ -368,7 +369,7 @@ conversation, not a provider transcript resume.
 
 | Command | Purpose |
 |---|---|
-| `captain [--agent claude\|codex] [--prompt TEXT]` | Start a captain in this pane |
+| `captain [--agent claude\|codex\|pi] [--prompt TEXT]` | Start a captain in this pane |
 | `captain crew [NAME] --task TEXT [--agent ...] [--placement pane\|tab] [--direction ...] [--split-pane ...] [--model ...]` | Recruit crew |
 | `captain wait NAME [--timeout SECONDS]` | Wait for crew to finish |
 | `captain model NAME cheap\|mid\|strong\|<model>` | Switch a running crew's model |
