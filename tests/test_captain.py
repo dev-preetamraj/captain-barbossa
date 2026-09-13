@@ -251,9 +251,10 @@ class CaptainFlowTests(unittest.TestCase):
         captain = " ".join(agents.agent_instructions(self.directory, "Captain Barbossa").split())
         for phrase in (
             "CAPTAIN wait 'NAME' [--timeout <seconds>]",
-            "Wait polls until the crew is idle, done, or blocked",
+            "Wait reads native hook events until the crew is idle, done, or blocked",
             "records and prints its completion",
-            "the crew's own report, or its pane tail when it recorded none",
+            "the crew's own report or hook message",
+            "Without events, it falls back to the pane tail",
         ):
             self.assertIn(phrase, captain)
         self.assertNotIn("herdr agent wait", captain)
@@ -1134,7 +1135,12 @@ class CaptainFlowTests(unittest.TestCase):
                             if process.poll() is None:
                                 process.kill()
                     self.assertEqual(
-                        json.loads(received.read_text()), agents.native_args(provider, instructions)
+                        json.loads(received.read_text()),
+                        agents.native_args(
+                            provider,
+                            instructions,
+                            events=self.directory / "events" / f"{name}.jsonl",
+                        ),
                     )
                 finally:
                     os.close(master)
@@ -2159,14 +2165,18 @@ class CaptainFlowTests(unittest.TestCase):
         remaining = list(statuses)
 
         def api(*args, **kwargs):
-            if args[:2] == ("agent", "get"):
-                status = remaining.pop(0) if remaining else "working"
+            if args[:2] == ("agent", "read"):
+                if not remaining:
+                    return tail
+                status = remaining.pop(0)
                 if report and status in ("idle", "blocked"):
                     # The crew records its report just before its pane settles.
                     memory.add_memory(self.directory / "graph.json", "Jack", "report", report)
-                return {"agent": {"agent_status": status}}
-            if args[:2] == ("agent", "read"):
-                return tail
+                if agents.modal_start(tail.splitlines()) is not None:
+                    return tail
+                if status == "blocked":
+                    return tail + "\n1. Yes\n2. No\nPress enter to confirm or esc to cancel"
+                return tail + ("\n❯" if status == "idle" else "\nworking")
             raise AssertionError(f"unexpected herdr call: {args}")
 
         return api
@@ -2177,6 +2187,7 @@ class CaptainFlowTests(unittest.TestCase):
                 agents, "herdr", side_effect=self.wait_api(statuses, tail, report)
             ) as calls,
             patch.object(agents.time, "sleep"),
+            patch.object(agents.time, "monotonic", side_effect=count(0, 2)),
             contextlib.redirect_stdout(io.StringIO()) as output,
         ):
             agents.wait_crew(
@@ -2350,12 +2361,12 @@ class CaptainFlowTests(unittest.TestCase):
         self.assertIn("no report recorded; pane tail: waiting", printed)
         self.assertNotIn("previous run", printed)
 
-    def test_wait_settles_only_after_consecutive_idle_polls(self):
+    def test_wait_fallback_settles_only_after_consecutive_idle_pane_reads(self):
         self.wait_crew_record()
         printed, calls = self.run_wait(["idle", "idle", "working", "idle", "idle", "idle"], "tail")
         self.assertIn("Jack idle.", printed)
         self.assertEqual(
-            len([c for c in calls.call_args_list if c.args[:2] == ("agent", "get")]), 6
+            len([c for c in calls.call_args_list if c.args[:2] == ("agent", "read")]), 7
         )
 
     def test_wait_reports_a_blocked_crew_with_its_pane_tail(self):
@@ -2399,7 +2410,7 @@ class CaptainFlowTests(unittest.TestCase):
 
         with (
             patch.object(agents, "herdr", side_effect=api),
-            patch.object(agents.time, "sleep"),
+            patch.object(agents, "crew_status", return_value=("idle", None)),
             contextlib.redirect_stdout(io.StringIO()) as output,
         ):
             agents.wait_crew(self.args("wait", "Jack"), self.pane, self.project)

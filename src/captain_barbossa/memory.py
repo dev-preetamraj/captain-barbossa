@@ -157,6 +157,38 @@ def write_json(path, data):
     write_text(path, json.dumps(data, ensure_ascii=False, indent=2) + "\n")
 
 
+def append_event():
+    """Native hooks supply JSON on stdin (Claude) or as the last argument (Codex)."""
+    event = json.loads(sys.argv[2]) if len(sys.argv) > 2 else json.load(sys.stdin)
+    if not isinstance(event, dict):
+        return
+    with open(sys.argv[1], "a", encoding="utf-8") as file:
+        fcntl.flock(file, fcntl.LOCK_EX)
+        file.write(json.dumps(event, ensure_ascii=False) + "\n")
+        file.flush()
+
+
+def read_events(path, offset):
+    """Read complete JSONL records, retaining an unfinished final line for the next poll."""
+    events = []
+    try:
+        with path.open("rb") as file:
+            file.seek(offset)
+            while line := file.readline():
+                if not line.endswith(b"\n"):
+                    break
+                offset = file.tell()
+                try:
+                    event = json.loads(line)
+                except (ValueError, UnicodeDecodeError):
+                    continue
+                if isinstance(event, dict):
+                    events.append(event)
+    except FileNotFoundError:
+        pass
+    return events, offset
+
+
 @contextmanager
 def lock(path):
     path.parent.mkdir(parents=True, exist_ok=True)

@@ -13,7 +13,9 @@ from .layout import HERDR_DIRECTIONS, pick_split, tab_panes
 from .memory import (
     add_memory,
     lock,
+    private_dir,
     prune_sessions,
+    read_events,
     read_json,
     session,
     state_root,
@@ -141,8 +143,9 @@ Name the files each crew owns. Give simultaneous writers disjoint files; seriali
 same-file work and wait for the current owner's report before reassigning a file.
 Recruiting prints one canonical name; use it for CAPTAIN and Herdr commands:
   CAPTAIN wait 'NAME' [--timeout <seconds>]
-Wait polls until the crew is idle, done, or blocked, then records and prints its
-completion: the crew's own report, or its pane tail when it recorded none. Run every
+Wait reads native hook events until the crew is idle, done, or blocked, then records
+and prints its completion: the crew's own report or hook message. Without events,
+it falls back to the pane tail. Run every
 wait in the background; never block on a foreground wait. Stay responsive; check when
 notified. For more detail: herdr agent read <name>
 Read the pane before approving native permission prompts:
@@ -197,16 +200,34 @@ Replace CAPTAIN in commands below with:
 CLAUDE_NO_ATTRIBUTION = json.dumps({"attribution": {"commit": "", "pr": "", "sessionUrl": False}})
 
 
-def native_args(provider, instructions, model=None):
+def native_args(provider, instructions, model=None, events=None):
+    hook = (
+        [
+            sys.executable,
+            "-c",
+            "from captain_barbossa.memory import append_event; append_event()",
+            str(events),
+        ]
+        if events is not None
+        else None
+    )
     if provider == "claude":
+        settings = json.loads(CLAUDE_NO_ATTRIBUTION)
+        if hook:
+            settings["hooks"] = {
+                event: [{"hooks": [{"type": "command", "command": shlex.join(hook)}]}]
+                for event in ("SessionStart", "Stop", "Notification", "PermissionRequest")
+            }
         flags = [
             "--append-system-prompt",
             instructions,
             "--settings",
-            CLAUDE_NO_ATTRIBUTION,
+            json.dumps(settings),
         ]
     else:
         flags = ["-c", "developer_instructions=" + json.dumps(instructions, ensure_ascii=False)]
+        if hook:
+            flags.extend(["-c", "notify=" + json.dumps(hook)])
     return [*flags, *native_model_args(provider, model)]
 
 
@@ -338,23 +359,68 @@ def resolve_crew(meta, requested):
     return matches[0]
 
 
-def crew_status(agent_name, timeout):
-    """Poll until the crew settles at idle or reports done or blocked; None on timeout.
+def event_status(event, task=None):
+    kind = event.get("hook_event_name", event.get("type"))
+    if kind == "agent-turn-complete":
+        # Codex also notifies for internal title-generation turns.
+        messages = event.get("input-messages")
+        return (
+            "done"
+            if task is not None and isinstance(messages, list) and messages and messages[0] == task
+            else None
+        )
+    if kind == "Stop":
+        return "done"
+    if kind == "SessionStart":
+        return "working"
+    if kind == "PermissionRequest":
+        return "blocked"
+    if kind == "Notification" and isinstance(event.get("notification_type"), str):
+        return {"idle_prompt": "idle", "permission_prompt": "blocked"}.get(
+            event.get("notification_type")
+        )
+    return None
 
-    A crew that pauses between tools reads as idle, so idle counts only after WAIT_POLLS
-    consecutive polls.
-    """
+
+def crew_status(agent_name, timeout, events, task=None):
+    """Tail hooks; use pane detection only while no native event has arrived."""
     deadline = time.monotonic() + timeout
+    fallback_at = time.monotonic() + WAIT_INTERVAL * WAIT_POLLS
+    cursor = events.with_suffix(".cursor")
+    offset = read_json(cursor) if cursor.exists() else 0
+    seen = False
     idle_polls = 0
+    previous = None
     while True:
-        status = herdr("agent", "get", agent_name, timeout=5).get("agent", {}).get("agent_status")
-        if status in ("done", "blocked"):
-            return status
-        idle_polls = idle_polls + 1 if status == "idle" else 0
-        if idle_polls >= WAIT_POLLS:
-            return "blocked" if choice_modal(agent_name) else "idle"
+        batch, offset = read_events(events, offset)
+        batch = [event for event in batch if event_status(event, task) is not None]
+        seen = seen or bool(batch)
+        if batch:
+            # Only the newest lifecycle event describes the current state.
+            event = batch[-1]
+            status = event_status(event, task)
+            if status != "working":
+                write_json(cursor, offset)
+                return status, event
+        if not seen and time.monotonic() >= fallback_at:
+            try:
+                lines = pane_lines(agent_name)
+            except (CaptainError, subprocess.TimeoutExpired, OSError):
+                lines = []
+            if modal_start(lines) is not None:
+                return "blocked", None
+            # ponytail: pane fallback is heuristic; native hooks are authoritative.
+            idle = any(PANE_EMPTY_PROMPT.match(line) for line in lines) and not any(
+                "esc to interrupt" in line.casefold() for line in lines
+            )
+            idle_polls = idle_polls + 1 if idle and lines == previous else int(idle)
+            previous = lines
+            if idle_polls >= WAIT_POLLS:
+                return "idle", None
         if time.monotonic() >= deadline:
-            return None
+            if events.exists():
+                write_json(cursor, offset)
+            return None, None
         time.sleep(WAIT_INTERVAL)
 
 
@@ -433,26 +499,37 @@ def crew_reports(directory, names):
 
 def wait_crew(args, pane, project):
     directory, meta = session(project, pane, args.session)
-    crew = meta["crew"][resolve_crew(meta, args.name)]
+    crew_id = resolve_crew(meta, args.name)
+    crew = meta["crew"][crew_id]
     display_name = crew.get("name", args.name)
     names = (display_name, crew.get("id"), crew["agent"])
-    # Only a report written during this wait belongs to the assignment being waited on.
+    events = directory / "events" / f"{crew_id}.jsonl"
+    report_cursor = events.with_suffix(".reports")
+    reported = read_json(report_cursor) if report_cursor.exists() else 0
+    # Legacy pane detection has no event boundary; only trust reports written during wait.
     before = len(crew_reports(directory, names))
-    status = crew_status(crew["agent"], max(args.timeout, 0))
+    status, event = crew_status(crew["agent"], max(args.timeout, 0), events, crew.get("task"))
     if status is None:
         raise CaptainError(
             f"{display_name} was still working after {args.timeout} seconds. "
             "Wait again, or read its pane with: herdr agent read " + crew["agent"]
         )
-    reports = crew_reports(directory, names)[before:]
+    all_reports = crew_reports(directory, names)
+    reports = all_reports[reported if event is not None else before :]
     if reports:
         entry = f"{status}; reported: {reports[-1]}"
         # Blocked means the pane is waiting on input/approval; show it even with a report.
         printed = (
-            f"{entry}; pane tail: {pane_tail(crew['agent'])}" if status == "blocked" else entry
+            f"{entry}; pane tail: {pane_tail(crew['agent'])}"
+            if status == "blocked" and event is None
+            else entry
         )
         # The report text already lives on its own "report" edge; don't duplicate it here.
         completed = f"{status}; reported"
+    elif event is not None:
+        entry = f"{status}; no report recorded"
+        printed = entry
+        completed = entry
     else:
         tail = pane_tail(crew["agent"])
         # Kept short: the full tail already went to stdout, this is just a debugging breadcrumb.
@@ -460,7 +537,19 @@ def wait_crew(args, pane, project):
         entry = f"{status}; no report recorded"
         printed = f"{entry}; pane tail: {tail}"
         completed = entry
+    if event is not None and (not reports or status == "blocked"):
+        message = (
+            event.get("last-assistant-message")
+            or event.get("last_assistant_message")
+            or event.get("message")
+        )
+        if status == "blocked" and event.get("tool_name"):
+            message = f"{event['tool_name']} {json.dumps(event.get('tool_input', {}))}"
+        if message:
+            printed += f"; hook: {message}"
     add_memory(directory / "graph.json", display_name, "completed", completed[:8000])
+    if events.exists():
+        write_json(report_cursor, len(all_reports))
     print(f"{display_name} {status}.")
     print(printed)
 
@@ -798,7 +887,15 @@ def create_crew(args, pane, project):
             f"CAPTAIN_CREW_LAUNCHER={launcher}",
         ]
         instructions = agent_instructions(directory, f"crew member {display_name}")
-        command = shlex.join([binary, *native_args(provider, instructions, model)])
+        events = private_dir(directory / "events") / f"{name}.jsonl"
+        events.write_text("", encoding="utf-8")
+        events.chmod(0o600)
+        events.with_suffix(".cursor").unlink(missing_ok=True)
+        write_json(
+            events.with_suffix(".reports"),
+            len(crew_reports(directory, (display_name, name, agent_name))),
+        )
+        command = shlex.join([binary, *native_args(provider, instructions, model, events)])
         launcher.write_text(f"#!/bin/sh\nexec {command}\n", encoding="utf-8")
         launcher.chmod(0o600)
         if placement == "tab":
