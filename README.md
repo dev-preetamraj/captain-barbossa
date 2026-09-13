@@ -1,6 +1,7 @@
 # Captain Barbossa
 
 [![CI](https://github.com/dev-preetamraj/captain-barbossa/actions/workflows/ci.yml/badge.svg)](https://github.com/dev-preetamraj/captain-barbossa/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/captain-barbossa)](https://pypi.org/project/captain-barbossa/)
 
 Captain Barbossa launches a native agent CLI (Claude Code or Codex) as a
 **captain** inside a [Herdr](https://herdr.dev) workspace. The captain recruits
@@ -12,18 +13,14 @@ graph memory stored outside the repo.
 ## Requirements
 
 - macOS or Linux, Python 3.11+
-- Git
 - [uv](https://docs.astral.sh/uv/getting-started/installation/)
 - [Herdr](https://herdr.dev/docs/cli-reference/), as your terminal workspace
 - Claude Code and/or Codex, installed and already signed in
 
 ## Install
 
-No manual clone is needed; uv downloads the package and installs its
-dependencies in an isolated environment.
-
 ```sh
-uv tool install git+https://github.com/dev-preetamraj/captain-barbossa.git
+uv tool install captain-barbossa
 ```
 
 If your shell cannot find `captain` afterward, run `uv tool update-shell` and
@@ -35,11 +32,7 @@ restart the terminal.
 uv tool upgrade captain-barbossa
 ```
 
-`captain --version` prints the installed version. uv re-resolves the Git
-source recorded at install time and installs the latest commit on the default
-branch, even when the version number has not changed.
-`uv tool install --force git+https://github.com/dev-preetamraj/captain-barbossa.git`
-does the same. Running captains keep the old code until restarted with
+Running captains keep the old code until restarted with
 `captain --session <session-id>`.
 
 ## Starting a captain
@@ -120,12 +113,10 @@ unknown text reports the options and creates nothing. Without `--model`, the
 CLI's own default applies.
 
 New crew panes/tabs open in the same workspace and project without stealing
-focus. Captain waits for the native agent to hold an idle state across
-consecutive polls before naming it and submitting its task, since a freshly
-drawn TUI silently drops a submitted prompt. A task that never starts, or an
-agent waiting for approval, preserves the pane for inspection and reports an
-error naming the `herdr agent prompt` command to send the task by hand;
-nothing is retried automatically beyond one resend.
+focus, and the task is submitted once the native agent is ready. A task that
+never starts, or an agent waiting for approval, preserves the pane for
+inspection and reports an error naming the `herdr agent prompt` command to
+send the task by hand; nothing is retried automatically beyond one resend.
 
 Crew share the checkout; see [Editing guardrails](#editing-guardrails) below.
 
@@ -136,11 +127,13 @@ captain wait Jack
 captain wait Jack --timeout 300
 ```
 
-Polls Herdr until the crew settles at idle (across consecutive polls, so a
-pause between tools isn't mistaken for the end), or reports done or blocked.
-Records a `completed` entry in memory with the final status and the crew's
-own report, falling back to the tail of its pane when it recorded none, and
-prints the same. A crew still working when the timeout (900s by default)
+Blocks until the crew is done, idle, or blocked. It follows the native CLI's
+own lifecycle events rather than reading its pane, so a pause between tools is
+not mistaken for the end.
+
+The final status and the crew's own report are printed and recorded in memory,
+falling back to the crew's last message or the tail of its pane when it
+reported nothing. A crew still working when the timeout (900s by default)
 expires records nothing and reports an error; wait again, or read its pane
 directly with `herdr agent read <name>`.
 
@@ -169,15 +162,13 @@ captain model Jack strong
 captain model Will cheap
 ```
 
-This drives the CLI's own `/model` command through Herdr: Claude Code takes
-the model inline; Codex opens its numbered picker, reads the pane for the
-matching row, and keeps the reasoning level it already had. Either way the
-switch is verified from the pane; without the CLI's own confirmation line
-naming that model, the command reports an error and changes nothing. A
-confirmed switch updates the session and memory; the pane, the conversation,
-and the assignment are untouched. Claude Code's inline `/model` also saves
-the model as the default for new sessions, and the command prints that as a
-reminder.
+This drives the CLI's own `/model` command through Herdr and verifies the
+result: without the CLI's own confirmation line naming that model, the command
+reports an error and changes nothing. Codex keeps the reasoning level it
+already had. A confirmed switch updates the session and memory; the pane, the
+conversation, and the assignment are untouched. Claude Code's inline `/model`
+also saves the model as the default for new sessions, and the command prints
+that as a reminder.
 
 ## Dismissing crew
 
@@ -224,6 +215,7 @@ ephemeral session state does not:
   sessions/<session-id>/
     session.json                  # workspace and crew references
     graph.json                    # this session's memory only
+    events/<crew>.jsonl           # native hook events, plus cursor files
 ```
 
 `$XDG_STATE_HOME` is honored in place of `~/.local/state` when set. Git
@@ -248,11 +240,9 @@ Default scope is `session`; use `--scope project` only for facts that should
 survive into future sessions.
 
 [Graphify](https://graphify.com/docs/cli) is optional: install it with
-`uv tool install graphifyy` to enable `memory query`, which runs `graphify
-query` against an isolated snapshot of project and session memory (output,
-cache, and query logging are scoped to that snapshot and removed afterward).
-Relationships can still be added and read with `memory add`/`show` without
-it.
+`uv tool install graphifyy` to enable `memory query`, which runs against an
+isolated snapshot of project and session memory that is removed afterward.
+Relationships can still be added and read with `memory add`/`show` without it.
 
 Session directories accumulate as sessions end. `captain memory prune` (also
 run automatically, silently, and best-effort at every launch) removes
@@ -284,6 +274,9 @@ conversation, not a provider transcript resume.
 
 - **`captain: command not found`** - run `uv tool update-shell` and restart
   the terminal.
+- **Installed from Git before the PyPI release** - switch the install over once
+  with `uv tool install --force captain-barbossa`; `uv tool upgrade` then picks
+  up each published release.
 - **"Launch captain from an interactive Herdr terminal."** - `captain` with
   no subcommand needs a TTY; run it directly in a Herdr pane, not through a
   script or pipe.
@@ -333,9 +326,10 @@ name, ID, or Herdr agent name.
 
 ## Development
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for setting up a checkout, running
-checks, and the commit/PR workflow. Current implementation scope is tracked
-in [docs/plan.md](docs/plan.md).
+See [CONTRIBUTING.md](https://github.com/dev-preetamraj/captain-barbossa/blob/main/CONTRIBUTING.md)
+for setting up a checkout, running checks, and the commit/PR workflow. Current
+implementation scope is tracked in
+[docs/plan.md](https://github.com/dev-preetamraj/captain-barbossa/blob/main/docs/plan.md).
 
 Related CLIs: [Herdr](https://herdr.dev/docs/cli-reference/),
 [Graphify](https://graphify.com/docs/cli), and
@@ -343,4 +337,4 @@ Related CLIs: [Herdr](https://herdr.dev/docs/cli-reference/),
 
 ## License
 
-Licensed under [MIT](LICENSE).
+Licensed under [MIT](https://github.com/dev-preetamraj/captain-barbossa/blob/main/LICENSE).
