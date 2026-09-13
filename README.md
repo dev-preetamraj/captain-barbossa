@@ -137,6 +137,32 @@ reported nothing. A crew still working when the timeout (900s by default)
 expires records nothing and reports an error; wait again, or read its pane
 directly with `herdr agent read <name>`.
 
+## Sending a follow-up
+
+```sh
+captain tell Jack "also update the changelog"
+```
+
+Prompts an existing crew in place; its pane, model, and running conversation
+are kept. The message replaces the crew's recorded assignment and is saved to
+memory, and any idle event left over from before the prompt is consumed first,
+so the next `captain wait Jack` reports the new work rather than the old pause.
+Dismissed crew are refused; recruit new crew instead.
+
+## Checking crew status
+
+```sh
+captain status
+captain status --all
+```
+
+Prints a plain-text table of this session's crew: name, provider, model,
+pane, status, and the first line of their assigned task, truncated to about
+60 characters. Status is refreshed live from Herdr for each crew, falling
+back to the last recorded status if Herdr can't be reached. Dismissed crew
+are omitted unless `--all` is given; `captain status` with no crew prints
+"No crew."
+
 ## Focusing crew
 
 Tell the captain "focus on Jack", "switch to Will", or "take me to
@@ -311,6 +337,8 @@ conversation, not a provider transcript resume.
 | `captain crew [NAME] --task TEXT [--agent ...] [--placement pane\|tab] [--direction ...] [--split-pane ...] [--model ...]` | Recruit crew |
 | `captain wait NAME [--timeout SECONDS]` | Wait for crew to finish |
 | `captain model NAME cheap\|mid\|strong\|<model>` | Switch a running crew's model |
+| `captain tell NAME MESSAGE` | Send a follow-up prompt to crew |
+| `captain status [--all]` | Print a table of this session's crew |
 | `captain focus NAME` | Focus crew's pane and tab |
 | `captain dismiss NAME` | Close and retire crew |
 | `captain memory add SUBJECT RELATION TARGET [--scope session\|project]` | Save a memory relationship |

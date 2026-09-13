@@ -167,6 +167,10 @@ For "focus on", "switch to", or "take me to" NAME:
   CAPTAIN focus 'NAME'
 Names are case-insensitive; ask about unknown/ambiguous names. Focus only navigates
 to existing crew's pane/tab: do not recruit or send a task.
+Send a running crew a follow-up prompt; it keeps its pane and conversation:
+  CAPTAIN tell 'NAME' 'message'
+See this session's crew and their live status in a table:
+  CAPTAIN status [--all]
 Retier a running crew when its model stops fitting the work (a cheap crew that is
 stuck, looping, or out of its depth -> step up; a mechanical follow-up on a strong
 crew -> step down); it keeps the pane and the conversation:
@@ -568,6 +572,66 @@ def focus_crew(args, pane, project):
     except CaptainError as exc:
         raise CaptainError(f"Could not focus {display_name}: {exc}") from exc
     print(f"Focused {display_name}.")
+
+
+def status_crew(args, pane, project):
+    """Print a table of this session's crew, refreshing status from Herdr best-effort."""
+    _, meta = session(project, pane, args.session)
+    rows = []
+    for crew_id, crew in meta["crew"].items():
+        if crew.get("status") == "dismissed" and not args.all:
+            continue
+        status = crew.get("status") or "-"
+        try:
+            agent = herdr("agent", "get", crew["agent"], timeout=5).get("agent", {})
+            status = agent.get("agent_status") or status
+        except (CaptainError, subprocess.TimeoutExpired, OSError):
+            pass
+        task = (crew.get("task") or "").splitlines()
+        rows.append(
+            (
+                crew.get("name", crew_id),
+                crew.get("provider", "-"),
+                crew.get("model") or "-",
+                crew.get("pane") or "-",
+                status,
+                truncate_label(task[0], 60) if task else "-",
+            )
+        )
+    if not rows:
+        print("No crew.")
+        return
+    headers = ("NAME", "PROVIDER", "MODEL", "PANE", "STATUS", "TASK")
+    widths = [max(len(str(row[i])) for row in (headers, *rows)) for i in range(len(headers) - 1)]
+    for row in (headers, *rows):
+        cells = [str(value).ljust(width) for value, width in zip(row, widths)]
+        cells.append(str(row[-1]))
+        print("  ".join(cells))
+
+
+def tell_crew(args, pane, project):
+    """Send a follow-up prompt to a running crew."""
+    if not args.message.strip() or len(args.message) > 8000 or "\x00" in args.message:
+        raise CaptainError("Provide a message of 1-8000 characters, without NUL bytes.")
+    directory, meta = session(project, pane, args.session)
+    with lock(directory / "crew.lock"):
+        meta = read_json(directory / "session.json")
+        crew_id = resolve_crew(meta, args.name)
+        crew = meta["crew"][crew_id]
+        display_name = crew.get("name", args.name)
+        if crew.get("status") == "dismissed":
+            raise CaptainError(f"{display_name} was dismissed; recruit new crew instead.")
+        events = directory / "events" / f"{crew_id}.jsonl"
+        cursor = events.with_suffix(".cursor")
+        # An idle event from the gap before this prompt would otherwise read as done.
+        _, offset = read_events(events, read_json(cursor) if cursor.exists() else 0)
+        if events.exists():
+            write_json(cursor, offset)
+        crew["task"] = args.message
+        write_json(directory / "session.json", meta)
+        submit_task(crew["agent"], args.message, crew.get("provider"))
+        add_memory(directory / "graph.json", display_name, "assigned", args.message)
+    print(f"Sent to {display_name}.")
 
 
 def pane_await(agent_name, match, timeout):

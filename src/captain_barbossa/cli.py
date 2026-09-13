@@ -12,7 +12,9 @@ from .agents import (
     dismiss_crew,
     focus_crew,
     launch,
+    status_crew,
     switch_model,
+    tell_crew,
     wait_crew,
 )
 from .memory import PRUNE_DAYS, memory, project_root
@@ -73,11 +75,16 @@ def parser():
         default=WAIT_TIMEOUT,
         help=f"seconds to wait before giving up (default {WAIT_TIMEOUT})",
     )
+    tell = commands.add_parser("tell", help="send a follow-up prompt to an existing crew")
+    tell.add_argument("name", help="crew name or ID (case-insensitive)")
+    tell.add_argument("message")
     model = commands.add_parser("model", help="switch a running crew to another model")
     model.add_argument("name", help="crew name or ID (case-insensitive)")
     model.add_argument("model", help=f"tier ({'|'.join(TIER_NAMES)}), model name, or alias")
     focus = commands.add_parser("focus", help="focus an existing crew's pane and tab")
     focus.add_argument("name", help="crew name or ID (case-insensitive)")
+    status = commands.add_parser("status", help="print a table of this session's crew")
+    status.add_argument("--all", action="store_true", help="include dismissed crew")
     dismiss = commands.add_parser("dismiss", help="close an existing crew's pane and retire it")
     dismiss.add_argument("name", help="crew name or ID (case-insensitive)")
     mem = commands.add_parser("memory", help="project/session graph memory outside the repo")
@@ -115,10 +122,14 @@ def main(argv=None):
             create_crew(args, pane, project)
         elif args.command == "wait":
             wait_crew(args, pane, project)
+        elif args.command == "tell":
+            tell_crew(args, pane, project)
         elif args.command == "model":
             switch_model(args, pane, project)
         elif args.command == "focus":
             focus_crew(args, pane, project)
+        elif args.command == "status":
+            status_crew(args, pane, project)
         elif args.command == "dismiss":
             dismiss_crew(args, pane, project)
         elif args.command == "memory":
