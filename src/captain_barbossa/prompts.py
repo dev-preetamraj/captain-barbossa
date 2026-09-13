@@ -9,12 +9,14 @@ from .runtime import CaptainError
 LABELS = {
     "claude": "Claude Code",
     "codex": "Codex",
+    "pi": "Pi",
     "pane": "New pane",
     "tab": "New tab",
     "vertical": "Vertical (side by side)",
     "horizontal": "Horizontal (stacked)",
     "auto": "Auto (balanced by layout)",
 }
+PLACEMENTS = ("pane", "tab")
 STYLE = questionary.Style(
     [
         ("question", "bold"),

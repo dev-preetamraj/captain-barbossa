@@ -112,7 +112,7 @@ class TellCrewTests(unittest.TestCase):
             self.tell("Jack", "keep going")
 
     def test_blank_message_is_refused(self):
-        with self.assertRaisesRegex(agents.CaptainError, "1-8000 characters"):
+        with self.assertRaisesRegex(agents.CaptainError, "1–8000 characters"):
             self.tell("Jack", "   ")
 
 

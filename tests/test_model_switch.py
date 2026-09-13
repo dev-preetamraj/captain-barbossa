@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from captain_barbossa import agents, cli, memory, runtime
+from captain_barbossa import agents, cli, memory, models, runtime
 from captain_barbossa import pane as panes
 from captain_barbossa.runtime import CaptainError
 
@@ -151,6 +151,30 @@ class SwitchModelTests(unittest.TestCase):
         with self.assertRaises(CaptainError) as error:
             self.switch(self.reader(["", CODEX_PICKER]), "gpt-5.5")
         self.assertIn("/model picker", str(error.exception))
+
+    def pi_catalog(self):
+        return patch.object(
+            models, "pi_models", return_value=(("openai-codex/gpt-5.5", ("gpt-5.5",)),)
+        )
+
+    def test_pi_switch_sends_the_exact_id_and_needs_no_picker_or_enter(self):
+        with self.pi_catalog():
+            agent_name = self.crew("pi", "anthropic/claude-sonnet-5")
+            herdr = self.switch(
+                self.reader(["thinking…", "Model: openai-codex/gpt-5.5"]), "gpt-5.5"
+            )
+        calls = [call.args for call in herdr.call_args_list]
+        self.assertIn(("agent", "prompt", agent_name, "/model openai-codex/gpt-5.5"), calls)
+        self.assertEqual([call for call in calls if call[1] == "send-keys"], [])
+        self.assertIn("Jack switched to openai-codex/gpt-5.5.", self.output.getvalue())
+
+    def test_pis_status_footer_naming_the_model_is_not_a_confirmation(self):
+        footer = "↑3.8k ↓5 $0.019 (sub) 1.4%/272k (auto)   (openai-codex) gpt-5.5 • medium"
+        with self.pi_catalog():
+            self.crew("pi", "anthropic/claude-sonnet-5")
+            with self.assertRaises(CaptainError) as error:
+                self.switch(self.reader([footer]), "gpt-5.5")
+        self.assertIn("did not confirm", str(error.exception))
 
     def test_an_unknown_crew_name_reports_the_available_crew(self):
         self.crew("claude")

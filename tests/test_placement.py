@@ -39,7 +39,7 @@ class PlacementTests(unittest.TestCase):
 
     def choose(self, direction=None, target="auto", placement="pane"):
         args = SimpleNamespace(direction=direction, split_pane=target)
-        return Placement(self.pane, self.meta).choose_split(args, placement)
+        return Placement(self.pane, Session(None, self.meta)).choose_split(args, placement)
 
     def recruit(self, direction=None):
         chosen, target, tab, reason = self.choose(direction)

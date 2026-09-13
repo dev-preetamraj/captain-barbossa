@@ -1,11 +1,10 @@
 """Native agent terminal interaction and pane parsing."""
 
 import re
-import subprocess
 import time
 
 from . import runtime
-from .runtime import CaptainError
+from .runtime import HERDR_ERRORS, CaptainError
 
 POLL_INTERVAL = 0.2
 # Consecutive idle polls before a freshly drawn native TUI accepts a submitted prompt.
@@ -17,14 +16,19 @@ MODEL_INTERVAL = 1
 MODEL_TIMEOUT = 20
 # Each CLI's own line after a switch: "Set model to Sonnet 5 …" / "Model changed to …".
 MODEL_CONFIRMATIONS = ("set model to", "model changed to")
+# pi instead echoes "Model: <id>" at line start; its status bar never carries "model:".
+PI_MODEL_CONFIRMATION = re.compile(r"^\s*Model:\s")
 CODEX_EFFORT_HEADER = "Select Reasoning Level"
+# Input-prompt glyphs of the native TUIs, which also open their status bars.
+PROMPT_GLYPHS = ("❯", "›")
+INTERRUPT_MARKER = "esc to interrupt"
 # Pane chrome shared by the Claude Code and Codex TUIs: a bare box-drawing rule, an
 # empty input prompt (Codex shows a fixed placeholder; Claude shows just the glyph),
 # and the bottom status bar, which is always the last line and never starts like
 # real transcript content (a bullet, a tree glyph, a spinner).
 PANE_RULE = re.compile(r"^[─\-=━]+$")
-PANE_EMPTY_PROMPT = re.compile(r"^[❯›]\s*(Ask Codex to do anything)?$")
-PANE_STATUS_BAR_PREFIXES = ("•", "⏺", "└", "│", "✻", "✳", "?", "…", "❯", "›", "⎿")
+PANE_EMPTY_PROMPT = re.compile(rf"^[{''.join(PROMPT_GLYPHS)}]\s*(Ask Codex to do anything)?$")
+PANE_STATUS_BAR_PREFIXES = ("•", "⏺", "└", "│", "✻", "✳", "?", "…", *PROMPT_GLYPHS, "⎿")
 # Codex draws rate-limit and approval choices as a numbered list closed by a confirm
 # line and keeps reporting the pane idle while one is showing. Enter would accept the
 # default (silently switching the model), so a modal is needs-attention, not output.
@@ -77,7 +81,7 @@ class Pane:
         """The end of the crew's terminal output, for crew that recorded no report."""
         try:
             lines = self.lines()
-        except (CaptainError, subprocess.TimeoutExpired, OSError) as exc:
+        except HERDR_ERRORS as exc:
             return f"unreadable ({exc})"
         if lines and "·" in lines[-1] and not lines[-1].startswith(PANE_STATUS_BAR_PREFIXES):
             lines = lines[:-1]
@@ -95,10 +99,15 @@ class Pane:
     def draft_pending(self):
         """Whether the composer still holds an unsent draft, which Herdr cannot see."""
         try:
-            prompts = [line for line in self.lines() if line[:1] in ("❯", "›")]
-        except (CaptainError, subprocess.TimeoutExpired, OSError):
+            prompts = [line for line in self.lines() if line[:1] in PROMPT_GLYPHS]
+        except HERDR_ERRORS:
             return False
         return bool(prompts) and not PANE_EMPTY_PROMPT.match(prompts[-1])
+
+    def agent_status(self):
+        """Herdr's own view of the agent: idle, working, done, or blocked."""
+        agent = runtime.herdr("agent", "get", self.agent_name, timeout=5).get("agent", {})
+        return agent.get("agent_status")
 
     def settled_status(self, timeout, provider=None):
         """Poll until the agent reports working, done, or blocked; return the last status seen.
@@ -109,8 +118,7 @@ class Pane:
         deadline = time.monotonic() + timeout
         status = None
         while time.monotonic() < deadline:
-            agent = runtime.herdr("agent", "get", self.agent_name, timeout=5).get("agent", {})
-            status = agent.get("agent_status")
+            status = self.agent_status()
             if status == "blocked":
                 return status
             if status in ("working", "done"):
@@ -198,20 +206,25 @@ class Pane:
         """Whether the pane is showing a native choice modal, which reads as idle to Herdr."""
         try:
             return modal_start(self.lines()) is not None
-        except (CaptainError, subprocess.TimeoutExpired, OSError):
+        except HERDR_ERRORS:
             return False
 
-    def model_landed(self, names, timeout):
+    def model_landed(self, names, timeout, provider=None):
         """Whether the pane shows the native CLI's own switch confirmation for this model.
 
-        Both CLIs echo the new model, but Claude Code prints its display name ("Sonnet 5"),
+        Each CLI echoes the new model, but Claude Code prints its display name ("Sonnet 5"),
         so any of the model's known names counts.
         """
 
         def confirmation(lines):
             for line in reversed(lines):
                 lowered = line.casefold()
-                if any(marker in lowered for marker in MODEL_CONFIRMATIONS):
+                confirmed = (
+                    PI_MODEL_CONFIRMATION.match(line)
+                    if provider == "pi"
+                    else any(marker in lowered for marker in MODEL_CONFIRMATIONS)
+                )
+                if confirmed:
                     return any(name in lowered for name in names) or None
             return None
 

@@ -33,6 +33,7 @@ class SelectorTests(unittest.TestCase):
             with self.subTest(keys=repr(keys)):
                 self.assertEqual(self.select(keys), expected)
         self.assertEqual(self.select("j\r", ("pane", "tab")), "tab")
+        self.assertEqual(self.select("jj\r", ("claude", "codex", "pi")), "pi")
 
     def test_escape_eof_and_interrupt_cancel(self):
         for key in ("\x1b", "\x04"):
@@ -124,5 +125,8 @@ class SelectorTests(unittest.TestCase):
         with patch("captain_barbossa.prompts.questionary.select") as menu:
             self.assertEqual(
                 choose("codex", ("claude", "codex"), "Choose your captain", "--agent"), "codex"
+            )
+            self.assertEqual(
+                choose("pi", ("claude", "codex", "pi"), "Choose your captain", "--agent"), "pi"
             )
             menu.assert_not_called()

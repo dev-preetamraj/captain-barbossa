@@ -1,7 +1,98 @@
+import subprocess
 import unittest
+from unittest.mock import patch
 
-from captain_barbossa import models
+from captain_barbossa import models, runtime
 from captain_barbossa.runtime import CaptainError
+
+PI_TABLE = """provider      model                context  max-out  thinking  images
+ollama        llama3.2:3b          128K     16.4K    no        no
+anthropic     claude-sonnet-5      200K     64K      yes       yes
+openai-codex  gpt-5.4-mini         272K     128K     yes       yes
+openai-codex  gpt-6-astra          272K     128K     yes       yes
+bedrock       claude-sonnet-5      200K     64K      yes       yes
+"""
+
+
+def fake_pi(stdout=PI_TABLE, returncode=0, stderr=""):
+    """Stand in for `pi --list-models` without a pi install."""
+    models.pi_models.cache_clear()
+    run = patch.object(
+        runtime.subprocess,
+        "run",
+        return_value=subprocess.CompletedProcess([], returncode, stdout, stderr),
+    )
+    return patch.object(runtime, "executable", return_value="/usr/bin/pi"), run
+
+
+class PiModelDiscoveryTests(unittest.TestCase):
+    """pi is provider-agnostic, so its catalog comes from `pi --list-models`, not a table."""
+
+    def tearDown(self):
+        models.pi_models.cache_clear()
+
+    def test_models_come_from_pi_with_provider_qualified_ids(self):
+        which, run = fake_pi()
+        with which, run as call:
+            self.assertEqual(
+                models.model_ids("pi"),
+                [
+                    "ollama/llama3.2:3b",
+                    "anthropic/claude-sonnet-5",
+                    "bedrock/claude-sonnet-5",
+                    "openai-codex/gpt-5.4-mini",
+                    "openai-codex/gpt-6-astra",
+                ],
+            )
+            self.assertEqual(call.call_args.args[0], ["/usr/bin/pi", "--list-models"])
+
+    def test_tiers_rank_on_the_capability_columns_pi_reports(self):
+        which, run = fake_pi()
+        with which, run:
+            self.assertEqual(
+                models.tiers_for("pi"),
+                {
+                    "cheap": "ollama/llama3.2:3b",
+                    "mid": "bedrock/claude-sonnet-5",
+                    "strong": "openai-codex/gpt-6-astra",
+                },
+            )
+            self.assertEqual(models.resolve_model("pi", " Strong "), "openai-codex/gpt-6-astra")
+
+    def test_unique_short_names_resolve_but_shared_ones_stay_ambiguous(self):
+        which, run = fake_pi()
+        with which, run:
+            self.assertEqual(models.resolve_model("pi", "astra"), "openai-codex/gpt-6-astra")
+            self.assertEqual(
+                models.model_names("pi", "openai-codex/gpt-6-astra"),
+                ("openai-codex/gpt-6-astra", "gpt-6-astra"),
+            )
+            with self.assertRaises(CaptainError) as error:
+                models.resolve_model("pi", "claude-sonnet-5")
+            self.assertIn("ambiguous", str(error.exception))
+
+    def test_the_catalog_is_read_once_per_process(self):
+        which, run = fake_pi()
+        with which, run as call:
+            models.resolve_model("pi", "cheap")
+            models.resolve_model("pi", "strong")
+            models.model_ids("pi")
+            self.assertEqual(call.call_count, 1)
+
+    def test_a_failed_query_raises_instead_of_inventing_models(self):
+        cases = (
+            fake_pi(stdout="", returncode=1, stderr="pi: not authenticated"),
+            fake_pi(stdout="provider  model  context  max-out  thinking  images\n"),
+        )
+        for which, run in cases:
+            with self.subTest(), which, run, self.assertRaises(CaptainError) as error:
+                models.model_ids("pi")
+            self.assertIn("pi --list-models", str(error.exception))
+        models.pi_models.cache_clear()
+        with patch.object(runtime, "executable", side_effect=CaptainError("pi is not installed")):
+            with self.assertRaises(CaptainError) as error:
+                models.model_ids("pi")
+        self.assertIn("pi --list-models", str(error.exception))
 
 
 class ModelTierTests(unittest.TestCase):

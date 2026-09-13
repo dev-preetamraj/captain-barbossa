@@ -2,7 +2,6 @@
 
 import argparse
 import os
-import subprocess
 import sys
 
 from . import __version__
@@ -17,9 +16,11 @@ from .agents import (
     tell_crew,
     wait_crew,
 )
+from .layout import HERDR_DIRECTIONS
 from .memory import PRUNE_DAYS, memory, project_root
-from .models import TIER_NAMES
-from .runtime import CaptainError, current_pane
+from .models import PROVIDERS, TIER_NAMES
+from .prompts import PLACEMENTS
+from .runtime import HERDR_ERRORS, CaptainError, current_pane
 
 
 def parser():
@@ -27,9 +28,7 @@ def parser():
         prog="captain", description="Native captain and crew for Herdr workspaces."
     )
     root.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
-    root.add_argument(
-        "--agent", choices=("codex", "claude"), help="captain CLI (asks when omitted)"
-    )
+    root.add_argument("--agent", choices=PROVIDERS, help="captain CLI (asks when omitted)")
     root.add_argument(
         "--session",
         default=os.environ.get("CAPTAIN_SESSION"),
@@ -44,16 +43,16 @@ def parser():
     crew.add_argument(
         "--agent",
         dest="crew_agent",
-        choices=("codex", "claude"),
+        choices=PROVIDERS,
         help="crew CLI (asks when omitted)",
     )
     crew.add_argument("--task", required=True)
     crew.add_argument(
-        "--placement", choices=("pane", "tab"), help="the placement explicitly chosen by the user"
+        "--placement", choices=PLACEMENTS, help="the placement explicitly chosen by the user"
     )
     crew.add_argument(
         "--direction",
-        choices=("vertical", "horizontal", "auto"),
+        choices=(*HERDR_DIRECTIONS, "auto"),
         help="pane split direction chosen by the user, or auto (asks when omitted)",
     )
     crew.add_argument(
@@ -145,7 +144,7 @@ def main(argv=None):
             memory(args, pane, project)
         else:
             launch(args, pane, project)
-    except (CaptainError, OSError, subprocess.TimeoutExpired, EOFError) as exc:
+    except (*HERDR_ERRORS, EOFError) as exc:
         print(f"captain: {exc}", file=sys.stderr)
         return 1
     except KeyboardInterrupt:

@@ -15,7 +15,7 @@ from collections import namedtuple
 from contextlib import contextmanager
 from pathlib import Path
 
-from .runtime import CaptainError, executable, herdr
+from .runtime import HERDR_ERRORS, CaptainError, check_text, executable, herdr
 
 
 def project_root():
@@ -140,6 +140,11 @@ def read_json(path):
         return json.loads(path.read_text(encoding="utf-8"))
     except (ValueError, OSError) as exc:
         raise CaptainError(f"Cannot read memory at {path}: {exc}") from exc
+
+
+def read_cursor(path):
+    """The stored offset into a crew's event log; a missing cursor means read from the start."""
+    return read_json(path) if path.exists() else 0
 
 
 def write_text(path, text):
@@ -284,8 +289,7 @@ def load_graph(path):
 
 def add_memory(path, subject, relation, target):
     for text in (subject, relation, target):
-        if not text.strip() or len(text) > 8000 or "\x00" in text:
-            raise CaptainError("Memory values must contain 1–8000 characters and no NUL bytes.")
+        check_text(text, "memory value")
     with lock(path.with_suffix(".lock")):
         graph = read_json(path) if path.exists() else empty_graph()
         migrate_graph(path, graph)
@@ -325,6 +329,15 @@ class Session(namedtuple("Session", "directory meta")):
 
     def events(self, crew_id):
         return self.directory / "events" / f"{crew_id}.jsonl"
+
+
+def crew_prefix(session_id):
+    return f"c-{session_id[:8]}-"
+
+
+def agent_name(session_id, name):
+    """The Herdr agent name for a crew; prune_sessions reads live crew back off this prefix."""
+    return f"{crew_prefix(session_id)}{name}"
 
 
 @contextmanager
@@ -460,7 +473,7 @@ def live_agents():
     """Terminal IDs and agent names Herdr reports, or None when Herdr cannot be reached."""
     try:
         agents = herdr("agent", "list", timeout=10).get("agents") or []
-    except (CaptainError, OSError, subprocess.TimeoutExpired):
+    except HERDR_ERRORS:
         return None
     return (
         {agent.get("terminal_id") for agent in agents if agent.get("terminal_id")},
@@ -506,7 +519,7 @@ def prune_sessions(project, days=PRUNE_DAYS, current=None):
             continue
         if agents is not None:
             terminal_ids, names = agents
-            prefix = f"c-{directory.name[:8]}-"
+            prefix = crew_prefix(directory.name)
             terminal_id = session_terminal_id(directory)
             if (terminal_id and terminal_id in terminal_ids) or any(
                 name.startswith(prefix) for name in names

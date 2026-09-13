@@ -317,6 +317,55 @@ class WaitCrewMemoryTests(unittest.TestCase):
             )
         api.assert_not_called()
 
+    def pi_crew(self):
+        # pi's composer has no prompt glyph, so the pane fallback can never see it finish.
+        return Crew(
+            "jack",
+            {"agent": self.agent_name, "provider": "pi"},
+            memory.Session(self.directory, self.meta),
+        )
+
+    def pi_status(self, crew, statuses, timeout=60):
+        def api(*args, **kwargs):
+            self.assertEqual(args[:2], ("agent", "get"))
+            return {"agent": {"agent_status": statuses.pop(0)}}
+
+        with (
+            patch.object(runtime, "herdr", side_effect=api),
+            patch.object(panes.time, "sleep"),
+            patch.object(panes.time, "monotonic", side_effect=count(0, 2)),
+        ):
+            return crew.status(timeout)
+
+    def test_pi_wait_finishes_a_task_that_was_already_idle_at_the_first_poll(self):
+        # A task shorter than the grace period is never once seen working.
+        statuses = ["idle"] * 3
+        self.assertEqual(self.pi_status(self.pi_crew(), statuses), ("idle", None))
+        self.assertEqual(statuses, [])
+
+    def test_pi_wait_needs_consecutive_idle_reads(self):
+        statuses = ["idle", "working", "idle", "idle", "idle"]
+        self.assertEqual(self.pi_status(self.pi_crew(), statuses), ("idle", None))
+        self.assertEqual(statuses, [])
+
+    def test_pi_wait_reads_no_herdr_status_within_the_grace_period(self):
+        with patch.object(runtime, "herdr") as unused:
+            self.assertEqual(self.pi_crew().status(0), (None, None))
+        unused.assert_not_called()
+
+    def test_pi_wait_reports_herdr_done_without_waiting_for_idle(self):
+        crew = Crew(
+            "jack",
+            {"agent": self.agent_name, "provider": "pi"},
+            memory.Session(self.directory, self.meta),
+        )
+        with (
+            patch.object(runtime, "herdr", return_value={"agent": {"agent_status": "done"}}),
+            patch.object(panes.time, "sleep"),
+            patch.object(panes.time, "monotonic", side_effect=count(0, 2)),
+        ):
+            self.assertEqual(crew.status(60), ("done", None))
+
     def test_event_reader_skips_bad_records_and_retries_a_partial_unicode_line(self):
         events = self.event_path()
         self.assertEqual(memory.read_events(events, 0), ([], 0))

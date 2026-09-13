@@ -469,6 +469,14 @@ class CaptainFlowTests(unittest.TestCase):
         self.assertEqual(settings, {"attribution": {"commit": "", "pr": "", "sessionUrl": False}})
         codex_args = instruction_prompts.native_args("codex", "instructions")
         self.assertNotIn("--settings", codex_args)
+        pi_args = instruction_prompts.native_args("pi", "instructions")
+        self.assertNotIn("--settings", pi_args)
+
+    def test_native_args_for_pi_pass_instructions_and_skip_hooks(self):
+        args = instruction_prompts.native_args("pi", "instructions", "opus", events="/tmp/events")
+        self.assertEqual(args[:2], ["--append-system-prompt", "instructions"])
+        self.assertNotIn("append_event", " ".join(args))
+        self.assertEqual(args[2:], models.native_model_args("pi", "opus"))
 
     def test_captain_requires_an_agent_selection(self):
         for provider in ("claude", "codex"):

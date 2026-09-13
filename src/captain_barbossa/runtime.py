@@ -10,6 +10,15 @@ class CaptainError(Exception):
     pass
 
 
+# Every Herdr call goes through a subprocess, so these three always travel together.
+HERDR_ERRORS = (CaptainError, subprocess.TimeoutExpired, OSError)
+
+
+def check_text(value, what):
+    if not value.strip() or len(value) > 8000 or "\x00" in value:
+        raise CaptainError(f"Provide a {what} of 1–8000 characters, without NUL bytes.")
+
+
 def executable(name):
     path = shutil.which(name)
     if not path:

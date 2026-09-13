@@ -88,7 +88,12 @@ class PruneTests(unittest.TestCase):
         )
         gone = self.make_session("c" * 32, 30, captain_pane="w1:p8", captain_terminal="term_dead")
         live = agent_list(
-            {"pane_id": "w1:p2", "name": f"c-{'a' * 8}-jack", "terminal_id": "term_jack"},
+            # Built the way create_crew names a crew, so prune cannot drift from it.
+            {
+                "pane_id": "w1:p2",
+                "name": memory.agent_name("a" * 32, "jack"),
+                "terminal_id": "term_jack",
+            },
             {"pane_id": "w1:p4", "agent": "claude", "terminal_id": "term_live"},
         )
         with patch.object(memory, "herdr", return_value=live):

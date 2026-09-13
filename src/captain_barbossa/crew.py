@@ -1,12 +1,11 @@
 """Crew identities, roster queries, and native lifecycle events."""
 
-import subprocess
 import time
 from dataclasses import dataclass
 
-from .memory import Session, read_events, read_json, write_json
-from .pane import PANE_EMPTY_PROMPT, Pane, modal_start
-from .runtime import CaptainError
+from .memory import Session, read_cursor, read_events, read_json, session, write_json
+from .pane import INTERRUPT_MARKER, PANE_EMPTY_PROMPT, Pane, modal_start
+from .runtime import HERDR_ERRORS, CaptainError
 
 WAIT_INTERVAL = 2
 # Consecutive idle polls before a crew that only paused between tools counts as finished.
@@ -60,12 +59,26 @@ class Crew:
         return self.session.events(self.crew_id)
 
     @property
+    def cursor(self):
+        return self.events.with_suffix(".cursor")
+
+    @property
+    def report_cursor(self):
+        return self.events.with_suffix(".reports")
+
+    @property
     def pane(self):
         return Pane(self.record["agent"])
 
     @classmethod
     def members(cls, current):
         return [cls(crew_id, record, current) for crew_id, record in current.meta["crew"].items()]
+
+    @classmethod
+    def for_args(cls, args, pane, project):
+        """The session named by args and the crew it names, for a command that takes a name."""
+        current = session(project, pane, args.session)
+        return current, cls.resolve(current, args.name)
 
     @classmethod
     def resolve(cls, current, requested):
@@ -127,14 +140,40 @@ class Crew:
             and labels.get(link["source"], "").casefold() in wanted
         ]
 
+    def pi_status(self, timeout):
+        """Poll Herdr's own agent status, which is all pi offers: it installs no hooks.
+
+        Idle is debounced exactly like the pane fallback: a task that has not started yet
+        also reads idle, and one between tools reads idle for a moment.
+        """
+        deadline = time.monotonic() + timeout
+        fallback_at = time.monotonic() + WAIT_INTERVAL * WAIT_POLLS
+        idle_polls = 0
+        while True:
+            if time.monotonic() >= fallback_at:
+                try:
+                    status = self.pane.agent_status()
+                except HERDR_ERRORS:
+                    status = None
+                if status == "done":
+                    return status
+                idle_polls = idle_polls + 1 if status == "idle" else 0
+                if idle_polls >= WAIT_POLLS:
+                    return "idle"
+            if time.monotonic() >= deadline:
+                return None
+            time.sleep(WAIT_INTERVAL)
+
     def status(self, timeout):
         """Tail hooks; use pane detection only while no native event has arrived."""
+        if self.record.get("provider") == "pi":
+            return self.pi_status(timeout), None
         events = self.events
         task = self.record.get("task")
         deadline = time.monotonic() + timeout
         fallback_at = time.monotonic() + WAIT_INTERVAL * WAIT_POLLS
-        cursor = events.with_suffix(".cursor")
-        offset = read_json(cursor) if cursor.exists() else 0
+        cursor = self.cursor
+        offset = read_cursor(cursor)
         seen = False
         idle_polls = 0
         previous = None
@@ -152,13 +191,13 @@ class Crew:
             if not seen and time.monotonic() >= fallback_at:
                 try:
                     lines = self.pane.lines()
-                except (CaptainError, subprocess.TimeoutExpired, OSError):
+                except HERDR_ERRORS:
                     lines = []
                 if modal_start(lines) is not None:
                     return "blocked", None
                 # ponytail: pane fallback is heuristic; native hooks are authoritative.
                 idle = any(PANE_EMPTY_PROMPT.match(line) for line in lines) and not any(
-                    "esc to interrupt" in line.casefold() for line in lines
+                    INTERRUPT_MARKER in line.casefold() for line in lines
                 )
                 idle_polls = idle_polls + 1 if idle and lines == previous else int(idle)
                 previous = lines

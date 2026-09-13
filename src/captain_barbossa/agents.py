@@ -4,7 +4,6 @@ import json
 import os
 import re
 import shlex
-import subprocess
 import sys
 from itertools import cycle
 
@@ -13,22 +12,23 @@ from .crew import WAIT_TIMEOUT as WAIT_TIMEOUT
 from .crew import Crew
 from .memory import (
     add_memory,
+    agent_name,
     crew_meta,
     private_dir,
     prune_sessions,
+    read_cursor,
     read_events,
-    read_json,
     session,
     state_root,
     temp_root,
     truncate_label,
     write_json,
 )
-from .models import model_names, resolve_model
+from .models import PROVIDERS, model_names, resolve_model
 from .pane import MODEL_TIMEOUT, PROMPT_TIMEOUT
 from .placement import Placement
-from .prompts import choose
-from .runtime import CaptainError, executable
+from .prompts import PLACEMENTS, choose
+from .runtime import HERDR_ERRORS, CaptainError, check_text, executable
 
 # One word each: the roster name is the crew ID, the display name, and the agent suffix.
 CREW_NAMES = (
@@ -50,13 +50,13 @@ CREW_NAMES = (
 def launch(args, pane, project):
     if not sys.stdin.isatty():
         raise CaptainError("Launch captain from an interactive Herdr terminal.")
-    provider = choose(args.agent, ("claude", "codex"), "Choose your captain", "--agent")
+    provider = choose(args.agent, PROVIDERS, "Choose your captain", "--agent")
     binary = executable(provider)
     current = session(project, pane, args.session, create=args.session is None)
     meta = current.meta
     try:
         prune_sessions(project, current=meta["id"])
-    except (CaptainError, OSError, subprocess.TimeoutExpired):
+    except HERDR_ERRORS:
         pass  # retention is housekeeping; never block a launch on it
     instruction_text = instructions.agent_instructions(current.directory, "Captain Barbossa")
     write_json(
@@ -79,18 +79,16 @@ def launch(args, pane, project):
 
 
 def wait_crew(args, pane, project):
-    current = session(project, pane, args.session)
-    crew = Crew.resolve(current, args.name)
-    display_name = crew.display_name
+    current, crew = Crew.for_args(args, pane, project)
     events = crew.events
-    report_cursor = events.with_suffix(".reports")
-    reported = read_json(report_cursor) if report_cursor.exists() else 0
+    report_cursor = crew.report_cursor
+    reported = read_cursor(report_cursor)
     # Legacy pane detection has no event boundary; only trust reports written during wait.
     before = len(crew.reports)
     status, event = crew.status(max(args.timeout, 0))
     if status is None:
         raise CaptainError(
-            f"{display_name} was still working after {args.timeout} seconds. "
+            f"{crew.display_name} was still working after {args.timeout} seconds. "
             "Wait again, or read its pane with: herdr agent read " + crew.record["agent"]
         )
     all_reports = crew.reports
@@ -112,7 +110,7 @@ def wait_crew(args, pane, project):
     else:
         tail = crew.pane.tail()
         # Kept short: the full tail already went to stdout, this is just a debugging breadcrumb.
-        add_memory(current.graph, display_name, "tail", truncate_label(tail))
+        add_memory(current.graph, crew.display_name, "tail", truncate_label(tail))
         entry = f"{status}; no report recorded"
         printed = f"{entry}; pane tail: {tail}"
         completed = entry
@@ -126,17 +124,15 @@ def wait_crew(args, pane, project):
             message = f"{event['tool_name']} {json.dumps(event.get('tool_input', {}))}"
         if message:
             printed += f"; hook: {message}"
-    add_memory(current.graph, display_name, "completed", completed[:8000])
+    add_memory(current.graph, crew.display_name, "completed", completed[:8000])
     if events.exists():
         write_json(report_cursor, len(all_reports))
-    print(f"{display_name} {status}.")
+    print(f"{crew.display_name} {status}.")
     print(printed)
 
 
 def focus_crew(args, pane, project):
-    current = session(project, pane, args.session)
-    crew = Crew.resolve(current, args.name)
-    display_name = crew.display_name
+    _, crew = Crew.for_args(args, pane, project)
     try:
         agent = runtime.herdr("agent", "get", crew.record["agent"]).get("agent", {})
         # The live agent wins over the recorded tab when its pane has moved.
@@ -145,8 +141,8 @@ def focus_crew(args, pane, project):
             runtime.herdr("tab", "focus", tab_id)
         runtime.herdr("agent", "focus", crew.record["agent"])
     except CaptainError as exc:
-        raise CaptainError(f"Could not focus {display_name}: {exc}") from exc
-    print(f"Focused {display_name}.")
+        raise CaptainError(f"Could not focus {crew.display_name}: {exc}") from exc
+    print(f"Focused {crew.display_name}.")
 
 
 def status_crew(args, pane, project):
@@ -160,7 +156,7 @@ def status_crew(args, pane, project):
         try:
             agent = runtime.herdr("agent", "get", crew.record["agent"], timeout=5).get("agent", {})
             status = agent.get("agent_status") or status
-        except (CaptainError, subprocess.TimeoutExpired, OSError):
+        except HERDR_ERRORS:
             pass
         task = (crew.record.get("task") or "").splitlines()
         rows.append(
@@ -186,53 +182,52 @@ def status_crew(args, pane, project):
 
 def tell_crew(args, pane, project):
     """Send a follow-up prompt to a running crew."""
-    if not args.message.strip() or len(args.message) > 8000 or "\x00" in args.message:
-        raise CaptainError("Provide a message of 1-8000 characters, without NUL bytes.")
+    check_text(args.message, "message")
     current = session(project, pane, args.session)
     with crew_meta(current.directory) as meta:
         current = current._replace(meta=meta)
         crew = Crew.resolve(current, args.name)
-        display_name = crew.display_name
         if crew.is_dismissed:
-            raise CaptainError(f"{display_name} was dismissed; recruit new crew instead.")
+            raise CaptainError(f"{crew.display_name} was dismissed; recruit new crew instead.")
         events = crew.events
-        cursor = events.with_suffix(".cursor")
+        cursor = crew.cursor
         # An idle event from the gap before this prompt would otherwise read as done.
-        _, offset = read_events(events, read_json(cursor) if cursor.exists() else 0)
+        _, offset = read_events(events, read_cursor(cursor))
         if events.exists():
             write_json(cursor, offset)
         crew.record["task"] = args.message
         crew.pane.submit_task(args.message, crew.record.get("provider"))
-        add_memory(current.graph, display_name, "assigned", args.message)
-    print(f"Sent to {display_name}.")
+        add_memory(current.graph, crew.display_name, "assigned", args.message)
+    print(f"Sent to {crew.display_name}.")
 
 
 def switch_model(args, pane, project):
     """Switch a running crew to another model through the native CLI's own /model command."""
-    current = session(project, pane, args.session)
-    crew = Crew.resolve(current, args.name)
-    display_name = crew.display_name
+    current, crew = Crew.for_args(args, pane, project)
     provider = crew.record["provider"]
     model = resolve_model(provider, args.model)
-    agent_name = crew.record["agent"]
+    crew_agent = crew.record["agent"]
     names = [name.casefold() for name in model_names(provider, model)]
     if provider == "claude":
-        runtime.herdr("agent", "prompt", agent_name, f"/model {model}")
-        if not crew.pane.model_landed(names, PROMPT_TIMEOUT):
+        runtime.herdr("agent", "prompt", crew_agent, f"/model {model}")
+        if not crew.pane.model_landed(names, PROMPT_TIMEOUT, provider):
             # Claude Code can leave a submitted line as an unsent draft in its input box.
-            runtime.herdr("agent", "send-keys", agent_name, "enter")
+            runtime.herdr("agent", "send-keys", crew_agent, "enter")
+    elif provider == "pi":
+        # An exact pi model ID selects straight away, with no picker and no draft state.
+        runtime.herdr("agent", "prompt", crew_agent, f"/model {model}")
     else:
-        runtime.herdr("agent", "prompt", agent_name, "/model")
+        runtime.herdr("agent", "prompt", crew_agent, "/model")
         crew.pane.codex_pick_model(model, MODEL_TIMEOUT)
-    if not crew.pane.model_landed(names, MODEL_TIMEOUT):
+    if not crew.pane.model_landed(names, MODEL_TIMEOUT, provider):
         raise CaptainError(
-            f"{display_name} did not confirm the switch to {model}. "
-            f"Read its pane before retrying: herdr agent read {agent_name}"
+            f"{crew.display_name} did not confirm the switch to {model}. "
+            f"Read its pane before retrying: herdr agent read {crew_agent}"
         )
     with crew_meta(current.directory) as meta:
         meta["crew"][crew.crew_id]["model"] = model
-    add_memory(current.graph, display_name, "model", model)
-    print(f"{display_name} switched to {model}.")
+    add_memory(current.graph, crew.display_name, "model", model)
+    print(f"{crew.display_name} switched to {model}.")
     if provider == "claude":
         # Claude Code's inline /model always writes the model to the user's settings.
         print("Claude Code also saved it as the default for new sessions.")
@@ -243,15 +238,14 @@ def dismiss_crew(args, pane, project):
     with crew_meta(current.directory) as meta:
         current = current._replace(meta=meta)
         crew = Crew.resolve(current, args.name)
-        display_name = crew.display_name
         if crew.is_dismissed:
-            raise CaptainError(f"{display_name} was already dismissed.")
+            raise CaptainError(f"{crew.display_name} was already dismissed.")
         if not crew.record.get("pane"):
-            raise CaptainError(f"{display_name} has no recorded pane to close.")
+            raise CaptainError(f"{crew.display_name} has no recorded pane to close.")
         try:
             runtime.herdr("pane", "close", crew.record["pane"])
         except CaptainError as exc:
-            raise CaptainError(f"Could not dismiss {display_name}: {exc}") from exc
+            raise CaptainError(f"Could not dismiss {crew.display_name}: {exc}") from exc
         (current.directory / f"crew-{crew.crew_id}.sh").unlink(missing_ok=True)
         crew.record["status"] = "dismissed"
         tab_id = crew.record.get("tab")
@@ -260,7 +254,7 @@ def dismiss_crew(args, pane, project):
     if label:
         runtime.herdr("tab", "rename", tab_id, label)
     add_memory(current.graph, f"session:{meta['id']}", "dismissed", crew.record["agent"])
-    print(f"Dismissed {display_name}.")
+    print(f"Dismissed {crew.display_name}.")
 
 
 def create_crew(args, pane, project):
@@ -272,16 +266,13 @@ def create_crew(args, pane, project):
             "Use a Pirates of the Caribbean character name (e.g. jack or gibbs), "
             "or omit NAME to assign one automatically. Names must be at most 16 characters."
         )
-    if not args.task.strip() or len(args.task) > 8000 or "\x00" in args.task:
-        raise CaptainError("Provide a task of 1–8000 characters, without NUL bytes.")
-    provider = choose(args.crew_agent, ("claude", "codex"), "Choose your crew agent", "--agent")
-    placement = choose(
-        args.placement, ("pane", "tab"), "Where should the crew open?", "--placement"
-    )
+    check_text(args.task, "task")
+    provider = choose(args.crew_agent, PROVIDERS, "Choose your crew agent", "--agent")
+    placement = choose(args.placement, PLACEMENTS, "Where should the crew open?", "--placement")
     current = session(project, pane, args.session)
     with crew_meta(current.directory) as meta:
         current = current._replace(meta=meta)
-        direction, split_pane, tab_id, auto = Placement(pane, meta).choose_split(args, placement)
+        direction, split_pane, tab_id, auto = Placement(pane, current).choose_split(args, placement)
         if auto and split_pane is None:
             placement = "tab"
         model = resolve_model(provider, args.model) if args.model is not None else None
@@ -298,7 +289,7 @@ def create_crew(args, pane, project):
         display_name = name.capitalize()
         if Crew.name_reserved(current, name):
             raise CaptainError(f"Crew '{display_name}' already exists in this session.")
-        agent_name = f"c-{meta['id'][:8]}-{name}"
+        crew_agent = agent_name(meta["id"], name)
         launcher = current.directory / f"crew-{name}.sh"
         environment = [
             "--env",
@@ -315,16 +306,13 @@ def create_crew(args, pane, project):
         instruction_text = instructions.agent_instructions(
             current.directory, f"crew member {display_name}"
         )
-        crew = Crew(name, {"id": name, "name": display_name, "agent": agent_name}, current)
+        crew = Crew(name, {"id": name, "name": display_name, "agent": crew_agent}, current)
         events = crew.events
         private_dir(events.parent)
         events.write_text("", encoding="utf-8")
         events.chmod(0o600)
-        events.with_suffix(".cursor").unlink(missing_ok=True)
-        write_json(
-            events.with_suffix(".reports"),
-            len(crew.reports),
-        )
+        crew.cursor.unlink(missing_ok=True)
+        write_json(crew.report_cursor, len(crew.reports))
         command = shlex.join(
             [binary, *instructions.native_args(provider, instruction_text, model, events)]
         )
@@ -373,7 +361,7 @@ def create_crew(args, pane, project):
         record = {
             "id": name,
             "name": display_name,
-            "agent": agent_name,
+            "agent": crew_agent,
             "provider": provider,
             "pane": new_pane,
             "tab": tab_id,
@@ -389,13 +377,13 @@ def create_crew(args, pane, project):
         meta["crew"][name] = record
         write_json(current.meta_path, meta)
         try:
-            add_memory(current.graph, f"session:{meta['id']}", "crew", agent_name)
-            add_memory(current.graph, agent_name, "name", display_name)
-            add_memory(current.graph, agent_name, "assigned", args.task)
+            add_memory(current.graph, f"session:{meta['id']}", "crew", crew_agent)
+            add_memory(current.graph, crew_agent, "name", display_name)
+            add_memory(current.graph, crew_agent, "assigned", args.task)
             if model:
-                add_memory(current.graph, agent_name, "model", model)
+                add_memory(current.graph, crew_agent, "model", model)
             if auto:
-                add_memory(current.graph, agent_name, "placement", f"auto: {auto}")
+                add_memory(current.graph, crew_agent, "placement", f"auto: {auto}")
             runtime.herdr("pane", "rename", new_pane, display_name)
             # A new shell may still be in canonical mode: keep terminal input short.
             runtime.herdr(
@@ -408,7 +396,7 @@ def create_crew(args, pane, project):
                 label = Crew.tab_label(current, tab_id)
                 if label:
                     runtime.herdr("tab", "rename", tab_id, label)
-        except (CaptainError, subprocess.TimeoutExpired, OSError) as exc:
+        except HERDR_ERRORS as exc:
             record["status"] = "needs_attention"
             write_json(current.meta_path, meta)
             launcher.unlink(missing_ok=True)

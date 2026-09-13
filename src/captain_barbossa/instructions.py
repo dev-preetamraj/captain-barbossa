@@ -160,6 +160,9 @@ def native_args(provider, instructions, model=None, events=None):
             "--settings",
             json.dumps(settings),
         ]
+    elif provider == "pi":
+        # pi has no hook/notify mechanism, so crew state falls back to pane reading.
+        flags = ["--append-system-prompt", instructions]
     else:
         flags = ["-c", "developer_instructions=" + json.dumps(instructions, ensure_ascii=False)]
         if hook:

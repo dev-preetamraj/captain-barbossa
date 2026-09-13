@@ -3,6 +3,7 @@
 import sys
 
 from . import runtime
+from .crew import Crew
 from .layout import HERDR_DIRECTIONS, pick_auto_split, pick_split, tab_panes
 from .prompts import LABELS, choose
 from .runtime import CaptainError
@@ -11,9 +12,9 @@ from .runtime import CaptainError
 class Placement:
     """The captain's origin and the active crew geometry used to choose a split."""
 
-    def __init__(self, pane, meta):
+    def __init__(self, pane, current):
         self.pane = pane
-        active = [crew for crew in meta["crew"].values() if crew.get("status") != "dismissed"]
+        active = [crew.record for crew in Crew.members(current) if not crew.is_dismissed]
         self.crew_panes = {crew["pane"] for crew in active if crew.get("pane")}
         self.crew_tabs = []
         self.pane_to_tab = {}
@@ -120,7 +121,7 @@ class Placement:
         if args.split_pane == "auto":
             return self.auto_split(None if args.direction == "auto" else args.direction)
         direction = choose(
-            args.direction, ("vertical", "horizontal", "auto"), "Split direction?", "--direction"
+            args.direction, (*HERDR_DIRECTIONS, "auto"), "Split direction?", "--direction"
         )
         free = None if direction == "auto" else direction
         if args.split_pane == self.pane["pane_id"]:
