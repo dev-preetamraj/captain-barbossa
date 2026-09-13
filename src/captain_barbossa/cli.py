@@ -62,7 +62,9 @@ def parser():
     )
     crew.add_argument(
         "--model",
-        help=f"tier ({'|'.join(TIER_NAMES)}) resolved for the crew CLI, or a model name/alias",
+        default="cheap",
+        help=f"tier ({'|'.join(TIER_NAMES)}) resolved for the crew CLI, or a model name/alias "
+        "(default: cheap, so routine work never silently lands on an expensive default)",
     )
     wait = commands.add_parser(
         "wait", help="wait for a crew to finish, then record and print its completion"

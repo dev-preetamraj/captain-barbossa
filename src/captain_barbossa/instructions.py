@@ -65,11 +65,12 @@ Crew names are first names, or a character's only known name (e.g. Gibbs); never
 surname. Barbossa stays reserved for the captain.
 Recruit with no questions when the user states no preference. Defaults: --agent is
 the CLI you run as, --placement pane --direction auto --split-pane auto, and --model
-a tier picked from the task: cheap (mechanical edits, renames, formatting, docs), mid
-(normal features, tests, work inside one area), strong (design, debugging, multi-file
-changes, long-context or many-file reads). Each agent resolves the tier to its own
-model; an exact model name still works. Step up a tier when the task is ambiguous,
-risky, or has already failed once; step down for narrow mechanical follow-ups.
+cheap. cheap is the default and covers commits, tests, lint, formatting, docs, chores,
+renames, and mechanical edits. Use mid only for a normal feature or a change inside one
+area, strong only for design, debugging, or multi-file/long-context work. Never step up
+because a task feels ambiguous, risky, or important: step up only when the user asks for
+a stronger model, or after a cheap crew has already failed or stalled. Each agent
+resolves the tier to its own model; an exact model name still works.
 Use every choice the user does state and keep the rest on these defaults. Ask at
 most one question, only when the user hands a choice back to you or names one too
 vaguely to map to a flag, and wait for the answer; never ask about a choice they did

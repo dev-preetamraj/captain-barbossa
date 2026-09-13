@@ -71,7 +71,8 @@ questions, using:
 - **agent**: the CLI the captain itself runs as
 - **placement**: a pane split picked from the tab layout (auto), or a new tab
   when crowded
-- **model**: a tier picked from the task (see below)
+- **model**: the `cheap` tier, stepped up only for genuinely harder work (see
+  below)
 
 Every choice you do state is used as given; the captain asks at most one
 question, and only when you hand a choice back to it ("ask me where to put
@@ -118,16 +119,25 @@ memory.
 | `mid`    | claude-sonnet-5   | gpt-5.6-terra         |
 | `strong` | claude-opus-5     | gpt-6-astra           |
 
-The captain picks a tier from the task: `cheap` for mechanical edits,
-renames, formatting, and docs; `mid` for normal features, tests, and work
-inside one area; `strong` for design, debugging, multi-file changes, or
-long-context reads. Free text also works and is matched to the closest model
-the chosen CLI offers (exact IDs and aliases first, then prefixes,
-substrings, and close spellings): Claude Code additionally offers
-`claude-fable-5-1` (fable); Codex additionally offers `gpt-5.4-mini` (mini),
-`gpt-5.6-luna` (luna), `gpt-5.6-sol` (sol), and `gpt-5.5`. Ambiguous or
-unknown text reports the options and creates nothing. Without `--model`, the
-CLI's own default applies.
+**`cheap` is the default**: omitting `--model` recruits a `cheap` crew rather
+than falling through to whatever the native CLI is configured to use, so
+routine work never silently lands on an expensive model. `cheap` covers
+commits, tests, lint, formatting, docs, chores, renames, and mechanical
+edits. `mid` is for a normal feature or a change inside one area, `strong`
+for design, debugging, or multi-file and long-context work.
+
+The captain is instructed not to step up just because a task feels ambiguous,
+risky, or important: it steps up only when you ask for a stronger model, or
+after a cheap crew has already failed or stalled. Retier a running crew in
+place with `captain model <name> mid|strong` rather than recruiting high
+up front.
+
+Free text also works and is matched to the closest model the chosen CLI
+offers (exact IDs and aliases first, then prefixes, substrings, and close
+spellings): Claude Code additionally offers `claude-fable-5-1` (fable);
+Codex additionally offers `gpt-5.4-mini` (mini), `gpt-5.6-luna` (luna),
+`gpt-5.6-sol` (sol), and `gpt-5.5`. Ambiguous or unknown text reports the
+options and creates nothing.
 
 New crew panes/tabs open in the same workspace and project without stealing
 focus, and the task is submitted once the native agent is ready. A task that
@@ -153,6 +163,14 @@ falling back to the crew's last message or the tail of its pane when it
 reported nothing. A crew still working when the timeout (900s by default)
 expires records nothing and reports an error; wait again, or read its pane
 directly with `herdr agent read <name>`.
+
+For **pi** crew the pane tail is written to `tail-<name>.txt` in the session
+directory and the wait prints that path instead of the tail itself. pi installs
+no lifecycle hooks, so every pi wait falls back to the tail, and the captain
+extension steers whatever `wait` prints into the conversation; filing it keeps
+each delivery to one line. Read the file when the status and report leave you
+unsure. Claude Code and Codex crew, which do have hooks, still print the tail
+inline on the rare wait that has no event.
 
 ## Sending a follow-up
 

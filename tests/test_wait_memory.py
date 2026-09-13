@@ -117,6 +117,55 @@ class WaitCrewMemoryTests(unittest.TestCase):
         self.assertLessEqual(len(tail_edges[0]), 300)
         self.assertIn(f"pane tail: {long_tail}", printed)
 
+    def run_pi_wait(self, tail, report=None):
+        """A pi wait: pi installs no hooks, so it always reaches the pane-tail fallback."""
+        self.meta["crew"]["jack"]["provider"] = "pi"
+        memory.write_json(self.directory / "session.json", self.meta)
+
+        def api(*args, **kwargs):
+            if args[:2] == ("agent", "get"):
+                if report:
+                    memory.add_memory(self.directory / "graph.json", "Jack", "report", report)
+                return {"agent": {"agent_status": "idle"}}
+            if args[:2] == ("agent", "read"):
+                return tail
+            raise AssertionError(f"unexpected herdr call: {args}")
+
+        with (
+            patch.object(runtime, "herdr", side_effect=api),
+            patch.object(panes.time, "sleep"),
+            patch.object(panes.time, "monotonic", side_effect=count(0, 2)),
+            contextlib.redirect_stdout(io.StringIO()) as output,
+        ):
+            agents.wait_crew(self.args("wait", "Jack", "--timeout", "60"), self.pane, self.project)
+        return output.getvalue()
+
+    def test_pi_wait_files_the_pane_tail_instead_of_printing_it(self):
+        tail = "\n".join(f"line {index} of noisy pi terminal chrome" for index in range(60))
+        printed = self.run_pi_wait(tail)
+        self.assertNotIn("line 59 of noisy pi terminal chrome", printed)
+        filed = self.directory / "tail-jack.txt"
+        self.assertIn(str(filed), printed)
+        self.assertIn("line 59 of noisy pi terminal chrome", filed.read_text(encoding="utf-8"))
+
+    def test_pi_wait_delivery_stays_a_couple_of_short_lines(self):
+        """The captain extension steers whatever wait prints into pi, so size is context cost."""
+        printed = self.run_pi_wait("x" * 1400)
+        self.assertLess(len(printed), 400)
+        self.assertEqual(len(printed.splitlines()), 2)
+        self.assertIn("idle; no report recorded", printed)
+
+    def test_pi_wait_with_a_report_prints_the_report_and_files_no_tail(self):
+        printed = self.run_pi_wait("y" * 1400, report="tests pass")
+        self.assertIn("idle; reported: tests pass", printed)
+        self.assertNotIn("pane tail", printed)
+        self.assertFalse((self.directory / "tail-jack.txt").exists())
+
+    def test_non_pi_crew_still_print_the_tail_inline(self):
+        printed = self.run_wait(["idle", "idle", "idle"], tail="ran 66 tests\nOK")
+        self.assertIn("pane tail: ran 66 tests\nOK", printed)
+        self.assertFalse((self.directory / "tail-jack.txt").exists())
+
     def event_path(self):
         return memory.private_dir(self.directory / "events") / "jack.jsonl"
 

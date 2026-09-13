@@ -33,6 +33,22 @@ class InstructionSizeTests(unittest.TestCase):
         crew = instruction_prompts.agent_instructions(self.directory, "crew member Jack")
         self.assertNotIn("CAPTAIN model", crew)
 
+    def test_routine_work_is_pinned_to_cheap_and_never_steps_up_on_a_hunch(self):
+        captain = " ".join(
+            instruction_prompts.agent_instructions(self.directory, "Captain Barbossa").split()
+        )
+        cheap_sentence = captain.split("cheap is the default")[1].split("Use mid only")[0]
+        for routine in ("commits", "tests", "lint", "formatting", "docs", "chores"):
+            self.assertIn(routine, cheap_sentence)
+        self.assertIn(
+            "Never step up because a task feels ambiguous, risky, or important: step up "
+            "only when the user asks for a stronger model, or after a cheap crew has "
+            "already failed or stalled.",
+            captain,
+        )
+        # The old wording made ambiguity a reason to spend more, which drifted every task up.
+        self.assertNotIn("Step up a tier when the task is ambiguous", captain)
+
     def test_both_roles_preserve_existing_files_and_ask_before_replacing_content(self):
         rule = (
             "Never overwrite, rewrite from scratch, or discard existing files or "

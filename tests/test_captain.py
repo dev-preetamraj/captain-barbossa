@@ -378,12 +378,15 @@ class CaptainFlowTests(unittest.TestCase):
             "Recruit with no questions when the user states no preference.",
             "--agent is the CLI you run as",
             "--placement pane --direction auto --split-pane auto",
-            "--model a tier picked from the task: cheap (mechanical edits, renames, "
-            "formatting, docs), mid (normal features, tests, work inside one area), "
-            "strong (design, debugging, multi-file changes, long-context or many-file reads).",
+            "--model cheap.",
+            "cheap is the default and covers commits, tests, lint, formatting, docs, "
+            "chores, renames, and mechanical edits.",
+            "Use mid only for a normal feature or a change inside one area, strong only "
+            "for design, debugging, or multi-file/long-context work.",
+            "Never step up because a task feels ambiguous, risky, or important: step up "
+            "only when the user asks for a stronger model, or after a cheap crew has "
+            "already failed or stalled.",
             "Each agent resolves the tier to its own model; an exact model name still works.",
-            "Step up a tier when the task is ambiguous, risky, or has already failed once; "
-            "step down for narrow mechanical follow-ups.",
             "Use every choice the user does state and keep the rest on these defaults.",
             "Ask at most one question, only when the user hands a choice back to you "
             "or names one too vaguely to map to a flag, and wait for the answer;",
@@ -1240,6 +1243,7 @@ class CaptainFlowTests(unittest.TestCase):
                         instruction_prompts.native_args(
                             provider,
                             instructions,
+                            models.tiers_for(provider)["cheap"],
                             events=self.directory / "events" / f"{name}.jsonl",
                         ),
                     )
@@ -1294,8 +1298,9 @@ class CaptainFlowTests(unittest.TestCase):
                 graph = memory.read_json(self.directory / "graph.json")
                 self.assertIn(model, [node["label"] for node in graph["nodes"]])
 
-    def test_crew_without_a_model_leaves_the_native_default(self):
+    def test_crew_without_a_model_recruits_cheap_instead_of_the_native_default(self):
         args = self.args("crew", "--agent", "claude", "--task", "build", "--placement", "tab")
+        self.assertEqual(args.model, "cheap")
         created = {
             "pane": {"pane_id": "w1:p2", "agent": "claude", "agent_status": "idle"},
             "root_pane": {"pane_id": "w1:p3"},
@@ -1309,9 +1314,20 @@ class CaptainFlowTests(unittest.TestCase):
             contextlib.redirect_stderr(io.StringIO()) as errors,
         ):
             agents.create_crew(args, self.pane, self.project)
-        self.assertIsNone(json.loads(output.getvalue())["model"])
-        self.assertEqual(errors.getvalue(), "")
-        self.assertNotIn("--model", (self.directory / "crew-jack.sh").read_text())
+        self.assertEqual(json.loads(output.getvalue())["model"], "claude-haiku-4-5")
+        self.assertEqual(errors.getvalue(), "Model: claude-haiku-4-5 (from 'cheap')\n")
+        launcher = shlex.split((self.directory / "crew-jack.sh").read_text())
+        self.assertEqual(launcher[launcher.index("--model") + 1], "claude-haiku-4-5")
+
+    def test_the_cheap_default_never_silently_reaches_a_mid_or_strong_model(self):
+        """The whole point of the default: an unspecified tier cannot cost mid/strong money."""
+        for provider, cheap in (("claude", "claude-haiku-4-5"), ("codex", "gpt-5.3-codex-spark")):
+            with self.subTest(provider=provider):
+                args = self.args("crew", "--agent", provider, "--task", "commit the fix")
+                self.assertEqual(models.resolve_model(provider, args.model), cheap)
+                tiers = models.tiers_for(provider)
+                self.assertEqual(tiers["cheap"], cheap)
+                self.assertNotIn(cheap, (tiers["mid"], tiers["strong"]))
 
     def test_unmatched_or_ambiguous_model_lists_options_and_creates_nothing(self):
         for provider, text, message in (

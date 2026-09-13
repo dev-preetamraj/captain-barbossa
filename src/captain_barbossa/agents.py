@@ -83,6 +83,21 @@ def launch(args, pane, project):
     os.execvpe(binary, command, env)
 
 
+def tail_note(current, crew, tail):
+    """The wait line's pane-tail fragment: inline, or a file path for pi.
+
+    pi installs no hooks, so every pi wait falls back to the pane tail, and the captain
+    extension steers whatever wait prints straight into the conversation. Filing it keeps
+    each delivery one short line; the captain reads the path only when it needs detail.
+    """
+    if crew.record.get("provider") != "pi":
+        return f"pane tail: {tail}"
+    path = current.directory / f"tail-{crew.crew_id}.txt"
+    path.write_text(tail, encoding="utf-8")
+    path.chmod(0o600)
+    return f"pane tail ({len(tail)} chars): {path}"
+
+
 def wait_crew(args, pane, project):
     current, crew = Crew.for_args(args, pane, project)
     events = crew.events
@@ -102,7 +117,7 @@ def wait_crew(args, pane, project):
         entry = f"{status}; reported: {reports[-1]}"
         # Blocked means the pane is waiting on input/approval; show it even with a report.
         printed = (
-            f"{entry}; pane tail: {crew.pane.tail()}"
+            f"{entry}; {tail_note(current, crew, crew.pane.tail())}"
             if status == "blocked" and event is None
             else entry
         )
@@ -114,10 +129,10 @@ def wait_crew(args, pane, project):
         completed = entry
     else:
         tail = crew.pane.tail()
-        # Kept short: the full tail already went to stdout, this is just a debugging breadcrumb.
+        # Kept short: tail_note already delivered the full tail, this is just a breadcrumb.
         add_memory(current.graph, crew.display_name, "tail", truncate_label(tail))
         entry = f"{status}; no report recorded"
-        printed = f"{entry}; pane tail: {tail}"
+        printed = f"{entry}; {tail_note(current, crew, tail)}"
         completed = entry
     if event is not None and (not reports or status == "blocked"):
         message = (
@@ -280,9 +295,8 @@ def create_crew(args, pane, project):
         direction, split_pane, tab_id, auto = Placement(pane, current).choose_split(args, placement)
         if auto and split_pane is None:
             placement = "tab"
-        model = resolve_model(provider, args.model) if args.model is not None else None
-        if model:
-            print(f"Model: {model} (from {args.model!r})", file=sys.stderr)
+        model = resolve_model(provider, args.model)
+        print(f"Model: {model} (from {args.model!r})", file=sys.stderr)
         binary = executable(provider)
         name = args.name
         if name is None:
