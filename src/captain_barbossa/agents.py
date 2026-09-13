@@ -737,6 +737,20 @@ def switch_model(args, pane, project):
         print("Claude Code also saved it as the default for new sessions.")
 
 
+def crew_tab_label(meta, tab_id):
+    """Build a tab label showing all active crew: 'Elizabeth' or 'Elizabeth +2'."""
+    crew_in_tab = [
+        crew.get("name", crew_id)
+        for crew_id, crew in meta["crew"].items()
+        if crew.get("tab") == tab_id and crew.get("status") != "dismissed"
+    ]
+    if not crew_in_tab:
+        return None
+    if len(crew_in_tab) == 1:
+        return crew_in_tab[0]
+    return f"{crew_in_tab[0]} +{len(crew_in_tab) - 1}"
+
+
 def dismiss_crew(args, pane, project):
     directory, meta = session(project, pane, args.session)
     with lock(directory / "crew.lock"):
@@ -755,6 +769,11 @@ def dismiss_crew(args, pane, project):
         (directory / f"crew-{crew_id}.sh").unlink(missing_ok=True)
         crew["status"] = "dismissed"
         write_json(directory / "session.json", meta)
+        tab_id = crew.get("tab")
+        if tab_id and tab_id != pane["tab_id"]:
+            label = crew_tab_label(meta, tab_id)
+            if label:
+                herdr("tab", "rename", tab_id, label)
         add_memory(directory / "graph.json", f"session:{meta['id']}", "dismissed", crew["agent"])
     print(f"Dismissed {display_name}.")
 
@@ -1047,6 +1066,10 @@ def create_crew(args, pane, project):
             wait_for_crew(new_pane, provider, agent_name)
             submit_task(agent_name, args.task, provider)
             record["status"] = "started"
+            if tab_id != pane["tab_id"]:
+                label = crew_tab_label(meta, tab_id)
+                if label:
+                    herdr("tab", "rename", tab_id, label)
         except (CaptainError, subprocess.TimeoutExpired, OSError) as exc:
             record["status"] = "needs_attention"
             write_json(directory / "session.json", meta)

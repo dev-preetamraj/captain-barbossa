@@ -1057,10 +1057,17 @@ class CaptainFlowTests(unittest.TestCase):
                 self.assertEqual(run.args[-1], '/bin/sh "$CAPTAIN_CREW_LAUNCHER"')
                 self.assertEqual(run.kwargs, {"expect_output": False})
                 agent_name = f"c-{self.meta['id'][:8]}-{name}"
-                self.assertEqual(calls[-4].args[:2], ("agent", "rename"))
-                self.assertEqual(calls[-3].args, ("agent", "get", run.args[2]))
-                self.assertEqual(calls[-2].args, ("agent", "prompt", agent_name, task))
-                self.assertEqual(calls[-1].args, ("agent", "get", agent_name))
+                if placement == "tab":
+                    self.assertEqual(calls[-5].args[:2], ("agent", "rename"))
+                    self.assertEqual(calls[-4].args, ("agent", "get", run.args[2]))
+                    self.assertEqual(calls[-3].args, ("agent", "prompt", agent_name, task))
+                    self.assertEqual(calls[-2].args, ("agent", "get", agent_name))
+                    self.assertEqual(calls[-1].args[:2], ("tab", "rename"))
+                else:
+                    self.assertEqual(calls[-4].args[:2], ("agent", "rename"))
+                    self.assertEqual(calls[-3].args, ("agent", "get", run.args[2]))
+                    self.assertEqual(calls[-2].args, ("agent", "prompt", agent_name, task))
+                    self.assertEqual(calls[-1].args, ("agent", "get", agent_name))
                 self.assertFalse(any(call.args[:2] == ("agent", "send-keys") for call in calls))
                 saved = memory.read_json(self.directory / "session.json")["crew"][name]
                 self.assertEqual(saved["task"], task)
