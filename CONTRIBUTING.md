@@ -104,6 +104,13 @@ When changing dependencies, use `uv add` (or `uv add --dev`) and commit both
 `pyproject.toml` and `uv.lock`. Validate packaging changes with `uv build`.
 Do not commit virtual environments, caches, credentials, or private transcripts.
 
+## Branches
+
+Cut feature branches from `main`. Merge a feature branch into `uat` to publish
+a dev build to TestPyPI. Once it looks good, merge the feature branch into
+`main` with a version bump in `pyproject.toml`. Tag the merge commit `vX.Y.Z`
+to publish to PyPI. `uat` is disposable and may be reset to `main` at any time.
+
 ## License
 
 Captain Barbossa is licensed under [MIT](LICENSE). Contributions are made under
