@@ -26,6 +26,7 @@ from .memory import (
 )
 from .models import PROVIDERS, model_names, resolve_model
 from .pane import MODEL_TIMEOUT, PROMPT_TIMEOUT
+from .pi_captain import captain_extension
 from .placement import Placement
 from .prompts import PLACEMENTS, choose
 from .runtime import HERDR_ERRORS, CaptainError, check_text, executable
@@ -58,7 +59,9 @@ def launch(args, pane, project):
         prune_sessions(project, current=meta["id"])
     except HERDR_ERRORS:
         pass  # retention is housekeeping; never block a launch on it
-    instruction_text = instructions.agent_instructions(current.directory, "Captain Barbossa")
+    instruction_text = instructions.agent_instructions(
+        current.directory, "Captain Barbossa", provider
+    )
     write_json(
         current.directory / "captain.json",
         {"provider": provider, "pane": pane["pane_id"], "terminal_id": pane.get("terminal_id")},
@@ -73,6 +76,8 @@ def launch(args, pane, project):
         CAPTAIN_TEMP_ROOT=str(temp_root()),
     )
     command = [binary, *instructions.native_args(provider, instruction_text)]
+    if provider == "pi":
+        command.extend(["--extension", str(captain_extension(current.directory))])
     if args.prompt:
         command.extend(["--", args.prompt])
     os.execvpe(binary, command, env)

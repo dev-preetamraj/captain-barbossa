@@ -442,6 +442,7 @@ class CaptainFlowTests(unittest.TestCase):
                 patch.object(agents, "executable", return_value=f"/bin/{provider}"),
                 patch.object(os, "execvpe") as execute,
                 patch.object(sys.stdin, "isatty", return_value=True),
+                patch.object(agents, "captain_extension") as extension,
             ):
                 args = self.args(
                     "--agent", provider, "--prompt", "literal `touch /tmp/no` $(false)"
@@ -461,6 +462,50 @@ class CaptainFlowTests(unittest.TestCase):
                 self.assertEqual(env["CAPTAIN_SESSION"], self.meta["id"])
                 self.assertEqual(env["CAPTAIN_PROJECT"], str(self.project))
                 self.assertEqual(list(self.project.iterdir()), [])
+                extension.assert_not_called()
+                self.assertNotIn("--extension", argv)
+                self.assertNotIn("captain_wait", " ".join(argv))
+
+    def test_pi_captain_loads_private_extension_and_rearming_guidance(self):
+        with (
+            patch.object(runtime, "herdr"),
+            patch.object(agents, "executable", return_value="/bin/pi"),
+            patch.object(os, "execvpe") as execute,
+            patch.object(sys.stdin, "isatty", return_value=True),
+        ):
+            agents.launch(
+                self.args("--agent", "pi", "--prompt", "Inspect"), self.pane, self.project
+            )
+        binary, argv, env = execute.call_args.args
+        self.assertEqual(binary, "/bin/pi")
+        self.assertEqual(argv[-2:], ["--", "Inspect"])
+        extension = Path(argv[argv.index("--extension") + 1])
+        self.assertEqual(extension.parent, self.directory)
+        self.assertEqual(extension.stat().st_mode & 0o777, 0o600)
+        self.assertIn(env["CAPTAIN_SESSION"], extension.read_text())
+        text = argv[argv.index("--append-system-prompt") + 1]
+        self.assertIn("Use the captain_wait tool", text)
+        self.assertIn("After approving a crew prompt", text)
+        self.assertIn("or sending CAPTAIN tell, call captain_wait again", text)
+        self.assertNotIn("Run every\nwait in the background", text)
+        self.assertEqual(list(self.project.iterdir()), [])
+
+    def test_pi_delivery_instructions_do_not_change_other_roles(self):
+        legacy = instruction_prompts.agent_instructions(self.directory, "Captain Barbossa")
+        for provider in ("codex", "claude"):
+            self.assertEqual(
+                instruction_prompts.agent_instructions(
+                    self.directory, "Captain Barbossa", provider
+                ),
+                legacy,
+            )
+        for provider in models.PROVIDERS:
+            self.assertEqual(
+                instruction_prompts.agent_instructions(
+                    self.directory, "crew member Jack", provider
+                ),
+                instruction_prompts.agent_instructions(self.directory, "crew member Jack"),
+            )
 
     def test_native_args_disables_claude_attribution_only(self):
         claude_args = instruction_prompts.native_args("claude", "instructions")
