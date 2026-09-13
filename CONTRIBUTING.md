@@ -22,6 +22,13 @@ git switch -c fix/describe-the-change
 this checkout. Repeat it after each fresh clone. The development tools are pinned
 in `uv.lock`; they are not runtime dependencies of the installed `captain` tool.
 
+To install `captain` itself from source rather than from PyPI, use `make tool`
+(this checkout) or point uv at the repository:
+
+```sh
+uv tool install git+https://github.com/dev-preetamraj/captain-barbossa.git
+```
+
 Herdr, agent authentication, and Graphify are not required for the core tests.
 Live CLI checks need an interactive Herdr workspace and a signed-in agent.
 
@@ -49,16 +56,24 @@ uv run --locked python -m unittest discover -s tests -v
 uv run --locked python -m captain_barbossa --help
 ```
 
+The `Makefile` wraps these: `make help` lists every target, `make install`,
+`make test`, `make lint`, `make format`, `make gate`, `make build`, `make
+clean`, `make tool` (install this checkout as a uv tool), `make version`,
+`make bump VERSION=x.y.z`, `make uat`, `make release`, and `make status`
+(latest versions on PyPI and TestPyPI). The commands above stay the source of
+truth; the targets are shorthand.
+
 Ruff owns Python formatting and import order; the line-length target is 100.
 Add a focused regression test for changed behavior. Use temporary directories
 outside the checkout for test state. Native Herdr mutations and model sessions
 are mocked; the suite also exercises actual terminal input. The Graphify test
 runs when `graphify` is installed and otherwise reports a skip.
 
-CI repeats lint and format checks, validates commit messages and PR titles, and
-runs tests on Linux and macOS with Python 3.11 and 3.14. It also builds the package
-and checks that the wheel's CLI works outside the checkout. CI runs for pull
-requests and pushes to `main`; local hooks must be installed to guard your pushes.
+CI (`.github/workflows/ci.yml`) repeats lint and format checks, validates commit
+messages and PR titles, and runs tests on Linux and macOS with Python 3.11 and
+3.14. It also builds the package and checks that the wheel's CLI works outside
+the checkout. CI runs for pull requests and pushes to `main`; local hooks must be
+installed to guard your pushes.
 
 ## Write a useful commit message
 
@@ -104,12 +119,23 @@ When changing dependencies, use `uv add` (or `uv add --dev`) and commit both
 `pyproject.toml` and `uv.lock`. Validate packaging changes with `uv build`.
 Do not commit virtual environments, caches, credentials, or private transcripts.
 
-## Branches
+## Branches and releases
 
-Cut feature branches from `main`. Merge a feature branch into `uat` to publish
-a dev build to TestPyPI. Once it looks good, merge the feature branch into
-`main` with a version bump in `pyproject.toml`. Tag the merge commit `vX.Y.Z`
-to publish to PyPI. `uat` is disposable and may be reset to `main` at any time.
+Cut feature branches from `main`.
+
+- Merge a feature branch into `uat` to publish a dev build to TestPyPI. The
+  release workflow sets the version to `X.Y.Z.dev<run number>` for that build,
+  so `uat` needs no version bump. `uat` is disposable and may be reset to
+  `main` at any time.
+- When it looks good, merge the feature branch into `main` with a version bump
+  in `pyproject.toml` (and `uv.lock`), then tag the merge commit `vX.Y.Z` and
+  push the tag to publish to PyPI. The workflow refuses a tag that does not
+  match the version in `pyproject.toml`.
+
+Both paths run through `.github/workflows/release.yml`, which builds, runs the
+tests, and then publishes from the GitHub environment chosen by the ref:
+`testpypi` for `uat`, `pypi` for `v*` tags. Publishing uses PyPI trusted
+publishing, so there are no API tokens to hold or rotate.
 
 ## License
 
