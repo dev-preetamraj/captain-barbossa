@@ -75,6 +75,7 @@ jobs:
         with:
           version: "0.12.5"
           python-version: "3.11"
+          enable-cache: false
       - name: Publish to TestPyPI
         if: github.ref == 'refs/heads/uat'
         run: uv publish --publish-url https://test.pypi.org/legacy/
