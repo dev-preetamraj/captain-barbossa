@@ -155,7 +155,8 @@ class Crew:
                     status = self.pane.agent_status()
                 except HERDR_ERRORS:
                     status = None
-                if status == "done":
+                # Herdr sees pi's approval prompts even though pi fires no hooks.
+                if status in ("done", "blocked"):
                     return status
                 idle_polls = idle_polls + 1 if status == "idle" else 0
                 if idle_polls >= WAIT_POLLS:

@@ -35,33 +35,18 @@ PANE_STATUS_BAR_PREFIXES = ("•", "⏺", "└", "│", "✻", "✳", "?", "…"
 PANE_MODAL_CONFIRM = re.compile(r"^Press enter to confirm or esc to \w+")
 PANE_MODAL_OPTION = re.compile(r"^[›»]?\s*([1-9])\.\s+(\S+)")
 PANE_MODAL_LINES = 20
-PANE_MODAL_HEADER_LINES = 4
-
-
-def modal_header(line):
-    """Whether a line above the option list is the modal's banner or question, not output.
-
-    Wrapped transcript text ends a sentence or carries a TUI glyph; a modal header is a
-    short standalone line.
-    """
-    if line.startswith(PANE_STATUS_BAR_PREFIXES):
-        return False
-    return line.endswith("?") or (len(line) <= 48 and not line.endswith((".", "!", ")")))
 
 
 def modal_start(lines):
-    """Index where a trailing native choice modal begins, or None when there is none."""
+    """Index of a trailing choice modal's first option, or None when there is none.
+
+    The lines above it are the modal's question, which a blocked crew's tail must keep.
+    """
     if not lines or not PANE_MODAL_CONFIRM.match(lines[-1]):
         return None
     window = range(max(len(lines) - PANE_MODAL_LINES, 0), len(lines) - 1)
     options = [index for index in window if PANE_MODAL_OPTION.match(lines[index])]
-    if not options:
-        return None
-    start = options[0]
-    limit = max(start - PANE_MODAL_HEADER_LINES, 0)
-    while start > limit and modal_header(lines[start - 1]):
-        start -= 1
-    return start
+    return options[0] if options else None
 
 
 class Pane:
@@ -87,6 +72,7 @@ class Pane:
             lines = lines[:-1]
         start = modal_start(lines)
         if start is not None:
+            # Drop the option list and confirm line; the question above them is the point.
             lines = lines[:start]
         lines = [
             line

@@ -11,6 +11,12 @@ import { randomUUID } from "node:crypto";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 
+// Every delivery is steered into the captain's conversation, so it is pure context cost.
+const LIMIT = 2000;
+// A wait that returns instantly burns a captain turn per poll; background waits sit out
+// at least this long. The CLI still honours --timeout 0 as an immediate event check.
+const FLOOR = 60;
+
 export default function (pi) {
   const pending = new Map();
   pi.on("session_shutdown", () => {
@@ -21,8 +27,8 @@ export default function (pi) {
     name: "captain_wait",
     label: "Wait for crew",
     description: "Arm one background Captain wait; deliver its result into pi. " +
-      "Use the crew display name. Returns immediately. Output capped at 16000 characters " +
-      "with full output saved in the Captain session directory.",
+      "Use the crew display name. Returns immediately. Timeouts below 60s are raised to 60s. " +
+      "Output capped at 2000 characters with full output saved in the Captain session directory.",
     parameters: {
       type: "object",
       properties: {
@@ -39,21 +45,27 @@ export default function (pi) {
         // The wait outlives this tool turn; only session shutdown cancels it.
         const controller = new AbortController();
         pending.set(key, controller);
+        const seconds = Math.max(timeout, FLOOR);
         const deliver = (output, code) => {
           if (controller.signal.aborted) return;
           pending.delete(key);
           const log = join(directory, `pi-wait-${randomUUID()}.txt`);
           writeFileSync(log, output, { encoding: "utf8", mode: 0o600, flag: "wx" });
+          const head = `Captain wait for ${name} (exit ${code}):\n`;
+          const foot = `\nFull wait output: ${log}\n` +
+            "Wait ended. Rearm captain_wait now; act only if this changed something.";
+          const marker = "\n[Output truncated]";
+          const room = Math.max(LIMIT - head.length - foot.length, 0);
           pi.sendMessage({
             customType: "captain-wait",
-            content: `Captain wait for ${name} (exit ${code}):\n` + output.slice(0, 16000) +
-              `\n${output.length > 16000 ? "[Output truncated] " : ""}Full wait output: ${log}\n` +
-              "Wait ended. Rearm captain_wait after approval/follow-up or timeout if work remains.",
+            content: head + (output.length > room
+              ? output.slice(0, Math.max(room - marker.length, 0)) + marker
+              : output) + foot,
             display: true,
           }, { triggerTurn: true, deliverAs: "steer" });
         };
-        void pi.exec(command[0], [...command.slice(1), "wait", name, "--timeout", String(timeout)],
-          { signal: controller.signal, timeout: (timeout + 30) * 1000 })
+        void pi.exec(command[0], [...command.slice(1), "wait", name, "--timeout", String(seconds)],
+          { signal: controller.signal, timeout: (seconds + 30) * 1000 })
           .then(result => deliver(
             [result.stdout, result.stderr, result.killed ? "Wait process was killed." : ""]
               .filter(Boolean).join("\n"), result.code),
