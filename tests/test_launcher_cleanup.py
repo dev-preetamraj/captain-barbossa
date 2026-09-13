@@ -6,7 +6,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from captain_barbossa import agents, cli, memory
+from captain_barbossa import agents, cli, memory, runtime
+from captain_barbossa import pane as panes
 
 
 class LauncherCleanupTests(unittest.TestCase):
@@ -26,7 +27,7 @@ class LauncherCleanupTests(unittest.TestCase):
                 },
             )
         )
-        self.enterContext(patch.object(agents, "READY_POLLS", 1))
+        self.enterContext(patch.object(panes, "READY_POLLS", 1))
         self.pane = {"workspace_id": "w1", "tab_id": "w1:t1", "pane_id": "w1:p1"}
         self.directory, self.meta = memory.session(self.project, self.pane, create=True)
         self.enterContext(contextlib.redirect_stdout(io.StringIO()))
@@ -50,14 +51,14 @@ class LauncherCleanupTests(unittest.TestCase):
             "crew", "jack", "--agent", "claude", "--task", "build", "--placement", "tab"
         )
         with (
-            patch.object(agents, "herdr", side_effect=lambda *call, **_: created),
+            patch.object(runtime, "herdr", side_effect=lambda *call, **_: created),
             patch.object(agents, "executable", return_value="/bin/claude"),
         ):
             agents.create_crew(create_args, self.pane, self.project)
         launcher = self.directory / "crew-jack.sh"
         self.assertTrue(launcher.exists())
 
-        with patch.object(agents, "herdr", return_value={}):
+        with patch.object(runtime, "herdr", return_value={}):
             agents.dismiss_crew(self.args("dismiss", "jack"), self.pane, self.project)
         self.assertFalse(launcher.exists())
 

@@ -6,7 +6,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from captain_barbossa import agents, cli, memory
+from captain_barbossa import agents, cli, memory, runtime
+from captain_barbossa import pane as panes
 
 
 class CrewTabLabelTests(unittest.TestCase):
@@ -28,7 +29,7 @@ class CrewTabLabelTests(unittest.TestCase):
         )
         for name in ("CAPTAIN_STATE_ROOT", "CAPTAIN_TEMP_ROOT"):
             os.environ.pop(name, None)
-        self.enterContext(patch.object(agents, "READY_POLLS", 1))
+        self.enterContext(patch.object(panes, "READY_POLLS", 1))
         self.pane = {"workspace_id": "w1", "tab_id": "w1:t1", "pane_id": "w1:p1"}
         self.directory, self.meta = memory.session(self.project, self.pane, create=True)
         self.enterContext(contextlib.redirect_stdout(io.StringIO()))
@@ -62,7 +63,7 @@ class CrewTabLabelTests(unittest.TestCase):
             "tab",
         )
         with (
-            patch.object(agents, "herdr", return_value=created_jack),
+            patch.object(runtime, "herdr", return_value=created_jack),
             patch.object(agents, "executable", return_value="/bin/claude"),
             contextlib.redirect_stdout(io.StringIO()),
         ):
@@ -80,7 +81,7 @@ class CrewTabLabelTests(unittest.TestCase):
             "crew", "will", "--agent", "claude", "--task", "review", "--placement", "tab"
         )
         with (
-            patch.object(agents, "herdr", side_effect=track_herdr),
+            patch.object(runtime, "herdr", side_effect=track_herdr),
             patch.object(agents, "executable", return_value="/bin/claude"),
             contextlib.redirect_stdout(io.StringIO()),
         ):
@@ -99,7 +100,7 @@ class CrewTabLabelTests(unittest.TestCase):
 
         args_dismiss = self.args("dismiss", "jack")
         with (
-            patch.object(agents, "herdr", side_effect=track_dismiss),
+            patch.object(runtime, "herdr", side_effect=track_dismiss),
             contextlib.redirect_stdout(io.StringIO()),
         ):
             agents.dismiss_crew(args_dismiss, self.pane, self.project)

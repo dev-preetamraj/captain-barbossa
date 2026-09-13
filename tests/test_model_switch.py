@@ -6,7 +6,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from captain_barbossa import agents, cli, memory
+from captain_barbossa import agents, cli, memory, runtime
+from captain_barbossa import pane as panes
 from captain_barbossa.runtime import CaptainError
 
 CODEX_PICKER = """
@@ -48,7 +49,7 @@ class SwitchModelTests(unittest.TestCase):
                 },
             )
         )
-        self.enterContext(patch.object(agents.time, "sleep"))
+        self.enterContext(patch.object(panes.time, "sleep"))
         # Real deadlines: keep the polling loops short instead of waiting them out.
         self.enterContext(patch.object(agents, "MODEL_TIMEOUT", 0.05))
         self.enterContext(patch.object(agents, "PROMPT_TIMEOUT", 0.05))
@@ -75,7 +76,7 @@ class SwitchModelTests(unittest.TestCase):
 
     def switch(self, api, target):
         args = cli.parser().parse_args(["--session", self.meta["id"], "model", "Jack", target])
-        with patch.object(agents, "herdr", side_effect=api) as herdr:
+        with patch.object(runtime, "herdr", side_effect=api) as herdr:
             agents.switch_model(args, self.pane, self.project)
         return herdr
 

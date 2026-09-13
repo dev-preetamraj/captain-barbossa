@@ -10,7 +10,10 @@ from itertools import count
 from pathlib import Path
 from unittest.mock import patch
 
-from captain_barbossa import agents, cli, memory
+from captain_barbossa import agents, cli, memory, runtime
+from captain_barbossa import instructions as instruction_prompts
+from captain_barbossa import pane as panes
+from captain_barbossa.crew import Crew
 
 
 class WaitCrewMemoryTests(unittest.TestCase):
@@ -71,9 +74,9 @@ class WaitCrewMemoryTests(unittest.TestCase):
 
     def run_wait(self, statuses, tail="", report=None):
         with (
-            patch.object(agents, "herdr", side_effect=self.wait_api(statuses, tail, report)),
-            patch.object(agents.time, "sleep"),
-            patch.object(agents.time, "monotonic", side_effect=count(0, 2)),
+            patch.object(runtime, "herdr", side_effect=self.wait_api(statuses, tail, report)),
+            patch.object(panes.time, "sleep"),
+            patch.object(panes.time, "monotonic", side_effect=count(0, 2)),
             contextlib.redirect_stdout(io.StringIO()) as output,
         ):
             agents.wait_crew(self.args("wait", "Jack", "--timeout", "60"), self.pane, self.project)
@@ -125,11 +128,12 @@ class WaitCrewMemoryTests(unittest.TestCase):
         events = self.root / "events with 'quotes' $() and spaces.jsonl"
         expected = []
         for provider in ("claude", "codex"):
-            args = agents.native_args(provider, "instructions", events=events)
+            args = instruction_prompts.native_args(provider, "instructions", events=events)
             if provider == "claude":
                 settings = json.loads(args[args.index("--settings") + 1])
                 self.assertEqual(
-                    settings["attribution"], json.loads(agents.CLAUDE_NO_ATTRIBUTION)["attribution"]
+                    settings["attribution"],
+                    json.loads(instruction_prompts.CLAUDE_NO_ATTRIBUTION)["attribution"],
                 )
                 self.assertEqual(
                     set(settings["hooks"]),
@@ -178,7 +182,7 @@ class WaitCrewMemoryTests(unittest.TestCase):
             ),
             ({"hook_event_name": "PermissionRequest"}, "blocked"),
         ):
-            with self.subTest(event=event), patch.object(agents, "herdr") as api:
+            with self.subTest(event=event), patch.object(runtime, "herdr") as api:
                 self.write_event(event)
                 with contextlib.redirect_stdout(io.StringIO()) as output:
                     agents.wait_crew(
@@ -190,7 +194,12 @@ class WaitCrewMemoryTests(unittest.TestCase):
                     self.assertIn("checks pass", output.getvalue())
                 api.assert_not_called()
                 self.assertEqual(
-                    agents.crew_status(self.agent_name, 0, self.event_path()), (None, None)
+                    Crew(
+                        "jack",
+                        {"agent": self.agent_name},
+                        memory.Session(self.directory, self.meta),
+                    ).status(0),
+                    (None, None),
                 )
 
     def test_wait_ignores_codex_title_completion_until_the_submitted_task_finishes(self):
@@ -206,7 +215,7 @@ class WaitCrewMemoryTests(unittest.TestCase):
             "input-messages": ["build"],
             "last-assistant-message": "Real task finished",
         }
-        with patch.object(agents, "herdr") as api:
+        with patch.object(runtime, "herdr") as api:
             with self.assertRaisesRegex(agents.CaptainError, "still working"):
                 agents.wait_crew(
                     self.args("wait", "Jack", "--timeout", "0"), self.pane, self.project
@@ -214,7 +223,7 @@ class WaitCrewMemoryTests(unittest.TestCase):
             self.assertEqual(self.edges("completed"), [])
             with (
                 patch.object(
-                    agents.time, "sleep", side_effect=lambda _: self.write_event(completion)
+                    panes.time, "sleep", side_effect=lambda _: self.write_event(completion)
                 ) as sleep,
                 contextlib.redirect_stdout(io.StringIO()) as output,
             ):
@@ -246,7 +255,7 @@ class WaitCrewMemoryTests(unittest.TestCase):
                         memory.add_memory(self.directory / "graph.json", "Jack", "report", report)
                     self.write_event(event)
                     with (
-                        patch.object(agents, "herdr") as api,
+                        patch.object(runtime, "herdr") as api,
                         contextlib.redirect_stdout(io.StringIO()) as output,
                     ):
                         agents.wait_crew(
@@ -261,7 +270,7 @@ class WaitCrewMemoryTests(unittest.TestCase):
         memory.add_memory(self.directory / "graph.json", "Jack", "report", "tests pass")
         self.write_event({"hook_event_name": "Stop"})
         with (
-            patch.object(agents, "herdr") as api,
+            patch.object(runtime, "herdr") as api,
             contextlib.redirect_stdout(io.StringIO()) as output,
         ):
             agents.wait_crew(self.args("wait", "Jack", "--timeout", "0"), self.pane, self.project)
@@ -269,7 +278,7 @@ class WaitCrewMemoryTests(unittest.TestCase):
         api.assert_not_called()
         self.write_event({"hook_event_name": "PermissionRequest"})
         with (
-            patch.object(agents, "herdr") as api,
+            patch.object(runtime, "herdr") as api,
             contextlib.redirect_stdout(io.StringIO()) as output,
         ):
             agents.wait_crew(self.args("wait", "Jack", "--timeout", "0"), self.pane, self.project)
@@ -282,23 +291,29 @@ class WaitCrewMemoryTests(unittest.TestCase):
         self.write_event({"hook_event_name": "SessionStart"})
         stop = {"hook_event_name": "Stop"}
         with (
-            patch.object(agents, "herdr") as api,
-            patch.object(agents.time, "sleep", side_effect=lambda _: self.write_event(stop)),
+            patch.object(runtime, "herdr") as api,
+            patch.object(panes.time, "sleep", side_effect=lambda _: self.write_event(stop)),
         ):
             self.assertEqual(
-                agents.crew_status(self.agent_name, 10, self.event_path()), ("done", stop)
+                Crew(
+                    "jack", {"agent": self.agent_name}, memory.Session(self.directory, self.meta)
+                ).status(10),
+                ("done", stop),
             )
         api.assert_not_called()
 
     def test_session_start_does_not_finish_wait_or_trigger_pane_fallback(self):
         self.write_event({"hook_event_name": "SessionStart"})
         with (
-            patch.object(agents, "herdr") as api,
-            patch.object(agents.time, "monotonic", side_effect=count(0, 2)),
-            patch.object(agents.time, "sleep"),
+            patch.object(runtime, "herdr") as api,
+            patch.object(panes.time, "monotonic", side_effect=count(0, 2)),
+            patch.object(panes.time, "sleep"),
         ):
             self.assertEqual(
-                agents.crew_status(self.agent_name, 20, self.event_path()), (None, None)
+                Crew(
+                    "jack", {"agent": self.agent_name}, memory.Session(self.directory, self.meta)
+                ).status(20),
+                (None, None),
             )
         api.assert_not_called()
 

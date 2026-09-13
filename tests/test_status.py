@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from captain_barbossa import agents, cli, memory
+from captain_barbossa import agents, cli, memory, runtime
 
 
 class StatusCrewTests(unittest.TestCase):
@@ -65,7 +65,7 @@ class StatusCrewTests(unittest.TestCase):
 
     def status(self, api, *extra):
         with (
-            patch.object(agents, "herdr", side_effect=api),
+            patch.object(runtime, "herdr", side_effect=api),
             contextlib.redirect_stdout(io.StringIO()) as output,
         ):
             agents.status_crew(self.args(*extra), self.pane, self.project)

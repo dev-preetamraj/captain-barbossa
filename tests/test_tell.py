@@ -7,7 +7,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from captain_barbossa import agents, cli, memory
+from captain_barbossa import agents, cli, memory, runtime
+from captain_barbossa import pane as panes
+from captain_barbossa.crew import Crew
 
 
 class TellCrewTests(unittest.TestCase):
@@ -63,8 +65,8 @@ class TellCrewTests(unittest.TestCase):
             raise AssertionError(f"unexpected herdr call: {args}")
 
         with (
-            patch.object(agents, "herdr", side_effect=api),
-            patch.object(agents.time, "sleep"),
+            patch.object(runtime, "herdr", side_effect=api),
+            patch.object(panes.time, "sleep"),
             contextlib.redirect_stdout(io.StringIO()) as output,
         ):
             agents.tell_crew(self.args("tell", name, message), self.pane, self.project)
@@ -94,8 +96,12 @@ class TellCrewTests(unittest.TestCase):
         self.tell("Jack", "keep going")
         cursor = self.events.with_suffix(".cursor")
         self.assertEqual(memory.read_json(cursor), self.events.stat().st_size)
-        with patch.object(agents, "herdr", side_effect=AssertionError):
-            status, _ = agents.crew_status(self.agent_name, 0, self.events, "keep going")
+        with patch.object(runtime, "herdr", side_effect=AssertionError):
+            status, _ = Crew(
+                "jack",
+                {"agent": self.agent_name, "task": "keep going"},
+                memory.Session(self.directory, self.meta),
+            ).status(0)
         self.assertIsNone(status)
 
     def test_dismissed_crew_is_refused(self):

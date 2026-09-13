@@ -11,6 +11,7 @@ import sys
 import tempfile
 import time
 import uuid
+from collections import namedtuple
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -311,6 +312,30 @@ def add_memory(path, subject, relation, target):
 SESSION_ID = re.compile(r"[a-f0-9]{32}")
 
 
+class Session(namedtuple("Session", "directory meta")):
+    """A session directory and its metadata, plus the paths that live under it."""
+
+    @property
+    def graph(self):
+        return self.directory / "graph.json"
+
+    @property
+    def meta_path(self):
+        return self.directory / "session.json"
+
+    def events(self, crew_id):
+        return self.directory / "events" / f"{crew_id}.jsonl"
+
+
+@contextmanager
+def crew_meta(directory):
+    """Hold the crew lock over a read-modify-write of session.json."""
+    with lock(directory / "crew.lock"):
+        meta = read_json(directory / "session.json")
+        yield meta
+        write_json(directory / "session.json", meta)
+
+
 def session(project, pane, session_id=None, create=False):
     project = project.resolve()
     if session_id is None:
@@ -343,7 +368,7 @@ def session(project, pane, session_id=None, create=False):
         migrate_project_graph(project)
     except (CaptainError, OSError):
         pass  # migration is housekeeping; never block a command on it
-    return directory, meta
+    return Session(directory, meta)
 
 
 def project_and_session_graphs(directory):

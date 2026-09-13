@@ -11,7 +11,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from captain_barbossa import agents, cli, memory
+from captain_barbossa import agents, cli, memory, runtime
 from captain_barbossa.runtime import CaptainError
 
 
@@ -184,7 +184,7 @@ class PruneTests(unittest.TestCase):
         stale = self.make_session("a" * 32, 30)
         args = cli.parser().parse_args(["--agent", "claude"])
         with (
-            patch.object(agents, "herdr"),
+            patch.object(runtime, "herdr"),
             patch.object(memory, "herdr", return_value=agent_list()),
             patch.object(agents, "executable", return_value="/bin/claude"),
             patch.object(os, "execvpe") as execute,
@@ -196,7 +196,7 @@ class PruneTests(unittest.TestCase):
         self.assertFalse(stale.exists())
         blocked = self.make_session("b" * 32, 30)
         with (
-            patch.object(agents, "herdr"),
+            patch.object(runtime, "herdr"),
             patch.object(agents, "prune_sessions", side_effect=OSError("state is unreadable")),
             patch.object(agents, "executable", return_value="/bin/claude"),
             patch.object(os, "execvpe") as execute,
@@ -231,7 +231,7 @@ class PruneTests(unittest.TestCase):
         args = cli.parser().parse_args(["--agent", "claude"])
         before = set(self.sessions.iterdir()) if self.sessions.is_dir() else set()
         with (
-            patch.object(agents, "herdr"),
+            patch.object(runtime, "herdr"),
             patch.object(memory, "herdr", return_value=agent_list()),
             patch.object(agents, "executable", return_value="/bin/claude"),
             patch.object(os, "execvpe"),

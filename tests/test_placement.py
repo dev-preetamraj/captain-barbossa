@@ -6,7 +6,9 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from captain_barbossa import agents, cli, layout
+from captain_barbossa import agents, cli, layout, runtime
+from captain_barbossa.memory import Session
+from captain_barbossa.placement import Placement
 from captain_barbossa.runtime import CaptainError
 
 
@@ -16,7 +18,7 @@ class PlacementTests(unittest.TestCase):
         self.tabs = {"captain": {"captain": (0, 0, 480, 120)}}
         self.meta = {"crew": {}}
         self.enterContext(contextlib.redirect_stderr(io.StringIO()))
-        self.api = self.enterContext(patch.object(agents, "herdr", side_effect=self.herdr))
+        self.api = self.enterContext(patch.object(runtime, "herdr", side_effect=self.herdr))
 
     def herdr(self, *call):
         self.assertEqual(call[:3], ("pane", "layout", "--pane"))
@@ -37,10 +39,7 @@ class PlacementTests(unittest.TestCase):
 
     def choose(self, direction=None, target="auto", placement="pane"):
         args = SimpleNamespace(direction=direction, split_pane=target)
-        crew_panes = {
-            crew["pane"] for crew in self.meta["crew"].values() if crew["status"] != "dismissed"
-        }
-        return agents.choose_split(args, self.pane, placement, crew_panes, self.meta)
+        return Placement(self.pane, self.meta).choose_split(args, placement)
 
     def recruit(self, direction=None):
         chosen, target, tab, reason = self.choose(direction)
@@ -137,7 +136,7 @@ class PlacementTests(unittest.TestCase):
         for _ in range(6):
             self.recruit()
         groups = {tab: (tab, dict.fromkeys(panes, "Crew")) for tab, panes in self.tabs.items()}
-        with patch.object(agents, "workspace_panes", return_value=groups):
+        with patch.object(Placement, "workspace_panes", return_value=groups):
             for target, tab in (("captain", "captain"), ("crew3", "crew3")):
                 for direction in ("auto", "vertical", "horizontal"):
                     with self.subTest(target=target, direction=direction):
@@ -152,7 +151,7 @@ class PlacementTests(unittest.TestCase):
     def test_recruit_selects_from_fresh_metadata_under_the_crew_lock(self):
         self.recruit()
         self.recruit()
-        choose_split = agents.choose_split
+        choose_split = Placement.choose_split
         args = cli.parser().parse_args(
             [
                 "crew",
@@ -174,12 +173,12 @@ class PlacementTests(unittest.TestCase):
 
         with (
             tempfile.TemporaryDirectory() as root,
-            patch.object(agents, "session", return_value=(Path(root), {"crew": {}})),
-            patch.object(agents, "read_json", return_value=self.meta),
-            patch.object(agents, "lock") as guard,
-            patch.object(agents, "choose_split", side_effect=check_selection),
+            patch.object(agents, "session", return_value=Session(Path(root), {"crew": {}})),
+            patch.object(agents, "crew_meta") as guard,
+            patch.object(Placement, "choose_split", autospec=True, side_effect=check_selection),
             self.assertRaisesRegex(CaptainError, "selection checked"),
         ):
+            guard.return_value.__enter__.return_value = self.meta
             agents.create_crew(args, self.pane, Path(root))
 
 

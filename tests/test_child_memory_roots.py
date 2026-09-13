@@ -9,7 +9,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from captain_barbossa import agents, cli, memory
+from captain_barbossa import agents, cli, memory, runtime
+from captain_barbossa import pane as panes
 
 
 class ChildMemoryRootTests(unittest.TestCase):
@@ -38,7 +39,7 @@ class ChildMemoryRootTests(unittest.TestCase):
                 clear=True,
             )
         )
-        self.enterContext(patch.object(agents, "READY_POLLS", 1))
+        self.enterContext(patch.object(panes, "READY_POLLS", 1))
         self.directory, self.meta = memory.session(self.project, self.pane, create=True)
         self.enterContext(contextlib.redirect_stdout(io.StringIO()))
 
@@ -52,7 +53,7 @@ class ChildMemoryRootTests(unittest.TestCase):
 
     def test_launch_forwards_the_parents_distinct_state_and_temp_roots(self):
         with (
-            patch.object(agents, "herdr", return_value={}),
+            patch.object(runtime, "herdr", return_value={}),
             patch.object(agents, "executable", return_value="/bin/claude"),
             patch.object(agents.sys.stdin, "isatty", return_value=True),
             patch.object(os, "execvpe") as execute,
@@ -72,7 +73,7 @@ class ChildMemoryRootTests(unittest.TestCase):
         }
         args = self.args("crew", "--agent", "claude", "--task", "build", "--placement", "tab")
         with (
-            patch.object(agents, "herdr", return_value=created) as api,
+            patch.object(runtime, "herdr", return_value=created) as api,
             patch.object(agents, "executable", return_value="/bin/claude"),
         ):
             agents.create_crew(args, self.pane, self.project)
@@ -85,7 +86,7 @@ class ChildMemoryRootTests(unittest.TestCase):
 
     def test_child_env_resolves_project_graph_under_the_parents_state_root_not_temp(self):
         with (
-            patch.object(agents, "herdr", return_value={}),
+            patch.object(runtime, "herdr", return_value={}),
             patch.object(agents, "executable", return_value="/bin/claude"),
             patch.object(agents.sys.stdin, "isatty", return_value=True),
             patch.object(os, "execvpe") as execute,

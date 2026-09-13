@@ -4,7 +4,9 @@ import unittest
 from itertools import count
 from unittest.mock import patch
 
-from captain_barbossa import agents
+from captain_barbossa import pane as panes
+from captain_barbossa import runtime
+from captain_barbossa.pane import Pane
 from captain_barbossa.runtime import CaptainError
 
 TASK = "build the thing"
@@ -45,12 +47,12 @@ class CodexPane:
 
 class SubmitTaskTests(unittest.TestCase):
     def setUp(self):
-        self.enterContext(patch.object(agents.time, "sleep"))
-        self.enterContext(patch.object(agents.time, "monotonic", side_effect=count(0, 2)))
+        self.enterContext(patch.object(panes.time, "sleep"))
+        self.enterContext(patch.object(panes.time, "monotonic", side_effect=count(0, 2)))
 
     def submit(self, pane, provider="codex"):
-        with patch.object(agents, "herdr", side_effect=pane):
-            agents.submit_task("builder", TASK, provider)
+        with patch.object(runtime, "herdr", side_effect=pane):
+            Pane("builder").submit_task(TASK, provider)
 
     def test_a_renaming_codex_with_the_task_still_drafted_is_not_reported_started(self):
         pane = CodexPane(swallows_enter=True)

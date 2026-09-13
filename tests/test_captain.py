@@ -19,6 +19,10 @@ from unittest.mock import patch
 import questionary
 
 from captain_barbossa import agents, cli, layout, memory, models, runtime
+from captain_barbossa import instructions as instruction_prompts
+from captain_barbossa import pane as panes
+from captain_barbossa.crew import Crew
+from captain_barbossa.pane import Pane
 from captain_barbossa.runtime import CaptainError
 
 
@@ -42,7 +46,7 @@ class CaptainFlowTests(unittest.TestCase):
         # A live captain session forwards these; they outrank CAPTAIN_MEMORY_ROOT.
         for name in ("CAPTAIN_STATE_ROOT", "CAPTAIN_TEMP_ROOT"):
             os.environ.pop(name, None)
-        self.enterContext(patch.object(agents, "READY_POLLS", 1))
+        self.enterContext(patch.object(panes, "READY_POLLS", 1))
         self.pane = {"workspace_id": "w1", "tab_id": "w1:t1", "pane_id": "w1:p1"}
         self.directory, self.meta = memory.session(self.project, self.pane, create=True)
         self.enterContext(contextlib.redirect_stdout(io.StringIO()))
@@ -116,14 +120,14 @@ class CaptainFlowTests(unittest.TestCase):
                 self.subTest(response=response),
                 patch.object(runtime, "executable", return_value="/bin/herdr"),
                 patch.object(runtime.subprocess, "run", self.herdr_stdout(lambda _: response)),
-                patch.object(agents.time, "sleep"),
+                patch.object(panes.time, "sleep"),
             ):
                 with self.assertRaisesRegex(runtime.CaptainError, "unexpected response"):
                     runtime.current_pane()
                 with self.assertRaisesRegex(runtime.CaptainError, "unexpected response"):
-                    agents.wait_for_crew("w1:p2", "codex", "builder")
+                    Pane("builder").wait_for_crew("w1:p2", "codex")
                 with self.assertRaisesRegex(runtime.CaptainError, "unexpected response"):
-                    agents.submit_task("builder", "build", "claude")
+                    Pane("builder").submit_task("build", "claude")
                 with (
                     patch.object(cli, "project_root", return_value=self.project),
                     contextlib.redirect_stderr(io.StringIO()) as error,
@@ -159,7 +163,7 @@ class CaptainFlowTests(unittest.TestCase):
             patch.object(
                 runtime.subprocess, "run", side_effect=self.herdr_stdout(responses)
             ) as run,
-            patch.object(agents.time, "sleep"),
+            patch.object(panes.time, "sleep"),
         ):
             with self.assertRaisesRegex(runtime.CaptainError, "pane was preserved") as error:
                 agents.create_crew(args, self.pane, self.project)
@@ -171,7 +175,9 @@ class CaptainFlowTests(unittest.TestCase):
         self.assertEqual(saved["status"], "needs_attention")
 
     def test_instructions_delegate_routine_crew_approvals_to_captain(self):
-        instructions = " ".join(agents.agent_instructions(self.directory, "captain").split())
+        instructions = " ".join(
+            instruction_prompts.agent_instructions(self.directory, "captain").split()
+        )
         self.assertIn("captain memory reads/writes without asking the user", instructions)
         self.assertIn("herdr agent send-keys <name> y", instructions)
         self.assertIn('choose "don\'t ask again" when available', instructions)
@@ -187,9 +193,13 @@ class CaptainFlowTests(unittest.TestCase):
             'directly. Do the task yourself only if the user explicitly says "yourself", '
             '"no crew", or "do not recruit".'
         )
-        captain = " ".join(agents.agent_instructions(self.directory, "Captain Barbossa").split())
+        captain = " ".join(
+            instruction_prompts.agent_instructions(self.directory, "Captain Barbossa").split()
+        )
         self.assertIn(rule, captain)
-        crew = " ".join(agents.agent_instructions(self.directory, "crew member Gibbs").split())
+        crew = " ".join(
+            instruction_prompts.agent_instructions(self.directory, "crew member Gibbs").split()
+        )
         self.assertNotIn(rule, crew)
 
     def test_instructions_require_explicit_ask_before_commit_or_version_bump(self):
@@ -197,8 +207,12 @@ class CaptainFlowTests(unittest.TestCase):
             "Never commit or bump the version unless the user explicitly asks; "
             "otherwise leave the work in the working tree and report the diff."
         )
-        captain = " ".join(agents.agent_instructions(self.directory, "Captain Barbossa").split())
-        crew = " ".join(agents.agent_instructions(self.directory, "crew member Gibbs").split())
+        captain = " ".join(
+            instruction_prompts.agent_instructions(self.directory, "Captain Barbossa").split()
+        )
+        crew = " ".join(
+            instruction_prompts.agent_instructions(self.directory, "crew member Gibbs").split()
+        )
         self.assertIn(shared_rule, captain)
         self.assertIn(shared_rule, crew)
         self.assertIn(
@@ -207,7 +221,9 @@ class CaptainFlowTests(unittest.TestCase):
         )
 
     def test_instructions_keep_crew_prompts_short(self):
-        instructions = " ".join(agents.agent_instructions(self.directory, "captain").split())
+        instructions = " ".join(
+            instruction_prompts.agent_instructions(self.directory, "captain").split()
+        )
         crew_command = instructions.index("--placement pane|tab")
         rule = instructions.index("Keep crew prompts short")
         self.assertGreater(rule, crew_command)
@@ -220,7 +236,9 @@ class CaptainFlowTests(unittest.TestCase):
             self.assertIn(phrase, instructions)
 
     def test_instructions_cover_the_crew_lifecycle(self):
-        instructions = " ".join(agents.agent_instructions(self.directory, "captain").split())
+        instructions = " ".join(
+            instruction_prompts.agent_instructions(self.directory, "captain").split()
+        )
         for phrase in (
             "Recruiting prints one canonical name; use it for CAPTAIN and Herdr commands",
             "CAPTAIN wait 'NAME' [--timeout <seconds>]",
@@ -238,7 +256,9 @@ class CaptainFlowTests(unittest.TestCase):
             self.assertIn(phrase, instructions)
 
     def test_instructions_give_crew_a_report_and_the_captain_a_completion_signal(self):
-        crew = " ".join(agents.agent_instructions(self.directory, "crew member Gibbs").split())
+        crew = " ".join(
+            instruction_prompts.agent_instructions(self.directory, "crew member Gibbs").split()
+        )
         for phrase in (
             "End every assignment with a report: files changed, checks run and their result",
             "anything left or blocked",
@@ -248,7 +268,9 @@ class CaptainFlowTests(unittest.TestCase):
             "Going idle is your done signal",
         ):
             self.assertIn(phrase, crew)
-        captain = " ".join(agents.agent_instructions(self.directory, "Captain Barbossa").split())
+        captain = " ".join(
+            instruction_prompts.agent_instructions(self.directory, "Captain Barbossa").split()
+        )
         for phrase in (
             "CAPTAIN wait 'NAME' [--timeout <seconds>]",
             "Wait reads native hook events until the crew is idle, done, or blocked",
@@ -262,7 +284,9 @@ class CaptainFlowTests(unittest.TestCase):
     def test_instructions_give_every_role_the_shared_checkout_editing_contract(self):
         for role in ("Captain Barbossa", "crew member Gibbs"):
             with self.subTest(role=role):
-                instructions = " ".join(agents.agent_instructions(self.directory, role).split())
+                instructions = " ".join(
+                    instruction_prompts.agent_instructions(self.directory, role).split()
+                )
                 for phrase in (
                     "Crew share one checkout. Edit only files in your assignment",
                     "Re-read a file right before each edit",
@@ -272,7 +296,9 @@ class CaptainFlowTests(unittest.TestCase):
                     "Finish or record a handoff before anyone else edits your file",
                 ):
                     self.assertIn(phrase, instructions)
-        captain = " ".join(agents.agent_instructions(self.directory, "Captain Barbossa").split())
+        captain = " ".join(
+            instruction_prompts.agent_instructions(self.directory, "Captain Barbossa").split()
+        )
         for phrase in (
             "Name the files each crew owns",
             "Give simultaneous writers disjoint files",
@@ -281,13 +307,13 @@ class CaptainFlowTests(unittest.TestCase):
             "commit the user's leftover edits after crew have committed their own",
         ):
             self.assertIn(phrase, captain)
-        crew = agents.agent_instructions(self.directory, "crew member Gibbs")
+        crew = instruction_prompts.agent_instructions(self.directory, "crew member Gibbs")
         self.assertNotIn("disjoint files", crew)
 
     def test_instructions_keep_shared_rules_and_scope_crew_management_to_captain(self):
         for role in ("Captain Barbossa", "crew member Gibbs"):
             with self.subTest(role=role):
-                text = agents.agent_instructions(self.directory, role)
+                text = instruction_prompts.agent_instructions(self.directory, role)
                 instructions = " ".join(text.split())
                 self.assertEqual(text.count(str(self.directory.name)), 1)
                 for phrase in (
@@ -346,7 +372,7 @@ class CaptainFlowTests(unittest.TestCase):
 
     def test_instructions_recruit_on_defaults_and_ask_at_most_one_question(self):
         instructions = " ".join(
-            agents.agent_instructions(self.directory, "Captain Barbossa").split()
+            instruction_prompts.agent_instructions(self.directory, "Captain Barbossa").split()
         )
         for phrase in (
             "Recruit with no questions when the user states no preference.",
@@ -376,7 +402,7 @@ class CaptainFlowTests(unittest.TestCase):
             self.assertNotIn(gone, instructions)
 
     def test_agent_commands_work_outside_the_source_checkout(self):
-        instructions = agents.agent_instructions(self.directory, "captain")
+        instructions = instruction_prompts.agent_instructions(self.directory, "captain")
         command = next(
             line.strip() for line in instructions.splitlines() if " -m captain_barbossa " in line
         )
@@ -412,7 +438,7 @@ class CaptainFlowTests(unittest.TestCase):
         for provider in ("claude", "codex"):
             with (
                 self.subTest(provider=provider),
-                patch.object(agents, "herdr") as api,
+                patch.object(runtime, "herdr") as api,
                 patch.object(agents, "executable", return_value=f"/bin/{provider}"),
                 patch.object(os, "execvpe") as execute,
                 patch.object(sys.stdin, "isatty", return_value=True),
@@ -427,8 +453,9 @@ class CaptainFlowTests(unittest.TestCase):
                 self.assertEqual(argv[-1], args.prompt)
                 self.assertEqual(
                     argv[1:-2],
-                    agents.native_args(
-                        provider, agents.agent_instructions(self.directory, "Captain Barbossa")
+                    instruction_prompts.native_args(
+                        provider,
+                        instruction_prompts.agent_instructions(self.directory, "Captain Barbossa"),
                     ),
                 )
                 self.assertEqual(env["CAPTAIN_SESSION"], self.meta["id"])
@@ -436,18 +463,18 @@ class CaptainFlowTests(unittest.TestCase):
                 self.assertEqual(list(self.project.iterdir()), [])
 
     def test_native_args_disables_claude_attribution_only(self):
-        claude_args = agents.native_args("claude", "instructions")
+        claude_args = instruction_prompts.native_args("claude", "instructions")
         self.assertIn("--settings", claude_args)
         settings = json.loads(claude_args[claude_args.index("--settings") + 1])
         self.assertEqual(settings, {"attribution": {"commit": "", "pr": "", "sessionUrl": False}})
-        codex_args = agents.native_args("codex", "instructions")
+        codex_args = instruction_prompts.native_args("codex", "instructions")
         self.assertNotIn("--settings", codex_args)
 
     def test_captain_requires_an_agent_selection(self):
         for provider in ("claude", "codex"):
             with (
                 self.subTest(provider=provider),
-                patch.object(agents, "herdr"),
+                patch.object(runtime, "herdr"),
                 patch.object(agents, "executable", side_effect=lambda name: f"/bin/{name}"),
                 patch.object(os, "execvpe") as execute,
                 patch.object(sys.stdin, "isatty", return_value=True),
@@ -465,7 +492,7 @@ class CaptainFlowTests(unittest.TestCase):
                 "captain_barbossa.prompts.questionary.select",
                 **{"return_value.unsafe_ask.return_value": None},
             ),
-            patch.object(agents, "herdr") as api,
+            patch.object(runtime, "herdr") as api,
         ):
             with self.assertRaisesRegex(runtime.CaptainError, "cancelled"):
                 agents.launch(self.args(), self.pane, self.project)
@@ -482,7 +509,7 @@ class CaptainFlowTests(unittest.TestCase):
             with (
                 self.subTest(flags=flags),
                 patch.object(sys.stdin, "isatty", return_value=False),
-                patch.object(agents, "herdr") as api,
+                patch.object(runtime, "herdr") as api,
             ):
                 with self.assertRaisesRegex(runtime.CaptainError, "Ask the user"):
                     agents.create_crew(args, self.pane, self.project)
@@ -494,7 +521,7 @@ class CaptainFlowTests(unittest.TestCase):
                     "captain_barbossa.prompts.questionary.select",
                     **{"return_value.unsafe_ask.side_effect": answers},
                 ),
-                patch.object(agents, "herdr") as api,
+                patch.object(runtime, "herdr") as api,
             ):
                 with self.assertRaisesRegex(runtime.CaptainError, "cancelled"):
                     agents.create_crew(
@@ -556,7 +583,7 @@ class CaptainFlowTests(unittest.TestCase):
             with (
                 self.subTest(direction=direction),
                 patch.object(sys.stdin, "isatty", return_value=False),
-                patch.object(agents, "herdr", side_effect=self.listing) as api,
+                patch.object(runtime, "herdr", side_effect=self.listing) as api,
             ):
                 with self.assertRaisesRegex(runtime.CaptainError, "Ask the user") as error:
                     agents.create_crew(args, self.pane, self.project)
@@ -573,7 +600,7 @@ class CaptainFlowTests(unittest.TestCase):
             with (
                 self.subTest(response=response),
                 patch.object(sys.stdin, "isatty", return_value=False),
-                patch.object(agents, "herdr", return_value=response),
+                patch.object(runtime, "herdr", return_value=response),
             ):
                 with self.assertRaisesRegex(runtime.CaptainError, "no (tab or pane list|panes)"):
                     agents.create_crew(args, self.pane, self.project)
@@ -583,7 +610,7 @@ class CaptainFlowTests(unittest.TestCase):
             args = self.args(
                 "crew", "--agent", "codex", "--task", "build", "--placement", "tab", *flags
             )
-            with self.subTest(flags=flags), patch.object(agents, "herdr") as api:
+            with self.subTest(flags=flags), patch.object(runtime, "herdr") as api:
                 with self.assertRaisesRegex(runtime.CaptainError, "apply only to --placement pane"):
                     agents.create_crew(args, self.pane, self.project)
                 api.assert_not_called()
@@ -608,7 +635,7 @@ class CaptainFlowTests(unittest.TestCase):
             "w1:p9",
         )
         with (
-            patch.object(agents, "herdr", side_effect=api) as calls,
+            patch.object(runtime, "herdr", side_effect=api) as calls,
             patch.object(agents, "executable", return_value="/bin/codex"),
         ):
             with self.assertRaisesRegex(
@@ -637,7 +664,7 @@ class CaptainFlowTests(unittest.TestCase):
             )
             with (
                 self.subTest(pane=bad),
-                patch.object(agents, "herdr", side_effect=self.listing) as api,
+                patch.object(runtime, "herdr", side_effect=self.listing) as api,
             ):
                 with self.assertRaisesRegex(runtime.CaptainError, "not in this workspace") as error:
                     agents.create_crew(args, self.pane, self.project)
@@ -677,7 +704,7 @@ class CaptainFlowTests(unittest.TestCase):
             args = self.args("crew", "--task", "build", *flags)
             with (
                 self.subTest(direction=direction, flags=flags),
-                patch.object(agents, "herdr", side_effect=api) as calls,
+                patch.object(runtime, "herdr", side_effect=api) as calls,
                 patch.object(agents, "executable", return_value="/bin/codex"),
                 patch.object(sys.stdin, "isatty", return_value=True),
                 patch(
@@ -813,7 +840,7 @@ class CaptainFlowTests(unittest.TestCase):
             "sonnet",
         )
         with (
-            patch.object(agents, "herdr", side_effect=api),
+            patch.object(runtime, "herdr", side_effect=api),
             patch.object(agents, "executable", return_value="/bin/claude"),
             patch.object(sys.stdin, "isatty", return_value=True),
             patch.object(questionary, "select", side_effect=AssertionError("asked a question")),
@@ -890,7 +917,7 @@ class CaptainFlowTests(unittest.TestCase):
 
             with (
                 self.subTest(flags=flags),
-                patch.object(agents, "herdr", side_effect=api) as calls,
+                patch.object(runtime, "herdr", side_effect=api) as calls,
                 patch.object(agents, "executable", return_value="/bin/codex"),
                 patch.object(sys.stdin, "isatty", return_value=False),
                 contextlib.redirect_stdout(io.StringIO()) as output,
@@ -927,7 +954,7 @@ class CaptainFlowTests(unittest.TestCase):
         for response in ({}, {"layout": {}}, {"layout": {"panes": [{"pane_id": "w1:p9"}]}}):
             with (
                 self.subTest(response=response),
-                patch.object(agents, "herdr", return_value=response),
+                patch.object(runtime, "herdr", return_value=response),
                 patch.object(agents, "executable", return_value="/bin/codex"),
                 patch.object(sys.stdin, "isatty", return_value=False),
             ):
@@ -978,7 +1005,7 @@ class CaptainFlowTests(unittest.TestCase):
 
         base = ("crew", "--agent", "claude", "--task", "review code", "--placement", "pane")
         with (
-            patch.object(agents, "herdr", side_effect=api),
+            patch.object(runtime, "herdr", side_effect=api),
             patch.object(agents, "executable", return_value="/bin/claude"),
             patch.object(sys.stdin, "isatty", return_value=False),
             contextlib.redirect_stdout(io.StringIO()) as output,
@@ -1012,7 +1039,7 @@ class CaptainFlowTests(unittest.TestCase):
                 }
                 with (
                     patch.object(
-                        agents,
+                        runtime,
                         "herdr",
                         side_effect=lambda *call, **_: self.listing(*call) or created,
                     ) as api,
@@ -1122,10 +1149,12 @@ class CaptainFlowTests(unittest.TestCase):
                 created = {"pane": {"pane_id": "w1:p2", "agent": provider, "agent_status": "idle"}}
                 created["agent"] = {"name": f"c-{self.meta['id'][:8]}-{name}"}
                 with (
-                    patch.object(agents, "herdr", return_value=created) as api,
+                    patch.object(runtime, "herdr", return_value=created) as api,
                     patch.object(agents, "executable", return_value=str(native)),
-                    patch.object(agents, "agent_instructions", return_value=instructions),
-                    patch.object(agents, "submit_task"),
+                    patch.object(
+                        instruction_prompts, "agent_instructions", return_value=instructions
+                    ),
+                    patch.object(Pane, "submit_task"),
                 ):
                     agents.create_crew(args, self.pane, self.project)
                 command = next(
@@ -1155,7 +1184,7 @@ class CaptainFlowTests(unittest.TestCase):
                                 process.kill()
                     self.assertEqual(
                         json.loads(received.read_text()),
-                        agents.native_args(
+                        instruction_prompts.native_args(
                             provider,
                             instructions,
                             events=self.directory / "events" / f"{name}.jsonl",
@@ -1191,7 +1220,7 @@ class CaptainFlowTests(unittest.TestCase):
                 }
                 with (
                     patch.object(
-                        agents,
+                        runtime,
                         "herdr",
                         side_effect=lambda *call, **_: (
                             self.EMPTY_COMPOSER if call[:2] == ("agent", "read") else created
@@ -1221,7 +1250,7 @@ class CaptainFlowTests(unittest.TestCase):
             "agent": {"name": f"c-{self.meta['id'][:8]}-jack", "agent_status": "working"},
         }
         with (
-            patch.object(agents, "herdr", return_value=created),
+            patch.object(runtime, "herdr", return_value=created),
             patch.object(agents, "executable", return_value="/bin/claude"),
             contextlib.redirect_stdout(io.StringIO()) as output,
             contextlib.redirect_stderr(io.StringIO()) as errors,
@@ -1254,7 +1283,7 @@ class CaptainFlowTests(unittest.TestCase):
                     "--model",
                     text,
                 )
-                with patch.object(agents, "herdr") as api:
+                with patch.object(runtime, "herdr") as api:
                     with self.assertRaises(runtime.CaptainError) as error:
                         agents.create_crew(args, self.pane, self.project)
                 self.assertIn(message, str(error.exception))
@@ -1283,7 +1312,7 @@ class CaptainFlowTests(unittest.TestCase):
             return {"pane": {"pane_id": "w1:p2"}}
 
         with (
-            patch.object(agents, "herdr", side_effect=api) as calls,
+            patch.object(runtime, "herdr", side_effect=api) as calls,
             patch.object(agents, "executable", return_value="/bin/codex"),
         ):
             with self.assertRaisesRegex(runtime.CaptainError, "pane was preserved"):
@@ -1316,10 +1345,10 @@ class CaptainFlowTests(unittest.TestCase):
             )
 
         with (
-            patch.object(agents, "herdr", side_effect=api) as calls,
-            patch.object(agents.time, "sleep"),
+            patch.object(runtime, "herdr", side_effect=api) as calls,
+            patch.object(panes.time, "sleep"),
         ):
-            agents.wait_for_crew("w1:p2", "codex", "builder")
+            Pane("builder").wait_for_crew("w1:p2", "codex")
         self.assertEqual(states, [])
         self.assertEqual(calls.call_args_list[-2].args, ("agent", "rename", "w1:p2", "builder"))
         self.assertEqual(calls.call_args_list[-1].args, ("agent", "get", "w1:p2"))
@@ -1338,11 +1367,11 @@ class CaptainFlowTests(unittest.TestCase):
             return {"agent": {"name": "builder"}}
 
         with (
-            patch.object(agents, "READY_POLLS", 2),
-            patch.object(agents, "herdr", side_effect=api) as calls,
-            patch.object(agents.time, "sleep") as sleep,
+            patch.object(panes, "READY_POLLS", 2),
+            patch.object(runtime, "herdr", side_effect=api) as calls,
+            patch.object(panes.time, "sleep") as sleep,
         ):
-            agents.wait_for_crew("w1:p2", "claude", "builder")
+            Pane("builder").wait_for_crew("w1:p2", "claude")
         self.assertEqual(states, [])
         self.assertEqual(calls.call_args_list[-2].args, ("agent", "rename", "w1:p2", "builder"))
         self.assertEqual(sleep.call_count, 3)
@@ -1352,7 +1381,7 @@ class CaptainFlowTests(unittest.TestCase):
             with (
                 self.subTest(response=response),
                 patch.object(
-                    agents,
+                    runtime,
                     "herdr",
                     side_effect=[
                         {"pane": {"agent": "codex", "agent_status": "idle"}},
@@ -1360,10 +1389,10 @@ class CaptainFlowTests(unittest.TestCase):
                         response,
                     ],
                 ) as api,
-                patch.object(agents.time, "sleep") as sleep,
+                patch.object(panes.time, "sleep") as sleep,
             ):
                 with self.assertRaisesRegex(runtime.CaptainError, "rename failed for pane w1:p2"):
-                    agents.wait_for_crew("w1:p2", "codex", "builder")
+                    Pane("builder").wait_for_crew("w1:p2", "codex")
                 self.assertEqual(
                     [call.args for call in api.call_args_list[-2:]],
                     [("agent", "rename", "w1:p2", "builder"), ("agent", "get", "w1:p2")],
@@ -1390,10 +1419,10 @@ class CaptainFlowTests(unittest.TestCase):
                 created = {"pane": {"pane_id": "w1:p2", "agent": "codex", "agent_status": status}}
                 created["agent"] = {"name": f"c-{self.meta['id'][:8]}-{name}"}
                 with (
-                    patch.object(agents, "herdr", return_value=created) as calls,
+                    patch.object(runtime, "herdr", return_value=created) as calls,
                     patch.object(agents, "executable", return_value="/bin/codex"),
-                    patch.object(agents.time, "monotonic", side_effect=[0, 1, 31]),
-                    patch.object(agents.time, "sleep"),
+                    patch.object(panes.time, "monotonic", side_effect=[0, 1, 31]),
+                    patch.object(panes.time, "sleep"),
                 ):
                     message = "input or approval" if status == "blocked" else "did not become ready"
                     with self.assertRaisesRegex(runtime.CaptainError, message):
@@ -1437,10 +1466,10 @@ class CaptainFlowTests(unittest.TestCase):
         )
         agent_name, api = self.crew_status_api(iter(["idle", "idle", "working"]))
         with (
-            patch.object(agents, "herdr", side_effect=api) as calls,
+            patch.object(runtime, "herdr", side_effect=api) as calls,
             patch.object(agents, "executable", return_value="/bin/claude"),
-            patch.object(agents.time, "sleep"),
-            patch.object(agents.time, "monotonic", side_effect=count(0, 2)),
+            patch.object(panes.time, "sleep"),
+            patch.object(panes.time, "monotonic", side_effect=count(0, 2)),
         ):
             agents.create_crew(args, self.pane, self.project)
         self.assertEqual(
@@ -1473,10 +1502,10 @@ class CaptainFlowTests(unittest.TestCase):
         )
         agent_name, api = self.crew_status_api(iter(["idle", "idle", "idle", "idle", "working"]))
         with (
-            patch.object(agents, "herdr", side_effect=api) as calls,
+            patch.object(runtime, "herdr", side_effect=api) as calls,
             patch.object(agents, "executable", return_value="/bin/claude"),
-            patch.object(agents.time, "sleep"),
-            patch.object(agents.time, "monotonic", side_effect=count(0, 2)),
+            patch.object(panes.time, "sleep"),
+            patch.object(panes.time, "monotonic", side_effect=count(0, 2)),
         ):
             agents.create_crew(args, self.pane, self.project)
         self.assertEqual(
@@ -1512,10 +1541,10 @@ class CaptainFlowTests(unittest.TestCase):
         )
         agent_name, api = self.crew_status_api(repeat("idle"))
         with (
-            patch.object(agents, "herdr", side_effect=api) as calls,
+            patch.object(runtime, "herdr", side_effect=api) as calls,
             patch.object(agents, "executable", return_value="/bin/claude"),
-            patch.object(agents.time, "sleep"),
-            patch.object(agents.time, "monotonic", side_effect=count(0, 2)),
+            patch.object(panes.time, "sleep"),
+            patch.object(panes.time, "monotonic", side_effect=count(0, 2)),
         ):
             with self.assertRaisesRegex(runtime.CaptainError, "pane was preserved") as error:
                 agents.create_crew(args, self.pane, self.project)
@@ -1551,10 +1580,10 @@ class CaptainFlowTests(unittest.TestCase):
         )
         agent_name, api = self.crew_status_api(repeat("blocked"))
         with (
-            patch.object(agents, "herdr", side_effect=api) as calls,
+            patch.object(runtime, "herdr", side_effect=api) as calls,
             patch.object(agents, "executable", return_value="/bin/claude"),
-            patch.object(agents.time, "sleep"),
-            patch.object(agents.time, "monotonic", side_effect=count(0, 2)),
+            patch.object(panes.time, "sleep"),
+            patch.object(panes.time, "monotonic", side_effect=count(0, 2)),
         ):
             with self.assertRaisesRegex(runtime.CaptainError, "pane was preserved") as error:
                 agents.create_crew(args, self.pane, self.project)
@@ -1571,13 +1600,13 @@ class CaptainFlowTests(unittest.TestCase):
             with (
                 self.subTest(status=status),
                 patch.object(
-                    agents,
+                    runtime,
                     "herdr",
                     return_value={"agent": {"name": "builder", "agent_status": status}},
                 ) as api,
-                patch.object(agents.time, "sleep") as sleep,
+                patch.object(panes.time, "sleep") as sleep,
             ):
-                agents.submit_task("builder", "build", "claude")
+                Pane("builder").submit_task("build", "claude")
                 self.assertEqual(
                     [call.args for call in api.call_args_list],
                     [("agent", "prompt", "builder", "build"), ("agent", "get", "builder")],
@@ -1592,7 +1621,7 @@ class CaptainFlowTests(unittest.TestCase):
             with (
                 self.subTest(statuses=statuses),
                 patch.object(
-                    agents,
+                    runtime,
                     "herdr",
                     side_effect=lambda *call, statuses=iter(statuses), **kwargs: {
                         "agent": {
@@ -1603,11 +1632,11 @@ class CaptainFlowTests(unittest.TestCase):
                         }
                     },
                 ) as api,
-                patch.object(agents.time, "sleep"),
-                patch.object(agents.time, "monotonic", side_effect=count(0, 2)),
+                patch.object(panes.time, "sleep"),
+                patch.object(panes.time, "monotonic", side_effect=count(0, 2)),
             ):
                 with self.assertRaisesRegex(runtime.CaptainError, message):
-                    agents.submit_task("builder", "build", "claude")
+                    Pane("builder").submit_task("build", "claude")
                 sent = [
                     call.args
                     for call in api.call_args_list
@@ -1617,12 +1646,12 @@ class CaptainFlowTests(unittest.TestCase):
 
     def test_unknown_status_after_prompt_never_receives_enter(self):
         with (
-            patch.object(agents, "herdr", return_value={"agent": {"name": "builder"}}) as api,
-            patch.object(agents.time, "sleep"),
-            patch.object(agents.time, "monotonic", side_effect=count(0, 2)),
+            patch.object(runtime, "herdr", return_value={"agent": {"name": "builder"}}) as api,
+            patch.object(panes.time, "sleep"),
+            patch.object(panes.time, "monotonic", side_effect=count(0, 2)),
         ):
             with self.assertRaisesRegex(runtime.CaptainError, "reported status None"):
-                agents.submit_task("builder", "build", "claude")
+                Pane("builder").submit_task("build", "claude")
         self.assertFalse(
             any(call.args[:2] == ("agent", "send-keys") for call in api.call_args_list)
         )
@@ -1638,27 +1667,27 @@ class CaptainFlowTests(unittest.TestCase):
     def test_a_codex_choice_modal_after_a_prompt_needs_attention_without_enter(self):
         with (
             patch.object(
-                agents,
+                runtime,
                 "herdr",
                 side_effect=self.prompt_api(repeat("idle"), self.rate_limit_modal()),
             ) as api,
-            patch.object(agents.time, "sleep"),
-            patch.object(agents.time, "monotonic", side_effect=count(0, 2)),
+            patch.object(panes.time, "sleep"),
+            patch.object(panes.time, "monotonic", side_effect=count(0, 2)),
         ):
             with self.assertRaisesRegex(runtime.CaptainError, "waiting for input or approval"):
-                agents.submit_task("builder", "build", "codex")
+                Pane("builder").submit_task("build", "codex")
         self.assertFalse(
             any(call.args[:2] == ("agent", "send-keys") for call in api.call_args_list)
         )
 
     def test_an_idle_codex_pane_is_pressed_enter_before_the_task_is_resent(self):
         with (
-            patch.object(agents, "herdr", side_effect=self.prompt_api(repeat("idle"))) as api,
-            patch.object(agents.time, "sleep"),
-            patch.object(agents.time, "monotonic", side_effect=count(0, 2)),
+            patch.object(runtime, "herdr", side_effect=self.prompt_api(repeat("idle"))) as api,
+            patch.object(panes.time, "sleep"),
+            patch.object(panes.time, "monotonic", side_effect=count(0, 2)),
         ):
             with self.assertRaisesRegex(runtime.CaptainError, "did not start working"):
-                agents.submit_task("builder", "build", "codex")
+                Pane("builder").submit_task("build", "codex")
         sent = [call.args[:2] for call in api.call_args_list]
         self.assertEqual(sent.count(("agent", "prompt")), 2)
         self.assertEqual(sent.count(("agent", "send-keys")), 2)
@@ -1684,10 +1713,10 @@ class CaptainFlowTests(unittest.TestCase):
         )
         created = {"pane": {"pane_id": "w1:p2", "agent": "codex", "agent_status": "idle"}}
         with (
-            patch.object(agents, "herdr", return_value=created),
+            patch.object(runtime, "herdr", return_value=created),
             patch.object(agents, "executable", return_value="/bin/codex"),
-            patch.object(agents, "wait_for_crew"),
-            patch.object(agents, "submit_task"),
+            patch.object(Pane, "wait_for_crew"),
+            patch.object(Pane, "submit_task"),
         ):
             with ThreadPoolExecutor(max_workers=4) as pool:
                 list(
@@ -1735,10 +1764,10 @@ class CaptainFlowTests(unittest.TestCase):
         )
         created = {"pane": {"pane_id": "w1:p2", "agent": "codex", "agent_status": "idle"}}
         with (
-            patch.object(agents, "herdr", return_value=created) as api,
+            patch.object(runtime, "herdr", return_value=created) as api,
             patch.object(agents, "executable", return_value="/bin/codex"),
-            patch.object(agents, "wait_for_crew"),
-            patch.object(agents, "submit_task"),
+            patch.object(Pane, "wait_for_crew"),
+            patch.object(Pane, "submit_task"),
             contextlib.redirect_stdout(io.StringIO()) as output,
         ):
             agents.create_crew(args, self.pane, self.project)
@@ -1748,7 +1777,7 @@ class CaptainFlowTests(unittest.TestCase):
         self.assertEqual(record["agent"], f"c-{self.meta['id'][:8]}-jack")
         self.assertIn(("pane", "rename", "w1:p2", "Jack"), [c.args for c in api.call_args_list])
         with (
-            patch.object(agents, "herdr", return_value={}),
+            patch.object(runtime, "herdr", return_value={}),
             contextlib.redirect_stdout(io.StringIO()) as dismissed,
         ):
             agents.dismiss_crew(self.args("dismiss", "Jack"), self.pane, self.project)
@@ -1769,10 +1798,10 @@ class CaptainFlowTests(unittest.TestCase):
         memory.write_json(self.directory / "session.json", self.meta)
         created = {"pane": {"pane_id": "w1:p2", "agent": "codex", "agent_status": "idle"}}
         with (
-            patch.object(agents, "herdr", return_value=created),
+            patch.object(runtime, "herdr", return_value=created),
             patch.object(agents, "executable", return_value="/bin/codex"),
-            patch.object(agents, "wait_for_crew"),
-            patch.object(agents, "submit_task"),
+            patch.object(Pane, "wait_for_crew"),
+            patch.object(Pane, "submit_task"),
         ):
             with contextlib.redirect_stdout(io.StringIO()) as output:
                 agents.create_crew(
@@ -1846,7 +1875,7 @@ class CaptainFlowTests(unittest.TestCase):
 
     def test_non_character_names_are_rejected_before_launch(self):
         for name in ("scout", "barbossa", "../../jack", "", "jack;ls", "jack-123456789012"):
-            with self.subTest(name=name), patch.object(agents, "herdr") as api:
+            with self.subTest(name=name), patch.object(runtime, "herdr") as api:
                 args = self.args("crew", name, "--task", "standby")
                 with self.assertRaisesRegex(runtime.CaptainError, "omit NAME"):
                     agents.create_crew(args, self.pane, self.project)
@@ -1890,7 +1919,7 @@ class CaptainFlowTests(unittest.TestCase):
                 patch.object(cli, "current_pane", return_value=self.pane),
                 patch.object(cli, "project_root", return_value=self.project),
                 patch.object(
-                    agents, "herdr", side_effect=lambda *call, **_: live.get(call[2], {})
+                    runtime, "herdr", side_effect=lambda *call, **_: live.get(call[2], {})
                 ) as api,
                 contextlib.redirect_stdout(io.StringIO()) as output,
             ):
@@ -1906,7 +1935,7 @@ class CaptainFlowTests(unittest.TestCase):
             patch.object(cli, "current_pane", return_value=self.pane),
             patch.object(cli, "project_root", return_value=self.project),
             patch.object(
-                agents, "herdr", side_effect=runtime.CaptainError("agent_not_found")
+                runtime, "herdr", side_effect=runtime.CaptainError("agent_not_found")
             ) as api,
             contextlib.redirect_stderr(io.StringIO()) as error,
             contextlib.redirect_stdout(io.StringIO()) as output,
@@ -1925,7 +1954,7 @@ class CaptainFlowTests(unittest.TestCase):
         other, meta = memory.session(self.project, self.pane, create=True)
         meta["crew"] = {"elizabeth": {"name": "Elizabeth", "agent": "c-other-elizabeth"}}
         memory.write_json(other / "session.json", meta)
-        with patch.object(agents, "herdr") as api:
+        with patch.object(runtime, "herdr") as api:
             for name, message in (
                 ("Elizabeth", "Available crew"),
                 ("", "No crew"),
@@ -1970,7 +1999,7 @@ class CaptainFlowTests(unittest.TestCase):
         with (
             patch.object(cli, "current_pane", return_value=self.pane),
             patch.object(cli, "project_root", return_value=self.project),
-            patch.object(agents, "herdr", return_value={}) as api,
+            patch.object(runtime, "herdr", return_value={}) as api,
             contextlib.redirect_stdout(io.StringIO()) as output,
         ):
             self.assertEqual(cli.main(["--session", self.meta["id"], "dismiss", " jAcK "]), 0)
@@ -1989,7 +2018,7 @@ class CaptainFlowTests(unittest.TestCase):
             ],
             [(f"session:{self.meta['id']}", "dismissed", "c-session-jack")],
         )
-        with patch.object(agents, "herdr") as api:
+        with patch.object(runtime, "herdr") as api:
             with self.assertRaisesRegex(runtime.CaptainError, "already dismissed"):
                 agents.dismiss_crew(self.args("dismiss", "Jack"), self.pane, self.project)
             api.assert_not_called()
@@ -2005,7 +2034,7 @@ class CaptainFlowTests(unittest.TestCase):
             "cotton": {"name": "Cotton", "agent": "c-session-cotton"},
         }
         memory.write_json(self.directory / "session.json", self.meta)
-        with patch.object(agents, "herdr") as api:
+        with patch.object(runtime, "herdr") as api:
             for name, message in (
                 ("Elizabeth", "Available crew"),
                 ("Jack", "ambiguous"),
@@ -2018,7 +2047,7 @@ class CaptainFlowTests(unittest.TestCase):
             patch.object(cli, "current_pane", return_value=self.pane),
             patch.object(cli, "project_root", return_value=self.project),
             patch.object(
-                agents, "herdr", side_effect=runtime.CaptainError("pane_not_found")
+                runtime, "herdr", side_effect=runtime.CaptainError("pane_not_found")
             ) as api,
             contextlib.redirect_stderr(io.StringIO()) as error,
         ):
@@ -2197,7 +2226,7 @@ class CaptainFlowTests(unittest.TestCase):
                 if report and status in ("idle", "blocked"):
                     # The crew records its report just before its pane settles.
                     memory.add_memory(self.directory / "graph.json", "Jack", "report", report)
-                if agents.modal_start(tail.splitlines()) is not None:
+                if panes.modal_start(tail.splitlines()) is not None:
                     return tail
                 if status == "blocked":
                     return tail + "\n1. Yes\n2. No\nPress enter to confirm or esc to cancel"
@@ -2209,10 +2238,10 @@ class CaptainFlowTests(unittest.TestCase):
     def run_wait(self, statuses, tail="", timeout=60, report=None):
         with (
             patch.object(
-                agents, "herdr", side_effect=self.wait_api(statuses, tail, report)
+                runtime, "herdr", side_effect=self.wait_api(statuses, tail, report)
             ) as calls,
-            patch.object(agents.time, "sleep"),
-            patch.object(agents.time, "monotonic", side_effect=count(0, 2)),
+            patch.object(panes.time, "sleep"),
+            patch.object(panes.time, "monotonic", side_effect=count(0, 2)),
             contextlib.redirect_stdout(io.StringIO()) as output,
         ):
             agents.wait_crew(
@@ -2409,8 +2438,8 @@ class CaptainFlowTests(unittest.TestCase):
     def test_wait_times_out_without_recording_a_completion(self):
         self.wait_crew_record()
         with (
-            patch.object(agents, "herdr", side_effect=self.wait_api(["working"])),
-            patch.object(agents.time, "sleep"),
+            patch.object(runtime, "herdr", side_effect=self.wait_api(["working"])),
+            patch.object(panes.time, "sleep"),
         ):
             with self.assertRaisesRegex(runtime.CaptainError, "still working after 0.0 seconds"):
                 agents.wait_crew(
@@ -2420,7 +2449,7 @@ class CaptainFlowTests(unittest.TestCase):
 
     def test_wait_rejects_unknown_crew_before_polling_herdr(self):
         self.wait_crew_record()
-        with patch.object(agents, "herdr") as api:
+        with patch.object(runtime, "herdr") as api:
             with self.assertRaisesRegex(runtime.CaptainError, "No crew named 'Gibbs'"):
                 agents.wait_crew(self.args("wait", "Gibbs"), self.pane, self.project)
         api.assert_not_called()
@@ -2434,8 +2463,8 @@ class CaptainFlowTests(unittest.TestCase):
             return {"agent": {"agent_status": "idle"}}
 
         with (
-            patch.object(agents, "herdr", side_effect=api),
-            patch.object(agents, "crew_status", return_value=("idle", None)),
+            patch.object(runtime, "herdr", side_effect=api),
+            patch.object(Crew, "status", return_value=("idle", None)),
             contextlib.redirect_stdout(io.StringIO()) as output,
         ):
             agents.wait_crew(self.args("wait", "Jack"), self.pane, self.project)
