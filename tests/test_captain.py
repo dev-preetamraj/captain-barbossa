@@ -399,6 +399,11 @@ class CaptainFlowTests(unittest.TestCase):
                     patch.object(agents, "executable", return_value=f"/bin/{provider}"),
                     patch.object(Pane, "wait_for_crew"),
                     patch.object(Pane, "submit_task") as submit,
+                    patch.object(
+                        models,
+                        "pi_models",
+                        return_value=(("anthropic/claude-opus-5", ()),),
+                    ),
                     contextlib.redirect_stdout(io.StringIO()) as output,
                 ):
                     agents.create_crew(args, self.pane, self.project)
