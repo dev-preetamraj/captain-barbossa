@@ -83,6 +83,7 @@ def parser():
     model.add_argument("model", help=f"tier ({'|'.join(TIER_NAMES)}), model name, or alias")
     focus = commands.add_parser("focus", help="focus an existing crew's pane and tab")
     focus.add_argument("name", help="crew name or ID (case-insensitive)")
+    commands.add_parser("session", help="print the current session id")
     status = commands.add_parser("status", help="print a table of this session's crew")
     status.add_argument("--all", action="store_true", help="include dismissed crew")
     dismiss = commands.add_parser("dismiss", help="close an existing crew's pane and retire it")
@@ -113,6 +114,12 @@ def parser():
     return root
 
 
+def print_session(args):
+    if not args.session:
+        raise CaptainError("Start captain first, or pass --session <id>.")
+    print(args.session)
+
+
 def main(argv=None):
     args = parser().parse_args(argv)
     try:
@@ -128,6 +135,8 @@ def main(argv=None):
             switch_model(args, pane, project)
         elif args.command == "focus":
             focus_crew(args, pane, project)
+        elif args.command == "session":
+            print_session(args)
         elif args.command == "status":
             status_crew(args, pane, project)
         elif args.command == "dismiss":

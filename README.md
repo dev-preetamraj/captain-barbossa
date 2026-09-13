@@ -35,6 +35,18 @@ uv tool upgrade captain-barbossa
 Running captains keep the old code until restarted with
 `captain --session <session-id>`.
 
+## Restarting a captain
+
+Find the id with `captain session` before you exit. Then exit the running
+agent with `/exit` or Ctrl+D, and rerun:
+
+```sh
+captain --session <session-id>
+```
+
+Graph memory carries over; the chat transcript does not. You get a fresh
+native conversation, not a provider transcript resume.
+
 ## Starting a captain
 
 Launch `captain` from an interactive terminal inside a Herdr workspace:
@@ -345,6 +357,7 @@ conversation, not a provider transcript resume.
 | `captain tell NAME MESSAGE` | Send a follow-up prompt to crew |
 | `captain status [--all]` | Print a table of this session's crew |
 | `captain focus NAME` | Focus crew's pane and tab |
+| `captain session` | Print the current session id |
 | `captain dismiss NAME` | Close and retire crew |
 | `captain memory add SUBJECT RELATION TARGET [--scope session\|project]` | Save a memory relationship |
 | `captain memory query QUESTION` | Search memory with Graphify |
