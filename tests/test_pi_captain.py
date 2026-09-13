@@ -63,8 +63,8 @@ await arm("Will", 7);
 assert.equal(calls.length, 2);
 assert.deepEqual(calls[0].args.slice(0, 3), ["-m", "captain_barbossa", "--session"]);
 assert.deepEqual(calls[0].args.slice(-4), ["wait", "Jack", "--timeout", "900"]);
-assert.deepEqual(calls[1].args.slice(-4), ["wait", "Will", "--timeout", "7"]);
-assert.equal(calls[1].options.timeout, 37000);
+assert.deepEqual(calls[1].args.slice(-4), ["wait", "Will", "--timeout", "60"]);
+assert.equal(calls[1].options.timeout, 90000);
 turn.abort();
 assert.equal(calls[0].options.signal.aborted, false);
 calls[0].resolve({ stdout: "Jack done.\nreported: focused tests passed", stderr: "", code: 0 });
@@ -121,13 +121,34 @@ const output = "crew report\n" + "x".repeat(20000) + "final line";
 await arm();
 calls[0].resolve({ stdout: output, stderr: "", code: 0 });
 await flush();
-assert.ok(messages[0].message.content.length < 17000);
+// The whole steered message, wrapper included, is what costs the captain context.
+assert.ok(messages[0].message.content.length <= 2000);
+assert.match(messages[0].message.content, /crew report/);
 assert.match(messages[0].message.content, /Output truncated/);
 const [log] = readdirSync(dirname(path)).filter(name => name.startsWith("pi-wait-"));
 const logPath = join(dirname(path), log);
 assert.equal(readFileSync(logPath, "utf8"), output);
 assert.equal(statSync(logPath).mode & 0o777, 0o600);
 assert.ok(messages[0].message.content.includes(logPath));
+""")
+
+    def test_a_background_wait_shorter_than_the_floor_is_raised_to_it(self):
+        self.run_js(r"""
+for (const [crew, timeout] of [["Jack", 0], ["Will", 5], ["Gibbs", 60], ["Cotton", 120]]) {
+  await arm(crew, timeout);
+  const armed = Number(calls.at(-1).args.at(-1));
+  assert.equal(armed, Math.max(timeout, 60));
+  assert.equal(calls.at(-1).options.timeout, (armed + 30) * 1000);
+}
+""")
+
+    def test_short_output_is_delivered_whole_without_a_truncation_marker(self):
+        self.run_js(r"""
+await arm();
+calls[0].resolve({ stdout: "Jack idle.\nidle; reported: done", stderr: "", code: 0 });
+await flush();
+assert.match(messages[0].message.content, /idle; reported: done/);
+assert.doesNotMatch(messages[0].message.content, /Output truncated/);
 """)
 
     def test_cancelled_tool_does_not_start_a_wait(self):

@@ -108,13 +108,11 @@ class WaitCrewMemoryTests(unittest.TestCase):
         self.run_wait(["idle", "idle", "idle"], report="tests pass")
         self.assertEqual(len(self.edges("completed")), 1)
 
-    def test_no_report_records_a_short_tail_edge_but_prints_the_full_tail(self):
+    def test_no_report_prints_the_tail_without_writing_it_to_memory(self):
         long_tail = "x" * 500
         printed = self.run_wait(["idle", "idle", "idle"], tail=long_tail)
         self.assertEqual(self.edges("completed"), ["idle; no report recorded"])
-        tail_edges = self.edges("tail")
-        self.assertEqual(len(tail_edges), 1)
-        self.assertLessEqual(len(tail_edges[0]), 300)
+        self.assertEqual(self.edges("tail"), [])
         self.assertIn(f"pane tail: {long_tail}", printed)
 
     def run_pi_wait(self, tail, report=None):
@@ -315,6 +313,40 @@ class WaitCrewMemoryTests(unittest.TestCase):
                         self.assertIn("reported: partial", output.getvalue())
                     api.assert_not_called()
 
+    def test_wait_caps_a_long_hook_message_and_points_at_the_event_file(self):
+        message = "y" * 4000
+        self.write_event({"hook_event_name": "Stop", "last_assistant_message": message})
+        with (
+            patch.object(runtime, "herdr") as api,
+            contextlib.redirect_stdout(io.StringIO()) as output,
+        ):
+            agents.wait_crew(self.args("wait", "Jack", "--timeout", "0"), self.pane, self.project)
+        printed = output.getvalue()
+        api.assert_not_called()
+        self.assertLess(len(printed), 800)
+        self.assertIn("y" * 400, printed)
+        self.assertIn(str(self.event_path()), printed)
+        # The raw event keeps the whole payload; only the wait line is capped.
+        self.assertIn(message, self.event_path().read_text(encoding="utf-8"))
+
+    def test_wait_caps_a_blocked_tool_payload_but_keeps_the_tool_name(self):
+        self.write_event(
+            {
+                "hook_event_name": "PermissionRequest",
+                "tool_name": "Bash",
+                "tool_input": {"command": "z" * 4000},
+            }
+        )
+        with (
+            patch.object(runtime, "herdr", return_value={}),
+            contextlib.redirect_stdout(io.StringIO()) as output,
+        ):
+            agents.wait_crew(self.args("wait", "Jack", "--timeout", "0"), self.pane, self.project)
+        printed = output.getvalue()
+        self.assertIn("hook: Bash ", printed)
+        self.assertLess(len(printed), 800)
+        self.assertIn(str(self.event_path()), printed)
+
     def test_wait_uses_report_written_before_an_unconsumed_stop(self):
         memory.add_memory(self.directory / "graph.json", "Jack", "report", "tests pass")
         self.write_event({"hook_event_name": "Stop"})
@@ -401,6 +433,27 @@ class WaitCrewMemoryTests(unittest.TestCase):
         with patch.object(runtime, "herdr") as unused:
             self.assertEqual(self.pi_crew().status(0), (None, None))
         unused.assert_not_called()
+
+    def test_pi_wait_delivers_a_report_written_before_the_wait_started_exactly_once(self):
+        """pi fires no hooks, so report consumption cannot depend on an events file."""
+        memory.add_memory(self.directory / "graph.json", "Jack", "report", "gate green")
+        self.assertIn("idle; reported: gate green", self.run_pi_wait("noise"))
+        self.assertFalse(self.event_path().exists())
+        printed = self.run_pi_wait("noise")
+        self.assertIn("idle; no report recorded", printed)
+        self.assertNotIn("gate green", printed)
+
+    def test_pi_wait_reports_a_blocked_pane_from_herdr(self):
+        self.meta["crew"]["jack"]["provider"] = "pi"
+        memory.write_json(self.directory / "session.json", self.meta)
+        crew = self.pi_crew()
+        crew.record["provider"] = "pi"
+        with (
+            patch.object(runtime, "herdr", return_value={"agent": {"agent_status": "blocked"}}),
+            patch.object(panes.time, "sleep"),
+            patch.object(panes.time, "monotonic", side_effect=count(0, 2)),
+        ):
+            self.assertEqual(crew.status(60), ("blocked", None))
 
     def test_pi_wait_reports_herdr_done_without_waiting_for_idle(self):
         crew = Crew(

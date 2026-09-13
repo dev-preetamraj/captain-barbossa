@@ -31,6 +31,10 @@ from .placement import Placement
 from .prompts import PLACEMENTS, choose
 from .runtime import HERDR_ERRORS, CaptainError, check_text, executable
 
+# A hook payload carries a whole assistant turn or tool_input; the wait line only needs
+# enough to decide what to do next, and the event file keeps the rest.
+HOOK_LIMIT = 500
+
 # One word each: the roster name is the crew ID, the display name, and the agent suffix.
 CREW_NAMES = (
     "jack",
@@ -100,11 +104,10 @@ def tail_note(current, crew, tail):
 
 def wait_crew(args, pane, project):
     current, crew = Crew.for_args(args, pane, project)
-    events = crew.events
     report_cursor = crew.report_cursor
+    # Reports are consumed by cursor alone: pi installs no hooks, so an events file may
+    # never exist, and a report written before this wait started is still undelivered.
     reported = read_cursor(report_cursor)
-    # Legacy pane detection has no event boundary; only trust reports written during wait.
-    before = len(crew.reports)
     status, event = crew.status(max(args.timeout, 0))
     if status is None:
         raise CaptainError(
@@ -112,7 +115,7 @@ def wait_crew(args, pane, project):
             "Wait again, or read its pane with: herdr agent read " + crew.record["agent"]
         )
     all_reports = crew.reports
-    reports = all_reports[reported if event is not None else before :]
+    reports = all_reports[reported:]
     if reports:
         entry = f"{status}; reported: {reports[-1]}"
         # Blocked means the pane is waiting on input/approval; show it even with a report.
@@ -129,8 +132,6 @@ def wait_crew(args, pane, project):
         completed = entry
     else:
         tail = crew.pane.tail()
-        # Kept short: tail_note already delivered the full tail, this is just a breadcrumb.
-        add_memory(current.graph, crew.display_name, "tail", truncate_label(tail))
         entry = f"{status}; no report recorded"
         printed = f"{entry}; {tail_note(current, crew, tail)}"
         completed = entry
@@ -143,10 +144,14 @@ def wait_crew(args, pane, project):
         if status == "blocked" and event.get("tool_name"):
             message = f"{event['tool_name']} {json.dumps(event.get('tool_input', {}))}"
         if message:
-            printed += f"; hook: {message}"
-    add_memory(current.graph, crew.display_name, "completed", completed[:8000])
-    if events.exists():
-        write_json(report_cursor, len(all_reports))
+            capped = truncate_label(message, HOOK_LIMIT)
+            if capped != message:
+                capped += f" (full event: {crew.events})"
+            printed += f"; hook: {capped}"
+    add_memory(current.graph, crew.display_name, "completed", completed)
+    # pi never creates the events directory this cursor lives beside.
+    private_dir(report_cursor.parent)
+    write_json(report_cursor, len(all_reports))
     print(f"{crew.display_name} {status}.")
     print(printed)
 
@@ -323,7 +328,7 @@ def create_crew(args, pane, project):
             f"CAPTAIN_CREW_LAUNCHER={launcher}",
         ]
         instruction_text = instructions.agent_instructions(
-            current.directory, f"crew member {display_name}"
+            current.directory, f"crew member {display_name}", provider
         )
         crew = Crew(name, {"id": name, "name": display_name, "agent": crew_agent}, current)
         events = crew.events

@@ -263,7 +263,7 @@ class CaptainFlowTests(unittest.TestCase):
             "End every assignment with a report: files changed, checks run and their result",
             "anything left or blocked",
             "Record it before you stop, under your own name",
-            "CAPTAIN memory add 'NAME' 'report' '<summary>'",
+            "memory add Gibbs report '<summary>'",
             "Then print the same report as your final message",
             "Going idle is your done signal",
         ):
@@ -318,25 +318,25 @@ class CaptainFlowTests(unittest.TestCase):
                 self.assertEqual(text.count(str(self.directory.name)), 1)
                 for phrase in (
                     f"You are {role}",
-                    "Do not create Herdr panes/tabs yourself or substitute hidden built-in subagents",
                     "one word, proper case, never a full name",
                     "Keep assignments separate from identity",
-                    "Read project/session memory at startup and after context compaction",
-                    "CAPTAIN memory show",
-                    "CAPTAIN memory add 'subject' 'relation' 'object'",
-                    "Search, if Graphify is installed: CAPTAIN memory query 'question'",
-                    "CAPTAIN memory path",
                 ):
                     self.assertIn(phrase, instructions)
                 if role.startswith("crew member "):
                     self.assertIn(
-                        "Send delegation requests to the captain; do not spawn crew", instructions
+                        "Complete your assignment yourself; do not delegate or use subagents",
+                        instructions,
                     )
-                    self.assertIn("Save decisions and findings: CAPTAIN memory add", instructions)
+                    self.assertIn("memory add Gibbs report '<summary>'", instructions)
                     for command in (" crew --agent", " dismiss ", " focus ", "herdr agent"):
                         self.assertNotIn(command, text)
                     self.assertNotIn("--model", text)
                     for phrase in (
+                        "Read project/session memory at startup and after context compaction",
+                        "CAPTAIN memory show",
+                        "CAPTAIN memory add 'subject' 'relation' 'object'",
+                        "CAPTAIN memory query",
+                        "CAPTAIN memory path",
                         "Save concise, meaningful decisions, findings, and handoffs",
                         "Default scope is session",
                         "Use --scope project ONLY for durable facts for future sessions",
@@ -352,6 +352,13 @@ class CaptainFlowTests(unittest.TestCase):
                         self.assertNotIn(phrase, instructions)
                 else:
                     for phrase in (
+                        "Do not create Herdr panes/tabs yourself or substitute hidden built-in subagents",
+                        "Replace CAPTAIN in commands below with:",
+                        "Read project/session memory at startup and after context compaction",
+                        "CAPTAIN memory show",
+                        "CAPTAIN memory add 'subject' 'relation' 'object'",
+                        "Search, if Graphify is installed: CAPTAIN memory query 'question'",
+                        "CAPTAIN memory path",
                         "Crew recruiting ruleset, for EVERY creation",
                         "lists every workspace pane by tab when --split-pane is missing",
                         "--direction vertical|horizontal|auto --split-pane <pane-id>|auto] "
@@ -369,6 +376,94 @@ class CaptainFlowTests(unittest.TestCase):
                         "or authorization",
                     ):
                         self.assertIn(phrase, instructions)
+
+    def test_create_crew_uses_crew_scoped_prompt_instructions(self):
+        for provider in models.PROVIDERS:
+            with self.subTest(provider=provider):
+                args = self.args(
+                    "crew",
+                    "--agent",
+                    provider,
+                    "--task",
+                    "build",
+                    "--placement",
+                    "pane",
+                    "--direction",
+                    "vertical",
+                    "--split-pane",
+                    "w1:p1",
+                )
+                created = {"pane": {"pane_id": "w1:p2"}}
+                with (
+                    patch.object(runtime, "herdr", return_value=created),
+                    patch.object(agents, "executable", return_value=f"/bin/{provider}"),
+                    patch.object(Pane, "wait_for_crew"),
+                    patch.object(Pane, "submit_task") as submit,
+                    contextlib.redirect_stdout(io.StringIO()) as output,
+                ):
+                    agents.create_crew(args, self.pane, self.project)
+
+                record = json.loads(output.getvalue())
+                launcher = self.directory / f"crew-{record['id']}.sh"
+                argv = shlex.split(launcher.read_text(), comments=True)
+                self.assertEqual(argv[:2], ["exec", f"/bin/{provider}"])
+                if provider == "codex":
+                    prompt = json.loads(
+                        next(
+                            arg.split("=", 1)[1]
+                            for arg in argv
+                            if arg.startswith("developer_instructions=")
+                        )
+                    )
+                else:
+                    prompt = argv[argv.index("--append-system-prompt") + 1]
+                self.assertIn(f"You are crew member {record['name']}", prompt)
+                self.assertIn("Edit only files in your assignment", prompt)
+                self.assertIn("Then print the same report as your final message", prompt)
+                self.assertIn(
+                    "Complete your assignment yourself; do not delegate or use subagents", prompt
+                )
+                self.assertEqual(
+                    [shlex.split(line) for line in prompt.splitlines() if " memory " in line],
+                    [
+                        [
+                            sys.executable,
+                            "-m",
+                            "captain_barbossa",
+                            "--session",
+                            self.directory.name,
+                            "memory",
+                            "add",
+                            record["name"],
+                            "report",
+                            "<summary>",
+                        ]
+                    ],
+                )
+                self.assertNotIn("CAPTAIN", prompt)
+                for phrase in (
+                    "Do not create Herdr panes/tabs",
+                    "Only the captain manages crew",
+                    "Send delegation requests to the captain",
+                    "The captain must also",
+                    "Replace CAPTAIN in commands below with:",
+                    "Read project/session memory",
+                    "context compaction",
+                    "Crew recruiting ruleset",
+                    "Any task request",
+                    "captain_wait",
+                    "wait in the background",
+                    "pi reload",
+                    "herdr agent",
+                    "herdr pane",
+                    "herdr tab",
+                    "--split-pane",
+                    "--model",
+                ):
+                    self.assertNotIn(phrase, prompt)
+                    self.assertNotIn(phrase.casefold(), prompt.casefold())
+                self.assertNotIn("--extension", argv)
+                submit.assert_called_once_with("build", provider)
 
     def test_instructions_recruit_on_defaults_and_ask_at_most_one_question(self):
         instructions = " ".join(
@@ -488,8 +583,7 @@ class CaptainFlowTests(unittest.TestCase):
         self.assertIn(env["CAPTAIN_SESSION"], extension.read_text())
         text = argv[argv.index("--append-system-prompt") + 1]
         self.assertIn("Use the captain_wait tool", text)
-        self.assertIn("After approving a crew prompt", text)
-        self.assertIn("or sending CAPTAIN tell, call captain_wait again", text)
+        self.assertIn("rearm too after approving\na prompt, CAPTAIN tell, or a pi reload", text)
         self.assertNotIn("Run every\nwait in the background", text)
         self.assertEqual(list(self.project.iterdir()), [])
 
@@ -2349,12 +2443,13 @@ class CaptainFlowTests(unittest.TestCase):
         self.assertEqual(self.completions(), ["idle; reported"])
         self.assertNotIn("pane tail", printed)
 
-    def test_wait_records_the_pane_tail_when_the_crew_wrote_no_report(self):
+    def test_wait_prints_the_pane_tail_when_the_crew_wrote_no_report(self):
         agent_name = self.wait_crew_record()
         printed, calls = self.run_wait(["idle", "idle", "idle"], tail="  ran 66 tests\n\nOK\n")
         self.assertIn("no report recorded; pane tail: ran 66 tests\nOK", printed)
         self.assertEqual(self.completions(), ["idle; no report recorded"])
-        self.assertEqual(self.tails(), ["ran 66 tests\nOK"])
+        # The tail is printed, never stored: memory carries reports, not terminal scrollback.
+        self.assertEqual(self.tails(), [])
         read = [call for call in calls.call_args_list if call.args[:2] == ("agent", "read")]
         self.assertEqual(read[0].args, ("agent", "read", agent_name, "--lines", "40"))
         self.assertTrue(read[0].kwargs["raw"])
@@ -2449,7 +2544,7 @@ class CaptainFlowTests(unittest.TestCase):
         self.assertEqual(len(self.completions()), 1)
         self.assertTrue(self.completions()[0].startswith("blocked;"))
 
-    def test_wait_strips_a_trailing_choice_modal_from_the_pane_tail(self):
+    def test_wait_keeps_a_choice_modals_question_and_drops_only_its_options(self):
         self.wait_crew_record()
         printed, _ = self.run_wait(["idle", "idle", "idle"], tail=self.rate_limit_modal())
         entry = "pane tail: " + "\n".join(
@@ -2457,10 +2552,12 @@ class CaptainFlowTests(unittest.TestCase):
                 "• Ran uv run --locked python -m unittest -q (with UV_CACHE_DIR=/tmp/uv-cache to avoid",
                 "a local permission issue).",
                 "77 tests ran, all passed (OK).",
+                "Approaching rate limits",
+                "Switch to gpt-5.6-luna for lower credit usage?",
             ]
         )
         self.assertIn(entry, printed)
-        for text in ("Approaching rate limits", "Keep current model", "Press enter to confirm"):
+        for text in ("1. Switch to gpt-5.6-luna", "Keep current model", "Press enter to confirm"):
             self.assertNotIn(text, printed)
 
     def test_a_numbered_list_in_crew_output_is_not_read_as_a_modal(self):
@@ -2477,9 +2574,11 @@ class CaptainFlowTests(unittest.TestCase):
         self.assertIn("Jack idle.", printed)
         self.assertIn("1. Bump the version", printed)
 
-    def test_wait_ignores_a_report_left_by_an_earlier_assignment(self):
+    def test_wait_delivers_an_unconsumed_report_once_and_not_again(self):
         self.wait_crew_record()
         memory.add_memory(self.directory / "graph.json", "Jack", "report", "previous run")
+        printed, _ = self.run_wait(["idle", "idle", "idle"], tail="waiting")
+        self.assertIn("reported: previous run", printed)
         printed, _ = self.run_wait(["idle", "idle", "idle"], tail="waiting")
         self.assertIn("no report recorded; pane tail: waiting", printed)
         self.assertNotIn("previous run", printed)

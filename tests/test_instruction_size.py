@@ -54,8 +54,7 @@ class InstructionSizeTests(unittest.TestCase):
             "Never overwrite, rewrite from scratch, or discard existing files or "
             "unsaved/uncommitted work (yours or anyone else's). Edit in place; preserve "
             "existing content. If an assignment implies replacing existing content, "
-            "stop and ask the user first; never decide alone. The captain must also ask "
-            "the user first, never instruct crew to override files."
+            "stop and ask the user first; never decide alone."
         )
         for role in ("Captain Barbossa", "crew member Jack"):
             with self.subTest(role=role):
@@ -63,27 +62,50 @@ class InstructionSizeTests(unittest.TestCase):
                     instruction_prompts.agent_instructions(self.directory, role).split()
                 )
                 self.assertIn(rule, instructions)
+                captain_rule = "The captain must also ask the user first, never instruct crew to override files."
+                self.assertEqual(captain_rule in instructions, role == "Captain Barbossa")
 
-    def test_crew_memory_block_keeps_only_the_four_essential_commands(self):
-        crew_text = instruction_prompts.agent_instructions(self.directory, "crew member Jack")
-        self.assertIn("CAPTAIN memory show", crew_text)
-        self.assertIn("CAPTAIN memory add", crew_text)
-        self.assertIn("CAPTAIN memory query", crew_text)
-        self.assertIn("CAPTAIN memory path", crew_text)
-        # Captain-only content should not leak into the crew block.
-        self.assertNotIn("Do not store secrets", crew_text)
-        self.assertNotIn("Commit and PR attribution", crew_text)
+    def test_crew_only_gets_the_report_command_for_every_provider(self):
+        for provider in (None, "codex", "claude", "pi"):
+            with self.subTest(provider=provider):
+                crew = instruction_prompts.agent_instructions(
+                    self.directory, "crew member Jack", provider
+                )
+                self.assertEqual(len([line for line in crew.splitlines() if " memory " in line]), 1)
+                self.assertIn("memory add Jack report '<summary>'", crew)
+                for phrase in (
+                    "CAPTAIN",
+                    "Do not create Herdr panes/tabs",
+                    "Only the captain manages crew",
+                    "Read project/session memory",
+                    "context compaction",
+                    "Crew recruiting ruleset",
+                    "Any task request",
+                    "captain_wait",
+                    "--model",
+                ):
+                    self.assertNotIn(phrase, crew)
 
     def test_captain_instructions_keep_the_full_memory_ruleset(self):
         captain_text = instruction_prompts.agent_instructions(self.directory, "Captain Barbossa")
         self.assertIn("Do not store secrets", captain_text)
         self.assertIn("Commit and PR attribution", captain_text)
 
+    def test_a_quiet_wait_result_is_rearmed_without_spending_a_captain_turn(self):
+        """Every delivery wakes the captain; the rule decides whether that costs a turn."""
+        text = instruction_prompts.agent_instructions(self.directory, "Captain Barbossa", "pi")
+        block = text.split("it falls back to the pane tail. ")[1].split(" For more detail")[0]
+        self.assertIn("rearm at once, silently", block)
+        self.assertIn("Act only on a new report, a newly blocked crew, or an error", block)
+        # The old rule made every delivery, timeout included, a full working turn.
+        self.assertNotIn("Rearm after a timeout if work remains", block)
+        # Token-budgeted: rewording the rule must not buy itself more lines.
+        self.assertLessEqual(len(block.splitlines()), 7)
+
     def test_graphify_query_is_not_advertised_as_always_available(self):
-        for role in ("crew member Jack", "Captain Barbossa"):
-            text = instruction_prompts.agent_instructions(self.directory, role)
-            query_line = next(line for line in text.splitlines() if "memory query" in line)
-            self.assertIn("if Graphify is installed", query_line)
+        text = instruction_prompts.agent_instructions(self.directory, "Captain Barbossa")
+        query_line = next(line for line in text.splitlines() if "memory query" in line)
+        self.assertIn("if Graphify is installed", query_line)
 
 
 if __name__ == "__main__":
