@@ -2,14 +2,10 @@ name: Release
 
 on:
   push:
+    branches: [uat]
     tags:
       - "v*"
   workflow_dispatch:
-    inputs:
-      testpypi:
-        description: "Publish to TestPyPI instead of PyPI"
-        type: boolean
-        default: false
 
 permissions:
   contents: read
@@ -29,7 +25,7 @@ jobs:
           python-version: "3.11"
       - run: uv sync --locked
       - name: Verify tag matches package version
-        if: github.event_name == 'push'
+        if: startsWith(github.ref, 'refs/tags/')
         run: |
           tag_version="${GITHUB_REF_NAME#v}"
           pkg_version="$(uv version --short)"
@@ -37,6 +33,9 @@ jobs:
             echo "Tag v$tag_version does not match pyproject version $pkg_version" >&2
             exit 1
           fi
+      - name: Set dev version for TestPyPI
+        if: github.ref == 'refs/heads/uat'
+        run: uv version "$(uv version --short).dev${GITHUB_RUN_NUMBER}"
       - run: uv build
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -63,7 +62,7 @@ jobs:
     needs: [build, tests]
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    environment: pypi
+    environment: ${{ startsWith(github.ref, 'refs/tags/') && 'pypi' || 'testpypi' }}
     permissions:
       id-token: write
       contents: read
@@ -76,9 +75,10 @@ jobs:
         with:
           version: "0.12.5"
           python-version: "3.11"
+          enable-cache: false
       - name: Publish to TestPyPI
-        if: ${{ inputs.testpypi }}
+        if: github.ref == 'refs/heads/uat'
         run: uv publish --publish-url https://test.pypi.org/legacy/
       - name: Publish to PyPI
-        if: ${{ !inputs.testpypi }}
+        if: startsWith(github.ref, 'refs/tags/')
         run: uv publish
