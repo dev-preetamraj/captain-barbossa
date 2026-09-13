@@ -86,10 +86,15 @@ crew ID, the pane/tab label, and the name in memory, `wait`, `focus`,
 
 **Placement.** `--placement pane|tab`, and for a pane, `--direction
 vertical|horizontal|auto` with `--split-pane <pane-id>|auto`. `auto` searches
-existing crew tabs (current tab first) for the split that leaves both halves
-largest and squarest on screen, at least 60 columns by 15 rows. Ties favor
-panes without crew, then panes nearest the captain; splitting the captain's
-own pane ranks last. When nothing fits, the crew opens in a new tab instead.
+the captain tab for room for two crew panes: the first splits the captain pane
+vertically, and the second splits that right half horizontally. The captain
+stays full height on the left. Further crew fill this session's crew-only tabs
+in recruitment order, with at most four crew panes per tab. Crew tabs split
+vertically first, then horizontally, choosing the largest balanced halves.
+When all eligible tabs are full or no split keeps both halves at least 60
+columns by 15 rows, the crew opens in a new tab. Explicit `--placement tab`
+always opens a new tab; `--split-pane <pane-id>` bypasses the auto tab limits.
+Manual `--direction vertical|horizontal` overrides the automatic direction.
 The chosen pane, direction, and a one-line reason are printed and recorded in
 memory.
 

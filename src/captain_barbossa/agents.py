@@ -9,7 +9,7 @@ import sys
 import time
 from itertools import cycle
 
-from .layout import HERDR_DIRECTIONS, pick_split, tab_panes
+from .layout import HERDR_DIRECTIONS, pick_auto_split, pick_split, tab_panes
 from .memory import (
     add_memory,
     lock,
@@ -293,31 +293,46 @@ def wait_for_crew(pane_id, provider, agent_name, timeout=30):
     raise CaptainError(f"{provider} did not become ready within {timeout} seconds.")
 
 
-def settled_status(agent_name, timeout):
-    """Poll until the agent reports working, done, or blocked; return the last status seen."""
+def draft_pending(agent_name):
+    """Whether the composer still holds an unsent draft, which Herdr cannot see."""
+    try:
+        prompts = [line for line in pane_lines(agent_name) if line[:1] in ("❯", "›")]
+    except (CaptainError, subprocess.TimeoutExpired, OSError):
+        return False
+    return bool(prompts) and not PANE_EMPTY_PROMPT.match(prompts[-1])
+
+
+def settled_status(agent_name, timeout, provider=None):
+    """Poll until the agent reports working, done, or blocked; return the last status seen.
+
+    Codex reports working while it renames its own thread, so its activity counts as the
+    task starting only once the composer no longer holds the draft.
+    """
     deadline = time.monotonic() + timeout
     status = None
     while time.monotonic() < deadline:
         agent = herdr("agent", "get", agent_name, timeout=5).get("agent", {})
         status = agent.get("agent_status")
-        if status in ("working", "done", "blocked"):
+        if status == "blocked":
             return status
+        if status in ("working", "done"):
+            if not (provider == "codex" and draft_pending(agent_name)):
+                return status
+            status = "idle"
         time.sleep(POLL_INTERVAL)
     return status
 
 
 def task_landed(agent_name, provider, timeout=PROMPT_TIMEOUT):
-    """Return the settled status after a prompt, pressing Enter once for an unsent Claude draft."""
-    status = settled_status(agent_name, timeout)
+    """Return the settled status after a prompt, pressing Enter once for an unsent draft."""
+    status = settled_status(agent_name, timeout, provider)
     if status != "idle":
         return status
-    if provider == "claude":
-        # Claude Code can leave a submitted prompt as an unsent draft in its input box.
-        herdr("agent", "send-keys", agent_name, "enter")
-        return settled_status(agent_name, timeout)
-    if choice_modal(agent_name):
+    if provider == "codex" and choice_modal(agent_name):
         return "blocked"
-    return status
+    # Either CLI can leave a submitted prompt as an unsent draft in its input box.
+    herdr("agent", "send-keys", agent_name, "enter")
+    return settled_status(agent_name, timeout, provider)
 
 
 def submit_task(agent_name, task, provider, attempts=2):
@@ -779,7 +794,7 @@ def auto_split(
 ):
     """Pick a split from crew tabs; a None pane means fall back to a new tab.
 
-    Searches tabs in order (current tab first), using only tabs with crew from this session.
+    Try the captain tab, then this session's crew-only tabs in recruitment order.
     """
     origin = target or pane["pane_id"]
     captain_pane = pane["pane_id"]
@@ -795,14 +810,8 @@ def auto_split(
         print(f"Auto placement: {choice}; {reason}.", file=sys.stderr)
         return chosen, split_pane, tab_id or pane["tab_id"], f"{choice}; {reason}"
 
-    tabs_to_search = []
-    if crew_tabs:
-        current_tab = pane["tab_id"]
-        if current_tab in crew_tabs:
-            tabs_to_search.append(current_tab)
-        tabs_to_search.extend(t for t in crew_tabs if t != current_tab)
-    else:
-        tabs_to_search = [pane["tab_id"]]
+    tabs_to_search = [pane["tab_id"]]
+    tabs_to_search.extend(t for t in crew_tabs or () if t != pane["tab_id"])
 
     last_reason = None
     for search_tab in tabs_to_search:
@@ -811,18 +820,23 @@ def auto_split(
                 geometry = tab_panes(herdr("pane", "layout", "--pane", origin), origin)
             else:
                 sample_pane = next(
-                    p for p in crew_panes if pane_to_tab and pane_to_tab.get(p) == search_tab
+                    (p for p in pane_to_tab or {} if pane_to_tab[p] == search_tab), None
                 )
-                all_geo = tab_panes(herdr("pane", "layout", "--pane", sample_pane), sample_pane)
-                geometry = {p: all_geo[p] for p in crew_panes if p in all_geo}
+                if sample_pane is None:
+                    continue
+                geometry = tab_panes(herdr("pane", "layout", "--pane", sample_pane), sample_pane)
 
-            split_pane, chosen, reason = pick_split(geometry, captain_pane, crew_panes, direction)
+            split_pane, chosen, reason = pick_auto_split(
+                geometry, captain_pane, crew_panes, direction
+            )
             if split_pane is not None:
                 choice = f"split {split_pane} {chosen} ({HERDR_DIRECTIONS[chosen]})"
                 print(f"Auto placement: {choice}; {reason}.", file=sys.stderr)
                 return chosen, split_pane, search_tab, f"{choice}; {reason}"
             last_reason = reason
         except CaptainError:
+            if search_tab == pane["tab_id"]:
+                raise
             continue
 
     choice = "new tab"
@@ -841,11 +855,11 @@ def choose_split(args, pane, placement, crew_panes, meta=None):
     crew_tabs = None
     pane_to_tab = {}
     if meta:
-        crew_tabs = set()
+        crew_tabs = []
         for crew in meta["crew"].values():
             if crew.get("status") != "dismissed":
-                if crew.get("tab"):
-                    crew_tabs.add(crew["tab"])
+                if crew.get("tab") and crew["tab"] not in crew_tabs:
+                    crew_tabs.append(crew["tab"])
                 if crew.get("pane") and crew.get("tab"):
                     pane_to_tab[crew["pane"]] = crew["tab"]
 
@@ -911,21 +925,21 @@ def create_crew(args, pane, project):
     placement = choose(
         args.placement, ("pane", "tab"), "Where should the crew open?", "--placement"
     )
-    directory, meta = session(project, pane, args.session)
-    crew_panes = {
-        crew["pane"]
-        for crew in meta["crew"].values()
-        if crew.get("pane") and crew.get("status") != "dismissed"
-    }
-    direction, split_pane, tab_id, auto = choose_split(args, pane, placement, crew_panes, meta)
-    if auto and split_pane is None:
-        placement = "tab"
-    model = resolve_model(provider, args.model) if args.model is not None else None
-    if model:
-        print(f"Model: {model} (from {args.model!r})", file=sys.stderr)
-    binary = executable(provider)
+    directory, _ = session(project, pane, args.session)
     with lock(directory / "crew.lock"):
         meta = read_json(directory / "session.json")
+        crew_panes = {
+            crew["pane"]
+            for crew in meta["crew"].values()
+            if crew.get("pane") and crew.get("status") != "dismissed"
+        }
+        direction, split_pane, tab_id, auto = choose_split(args, pane, placement, crew_panes, meta)
+        if auto and split_pane is None:
+            placement = "tab"
+        model = resolve_model(provider, args.model) if args.model is not None else None
+        if model:
+            print(f"Model: {model} (from {args.model!r})", file=sys.stderr)
+        binary = executable(provider)
         name = args.name
         if name is None:
             for index, character in enumerate(cycle(CREW_NAMES)):

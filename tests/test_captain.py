@@ -529,8 +529,11 @@ class CaptainFlowTests(unittest.TestCase):
             return self.tab_list()
         if call[:2] == ("pane", "list"):
             return self.pane_list()
+        if call[:2] == ("agent", "read"):
+            return self.EMPTY_COMPOSER
         return None
 
+    EMPTY_COMPOSER = "› Ask Codex to do anything"
     LISTING_CALLS = (("tab", "list", "--workspace", "w1"), ("pane", "list", "--workspace", "w1"))
     LISTED_PANES = (
         "auto Auto (balanced by layout); Captain Barbossa: w1:p1 zsh (captain) / w1:p5 Will; "
@@ -871,6 +874,14 @@ class CaptainFlowTests(unittest.TestCase):
             (("--split-pane", "auto", "--direction", "vertical"), two, "w1:p1", ("tab",), None),
             (("--split-pane", "auto"), grid, "w1:p1", ("tab",), None),
         ):
+            if response is two:
+                memory.write_json(
+                    self.directory / "session.json",
+                    {
+                        **self.meta,
+                        "crew": {"will": {"pane": "w1:p5", "tab": "w1:t1", "status": "started"}},
+                    },
+                )
 
             def api(*call, **_):
                 if call[:2] == ("pane", "layout"):
@@ -1021,7 +1032,8 @@ class CaptainFlowTests(unittest.TestCase):
                 self.assertEqual(result["name"], display_name)
                 self.assertEqual(result["status"], "started")
                 self.assertNotIn("task", result)
-                calls = api.call_args_list
+                # The composer read that confirms the task left the input box is not topology.
+                calls = [call for call in api.call_args_list if call.args[:2] != ("agent", "read")]
                 self.assertIn("Choose your crew agent", ask.call_args_list[0].args[0])
                 self.assertIn("Where should the crew open?", ask.call_args_list[1].args[0])
                 if placement == "pane":
@@ -1171,7 +1183,13 @@ class CaptainFlowTests(unittest.TestCase):
                     "agent": {"name": f"c-{self.meta['id'][:8]}-{name}", "agent_status": "working"},
                 }
                 with (
-                    patch.object(agents, "herdr", return_value=created),
+                    patch.object(
+                        agents,
+                        "herdr",
+                        side_effect=lambda *call, **_: (
+                            self.EMPTY_COMPOSER if call[:2] == ("agent", "read") else created
+                        ),
+                    ),
                     patch.object(agents, "executable", return_value=f"/bin/{provider}"),
                     contextlib.redirect_stdout(io.StringIO()) as output,
                     contextlib.redirect_stderr(io.StringIO()) as errors,
@@ -1626,7 +1644,7 @@ class CaptainFlowTests(unittest.TestCase):
             any(call.args[:2] == ("agent", "send-keys") for call in api.call_args_list)
         )
 
-    def test_an_idle_codex_pane_is_resent_the_task_instead_of_enter(self):
+    def test_an_idle_codex_pane_is_pressed_enter_before_the_task_is_resent(self):
         with (
             patch.object(agents, "herdr", side_effect=self.prompt_api(repeat("idle"))) as api,
             patch.object(agents.time, "sleep"),
@@ -1636,7 +1654,7 @@ class CaptainFlowTests(unittest.TestCase):
                 agents.submit_task("builder", "build", "codex")
         sent = [call.args[:2] for call in api.call_args_list]
         self.assertEqual(sent.count(("agent", "prompt")), 2)
-        self.assertNotIn(("agent", "send-keys"), sent)
+        self.assertEqual(sent.count(("agent", "send-keys")), 2)
 
     def test_automatic_names_are_unique_across_concurrent_recruits_and_session_scoped(self):
         self.meta["crew"] = {

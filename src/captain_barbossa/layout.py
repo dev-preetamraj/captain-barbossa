@@ -1,4 +1,4 @@
-"""Automatic crew pane placement from the current tab's pane geometry."""
+"""Automatic crew pane placement from tab occupancy and pane geometry."""
 
 from .runtime import CaptainError
 
@@ -33,6 +33,24 @@ def half(rect, direction):
     """Size of each pane after an even split; the new pane never gains the divider cell."""
     _, _, width, height = rect
     return (width // 2, height) if direction == "vertical" else (width, height // 2)
+
+
+def pick_auto_split(geometry, captain, crew_panes, direction=None):
+    """Stack two crew beside the captain and fill crew-only tabs to a four-pane grid."""
+    if captain in geometry:
+        present = crew_panes.intersection(geometry)
+        if len(present) >= 2:
+            return None, None, "captain tab already holds two crew panes"
+        target = next(iter(present), captain)
+        geometry = {target: geometry[target]}
+        chosen = direction or ("horizontal" if present else "vertical")
+    else:
+        if not set(geometry).issubset(crew_panes):
+            return None, None, "tab contains panes outside this session's crew"
+        if len(geometry) >= 4:
+            return None, None, "crew tab already holds four crew panes"
+        chosen = direction or ("vertical" if len(geometry) == 1 else "horizontal")
+    return pick_split(geometry, captain, crew_panes, chosen)
 
 
 def balance(width, height):
