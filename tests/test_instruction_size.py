@@ -37,17 +37,13 @@ class InstructionSizeTests(unittest.TestCase):
         captain = " ".join(
             instruction_prompts.agent_instructions(self.directory, "Captain Barbossa").split()
         )
-        cheap_sentence = captain.split("cheap is the default")[1].split("Use mid only")[0]
+        cheap_sentence = captain.split("cheap for mechanical work")[1].split("mid for a")[0]
         for routine in ("commits", "tests", "lint", "formatting", "docs", "chores"):
             self.assertIn(routine, cheap_sentence)
-        self.assertIn(
-            "Never step up because a task feels ambiguous, risky, or important: step up "
-            "only when the user asks for a stronger model, or after a cheap crew has "
-            "already failed or stalled.",
-            captain,
-        )
+        self.assertIn("Never step up just because a task feels risky or important.", captain)
         # The old wording made ambiguity a reason to spend more, which drifted every task up.
         self.assertNotIn("Step up a tier when the task is ambiguous", captain)
+        self.assertNotIn("step up only when the user asks for a stronger model", captain)
 
     def test_both_roles_preserve_existing_files_and_ask_before_replacing_content(self):
         rule = (
@@ -101,6 +97,28 @@ class InstructionSizeTests(unittest.TestCase):
         self.assertNotIn("Rearm after a timeout if work remains", block)
         # Token-budgeted: rewording the rule must not buy itself more lines.
         self.assertLessEqual(len(block.splitlines()), 7)
+
+    def test_captain_self_checks_before_doing_the_task_directly(self):
+        captain = " ".join(
+            instruction_prompts.agent_instructions(self.directory, "Captain Barbossa").split()
+        )
+        self.assertIn(
+            "Before any edit, file write, build, test, or debug step, recruit crew and "
+            "assign it; never do it yourself.",
+            captain,
+        )
+        self.assertIn(
+            "Self-check first: about to edit a file, write output, or run a "
+            "build/test/debug step yourself? Stop, recruit crew instead.",
+            captain,
+        )
+        self.assertIn(
+            'Work directly only if the user explicitly says "yourself", "no crew", or '
+            '"do not recruit".',
+            captain,
+        )
+        crew = instruction_prompts.agent_instructions(self.directory, "crew member Jack")
+        self.assertNotIn("Self-check first", crew)
 
     def test_graphify_query_is_not_advertised_as_always_available(self):
         text = instruction_prompts.agent_instructions(self.directory, "Captain Barbossa")
