@@ -30,6 +30,7 @@ from .pi_captain import captain_extension
 from .placement import Placement
 from .prompts import PLACEMENTS, choose
 from .runtime import HERDR_ERRORS, CaptainError, check_text, executable
+from .update_check import check_for_update
 
 # A hook payload carries a whole assistant turn or tool_input; the wait line only needs
 # enough to decide what to do next, and the event file keeps the rest.
@@ -55,6 +56,7 @@ CREW_NAMES = (
 def launch(args, pane, project):
     if not sys.stdin.isatty():
         raise CaptainError("Launch captain from an interactive Herdr terminal.")
+    check_for_update()
     provider = choose(args.agent, PROVIDERS, "Choose your captain", "--agent")
     binary = executable(provider)
     current = session(project, pane, args.session, create=args.session is None)
