@@ -128,7 +128,9 @@ class Pane:
     def submit_task(self, task, provider, attempts=2):
         """Submit the task and verify it landed, resending once when the pane stayed idle."""
         for _ in range(attempts):
-            runtime.herdr("agent", "prompt", self.agent_name, task)
+            # herdr has no "--" terminator; a leading space defuses a task that starts with "-".
+            guarded = f" {task}" if task.startswith("-") else task
+            runtime.herdr("agent", "prompt", self.agent_name, guarded)
             status = self.task_landed(provider)
             if status in ("working", "done"):
                 return

@@ -1,13 +1,17 @@
 """Tests for memory.py hygiene: lock file permissions and temp dir cleanup."""
 
+import io
+import json
 import os
 import stat
+import subprocess
 import tempfile
 import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from captain_barbossa import memory
 from captain_barbossa.memory import STALE_QUERY_SECONDS, lock, memory_snapshot, session
 
 
@@ -54,6 +58,97 @@ class TestLockFilePermissions(unittest.TestCase):
             pass
         self.assertTrue(lock_path.exists())
         self.assertTrue(lock_path.parent.exists())
+
+    def test_lock_file_parent_created_private(self):
+        """A freshly created lock parent directory should be 0700, not world/group readable."""
+        lock_path = self.temp_dir / "fresh_subdir" / "test.lock"
+        with lock(lock_path):
+            pass
+        mode = stat.S_IMODE(lock_path.parent.stat().st_mode)
+        self.assertEqual(mode, 0o700, f"Lock parent dir has mode {oct(mode)}, expected 0700")
+
+
+class TestAppendEventSecureOpen(unittest.TestCase):
+    """append_event must not follow a symlink swapped in at the event log path."""
+
+    def setUp(self):
+        self.temp_dir = Path(tempfile.mkdtemp())
+
+    def tearDown(self):
+        import shutil
+
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def run_append_event(self, argv1, event):
+        with (
+            patch.object(memory.sys, "argv", ["captain", argv1, json.dumps(event)]),
+            patch.object(memory.sys, "stdin", io.StringIO("")),
+        ):
+            memory.append_event()
+
+    def test_refuses_a_symlinked_event_log(self):
+        target = self.temp_dir / "elsewhere.jsonl"
+        link = self.temp_dir / "events.jsonl"
+        link.symlink_to(target)
+        with self.assertRaises(OSError):
+            self.run_append_event(str(link), {"hook_event_name": "Notification"})
+        self.assertFalse(target.exists())
+
+    def test_creates_the_log_with_0600(self):
+        path = self.temp_dir / "events.jsonl"
+        self.run_append_event(str(path), {"hook_event_name": "Notification"})
+        mode = stat.S_IMODE(path.stat().st_mode)
+        self.assertEqual(mode, 0o600, f"Event log has mode {oct(mode)}, expected 0600")
+        self.assertIn("Notification", path.read_text(encoding="utf-8"))
+
+
+class TestGraphifyQueryLeadingDashGuard(unittest.TestCase):
+    """A memory query starting with '-' must not be parsed as a graphify flag.
+
+    graphify (verified against the real binary) has no "--" option terminator: it either
+    ignores the token or misreads it as the value of a preceding flag. A leading space,
+    which the real binary strips before matching, guards a "-"-led question instead.
+    """
+
+    def setUp(self):
+        self.temp_dir = Path(tempfile.mkdtemp())
+        self.project = self.temp_dir / "project"
+        self.project.mkdir()
+        self.pane = {"workspace_id": "w1"}
+        self.enterContext(
+            patch.dict(os.environ, {"CAPTAIN_MEMORY_ROOT": str(self.temp_dir / "state")})
+        )
+
+    def tearDown(self):
+        import shutil
+
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def query_command(self, question):
+        from types import SimpleNamespace
+
+        directory, meta = session(self.project, self.pane, create=True)
+        args = SimpleNamespace(memory_command="query", session=meta["id"], question=question)
+        captured = {}
+
+        def fake_run(command, **kwargs):
+            captured["command"] = command
+            return subprocess.CompletedProcess(command, 0)
+
+        with (
+            patch.object(memory, "executable", return_value="/bin/graphify"),
+            patch.object(memory.subprocess, "run", fake_run),
+        ):
+            memory.memory(args, self.pane, self.project)
+        return captured["command"]
+
+    def test_dash_led_question_gets_a_leading_space(self):
+        command = self.query_command("--all")
+        self.assertIn(" --all", command)
+
+    def test_ordinary_question_is_passed_through_unchanged(self):
+        command = self.query_command("rate limiter")
+        self.assertIn("rate limiter", command)
 
 
 class TestMemorySnapshotCleanup(unittest.TestCase):
