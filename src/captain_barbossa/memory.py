@@ -168,7 +168,9 @@ def append_event():
     event = json.loads(sys.argv[2]) if len(sys.argv) > 2 else json.load(sys.stdin)
     if not isinstance(event, dict):
         return
-    with open(sys.argv[1], "a", encoding="utf-8") as file:
+    # O_NOFOLLOW rejects a symlink swapped in at this path; append never clobbers existing data.
+    fd = os.open(sys.argv[1], os.O_NOFOLLOW | os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o600)
+    with os.fdopen(fd, "a", encoding="utf-8") as file:
         fcntl.flock(file, fcntl.LOCK_EX)
         file.write(json.dumps(event, ensure_ascii=False) + "\n")
         file.flush()
@@ -197,7 +199,7 @@ def read_events(path, offset):
 
 @contextmanager
 def lock(path):
-    path.parent.mkdir(parents=True, exist_ok=True)
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     fd = os.open(str(path), os.O_CREAT | os.O_WRONLY, 0o600)
     os.close(fd)
     path.chmod(0o600)
@@ -565,11 +567,13 @@ def memory(args, pane, project):
                     show_memory(directory, args.all)
             else:
                 env = dict(os.environ, GRAPHIFY_OUT=str(snapshot), GRAPHIFY_QUERY_LOG_DISABLE="1")
+                # No "--" terminator in graphify; a leading space defuses a "-"-led question.
+                question = f" {args.question}" if args.question.startswith("-") else args.question
                 result = subprocess.run(
                     [
                         executable("graphify"),
                         "query",
-                        args.question,
+                        question,
                         "--graph",
                         str(snapshot / "graph.json"),
                     ],
