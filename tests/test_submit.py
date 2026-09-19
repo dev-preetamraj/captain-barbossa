@@ -78,6 +78,24 @@ class SubmitTaskTests(unittest.TestCase):
         self.submit(pane)
         self.assertNotIn(("agent", "send-keys"), pane.verbs())
 
+    def test_prompt_starting_with_a_dash_gets_a_leading_space(self):
+        """A task like "-x" must reach the agent as text, not get parsed as a flag; herdr
+        has no "--" terminator (verified against the real binary), so a leading space guards it."""
+        pane = CodexPane()
+        pane.draft = False
+        with patch.object(runtime, "herdr", side_effect=pane):
+            Pane("builder").submit_task("-x does a thing", "codex")
+        prompt_call = next(call for call in pane.calls if call[:2] == ("agent", "prompt"))
+        self.assertEqual(prompt_call[2:], ("builder", " -x does a thing"))
+
+    def test_prompt_without_a_leading_dash_is_passed_through_unchanged(self):
+        pane = CodexPane()
+        pane.draft = False
+        with patch.object(runtime, "herdr", side_effect=pane):
+            Pane("builder").submit_task(TASK, "codex")
+        prompt_call = next(call for call in pane.calls if call[:2] == ("agent", "prompt"))
+        self.assertEqual(prompt_call[2:], ("builder", TASK))
+
 
 if __name__ == "__main__":
     unittest.main()
