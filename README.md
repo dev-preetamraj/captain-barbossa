@@ -63,6 +63,13 @@ It renames the current tab to **Captain Barbossa** and replaces itself with
 the chosen native CLI, so native input, history, permissions, and login all
 stay with that agent.
 
+Outside a Herdr workspace, `captain` offers to bootstrap one instead of
+failing. If Herdr is missing it asks before running Herdr's installer
+(`curl -fsSL https://herdr.dev/install.sh | sh`); then it opens a Herdr
+workspace at the project, starts captain there with the same `--agent`,
+`--session`, and `--prompt`, and attaches your terminal to it. Declining, or
+running non-interactively, leaves the old error untouched.
+
 ## Recruiting crew
 
 Ask the captain to spin up a crew in plain language; its startup instructions

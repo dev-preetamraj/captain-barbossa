@@ -55,10 +55,14 @@ def herdr(*args, timeout=15, expect_output=True, raw=False):
         ) from exc
 
 
-def current_pane():
-    if not all(
+def in_workspace():
+    return all(
         os.environ.get(key) for key in ("HERDR_WORKSPACE_ID", "HERDR_TAB_ID", "HERDR_PANE_ID")
-    ):
+    )
+
+
+def current_pane():
+    if not in_workspace():
         raise CaptainError("Run captain inside a Herdr workspace.")
     # Resolve the live pane: Herdr's launch-time IDs can be stale after a move.
     result = herdr("pane", "current", "--current")

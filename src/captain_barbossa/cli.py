@@ -19,6 +19,7 @@ from .agents import (
 from .layout import HERDR_DIRECTIONS
 from .memory import PRUNE_DAYS, memory, project_root
 from .models import PROVIDERS, TIER_NAMES
+from .onboarding import bootstrap
 from .prompts import PLACEMENTS
 from .runtime import HERDR_ERRORS, CaptainError, current_pane
 
@@ -124,6 +125,8 @@ def print_session(args):
 def main(argv=None):
     args = parser().parse_args(argv)
     try:
+        if args.command is None:
+            bootstrap(args)
         pane = current_pane()
         project = project_root()
         if args.command == "crew":
