@@ -66,6 +66,8 @@ def start_server():
 def open_workspace(args, project):
     """Create a workspace at the project, start captain in its root pane, attach this terminal."""
     start_server()
+    # Env var, not shell text, so a quote in CAPTAIN_MEMORY_ROOT/TMPDIR can't inject commands.
+    launcher = storage(project) / "onboard.sh"
     created = runtime.herdr(
         "workspace",
         "create",
@@ -76,6 +78,8 @@ def open_workspace(args, project):
         "--focus",
         "--env",
         "CAPTAIN_BOOTSTRAPPED=1",
+        "--env",
+        f"CAPTAIN_ONBOARD_LAUNCHER={launcher}",
     )
     pane = created.get("root_pane", {}).get("pane_id")
     if not pane:
@@ -90,11 +94,10 @@ def open_workspace(args, project):
     ):
         if value:
             command += [flag, value]
-    launcher = storage(project) / "onboard.sh"
     launcher.write_text(f"#!/bin/sh\nexec {shlex.join(command)}\n", encoding="utf-8")
     launcher.chmod(0o600)
     # A new pane may still be in canonical mode: keep terminal input short.
-    runtime.herdr("pane", "run", pane, f'/bin/sh "{launcher}"', expect_output=False)
+    runtime.herdr("pane", "run", pane, '/bin/sh "$CAPTAIN_ONBOARD_LAUNCHER"', expect_output=False)
     binary = runtime.executable("herdr")
     os.execv(binary, [binary])
 

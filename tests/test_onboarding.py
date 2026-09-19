@@ -77,9 +77,19 @@ class OnboardingTests(unittest.TestCase):
     def herdr_call(self, *prefix):
         return next((call for call in self.herdr.calls if call[: len(prefix)] == prefix), None)
 
+    def onboard_launcher_path(self):
+        """The launcher path travels as an env var on `workspace create`, not interpolated
+        into the `pane run` shell string, so a quote in it cannot inject commands."""
+        create = self.herdr_call("workspace", "create")
+        prefix = "CAPTAIN_ONBOARD_LAUNCHER="
+        env_value = next(arg for arg in create if arg.startswith(prefix))
+        return Path(env_value[len(prefix) :])
+
     def launcher_flags(self, run_command):
-        """`pane run` only gets a short `/bin/sh "<launcher>"`; read the launcher for the rest."""
-        path = Path(shlex.split(run_command)[-1])
+        """`pane run` only gets a fixed `/bin/sh "$CAPTAIN_ONBOARD_LAUNCHER"`; read the
+        launcher (named via env) for the rest."""
+        self.assertEqual(run_command, '/bin/sh "$CAPTAIN_ONBOARD_LAUNCHER"')
+        path = self.onboard_launcher_path()
         self.assertEqual(path.stat().st_mode & 0o777, 0o600)
         exec_line = path.read_text(encoding="utf-8").splitlines()[1]
         tokens = shlex.split(exec_line)
@@ -105,6 +115,20 @@ class OnboardingTests(unittest.TestCase):
         )
         self.exec.assert_called_once_with("/bin/herdr", ["/bin/herdr"])
 
+    def test_launcher_path_travels_as_env_not_interpolated_shell_text(self):
+        """A quote in CAPTAIN_MEMORY_ROOT must not let the launcher path inject commands
+        into the `pane run` shell string."""
+        with patch.dict(
+            os.environ, {"CAPTAIN_MEMORY_ROOT": str(self.root / 'state"; touch pwned; "')}
+        ):
+            self.answer(True)
+            with patch.object(onboarding.shutil, "which", lambda name: f"/bin/{name}"):
+                onboarding.bootstrap(self.args())
+        run = self.herdr_call("pane", "run")
+        self.assertEqual(run[3], '/bin/sh "$CAPTAIN_ONBOARD_LAUNCHER"')
+        self.assertNotIn("pwned", run[3])
+        self.assertTrue(self.onboard_launcher_path().is_file())
+
     def test_omits_flags_the_user_did_not_pass(self):
         self.answer(True)
         with patch.object(onboarding.shutil, "which", lambda name: f"/bin/{name}"):
@@ -129,7 +153,7 @@ class OnboardingTests(unittest.TestCase):
         with patch.object(onboarding.sys, "argv", [module]):
             with patch.object(onboarding.shutil, "which", lambda name: f"/bin/{name}"):
                 onboarding.bootstrap(self.args())
-        launcher = Path(shlex.split(self.herdr_call("pane", "run")[3])[-1])
+        launcher = self.onboard_launcher_path()
         exec_line = launcher.read_text(encoding="utf-8").splitlines()[1]
         self.assertNotIn(module, exec_line)
         self.assertEqual(self.launcher_flags(self.herdr_call("pane", "run")[3]), [])
