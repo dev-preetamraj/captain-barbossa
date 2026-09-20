@@ -53,8 +53,6 @@ class OnboardingTests(unittest.TestCase):
                 },
             )
         )
-        for name in ("CAPTAIN_STATE_ROOT", "CAPTAIN_TEMP_ROOT"):
-            os.environ.pop(name, None)
         self.herdr = Recorder()
         self.enterContext(patch.object(onboarding.runtime, "herdr", self.herdr))
         self.enterContext(

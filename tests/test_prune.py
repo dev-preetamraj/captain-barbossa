@@ -36,8 +36,6 @@ class PruneTests(unittest.TestCase):
                 },
             )
         )
-        for name in ("CAPTAIN_STATE_ROOT", "CAPTAIN_TEMP_ROOT", "CAPTAIN_SESSION"):
-            os.environ.pop(name, None)
         self.pane = {"workspace_id": "w1", "tab_id": "w1:t1", "pane_id": "w1:p1"}
         self.sessions = memory.storage(self.project) / "sessions"
 

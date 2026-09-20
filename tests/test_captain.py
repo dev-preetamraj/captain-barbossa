@@ -25,8 +25,8 @@ from captain_barbossa.crew import Crew
 from captain_barbossa.pane import Pane
 from captain_barbossa.runtime import CaptainError
 
-# Imported for its side effect: HOME is a temp directory for every test in this process,
-# so the suite never reads the developer's own ~/.captain/settings.toml.
+# Imported for its side effect: HOME and the captain memory roots are temp directories
+# for every test in this process. tests/test_isolation.py guards it.
 from tests import home_isolation  # noqa: F401
 
 
@@ -47,9 +47,6 @@ class CaptainFlowTests(unittest.TestCase):
                 },
             )
         )
-        # A live captain session forwards these; they outrank CAPTAIN_MEMORY_ROOT.
-        for name in ("CAPTAIN_STATE_ROOT", "CAPTAIN_TEMP_ROOT"):
-            os.environ.pop(name, None)
         self.enterContext(patch.object(panes, "READY_POLLS", 1))
         self.pane = {"workspace_id": "w1", "tab_id": "w1:t1", "pane_id": "w1:p1"}
         self.directory, self.meta = memory.session(self.project, self.pane, create=True)
@@ -2270,8 +2267,6 @@ class CaptainFlowTests(unittest.TestCase):
 
     def test_memory_rejects_repo_storage_and_invalid_session_paths(self):
         with patch.dict(os.environ, {"CAPTAIN_MEMORY_ROOT": str(self.project / ".memory")}):
-            for name in ("CAPTAIN_STATE_ROOT", "CAPTAIN_TEMP_ROOT"):
-                os.environ.pop(name, None)
             with self.assertRaisesRegex(runtime.CaptainError, "outside the project"):
                 memory.storage(self.project)
         with self.assertRaisesRegex(runtime.CaptainError, "Invalid captain session"):
@@ -2612,28 +2607,6 @@ class CaptainFlowTests(unittest.TestCase):
             ),
         ):
             self.assertEqual(runtime.herdr("agent", "read", "builder", raw=True), "not JSON\n")
-
-
-class HomeIsolationTests(unittest.TestCase):
-    """The suite must never read the developer's own ~/.captain/settings.toml."""
-
-    def test_home_points_somewhere_other_than_the_account_running_the_suite(self):
-        import pwd
-
-        self.assertTrue(Path.home().is_dir())
-        self.assertNotEqual(Path.home(), Path(pwd.getpwuid(os.getuid()).pw_dir))
-        self.assertFalse((Path.home() / config.SETTINGS_PATH).exists())
-
-    def test_settings_fall_through_to_the_shipped_defaults(self):
-        # An uncommented [placement] shape in a real home file used to decide what the
-        # placement tests saw, so a deliberate user setting turned the gate red.
-        config.settings.cache_clear()
-        self.addCleanup(config.settings.cache_clear)
-        for name in ("captain_tab", "crew_tab"):
-            with self.subTest(name=name):
-                self.assertEqual(
-                    config.lookup("placement", name), config.defaults()["placement"][name]
-                )
 
 
 class ModelTests(unittest.TestCase):

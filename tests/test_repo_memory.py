@@ -27,10 +27,6 @@ class RepoMemoryTests(unittest.TestCase):
                 },
             )
         )
-        # A live captain session forwards these; they outrank CAPTAIN_MEMORY_ROOT, so
-        # without the pop the suite writes into the developer's real memory root.
-        for name in ("CAPTAIN_STATE_ROOT", "CAPTAIN_TEMP_ROOT"):
-            os.environ.pop(name, None)
         self.pane = {"workspace_id": "w1", "tab_id": "w1:t1", "pane_id": "w1:p1"}
         self.directory, self.meta = memory.session(self.project, self.pane, create=True)
         self.repo_graph = self.project / ".captain" / "graph.json"
