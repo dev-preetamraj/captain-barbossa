@@ -8,7 +8,7 @@ The current implementation follows the Herdr-only flow in [README.md](../README.
 - Use Herdr to create the selected topology and run a short session-local launcher there, then wait for the native agent to be ready before submitting its task.
 - Focus existing crew by name with `captain focus Jack`, including natural-language navigation requests to the captain.
 - Send an existing crew a follow-up prompt with `captain tell Jack 'message'`, which keeps its pane and conversation.
-- Store graph memory outside the repo, separated by canonical project path and Captain session. Query it using the installed Graphify CLI.
+- Store graph memory in three scopes: session and project outside the repo, separated by canonical project path and Captain session, plus a curated `repo` scope committed as `.captain/graph.json` and shared by the team: an explicit `--scope repo` write only, with a closed relation vocabulary, a required `--because` rationale, deterministic sorted bytes that re-add as a no-op, and `--supersede` in place of newest-wins. `captain memory init [--from PATH] [--apply]` seeds it from the project rulebook (AGENTS.md, else CLAUDE.md) by a fixed markdown parse, previewing the facts until `--apply`. Query all three using the installed Graphify CLI.
 
 There is no custom terminal UI, tmux layer, chat server, or background orchestration daemon.
 

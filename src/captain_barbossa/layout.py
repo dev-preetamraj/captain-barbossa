@@ -9,6 +9,10 @@ from . import config
 from .runtime import CaptainError
 
 HERDR_DIRECTIONS = {"vertical": "right", "horizontal": "down"}
+SHRINK_DIRECTIONS = {"vertical": "left", "horizontal": "up"}
+# herdr 0.7.5's `pane resize --amount` clamps a split's ratio to this range; a target
+# outside it cannot be reached by any amount, so it is reported rather than attempted.
+RESIZE_RATIO_BOUNDS = (0.1, 0.9)
 
 
 def _fault(columns):
@@ -91,14 +95,29 @@ def split_for(slot, panes, captain_pane):
     return left[0], "vertical"
 
 
-def ratio_for(slot, columns, direction):
-    """The share the split pane keeps, so a declared shape comes out evenly.
+def re_even(existing_panes):
+    """(pane, shrink amount) for every earlier pane in a chain, so one more pane
+    joining brings the whole chain back even.
 
-    Herdr halves a pane by default, which would make [1, 2, 2] land as a half and two
-    quarters. Splitting off column c of n, the source spans n - c + 2 columns and has to
-    keep one; a row of a column holding k is the same sum downward.
+    Herdr's split ratio belongs to its own node: pane p's ratio is its share of
+    "itself and everything after it" in the chain, not of the tab. So evening a chain
+    of `count` panes to 1 / count only ever needs pane p's own ratio moved from what
+    it was worth against the old count to what it is worth against the new one,
+    however many later panes there already were - the earlier resizes do not need to
+    know about each other, and the chain's last existing pane needs no call of its
+    own: splitting it at 0.5 to create the new pane already leaves it at its target.
     """
-    column, row = slot
-    if direction == "vertical":
-        return 1 / (len(columns) - column + 2)
-    return 1 / (columns[column - 1] - row + 2)
+    if not existing_panes:
+        return []
+    count = len(existing_panes) + 1
+    smallest_share = 1 / count
+    if not RESIZE_RATIO_BOUNDS[0] <= smallest_share <= RESIZE_RATIO_BOUNDS[1]:
+        raise CaptainError(
+            f"Herdr cannot size {count} panes evenly in one tab: the smallest share, "
+            f"{smallest_share:.3f}, is outside its resizable range "
+            f"{RESIZE_RATIO_BOUNDS[0]:.2f}-{RESIZE_RATIO_BOUNDS[1]:.2f}."
+        )
+    return [
+        (pane, 1 / (count - position) - 1 / (count - position + 1))
+        for position, pane in enumerate(existing_panes[:-1], start=1)
+    ]

@@ -8,7 +8,7 @@ Captain Barbossa launches a native agent CLI (Claude Code, Codex, or pi) as a
 further native agents as **crew** in new Herdr panes or tabs, so a team of
 native agent sessions can work on the same checkout at once. There is no
 daemon, custom UI, or tmux layer: everything runs through Herdr, plus a small
-graph memory stored outside the repo.
+graph memory stored outside the repo and a curated repo scope committed with it.
 
 ## Requirements
 
@@ -289,20 +289,37 @@ for dismissal and shared-checkout guardrails.
 
 ## Memory
 
-Captain stores session and project graph relationships outside the repository.
-`add` accepts `--scope session|project`; `show` accepts `--all` and `--json`;
-`prune` accepts `--older-than DAYS`. `query` uses optional Graphify.
+Captain stores session and project graph relationships outside the repository,
+and a third `repo` scope committed with the code as `.captain/graph.json`.
+`add` accepts `--scope session|project|repo` plus `--because` and `--supersede`
+for repo scope; `show` accepts `--scope`, `--all`, and `--json`; `prune` accepts
+`--older-than DAYS`. `query` uses optional Graphify.
 
 ```sh
 captain memory add "rate limiter" "uses" "per-user windows"
 captain memory add "test command" "is" "python -m unittest" --scope project
+captain memory add "placement" decided "declared tab shapes" --scope repo \
+  --because "even ratios must survive a dismissal"
+captain memory init --apply
 captain memory show
+captain memory show --scope repo
 captain memory query "rate limiter"
 captain memory path
 captain memory prune --older-than 30
 ```
 
-The default scope is session; project facts survive into future sessions. See
+The default scope is session; project facts survive into future sessions. Repo
+facts are shared with the team through version control, so the code fixes their
+shape: an explicit `--scope repo` only, a relation from the closed set
+`decided|method|convention`, a required `--because` rationale, deterministic
+sorted bytes that re-add as a no-op, and `--supersede` to change one rather than
+newest-wins. Nothing is committed for you.
+
+`captain memory init` seeds that graph from the rules the project already
+states, the counterpart of `captain init` writing `.captain/settings.toml`. It
+reads `AGENTS.md`, else `CLAUDE.md` (`--from PATH` overrides), turns each bullet
+under a `Rules`/`Key facts` section into one `convention` fact, and previews
+them until you pass `--apply`. Re-running adds only what is new. See
 [memory.md](https://github.com/dev-preetamraj/captain-barbossa/blob/main/docs/memory.md)
 for paths, identity, retention, Graphify isolation, and pruning safeguards.
 
@@ -349,9 +366,10 @@ Read the affected pane before retrying or approving anything.
 | `captain session` | Print the current session id |
 | `captain init [--global]` | Write a commented `.captain/settings.toml` template |
 | `captain dismiss NAME` | Close and retire crew |
-| `captain memory add SUBJECT RELATION TARGET [--scope session\|project]` | Save a memory relationship |
+| `captain memory add SUBJECT RELATION TARGET [--scope session\|project\|repo] [--because WHY] [--supersede]` | Save a memory relationship |
+| `captain memory init [--from PATH] [--apply]` | Seed repo memory from the project rulebook |
 | `captain memory query QUESTION` | Search memory with Graphify |
-| `captain memory show [--json] [--all]` | Print memory relationships |
+| `captain memory show [--scope SCOPE] [--json] [--all]` | Print memory relationships |
 | `captain memory path` | Print this session's memory directory |
 | `captain memory prune [--older-than DAYS]` | Remove finished sessions' memory |
 | `captain --session ID ...` | Run any command against another shell's session |

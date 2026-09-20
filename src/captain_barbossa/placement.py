@@ -5,7 +5,7 @@ from dataclasses import dataclass
 
 from . import runtime
 from .crew import Crew
-from .layout import HERDR_DIRECTIONS, next_slot, ratio_for, shape, split_for
+from .layout import HERDR_DIRECTIONS, SHRINK_DIRECTIONS, next_slot, re_even, shape, split_for
 from .prompts import LABELS, choose
 from .runtime import CaptainError
 
@@ -101,8 +101,26 @@ class Placement:
         captain_tab = self.pane["tab_id"]
         return [captain_tab, *(tab for tab in self.crew_tabs if tab != captain_tab)]
 
+    def chain(self, direction, column, row, panes, captain):
+        """The panes already in the column or row a new one is about to join, oldest
+        first, so re_even knows what to bring back to an even share.
+        """
+        captain_pane = self.pane["pane_id"]
+        if direction == "vertical":
+            return [captain_pane if c == 1 and captain else panes[c][0] for c in range(1, column)]
+        first_row = 2 if column == 1 and captain else 1
+        return [
+            captain_pane if column == 1 and captain and r == 1 else panes[column][r - first_row]
+            for r in range(1, row)
+        ]
+
     def grid_spot(self, direction=None):
-        """The first free slot in the declared shapes, or a new tab when all are full."""
+        """The first free slot in the declared shapes, or a new tab when all are full.
+
+        A crew joining a column or row that already holds others leaves Herdr to even
+        every pane already there, not just the one it splits off from; this is the one
+        place Placement drives Herdr rather than only reading the roster.
+        """
         captain_tab = self.pane["tab_id"]
         for tab in self.tab_order():
             if self.unmapped(tab):
@@ -115,10 +133,31 @@ class Placement:
                 continue
             pane, implied = split_for(slot, panes, self.pane["pane_id"])
             chosen = direction or implied
-            # The even ratio is arithmetic on the shape, so it only holds for the split
-            # the shape asked for; a forced direction leaves Herdr to halve the pane.
-            ratio = ratio_for(slot, columns, chosen) if chosen == implied else None
             column, row = slot
+            # A split only resizes the two panes it touches, never a sibling already on
+            # screen, so the new pane's own split, at half, is the only ratio arithmetic
+            # can set correctly up front; everything earlier in the chain is brought
+            # back even below. A forced direction that does not match the implied one
+            # leaves Herdr to halve the pane as it would have anyway, and is never
+            # re-evened: the arithmetic only describes the split the shape asked for.
+            ratio = 0.5 if chosen == implied else None
+            if chosen == implied:
+                for source, amount in re_even(self.chain(chosen, column, row, panes, captain)):
+                    result = runtime.herdr(
+                        "pane",
+                        "resize",
+                        "--pane",
+                        source,
+                        "--direction",
+                        SHRINK_DIRECTIONS[chosen],
+                        "--amount",
+                        f"{amount:.4f}",
+                    )
+                    if not result.get("resize", {}).get("changed"):
+                        raise CaptainError(
+                            f"Herdr would not resize pane {source} to even out this tab; "
+                            "report the layout rather than leaving it uneven."
+                        )
             return Spot(
                 chosen,
                 pane,
