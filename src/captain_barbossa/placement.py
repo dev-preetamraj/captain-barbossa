@@ -1,29 +1,69 @@
-"""Workspace pane discovery and crew split selection."""
+"""Workspace pane discovery, and the slot a crew takes in a declared tab shape."""
 
 import sys
+from dataclasses import dataclass
 
 from . import runtime
 from .crew import Crew
-from .layout import HERDR_DIRECTIONS, pick_auto_split, pick_split, tab_panes
+from .layout import HERDR_DIRECTIONS, next_slot, ratio_for, shape, split_for
 from .prompts import LABELS, choose
 from .runtime import CaptainError
 
 
+@dataclass(frozen=True)
+class Spot:
+    """Where a crew opens. A None pane with a reason means a new tab."""
+
+    direction: str | None = None
+    pane: str | None = None
+    tab: str | None = None
+    reason: str | None = None
+    column: int | None = None
+    row: int | None = None
+    ratio: float | None = None
+
+
 class Placement:
-    """The captain's origin, the dashboard pane to avoid, and the active crew geometry."""
+    """The captain's origin and this session's roster, which is all a slot needs."""
 
     def __init__(self, pane, current, dashboard=None):
         self.pane = pane
         self.dashboard = dashboard
-        active = [crew.record for crew in Crew.members(current) if not crew.is_dismissed]
-        self.crew_panes = {crew["pane"] for crew in active if crew.get("pane")}
+        self.active = [crew.record for crew in Crew.members(current) if not crew.is_dismissed]
         self.crew_tabs = []
-        self.pane_to_tab = {}
-        for crew in active:
+        for crew in self.active:
             if crew.get("tab") and crew["tab"] not in self.crew_tabs:
                 self.crew_tabs.append(crew["tab"])
-            if crew.get("pane") and crew.get("tab"):
-                self.pane_to_tab[crew["pane"]] = crew["tab"]
+
+    def unmapped(self, tab):
+        """Whether tab holds a crew recruited before slots were recorded at all.
+
+        Such a record predates this version, so its column is not None but missing, and
+        the grid would read the tab as empty and split the captain's pane over live crew.
+        A crew placed by hand is a None column, which is a slot the grid knows to skip.
+        """
+        return any(
+            "column" not in crew
+            for crew in self.active
+            if crew.get("tab") == tab and crew.get("pane")
+        )
+
+    def occupancy(self, tab):
+        """({column: crew in it}, {column: panes oldest first}) for one tab, from the roster.
+
+        A crew placed by hand holds no column, so it is counted nowhere and split never:
+        one hand placement would otherwise shift every slot after it.
+        """
+        rows = {}
+        for crew in self.active:
+            if crew.get("tab") != tab or not crew.get("pane"):
+                continue
+            if isinstance(crew.get("column"), int) and isinstance(crew.get("row"), int):
+                rows.setdefault(crew["column"], []).append((crew["row"], crew["pane"]))
+        # Ordered by the row each crew was given, not by roster position: arrival runs
+        # down a column, so the lowest row is its top pane whatever order the file lists.
+        panes = {column: [pane for _, pane in sorted(members)] for column, members in rows.items()}
+        return {column: len(members) for column, members in panes.items()}, panes
 
     def workspace_panes(self):
         """List workspace panes grouped by tab: {tab_id: (tab name, {pane_id: label})}."""
@@ -56,73 +96,68 @@ class Placement:
             raise CaptainError("Herdr listed no panes in this workspace.")
         return groups
 
-    def auto_split(self, direction=None, target=None, tab_id=None):
-        """Pick a split from crew tabs; a None pane means fall back to a new tab.
+    def tab_order(self):
+        """The captain's tab, then this session's crew tabs in recruitment order."""
+        captain_tab = self.pane["tab_id"]
+        return [captain_tab, *(tab for tab in self.crew_tabs if tab != captain_tab)]
 
-        Try the captain tab, then this session's crew-only tabs in recruitment order.
-        """
-        origin = target or self.pane["pane_id"]
-        captain_pane = self.pane["pane_id"]
-
-        if target:
-            geometry = tab_panes(runtime.herdr("pane", "layout", "--pane", origin), origin)
-            geometry = {target: geometry[target]}
-            split_pane, chosen, reason = pick_split(
-                geometry, captain_pane, self.crew_panes, direction
-            )
-            if split_pane is None:
-                choice = "new tab"
-            else:
-                choice = f"split {split_pane} {chosen} ({HERDR_DIRECTIONS[chosen]})"
-            print(f"Auto placement: {choice}; {reason}.", file=sys.stderr)
-            return chosen, split_pane, tab_id or self.pane["tab_id"], f"{choice}; {reason}"
-
-        tabs_to_search = [self.pane["tab_id"]]
-        tabs_to_search.extend(t for t in self.crew_tabs or () if t != self.pane["tab_id"])
-
-        last_reason = None
-        for search_tab in tabs_to_search:
-            try:
-                if search_tab == self.pane["tab_id"]:
-                    geometry = tab_panes(runtime.herdr("pane", "layout", "--pane", origin), origin)
-                else:
-                    sample_pane = next(
-                        (p for p in self.pane_to_tab or {} if self.pane_to_tab[p] == search_tab),
-                        None,
-                    )
-                    if sample_pane is None:
-                        continue
-                    geometry = tab_panes(
-                        runtime.herdr("pane", "layout", "--pane", sample_pane), sample_pane
-                    )
-
-                # A few rows of table: splitting it would leave half a dashboard and half
-                # a crew pane, so it is never a candidate.
-                geometry = {p: rect for p, rect in geometry.items() if p != self.dashboard}
-                split_pane, chosen, reason = pick_auto_split(
-                    geometry, captain_pane, self.crew_panes, direction
-                )
-                if split_pane is not None:
-                    choice = f"split {split_pane} {chosen} ({HERDR_DIRECTIONS[chosen]})"
-                    print(f"Auto placement: {choice}; {reason}.", file=sys.stderr)
-                    return chosen, split_pane, search_tab, f"{choice}; {reason}"
-                last_reason = reason
-            except CaptainError:
-                if search_tab == self.pane["tab_id"]:
-                    raise
+    def grid_spot(self, direction=None):
+        """The first free slot in the declared shapes, or a new tab when all are full."""
+        captain_tab = self.pane["tab_id"]
+        for tab in self.tab_order():
+            if self.unmapped(tab):
                 continue
+            captain = tab == captain_tab
+            columns = shape("captain_tab" if captain else "crew_tab")
+            counts, panes = self.occupancy(tab)
+            slot = next_slot(columns, counts, captain)
+            if slot is None:
+                continue
+            pane, implied = split_for(slot, panes, self.pane["pane_id"])
+            chosen = direction or implied
+            # The even ratio is arithmetic on the shape, so it only holds for the split
+            # the shape asked for; a forced direction leaves Herdr to halve the pane.
+            ratio = ratio_for(slot, columns, chosen) if chosen == implied else None
+            column, row = slot
+            return Spot(
+                chosen,
+                pane,
+                tab,
+                f"split {pane} {chosen} ({HERDR_DIRECTIONS[chosen]}); "
+                f"column {column} row {row} of {list(columns)}",
+                column,
+                row,
+                ratio,
+            )
+        return Spot(
+            reason="new tab; every slot in this session's tabs is taken or unmapped",
+            column=1,
+            row=1,
+        )
 
-        choice = "new tab"
-        reason = last_reason or "no feasible split"
-        print(f"Auto placement: {choice}; {reason}.", file=sys.stderr)
-        return None, None, tab_id or self.pane["tab_id"], f"{choice}; {reason}"
+    def auto_split(self, direction=None, target=None, tab_id=None):
+        """Where the next crew opens, from the roster alone; no pane is ever measured."""
+        if target:
+            # A pane named by hand is outside the shape, so it takes no slot and the
+            # grid never splits it again. Beside it unless the flag says otherwise.
+            chosen = direction or "vertical"
+            spot = Spot(
+                chosen,
+                target,
+                tab_id or self.pane["tab_id"],
+                f"split {target} {chosen} ({HERDR_DIRECTIONS[chosen]}); pane named by hand",
+            )
+        else:
+            spot = self.grid_spot(direction)
+        print(f"Auto placement: {spot.reason}.", file=sys.stderr)
+        return spot
 
     def choose_split(self, args, placement):
-        """Return (direction, split pane, tab, auto reason); a None pane with a reason means new tab."""
+        """The Spot a crew opens in; a None pane with a reason means a new tab."""
         if placement != "pane":
             if args.direction or args.split_pane:
                 raise CaptainError("--direction and --split-pane apply only to --placement pane.")
-            return None, None, None, None
+            return Spot()
 
         if args.split_pane == "auto":
             return self.auto_split(None if args.direction == "auto" else args.direction)
@@ -159,4 +194,4 @@ class Placement:
             tab_id = next(tab for tab, (_, panes) in groups.items() if split_pane in panes)
         if direction == "auto":
             return self.auto_split(None, split_pane, tab_id)
-        return direction, split_pane, tab_id, None
+        return Spot(direction, split_pane, tab_id)

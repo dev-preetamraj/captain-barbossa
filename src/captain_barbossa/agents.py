@@ -7,8 +7,7 @@ import shlex
 import sys
 from itertools import cycle
 
-from . import dashboard, instructions, runtime
-from .crew import WAIT_TIMEOUT as WAIT_TIMEOUT
+from . import config, dashboard, instructions, runtime
 from .crew import Crew
 from .memory import (
     add_memory,
@@ -37,10 +36,6 @@ from .update_check import check_for_update
 # enough to decide what to do next, and the event file keeps the rest.
 HOOK_LIMIT = 500
 
-# Fraction of the captain pane kept when the dashboard splits off below it: the
-# dashboard is a few rows of table, not half a screen.
-DASHBOARD_RATIO = 0.8
-
 # One word each: the roster name is the crew ID, the display name, and the agent suffix.
 CREW_NAMES = (
     "jack",
@@ -58,11 +53,24 @@ CREW_NAMES = (
 )
 
 
+def dashboard_ratio():
+    """Fraction of the captain pane kept when the dashboard splits off below it: the
+    dashboard is a few rows of table, not half a screen."""
+    return config.number("dashboard", "ratio", below=1)
+
+
 def launch(args, pane, project):
     if not sys.stdin.isatty():
         raise CaptainError("Launch captain from an interactive Herdr terminal.")
     check_for_update()
-    provider = choose(args.agent, PROVIDERS, "Choose your captain", "--agent")
+    wanted = args.agent or config.text("captain", "agent")
+    if wanted and wanted not in PROVIDERS:
+        where = config.source("captain", "agent") or config.SETTINGS_PATH
+        raise CaptainError(
+            f"[captain] agent is '{wanted}', which is not one of {', '.join(PROVIDERS)}. "
+            f"Fix it in {where}."
+        )
+    provider = choose(wanted, PROVIDERS, "Choose your captain", "--agent")
     binary = executable(provider)
     current = session(project, pane, args.session, create=args.session is None)
     meta = current.meta
@@ -86,13 +94,15 @@ def launch(args, pane, project):
     # can find its transcript. Nothing reads this file as a roster entry.
     events = current.events("captain")
     private_dir(events.parent)
-    command = [binary, *instructions.native_args(provider, instruction_text, events=events)]
+    wanted = config.text("captain", "model")
+    model = resolve_model(provider, wanted) if wanted else None
+    command = [binary, *instructions.native_args(provider, instruction_text, model, events=events)]
     if provider == "pi":
         command.extend(["--extension", str(captain_extension(current.directory))])
     if args.prompt:
         command.extend(["--", args.prompt])
     board = None
-    if not args.no_dashboard:
+    if config.flag("dashboard", "enabled") and not args.no_dashboard:
         try:
             board = start_dashboard(current, pane, project)
         except Exception as exc:  # a dashboard pane must never cost the captain its launch
@@ -128,7 +138,7 @@ def start_dashboard(current, pane, project):
         "--direction",
         "down",
         "--ratio",
-        str(DASHBOARD_RATIO),
+        str(dashboard_ratio()),
         "--cwd",
         str(project),
         "--no-focus",
@@ -143,11 +153,6 @@ def start_dashboard(current, pane, project):
         "--env",
         f"CAPTAIN_DASHBOARD_LAUNCHER={launcher}",
     ]
-    # usage.context_limit() reads this in the dashboard's own fresh process, so a
-    # shell-set override must be forwarded explicitly or the context % never appears.
-    context_limit = os.environ.get("CAPTAIN_CONTEXT_LIMIT")
-    if context_limit:
-        split_args.extend(["--env", f"CAPTAIN_CONTEXT_LIMIT={context_limit}"])
     created = runtime.herdr("pane", "split", *split_args)
     board = created.get("pane", {}).get("pane_id")
     if not isinstance(board, str) or not board:
@@ -189,7 +194,7 @@ def renest_dashboard(pane, captain_pane):
         "--split",
         "down",
         "--ratio",
-        str(DASHBOARD_RATIO),
+        str(dashboard_ratio()),
         "--no-focus",
     )
 
@@ -197,11 +202,8 @@ def renest_dashboard(pane, captain_pane):
 def run_dashboard(args, pane, project):
     """Refresh the crew token-usage table in this pane until interrupted."""
     current = session(project, pane, args.session)
-    # Omitted --interval leaves the cadence to dashboard.run rather than restating it here.
-    if args.interval is None:
-        dashboard.run(current)
-    else:
-        dashboard.run(current, args.interval)
+    # Omitted --interval leaves the cadence to dashboard.run, which reads the setting.
+    dashboard.run(current, args.interval)
 
 
 def tail_note(current, crew, tail):
@@ -225,10 +227,16 @@ def wait_crew(args, pane, project):
     # Reports are consumed by cursor alone: pi installs no hooks, so an events file may
     # never exist, and a report written before this wait started is still undelivered.
     reported = read_cursor(report_cursor)
-    status, event = crew.status(max(args.timeout, 0))
+    timeout = (
+        config.number("crew", "wait_timeout", kind=int)
+        if args.timeout is None
+        # 0 is allowed on the flag alone: it means report whatever has already arrived.
+        else config.in_range(args.timeout, "--timeout", least=0)
+    )
+    status, event = crew.status(timeout)
     if status is None:
         raise CaptainError(
-            f"{crew.display_name} was still working after {args.timeout} seconds. "
+            f"{crew.display_name} was still working after {timeout} seconds. "
             "Wait again, or read its pane with: herdr agent read " + crew.record["agent"]
         )
     all_reports = crew.reports
@@ -415,13 +423,13 @@ def create_crew(args, pane, project):
     with crew_meta(current.directory) as meta:
         current = current._replace(meta=meta)
         board = dashboard_pane(current)
-        direction, split_pane, tab_id, auto = Placement(pane, current, board).choose_split(
-            args, placement
-        )
+        spot = Placement(pane, current, board).choose_split(args, placement)
+        direction, split_pane, tab_id, auto = spot.direction, spot.pane, spot.tab, spot.reason
         if auto and split_pane is None:
             placement = "tab"
-        model = resolve_model(provider, args.model)
-        print(f"Model: {model} (from {args.model!r})", file=sys.stderr)
+        wanted = args.model or config.text("crew", "model")
+        model = resolve_model(provider, wanted)
+        print(f"Model: {model} (from {wanted!r})", file=sys.stderr)
         binary = executable(provider)
         name = args.name
         if name is None:
@@ -486,6 +494,7 @@ def create_crew(args, pane, project):
                     split_pane,
                     "--direction",
                     "right" if direction == "vertical" else "down",
+                    *(["--ratio", f"{spot.ratio:.4f}"] if spot.ratio else []),
                     "--cwd",
                     str(project),
                     "--no-focus",
@@ -518,6 +527,10 @@ def create_crew(args, pane, project):
             "direction": direction,
             "split_pane": split_pane,
             "auto": auto,
+            # The slot this crew holds in its tab's declared shape. Absent for a crew
+            # placed by hand, which the grid then counts nowhere and never splits.
+            "column": spot.column,
+            "row": spot.row,
             "model": model,
             "task": args.task,
             "status": "starting",

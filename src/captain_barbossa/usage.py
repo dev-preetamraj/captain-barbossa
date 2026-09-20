@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 import re
 import threading
 import time
@@ -11,10 +10,8 @@ import urllib.request
 from datetime import datetime
 from pathlib import Path
 
-from . import memory, models
+from . import config, memory, models
 
-CONTEXT_LIMIT_ENV = "CAPTAIN_CONTEXT_LIMIT"
-PRICES_ENV = "CAPTAIN_PRICES"
 # Prices change without a new model shipping, so they are fetched rather than tabulated
 # here. LiteLLM carries every id models.MODELS launches.
 PRICES_URL = (
@@ -158,7 +155,7 @@ def _codex_usage(events_path):
     return _frame(
         _codex_counts(totals),
         _context(_codex_counts(last)),
-        _env_limit() or limit,
+        _configured_limit() or limit,
         model,
         cost,
         spend,
@@ -271,14 +268,14 @@ def model_for_events(events_path):
 def context_limit(model):
     """The context window for a Claude `model`, or None when nothing covers it.
 
-    An explicit CAPTAIN_CONTEXT_LIMIT wins, so an unlisted model is never stuck. Nothing
+    An explicit [dashboard] context_limit wins, so an unlisted model is never stuck. Nothing
     Claude Code writes to disk states its window, so it comes from LiteLLM's
     max_input_tokens, falling back to CONTEXT_WINDOWS when the price cache is cold.
     Codex is excluded on purpose: LiteLLM reports the API window (922000 for
     gpt-5.6-terra) while the rollout log states the smaller window the CLI actually
     gives the crew (258400), and the native log is the authoritative one.
     """
-    override = _env_limit()
+    override = _configured_limit()
     if override is not None:
         return override
     if not model or not any(model.startswith(name) for name, _ in models.MODELS["claude"]):
@@ -300,12 +297,13 @@ def _for_model(table, model):
 def _prices():
     """Per-token prices for the models we launch, keyed by model id.
 
-    Empty until a cached extract or a CAPTAIN_PRICES override exists, which is how an
+    Empty until a cached extract or a [dashboard] prices_file exists, which is how an
     unknown cost stays unknown: the frame renders `$?` rather than a confident $0.
     """
-    override = os.environ.get(PRICES_ENV, "").strip()
+    override = config.text("dashboard", "prices_file")
     if override:
-        return _read_json(Path(override))
+        # Set in a file, not a shell, so nothing has expanded ~ on the way in.
+        return _read_json(Path(override).expanduser())
     cache = _prices_cache()
     if cache is None:
         return {}
@@ -371,9 +369,9 @@ def _read_json(path):
     return data if isinstance(data, dict) else {}
 
 
-def _env_limit():
-    raw = os.environ.get(CONTEXT_LIMIT_ENV, "").strip()
-    return int(raw) if raw.isdigit() and int(raw) != 0 else None
+def _configured_limit():
+    """[dashboard] context_limit, or None when it is left at 0 to be derived."""
+    return config.lookup("dashboard", "context_limit", kind=int) or None
 
 
 def _transcript_paths(events_path):

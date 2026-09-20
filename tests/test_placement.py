@@ -1,3 +1,5 @@
+"""Crew placement into declared tab shapes, decided from the session roster alone."""
+
 import contextlib
 import io
 import tempfile
@@ -6,151 +8,375 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from captain_barbossa import agents, cli, layout, runtime
+from captain_barbossa import agents, cli, config, layout, runtime
 from captain_barbossa.memory import Session
 from captain_barbossa.placement import Placement
 from captain_barbossa.runtime import CaptainError
 
 
-class PlacementTests(unittest.TestCase):
+def pinned(**keys):
+    """Pin config to the shipped defaults plus these [placement] keys."""
+    merged = config.merge(config.defaults(), {"placement": keys})
+    return patch.object(config, "settings", lambda: merged)
+
+
+class GridHarness(unittest.TestCase):
+    """A roster the test owns. Auto placement may not call Herdr at all."""
+
     def setUp(self):
         self.pane = {"workspace_id": "w1", "tab_id": "captain", "pane_id": "captain"}
-        self.tabs = {"captain": {"captain": (0, 0, 480, 120)}}
         self.meta = {"crew": {}}
+        self.tabs = 0
         self.enterContext(contextlib.redirect_stderr(io.StringIO()))
-        self.api = self.enterContext(patch.object(runtime, "herdr", side_effect=self.herdr))
-
-    def herdr(self, *call):
-        self.assertEqual(call[:3], ("pane", "layout", "--pane"))
-        for geometry in self.tabs.values():
-            if call[3] in geometry:
-                return {
-                    "layout": {
-                        "panes": [
-                            {
-                                "pane_id": pane,
-                                "rect": dict(zip(("x", "y", "width", "height"), rect)),
-                            }
-                            for pane, rect in geometry.items()
-                        ]
-                    }
-                }
-        raise CaptainError("pane closed")
+        self.api = self.enterContext(
+            patch.object(runtime, "herdr", side_effect=AssertionError("placement asked Herdr"))
+        )
 
     def choose(self, direction=None, target="auto", placement="pane"):
         args = SimpleNamespace(direction=direction, split_pane=target)
         return Placement(self.pane, Session(None, self.meta)).choose_split(args, placement)
 
-    def recruit(self, direction=None):
-        chosen, target, tab, reason = self.choose(direction)
-        name = f"crew{len(self.meta['crew']) + 1}"
-        if target is None:
-            tab = name
-            self.tabs[tab] = {name: (0, 0, 480, 120)}
+    def recruit(self, direction=None, name=None):
+        """Place one crew and record it the way create_crew does."""
+        spot = self.choose(direction)
+        name = name or f"crew{len(self.meta['crew']) + 1}"
+        if spot.pane is None:
+            self.tabs += 1
+            tab = f"newtab{self.tabs}"
         else:
-            x, y, _, _ = self.tabs[tab][target]
-            width, height = layout.half(self.tabs[tab][target], chosen)
-            self.tabs[tab][target] = (x, y, width, height)
-            self.tabs[tab][name] = (
-                x + width if chosen == "vertical" else x,
-                y + height if chosen == "horizontal" else y,
-                width,
-                height,
-            )
-        self.meta["crew"][name] = {"pane": name, "tab": tab, "status": "started"}
-        return chosen, target, tab, reason
+            tab = spot.tab
+        self.meta["crew"][name] = {
+            "pane": name,
+            "tab": tab,
+            "status": "started",
+            "column": spot.column,
+            "row": spot.row,
+        }
+        return spot, name, tab
 
-    def test_recruits_fill_captain_then_four_pane_crew_tabs(self):
-        expected = [
-            ("vertical", "captain", "captain"),
-            ("horizontal", "crew1", "captain"),
-            (None, None, "crew3"),
-            ("vertical", "crew3", "crew3"),
-            ("horizontal", "crew3", "crew3"),
-            ("horizontal", "crew4", "crew3"),
-            (None, None, "crew7"),
-            ("vertical", "crew7", "crew7"),
-            ("horizontal", "crew7", "crew7"),
-            ("horizontal", "crew8", "crew7"),
-            (None, None, "crew11"),
-        ]
-        for choice in expected:
-            with self.subTest(choice=choice):
-                self.assertEqual(self.recruit()[:3], choice)
-                self.assertLessEqual(len(self.tabs["captain"]), 3)
-                self.assertEqual(self.tabs["captain"]["captain"], (0, 0, 240, 120))
-                self.assertTrue(all(len(panes) <= 4 for panes in self.tabs.values()))
-        self.assertEqual(self.tabs["captain"]["crew1"], (240, 0, 240, 60))
-        self.assertEqual(self.tabs["captain"]["crew2"], (240, 60, 240, 60))
+    def place(self, name, tab, column, row, pane=None):
+        """Write a crew straight into a slot, to set a roster up without walking to it."""
+        self.meta["crew"][name] = {
+            "pane": pane or name,
+            "tab": tab,
+            "status": "started",
+            "column": column,
+            "row": row,
+        }
 
-    def test_first_crew_tab_split_is_vertical_even_when_horizontal_scores_better(self):
-        for _ in range(3):
+    def walk(self, count, **keys):
+        """Recruit count crew under these shapes; returns (slot, split pane, direction)."""
+        placed = []
+        with pinned(**keys):
+            for _ in range(count):
+                spot, _, tab = self.recruit()
+                placed.append(((spot.column, spot.row), spot.pane, spot.direction, tab))
+        return placed
+
+
+class FillOrderTests(GridHarness):
+    """Breadth first: a new column opens before anything stacks."""
+
+    def test_the_captain_tab_fills_its_declared_shape(self):
+        placed = self.walk(5, captain_tab=[1, 2, 2])
+        self.assertEqual(
+            placed[:4],
+            [
+                ((2, 1), "captain", "vertical", "captain"),
+                ((3, 1), "crew1", "vertical", "captain"),
+                ((2, 2), "crew1", "horizontal", "captain"),
+                ((3, 2), "crew2", "horizontal", "captain"),
+            ],
+        )
+        # The fifth has nowhere left in [1, 2, 2], so it opens a tab.
+        self.assertEqual(placed[4][:3], ((1, 1), None, None))
+
+    def test_a_crew_tab_fills_its_own_shape(self):
+        placed = self.walk(8, captain_tab=[1], crew_tab=[2, 2, 3])
+        # captain_tab = [1] holds no crew, so the first opens a tab and takes its root.
+        self.assertEqual(placed[0][:3], ((1, 1), None, None))
+        tab = placed[0][3]
+        self.assertEqual(
+            [(slot, pane, direction) for slot, pane, direction, _ in placed[1:7]],
+            [
+                ((2, 1), "crew1", "vertical"),
+                ((3, 1), "crew2", "vertical"),
+                ((1, 2), "crew1", "horizontal"),
+                ((2, 2), "crew2", "horizontal"),
+                ((3, 2), "crew3", "horizontal"),
+                ((3, 3), "crew6", "horizontal"),
+            ],
+        )
+        self.assertEqual({row[3] for row in placed[1:7]}, {tab})
+        # Seven crew fill [2, 2, 3]; the eighth starts another tab.
+        self.assertEqual(placed[7][1], None)
+
+    def test_a_depth_above_one_stacks_crew_under_the_captain(self):
+        placed = self.walk(3, captain_tab=[2, 2])
+        self.assertEqual(
+            [(slot, pane, direction) for slot, pane, direction, _ in placed],
+            [
+                # Row 1 opens column 2 first; row 2 then walks left to right, so the
+                # slot under the captain comes before the second row of column 2.
+                ((2, 1), "captain", "vertical"),
+                ((1, 2), "captain", "horizontal"),
+                ((2, 2), "crew1", "horizontal"),
+            ],
+        )
+
+    def test_ratios_divide_the_declared_shape_evenly(self):
+        with pinned(captain_tab=[1, 2, 2]):
+            self.assertAlmostEqual(self.recruit()[0].ratio, 1 / 3)  # column 2 of 3
+            self.assertAlmostEqual(self.recruit()[0].ratio, 1 / 2)  # column 3 of 3
+            self.assertAlmostEqual(self.recruit()[0].ratio, 1 / 2)  # row 2 of 2
+        with pinned(captain_tab=[1], crew_tab=[3]):
             self.recruit()
-        self.tabs["crew3"]["crew3"] = (0, 0, 180, 120)
-        self.assertEqual(self.choose()[:3], ("vertical", "crew3", "crew3"))
+            self.assertAlmostEqual(self.recruit()[0].ratio, 1 / 3)  # row 2 of 3
+            self.assertAlmostEqual(self.recruit()[0].ratio, 1 / 2)  # row 3 of 3
 
-    def test_small_captain_tab_opens_another_tab_without_shrinking_the_captain(self):
-        self.tabs["captain"]["captain"] = (0, 0, 100, 120)
-        self.assertEqual(self.choose()[:2], (None, None))
-        self.tabs["captain"]["captain"] = (0, 0, 480, 40)
-        self.recruit()
-        self.tabs["captain"]["crew1"] = (240, 0, 240, 20)
-        self.assertEqual(self.choose()[:2], (None, None))
-        self.assertEqual(self.tabs["captain"]["captain"], (0, 0, 240, 40))
 
-    def test_reuses_space_in_earlier_crew_tab(self):
-        for _ in range(7):
-            self.recruit()
-        self.meta["crew"]["crew6"]["status"] = "dismissed"
-        del self.tabs["crew3"]["crew6"]
-        self.tabs["crew3"]["crew4"] = (240, 0, 240, 120)
-        self.assertEqual(self.choose()[:3], ("horizontal", "crew4", "crew3"))
+class DeterminismTests(GridHarness):
+    """Same roster and shape in, same slot and split out."""
 
-    def test_skips_mixed_and_closed_crew_tabs(self):
-        for _ in range(7):
-            self.recruit()
-        self.tabs["crew3"] = {"crew3": (0, 0, 240, 120), "editor": (240, 0, 240, 120)}
-        self.assertEqual(self.choose()[:3], ("vertical", "crew7", "crew7"))
-        del self.tabs["crew3"]
-        self.assertEqual(self.choose()[:3], ("vertical", "crew7", "crew7"))
+    def roster(self):
+        self.place("a", "captain", 2, 1)
+        self.place("b", "captain", 3, 1)
+        self.place("c", "captain", 2, 2)
 
-    def test_small_tabs_are_skipped_and_closed_captain_layout_is_an_error(self):
-        for _ in range(3):
-            self.recruit()
-        self.tabs["crew3"]["crew3"] = (0, 0, 100, 20)
-        self.assertEqual(self.choose()[:2], (None, None))
-        del self.tabs["captain"]
-        with self.assertRaisesRegex(CaptainError, "pane closed"):
+    def test_the_same_roster_always_gives_the_same_slot(self):
+        self.roster()
+        with pinned(captain_tab=[1, 2, 2]):
+            answers = {
+                (spot.column, spot.row, spot.pane, spot.direction)
+                for spot in (self.choose() for _ in range(20))
+            }
+        self.assertEqual(answers, {(3, 2, "b", "horizontal")})
+
+    def test_the_roster_order_in_the_file_does_not_change_the_answer(self):
+        """A re-serialised session file lists crew in some order; the slot cannot move."""
+        self.roster()
+        records = dict(self.meta["crew"])
+        answers = set()
+        with pinned(captain_tab=[1, 2, 2]):
+            for order in ("abc", "cba", "bac", "cab"):
+                self.meta["crew"] = {name: records[name] for name in order}
+                spot = self.choose()
+                answers.add((spot.column, spot.row, spot.pane, spot.direction))
+        self.assertEqual(answers, {(3, 2, "b", "horizontal")})
+
+    def test_the_answer_moves_with_the_roster_so_the_tests_above_are_not_vacuous(self):
+        with pinned(captain_tab=[1, 2, 2]):
+            first = self.choose()
+            self.roster()
+            later = self.choose()
+        self.assertNotEqual(
+            (first.column, first.row, first.pane), (later.column, later.row, later.pane)
+        )
+
+    def test_placement_never_asks_herdr_anything(self):
+        self.roster()
+        with pinned(captain_tab=[1, 2, 2]):
             self.choose()
-
-    def test_manual_directions_override_grid_order_but_keep_caps(self):
-        self.assertEqual(self.recruit("horizontal")[:2], ("horizontal", "captain"))
-        self.assertEqual(self.recruit("vertical")[:2], ("vertical", "crew1"))
-        self.assertEqual(self.recruit("vertical")[:2], (None, None))
-        self.assertEqual(self.recruit("horizontal")[:2], ("horizontal", "crew3"))
-        self.assertEqual(self.recruit("vertical")[:2], ("vertical", "crew3"))
-        self.assertEqual(self.recruit("vertical")[0], "vertical")
-        self.assertEqual(self.choose("horizontal")[:2], (None, None))
-
-    def test_explicit_pane_bypasses_caps_with_auto_or_manual_direction(self):
-        for _ in range(6):
-            self.recruit()
-        groups = {tab: (tab, dict.fromkeys(panes, "Crew")) for tab, panes in self.tabs.items()}
-        with patch.object(Placement, "workspace_panes", return_value=groups):
-            for target, tab in (("captain", "captain"), ("crew3", "crew3")):
-                for direction in ("auto", "vertical", "horizontal"):
-                    with self.subTest(target=target, direction=direction):
-                        chosen, actual, actual_tab, _ = self.choose(direction, target)
-                        self.assertEqual((actual, actual_tab), (target, tab))
-                        self.assertEqual(chosen, "vertical" if direction == "auto" else direction)
-
-    def test_explicit_tab_never_queries_layout(self):
-        self.assertEqual(self.choose(target=None, placement="tab"), (None, None, None, None))
+            self.walk(3, captain_tab=[1, 2, 2])
         self.api.assert_not_called()
 
+
+class DismissalTests(GridHarness):
+    """A dismissal frees one place in its column; the survivors keep their panes."""
+
+    def setUp(self):
+        super().setUp()
+        for name, column, row in (("a", 2, 1), ("b", 3, 1), ("c", 2, 2), ("d", 3, 2)):
+            self.place(name, "captain", column, row)
+
+    def dismiss(self, *names):
+        for name in names:
+            self.meta["crew"][name]["status"] = "dismissed"
+
+    def test_dismissing_the_middle_of_a_column_rebuilds_the_same_slot(self):
+        self.dismiss("c")
+        with pinned(captain_tab=[1, 2, 2]):
+            spot = self.choose()
+        self.assertEqual((spot.column, spot.row), (2, 2))
+        self.assertEqual((spot.pane, spot.direction), ("a", "horizontal"))
+
+    def test_dismissing_the_top_of_a_column_splits_the_survivor(self):
+        self.dismiss("a")
+        with pinned(captain_tab=[1, 2, 2]):
+            spot = self.choose()
+        # Column 2 holds only c now, whose pane grew into the space it left.
+        self.assertEqual((spot.column, spot.row), (2, 2))
+        self.assertEqual((spot.pane, spot.direction), ("c", "horizontal"))
+
+    def test_an_emptied_column_is_opened_again_from_its_left_neighbour(self):
+        self.dismiss("a", "c")
+        with pinned(captain_tab=[1, 2, 2]):
+            spot = self.choose()
+        self.assertEqual((spot.column, spot.row), (2, 1))
+        self.assertEqual((spot.pane, spot.direction), ("captain", "vertical"))
+
+    def test_an_emptied_leftmost_crew_column_is_skipped_not_rebuilt(self):
+        """Herdr splits right and down only, so nothing can open to the left of column 2."""
+        self.meta["crew"] = {}
+        self.place("a", "t2", 1, 1)
+        self.place("b", "t2", 2, 1)
+        self.meta["crew"]["a"]["status"] = "dismissed"
+        with pinned(captain_tab=[1], crew_tab=[2, 2]):
+            spot = self.choose()
+        # Column 1 is free on paper but unreachable, so the crew stacks in column 2.
+        self.assertEqual((spot.column, spot.row), (2, 2))
+        self.assertEqual((spot.pane, spot.direction), ("b", "horizontal"))
+
+
+class OverflowTests(GridHarness):
+    """The captain tab, then crew tabs in recruitment order, then a new tab."""
+
+    def test_the_chain_runs_in_order(self):
+        with pinned(captain_tab=[1, 1], crew_tab=[1, 1]):
+            first = self.recruit()[0]
+            self.assertEqual(first.tab, "captain")
+
+            # The captain tab is full, so the next opens a crew tab.
+            second, _, older = self.recruit()
+            self.assertIsNone(second.pane)
+
+            # That tab has one place left, and it is used before any new tab.
+            third = self.recruit()[0]
+            self.assertEqual((third.tab, third.column), (older, 2))
+
+            # Both tabs full: a third tab opens.
+            fourth, _, newer = self.recruit()
+            self.assertIsNone(fourth.pane)
+            self.assertNotEqual(newer, older)
+
+    def test_the_oldest_crew_tab_with_room_wins(self):
+        self.place("a", "captain", 2, 1)
+        self.place("older", "t2", 1, 1)
+        self.place("newer", "t3", 1, 1)
+        with pinned(captain_tab=[1, 1], crew_tab=[2]):
+            spot = self.choose()
+        self.assertEqual((spot.tab, spot.pane, spot.row), ("t2", "older", 2))
+
+
+class HandPlacementTests(GridHarness):
+    """Explicit flags win, and what they place holds no slot."""
+
+    def test_an_explicit_tab_takes_no_slot_and_asks_nothing(self):
+        spot = self.choose(target=None, placement="tab")
+        self.assertEqual((spot.pane, spot.tab, spot.column), (None, None, None))
+        self.api.assert_not_called()
+
+    def test_an_explicit_pane_and_direction_bypass_the_shape(self):
+        with pinned(captain_tab=[1, 2]):
+            spot = self.choose("horizontal", "captain")
+        self.assertEqual((spot.pane, spot.direction), ("captain", "horizontal"))
+        self.assertIsNone(spot.column)
+        self.assertIsNone(spot.ratio)
+
+    def test_an_explicit_pane_with_auto_direction_splits_beside_it(self):
+        with pinned(captain_tab=[1, 2]):
+            spot = self.choose("auto", "captain")
+        self.assertEqual((spot.pane, spot.direction), ("captain", "vertical"))
+        self.assertIsNone(spot.column)
+
+    def test_a_hand_placed_crew_does_not_move_the_next_slot(self):
+        # create_crew records a hand placement as a present but empty slot.
+        self.meta["crew"]["byhand"] = {
+            "pane": "byhand",
+            "tab": "captain",
+            "status": "started",
+            "column": None,
+            "row": None,
+        }
+        with pinned(captain_tab=[1, 2]):
+            spot = self.choose()
+        self.assertEqual((spot.column, spot.row, spot.pane), (2, 1, "captain"))
+
+
+class UpgradedSessionTests(GridHarness):
+    """Crew recruited before slots were recorded: their tab's geometry is unknown."""
+
+    def legacy(self, name, tab):
+        """A roster entry as versions before the grid wrote it: no column key at all."""
+        self.meta["crew"][name] = {"pane": name, "tab": tab, "status": "started"}
+
+    def test_a_tab_holding_pre_upgrade_crew_is_never_split_over(self):
+        self.legacy("will", "captain")
+        with pinned(captain_tab=[1, 2]):
+            spot = self.choose()
+        # Splitting the captain's pane again would land the new crew on top of Will.
+        self.assertIsNone(spot.pane)
+        self.assertIn("unmapped", spot.reason)
+        # A new tab's id comes back from Herdr, so the spot must not carry a stale one.
+        self.assertIsNone(spot.tab)
+
+    def test_a_tab_with_no_pre_upgrade_crew_still_fills_its_shape(self):
+        self.legacy("will", "othertab")
+        with pinned(captain_tab=[1, 2]):
+            spot = self.choose()
+        self.assertEqual((spot.column, spot.row, spot.pane), (2, 1, "captain"))
+
+    def test_a_dismissed_pre_upgrade_crew_frees_its_tab_again(self):
+        self.legacy("will", "captain")
+        self.meta["crew"]["will"]["status"] = "dismissed"
+        with pinned(captain_tab=[1, 2]):
+            spot = self.choose()
+        self.assertEqual((spot.column, spot.row, spot.pane), (2, 1, "captain"))
+
+    def test_a_forced_direction_drops_the_ratio(self):
+        with pinned(captain_tab=[1, 2]):
+            self.assertIsNone(self.choose("horizontal").ratio)
+            self.assertIsNotNone(self.choose().ratio)
+
+
+class ShapeValidationTests(unittest.TestCase):
+    """A malformed shape fails the command, naming the file and the value."""
+
+    def setUp(self):
+        self.root = Path(self.enterContext(tempfile.TemporaryDirectory())).resolve()
+        (self.root / ".captain").mkdir()
+        self.settings = self.root / ".captain" / "settings.toml"
+        self.enterContext(patch.dict(__import__("os").environ, {"HOME": str(self.root / "nohome")}))
+        self.enterContext(patch.object(config, "project_root", return_value=self.root))
+        config.settings.cache_clear()
+        self.addCleanup(config.settings.cache_clear)
+
+    def write(self, body):
+        self.settings.write_text(f"[placement]\n{body}\n", encoding="utf-8")
+        config.settings.cache_clear()
+
+    def test_the_shipped_shapes_are_valid(self):
+        self.assertEqual(layout.shape("captain_tab"), (1, 2))
+        self.assertEqual(layout.shape("crew_tab"), (2, 2))
+
+    def test_a_malformed_shape_names_the_file_the_value_and_the_fault(self):
+        for body, fault in (
+            ("captain_tab = [1, 0, 2]", "column 2 is 0"),
+            ("captain_tab = [1, -3]", "column 2 is -3"),
+            ('captain_tab = [1, "2"]', "column 2 is '2'"),
+            ("captain_tab = [1, 2.5]", "column 2 is 2.5"),
+            ("captain_tab = [1, true]", "column 2 is True"),
+            ("captain_tab = []", "the list is empty"),
+            ('captain_tab = "wide"', "it is not a list"),
+        ):
+            with self.subTest(body=body):
+                self.write(body)
+                with self.assertRaises(CaptainError) as raised:
+                    layout.shape("captain_tab")
+                message = str(raised.exception)
+                self.assertIn("[placement] captain_tab must be a list", message)
+                self.assertIn(str(self.settings), message)
+                self.assertIn(fault, message)
+
+    def test_a_malformed_shape_is_never_quietly_replaced_by_the_default(self):
+        self.write("crew_tab = [0]")
+        with self.assertRaises(CaptainError):
+            layout.shape("crew_tab")
+
+
+class RecruitLockTests(GridHarness):
     def test_recruit_selects_from_fresh_metadata_under_the_crew_lock(self):
-        self.recruit()
-        self.recruit()
+        self.place("a", "captain", 2, 1)
         choose_split = Placement.choose_split
         args = cli.parser().parse_args(
             [
@@ -166,13 +392,15 @@ class PlacementTests(unittest.TestCase):
             ]
         )
 
-        def check_selection(*args):
+        def check_selection(*call):
             guard.return_value.__enter__.assert_called_once()
-            self.assertEqual(choose_split(*args)[:2], (None, None))
+            # The fresh roster already holds column 2, so the next slot is its second row.
+            self.assertEqual(choose_split(*call).row, 2)
             raise CaptainError("selection checked")
 
         with (
             tempfile.TemporaryDirectory() as root,
+            pinned(captain_tab=[1, 2]),
             patch.object(agents, "session", return_value=Session(Path(root), {"crew": {}})),
             patch.object(agents, "crew_meta") as guard,
             patch.object(Placement, "choose_split", autospec=True, side_effect=check_selection),

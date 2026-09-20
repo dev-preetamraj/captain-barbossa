@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "captain-barbossa"
-version = "0.18.0"
+version = "0.19.0"
 description = "Launch a native captain and crew inside a Herdr workspace"
 readme = "README.md"
 license = "MIT"
@@ -23,6 +23,9 @@ captain = "captain_barbossa.cli:main"
 where = ["src"]
 include = ["captain_barbossa*"]
 namespaces = false
+
+[tool.setuptools.package-data]
+captain_barbossa = ["defaults.toml"]
 
 [tool.ruff]
 target-version = "py311"

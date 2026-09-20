@@ -6,9 +6,15 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
-from captain_barbossa import usage
+from captain_barbossa import config, usage
 from captain_barbossa.models import model_ids
 from captain_barbossa.usage import context_limit, model_for_events, usage_for_events
+
+
+def _dashboard(**keys):
+    """Pin config to the shipped defaults plus these [dashboard] keys."""
+    pinned = config.merge(config.defaults(), {"dashboard": keys})
+    return patch.object(config, "settings", lambda: pinned)
 
 
 def _jsonl(path, records):
@@ -46,7 +52,7 @@ def _turn(model="claude-opus-5", call=None, when=None, hour=0, **counts):
 
 
 # The LiteLLM extract for every id models.MODELS launches, read 2026-09-20. Tests point
-# CAPTAIN_PRICES at this so none of them touches the state root or the network.
+# prices_file at this so none of them touches the state root or the network.
 PRICES = {
     "claude-haiku-4-5": {
         "input_cost_per_token": 1e-06,
@@ -122,11 +128,13 @@ class LimitTestCase(unittest.TestCase):
 
     def setUp(self):
         self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
-        self.enterContext(patch.dict(os.environ, {}, clear=False))
-        os.environ.pop(usage.CONTEXT_LIMIT_ENV, None)
         self.prices = self.root / "prices.json"
         self.prices.write_text(json.dumps(PRICES), encoding="utf-8")
-        os.environ[usage.PRICES_ENV] = str(self.prices)
+        self.pin(prices_file=str(self.prices))
+
+    def pin(self, **keys):
+        """Re-pin [dashboard] for this test; the last call wins."""
+        self.enterContext(_dashboard(**keys))
 
 
 class UsageTests(LimitTestCase):
@@ -404,7 +412,7 @@ class ContextLimitTests(LimitTestCase):
     def test_a_cold_price_cache_still_resolves_the_window(self):
         # Live regression: CTX went "-" on every row with no cached prices. A window is
         # a stable fact and must not depend on the network the way COST does.
-        os.environ[usage.PRICES_ENV] = str(self.root / "absent.json")
+        self.pin(prices_file=str(self.root / "absent.json"))
         with patch.object(usage.urllib.request, "urlopen", side_effect=AssertionError("fetched")):
             self.assertEqual(context_limit("claude-opus-5"), 1_000_000)
             self.assertEqual(context_limit("claude-haiku-4-5-20251001"), 200_000)
@@ -416,15 +424,16 @@ class ContextLimitTests(LimitTestCase):
         )
         self.assertEqual(context_limit("claude-opus-5"), 2_000_000)
 
-    def test_env_override_wins_over_the_table(self):
-        os.environ[usage.CONTEXT_LIMIT_ENV] = "500000"
+    def test_configured_limit_wins_over_the_table(self):
+        self.pin(prices_file=str(self.prices), context_limit=500_000)
         self.assertEqual(context_limit("claude-opus-5"), 500_000)
         self.assertEqual(context_limit("some-other-model"), 500_000)
 
-    def test_unusable_env_override_falls_back_to_the_table(self):
-        for raw in ("", "   ", "lots", "-1", "0", "1e6", "225k"):
-            with self.subTest(raw=raw):
-                os.environ[usage.CONTEXT_LIMIT_ENV] = raw
+    def test_an_unusable_limit_falls_back_to_the_table(self):
+        # 0 is the shipped "derive it"; the rest are wrong types, never coerced.
+        for value in (0, "", "225000", "lots", 2.5, True, None):
+            with self.subTest(value=value):
+                self.pin(prices_file=str(self.prices), context_limit=value)
                 self.assertEqual(context_limit("claude-opus-5"), 1_000_000)
 
 
@@ -543,8 +552,8 @@ class CodexUsageTests(LimitTestCase):
         _jsonl(self.events, [{"type": "agent-turn-complete", "thread-id": "../*/*/*/rollout-*"}])
         self.assertIsNone(usage_for_events(self.events))
 
-    def test_env_override_wins_over_the_reported_window(self):
-        os.environ[usage.CONTEXT_LIMIT_ENV] = "400000"
+    def test_configured_limit_wins_over_the_reported_window(self):
+        self.pin(prices_file=str(self.prices), context_limit=400_000)
         self.notify(self.THREAD)
         self.rollout(self.THREAD, [_token_count(9, output=1)])
         self.assertEqual(usage_for_events(self.events)["limit"], 400_000)
@@ -568,7 +577,7 @@ class PriceSourceTests(unittest.TestCase):
     def setUp(self):
         self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
         self.enterContext(patch.dict(os.environ, {"CAPTAIN_STATE_ROOT": str(self.root)}))
-        os.environ.pop(usage.PRICES_ENV, None)
+        self.enterContext(_dashboard(prices_file=""))
         self.enterContext(patch.object(usage, "_refreshed", False))
         # A temp state root is exactly what memory.state_root() warns about.
         self.enterContext(patch.object(usage.memory, "_warned_temp_state_root", True))
@@ -615,14 +624,27 @@ class PriceSourceTests(unittest.TestCase):
         with patch.object(usage, "_start_refresh"):
             self.assertEqual(usage._prices(), {})
 
-    def test_env_override_wins_over_the_cache(self):
+    def test_a_configured_prices_file_wins_over_the_cache(self):
         usage._prices_cache().write_text(json.dumps(PRICES), encoding="utf-8")
         override = self.root / "contracted.json"
         override.write_text(
             json.dumps({"claude-opus-5": {"output_cost_per_token": 1e-09}}), "utf-8"
         )
-        os.environ[usage.PRICES_ENV] = str(override)
-        self.assertEqual(usage._prices()["claude-opus-5"], {"output_cost_per_token": 1e-09})
+        with _dashboard(prices_file=str(override)):
+            self.assertEqual(usage._prices()["claude-opus-5"], {"output_cost_per_token": 1e-09})
+
+    def test_a_prices_file_written_with_a_tilde_is_expanded(self):
+        """It is set in a file, not a shell, so nothing has expanded ~ on the way in."""
+        home = self.root / "home"
+        home.mkdir()
+        (home / "contracted.json").write_text(
+            json.dumps({"claude-opus-5": {"output_cost_per_token": 2e-09}}), "utf-8"
+        )
+        with (
+            patch.dict(os.environ, {"HOME": str(home)}),
+            _dashboard(prices_file="~/contracted.json"),
+        ):
+            self.assertEqual(usage._prices()["claude-opus-5"], {"output_cost_per_token": 2e-09})
 
 
 if __name__ == "__main__":

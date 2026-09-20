@@ -4,7 +4,7 @@ from collections import Counter
 from difflib import get_close_matches
 from functools import lru_cache
 
-from . import runtime
+from . import config, runtime
 from .runtime import CaptainError
 
 # Cheapest to strongest per agent CLI; aliases are the short names people say.
@@ -27,12 +27,8 @@ MODELS = {
 # the user has authenticated locally and is discovered by pi_models() instead.
 PROVIDERS = ("claude", "codex", "pi")
 # Provider-neutral tiers: the captain picks one from the task, each CLI resolves its own.
-TIERS = {
-    "claude": {"cheap": "claude-haiku-4-5", "mid": "claude-sonnet-5", "strong": "claude-opus-5"},
-    # Codex picker on 2026-09-20 offers exactly these five: gpt-6-astra (default),
-    # gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna, gpt-5.5.
-    "codex": {"cheap": "gpt-5.6-luna", "mid": "gpt-5.6-sol", "strong": "gpt-6-astra"},
-}
+# defaults.toml is the one source for these, so settings can layer over the same values.
+TIERS = {provider: dict(tiers) for provider, tiers in config.defaults()["models"].items()}
 TIER_NAMES = ("cheap", "mid", "strong")
 
 
@@ -94,10 +90,22 @@ def models_for(provider):
 
 
 def tiers_for(provider):
-    if provider != "pi":
-        return TIERS[provider]
-    ids = model_ids(provider)
-    return dict(zip(TIER_NAMES, (ids[0], ids[len(ids) // 2], ids[-1])))
+    """The built-in tiers, with any tier named in [models.<provider>] settings replacing one.
+
+    Settings may name a model however the user says it, so aliases are mapped here rather
+    than through resolve_model, which calls this and would recurse.
+    """
+    if provider == "pi":
+        ids = model_ids(provider)
+        tiers = dict(zip(TIER_NAMES, (ids[0], ids[len(ids) // 2], ids[-1])))
+    else:
+        tiers = dict(TIERS[provider])
+    names = {name: model for model, aliases in models_for(provider) for name in (model, *aliases)}
+    for tier in TIER_NAMES:
+        choice = config.text("models", provider, tier)
+        if choice:
+            tiers[tier] = names.get(normalized(choice), choice)
+    return tiers
 
 
 def model_ids(provider):
@@ -112,9 +120,16 @@ def model_names(provider, model):
     return (model,)
 
 
+def normalized(text):
+    """Free text as a lookup key: casefolded, with spaces and underscores as dashes."""
+    return "-".join(text.casefold().split()).replace("_", "-").strip("-")
+
+
 def resolve_model(provider, text):
     """Map a tier or free text to a model ID for provider, or raise listing the options."""
-    wanted = "-".join(text.casefold().split()).replace("_", "-").strip("-")
+    # A blank or unset setting is a user mistake to report, not a crash: None reaches
+    # here whenever a settings key is left empty.
+    wanted = normalized(text or "")
     names = {}
     tiers = tiers_for(provider)
     for model, aliases in models_for(provider):

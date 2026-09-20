@@ -350,7 +350,7 @@ Shape of the mechanism:
   move on the order of months).
 - Offline or fetch failure: use the cached extract. No cache and no network: render
   `$?`, never `$0`. A confident zero is worse than an admitted unknown.
-- `CAPTAIN_PRICES` pointing at a JSON file overrides, for contracted rates. This
+- `[dashboard] prices_file` pointing at a JSON file overrides, for contracted rates. This
   mirrors Claude Code's own `modelPricing` managed setting, which exists for exactly
   this reason.
 

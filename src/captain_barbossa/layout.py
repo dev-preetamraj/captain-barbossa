@@ -1,117 +1,104 @@
-"""Automatic crew pane placement from tab occupancy and pane geometry."""
+"""Declared tab shapes: the slot a crew takes, and the split that creates it.
 
+A shape is a list of columns read left to right, each number the panes stacked in that
+column. Nothing here measures a pane: a slot is decided from the session roster alone,
+so the same roster and shape always give the same answer.
+"""
+
+from . import config
 from .runtime import CaptainError
 
-# Smallest pane (terminal cells) a native agent CLI stays usable in.
-MIN_WIDTH = 60
-MIN_HEIGHT = 15
 HERDR_DIRECTIONS = {"vertical": "right", "horizontal": "down"}
 
 
-def tab_panes(response, pane_id):
-    """Parse a Herdr pane layout into {pane_id: (x, y, width, height)} for pane_id's tab."""
-    layout = response.get("layout")
-    panes = layout.get("panes") if isinstance(layout, dict) else None
-    if not isinstance(panes, list):
-        raise CaptainError("Herdr returned no pane layout for the current tab.")
-    geometry = {}
-    for entry in panes:
-        if not isinstance(entry, dict):
-            continue
-        rect = entry.get("rect")
-        if not (isinstance(entry.get("pane_id"), str) and isinstance(rect, dict)):
-            continue
-        cells = [rect.get(key) for key in ("x", "y", "width", "height")]
-        if all(isinstance(cell, int) and cell >= 0 for cell in cells):
-            geometry[entry["pane_id"]] = tuple(cells)
-    if pane_id not in geometry:
-        raise CaptainError(f"Herdr's layout for the current tab does not include pane {pane_id}.")
-    return geometry
+def _fault(columns):
+    """What is wrong with a declared shape, or "" when it is usable."""
+    if not isinstance(columns, list):
+        return "it is not a list"
+    if not columns:
+        return "the list is empty"
+    for index, value in enumerate(columns, 1):
+        if isinstance(value, bool) or not isinstance(value, int):
+            return f"column {index} is {value!r}"
+        if value < 1:
+            return f"column {index} is {value}"
+    return ""
 
 
-def half(rect, direction):
-    """Size of each pane after an even split; the new pane never gains the divider cell."""
-    _, _, width, height = rect
-    return (width // 2, height) if direction == "vertical" else (width, height // 2)
+def shape(key):
+    """The declared [placement] shape for key, as a tuple of column depths.
 
-
-def pick_auto_split(geometry, captain, crew_panes, direction=None):
-    """Stack two crew beside the captain and fill crew-only tabs to a four-pane grid."""
-    if captain in geometry:
-        present = crew_panes.intersection(geometry)
-        if len(present) >= 2:
-            return None, None, "captain tab already holds two crew panes"
-        target = next(iter(present), captain)
-        geometry = {target: geometry[target]}
-        chosen = direction or ("horizontal" if present else "vertical")
-    else:
-        if not set(geometry).issubset(crew_panes):
-            return None, None, "tab contains panes outside this session's crew"
-        if len(geometry) >= 4:
-            return None, None, "crew tab already holds four crew panes"
-        chosen = direction or ("vertical" if len(geometry) == 1 else "horizontal")
-    return pick_split(geometry, captain, crew_panes, chosen)
-
-
-def balance(width, height):
-    """Area of the resulting pane, discounted by how far it is from a square on screen.
-
-    Terminal cells are about twice as tall as wide, so a pane looks square when width is
-    twice its height. A wide sliver or a tall sliver scores low either way, which is what
-    alternates the split direction as a tab fills up.
+    A malformed shape fails the command rather than falling back: a layout that quietly
+    ignores what you wrote is the bug people spend an afternoon on.
     """
-    aspect = width / (2 * height)
-    return width * height * min(aspect, 1 / aspect)
-
-
-def pick_split(geometry, captain, crew_panes, direction=None):
-    """Choose (pane_id, direction, reason); pane_id is None when the tab is too crowded.
-
-    Every feasible split keeps both halves at least MIN_WIDTH x MIN_HEIGHT. Among those, the
-    split whose halves stay largest and squarest wins, then panes without crew, then panes
-    nearest the captain. Splitting the captain's own pane down is the last resort before a
-    new tab: it shrinks the pane the user is typing in.
-    """
-    directions = (direction,) if direction else tuple(HERDR_DIRECTIONS)
-    anchor = center(geometry[captain]) if captain in geometry else None
-    candidates = []
-    for pane_id, rect in geometry.items():
-        distance = 0
-        if anchor:
-            px, py = center(rect)
-            distance = abs(px - anchor[0]) / 2 + abs(py - anchor[1])
-        for option in directions:
-            width, height = half(rect, option)
-            if width < MIN_WIDTH or height < MIN_HEIGHT:
-                continue
-            last_resort = pane_id == captain and option == "horizontal"
-            key = (last_resort, -balance(width, height), pane_id in crew_panes, distance)
-            candidates.append((key, pane_id, option, width, height))
-    if not candidates:
-        return (
-            None,
-            None,
-            (
-                f"every pane in this tab would drop below {MIN_WIDTH}x{MIN_HEIGHT} cells "
-                f"when split{' ' + direction if direction else ''}"
-            ),
+    columns = config.lookup("placement", key)
+    fault = _fault(columns)
+    if fault:
+        source = config.source("placement", key)
+        where = f" from {source}" if source else ""
+        raise CaptainError(
+            f"[placement] {key} must be a list of whole numbers, each 1 or more, "
+            f"like [1, 2, 2]. Got {columns!r}{where}: {fault}."
         )
-    key, pane_id, option, width, height = min(candidates, key=lambda item: item[0])
-    _, _, full_width, full_height = geometry[pane_id]
-    why = "largest balanced halves"
-    if key[0]:
-        why = "no other split fits, so the captain's pane is split down as a last resort"
-    elif pane_id == captain:
-        why += ", captain's own pane"
-    elif pane_id not in crew_panes:
-        why += ", holds no crew"
-    reason = (
-        f"{full_width}x{full_height} pane {pane_id} split {HERDR_DIRECTIONS[option]} "
-        f"leaves {width}x{height} halves; {why}"
-    )
-    return pane_id, option, reason
+    return tuple(columns)
 
 
-def center(rect):
-    x, y, width, height = rect
-    return x + width / 2, y + height / 2
+def is_open(column, counts, captain):
+    """Whether a column already holds a pane the next split could use."""
+    return counts.get(column, 0) > 0 or (column == 1 and captain)
+
+
+def next_slot(columns, counts, captain):
+    """The (column, row) the next crew takes, or None when every slot is taken.
+
+    Breadth first: a new column opens before anything stacks, so the column whose next
+    row is lowest wins, and the leftmost wins a tie. On the captain's tab column 1 row 1
+    is the captain, so its crew start a row lower.
+    """
+    slot = None
+    for index, depth in enumerate(columns):
+        column = index + 1
+        row = counts.get(column, 0) + (2 if captain and column == 1 else 1)
+        if row > depth:
+            continue
+        # Herdr splits right and down only, so a column can only open to the right of an
+        # open one. A leftmost column emptied by dismissals cannot be rebuilt.
+        if not is_open(column, counts, captain) and not (
+            column > 1 and is_open(column - 1, counts, captain)
+        ):
+            continue
+        if slot is None or row < slot[1]:
+            slot = (column, row)
+    return slot
+
+
+def split_for(slot, panes, captain_pane):
+    """(pane to split, direction) for slot, given {column: panes oldest first}.
+
+    A column's panes are in arrival order, because a right split lands beside its source
+    and a down split lands below it. So the first is the column's top pane and the last
+    is its bottom, and dismissing one does not reorder the rest.
+    """
+    column, _ = slot
+    stacked = panes.get(column) or ()
+    if stacked:
+        return stacked[-1], "horizontal"
+    if column == 1:
+        return captain_pane, "horizontal"
+    # next_slot only offers a column whose left neighbour is open, and a column that is
+    # open with no crew in it can only be the captain's own.
+    left = panes.get(column - 1) or (captain_pane,)
+    return left[0], "vertical"
+
+
+def ratio_for(slot, columns, direction):
+    """The share the split pane keeps, so a declared shape comes out evenly.
+
+    Herdr halves a pane by default, which would make [1, 2, 2] land as a half and two
+    quarters. Splitting off column c of n, the source spans n - c + 2 columns and has to
+    keep one; a row of a column holding k is the same sum downward.
+    """
+    column, row = slot
+    if direction == "vertical":
+        return 1 / (len(columns) - column + 2)
+    return 1 / (columns[column - 1] - row + 2)

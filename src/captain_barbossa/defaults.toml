@@ -1,0 +1,54 @@
+[captain]
+# Which CLI the captain launches: claude, codex, or pi.
+# Empty asks at launch; setting it skips the question. --agent still wins.
+agent = ""
+# The captain's own model: a tier (cheap|mid|strong), a model ID, or an alias.
+# Empty means the captain's CLI keeps whatever model it defaults to.
+model = ""
+
+[crew]
+# The model new crew are recruited with, when `captain crew` gets no --model.
+model = "cheap"
+# Seconds `captain wait` waits before giving up. --timeout still wins.
+wait_timeout = 900
+
+[dashboard]
+# Open the crew token-usage pane below the captain at launch.
+# `captain --no-dashboard` skips it even when this is true, and
+# `captain dashboard` still runs one by hand in any pane.
+enabled = false
+# Seconds between refreshes. --interval still wins.
+interval = 2.0
+# Share of the split the captain keeps, so the dashboard gets the remainder.
+ratio = 0.8
+# Context window for the CTX column, for a model nothing else covers.
+# 0 derives it from the price data, then from the bundled table.
+context_limit = 0
+# JSON file of per-token prices, in LiteLLM's shape, for contracted rates.
+# Empty uses the cached LiteLLM extract. `~` is expanded.
+prices_file = ""
+
+[placement]
+# The shape of a tab, read left to right as columns: each number is how many panes
+# that column holds, stacked top to bottom. Crew fill it breadth first, a new column
+# before anything stacks, and the declared slot is created however small it lands.
+# captain_tab column 1 row 1 is the captain, so [1, 2] means the captain full height
+# with two crew stacked beside it; the dashboard nests under the captain, not in a
+# slot. A depth above 1 there stacks crew under the captain instead.
+captain_tab = [1, 2]
+# Every other tab. [2, 2] is two columns of two, so four crew to a tab.
+crew_tab = [2, 2]
+
+# Which model each provider-neutral tier means, per agent CLI. Values take a
+# model ID or an alias, so `mid = "opus"` works. pi is absent on purpose: its
+# tiers are ranked from `pi --list-models`, but a [models.pi] table of your own
+# overrides them the same way, using pi's `provider/model` IDs.
+[models.claude]
+cheap = "claude-haiku-4-5"
+mid = "claude-sonnet-5"
+strong = "claude-opus-5"
+
+[models.codex]
+cheap = "gpt-5.6-luna"
+mid = "gpt-5.6-sol"
+strong = "gpt-6-astra"
