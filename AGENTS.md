@@ -49,7 +49,15 @@ Key facts:
 - Memory lives outside the checkout, split by durability: project-scope `graph.json`
   under `~/.local/state/captain-barbossa/<project hash>/` (or `$XDG_STATE_HOME`),
   session-scope `sessions/<id>/` under `<OS temp>/captain-barbossa-<uid>/<project hash>/`.
-  `CAPTAIN_MEMORY_ROOT` overrides both roots at once.
+  `CAPTAIN_MEMORY_ROOT` overrides both roots at once. Repo scope is the exception:
+  `.captain/graph.json` in the checkout, written only by an explicit
+  `memory add --scope repo`, read without migration, locked from the state root.
+  Its write path is deterministic, not model judgement: the relation comes from
+  `memory.REPO_RELATIONS` (the single place it is defined), `--because` is required,
+  ids hash the label and rows are sorted so the same facts give byte-identical bytes
+  and re-adding one is a no-op, and changing one needs `--supersede`.
+  `memory init` seeds it from AGENTS.md/CLAUDE.md by a fixed markdown parse (bullets
+  under Rules/Key facts sections), previewing until `--apply`; it only ever adds.
 - Crew state is signalled by the native CLI's own hooks (Claude `--settings` hooks,
   Codex `notify`), which append JSON lines to `sessions/<id>/events/<crew>.jsonl`.
   `wait` tails that file from a `.cursor` offset; pane reading is only a fallback for
@@ -75,7 +83,9 @@ Key facts:
   behavior; use temp directories outside the checkout for test state.
 - Commits follow Conventional Commits with a subject under 72 characters. Never add
   `Co-Authored-By` or other AI attribution to commits or PRs.
-- Keep Captain, Graphify, and generated instruction state outside the repo.
+- Keep Captain, Graphify, and generated instruction state outside the repo. The one
+  exception is `.captain/`: `settings.toml` and the curated `--scope repo` graph
+  (`graph.json`) are committed on purpose.
 - Comments are short and only for non-obvious "why"; no banners or restating code.
 
 ### Branching and releases

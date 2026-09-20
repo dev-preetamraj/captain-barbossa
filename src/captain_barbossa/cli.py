@@ -17,7 +17,7 @@ from .agents import (
     wait_crew,
 )
 from .layout import HERDR_DIRECTIONS
-from .memory import PRUNE_DAYS, memory, project_root
+from .memory import PRUNE_DAYS, REPO_RELATIONS, RULEBOOK_FILES, memory, project_root
 from .models import PROVIDERS, TIER_NAMES
 from .onboarding import bootstrap
 from .prompts import PLACEMENTS
@@ -111,19 +111,52 @@ def parser():
     )
     dismiss = commands.add_parser("dismiss", help="close an existing crew's pane and retire it")
     dismiss.add_argument("name", help="crew name or ID (case-insensitive)")
-    mem = commands.add_parser("memory", help="project/session graph memory outside the repo")
+    mem = commands.add_parser("memory", help="session, project, and committed repo graph memory")
     actions = mem.add_subparsers(dest="memory_command", required=True)
     add = actions.add_parser("add", help="remember a subject → relation → object")
     add.add_argument("subject")
     add.add_argument("relation")
     add.add_argument("target")
-    add.add_argument("--scope", choices=("session", "project"), default="session")
-    query = actions.add_parser("query", help="search session and project memory with Graphify")
+    add.add_argument(
+        "--scope",
+        choices=("session", "project", "repo"),
+        default="session",
+        help="repo writes the committed .captain/graph.json: curated team facts only",
+    )
+    add.add_argument(
+        "--because",
+        metavar="RATIONALE",
+        help=f"why the fact holds; required with --scope repo, whose relation must be "
+        f"one of {'|'.join(REPO_RELATIONS)}",
+    )
+    add.add_argument(
+        "--supersede",
+        action="store_true",
+        help="replace the repo fact already recorded for this subject and relation",
+    )
+    query = actions.add_parser(
+        "query", help="search session, project, and repo memory with Graphify"
+    )
     query.add_argument("question")
-    show = actions.add_parser("show", help="show session and project memory relationships")
+    show = actions.add_parser("show", help="show session, project, and repo memory relationships")
+    show.add_argument(
+        "--scope", choices=("session", "project", "repo"), help="show one scope instead of all"
+    )
     show.add_argument("--json", action="store_true", help="show the full raw graph instead")
     show.add_argument(
         "--all", action="store_true", help="show every link instead of the most recent 25"
+    )
+    seed = actions.add_parser(
+        "init", help="seed repo memory from the project rulebook; a preview without --apply"
+    )
+    seed.add_argument(
+        "--from",
+        dest="source",
+        metavar="PATH",
+        help=f"rulebook to read (default: {' then '.join(RULEBOOK_FILES)} at the project root)",
+    )
+    seed.add_argument(
+        "--apply", action="store_true", help="write the proposed facts instead of previewing them"
     )
     actions.add_parser("path", help="print this session's memory directory")
     prune = actions.add_parser("prune", help="remove finished sessions' memory directories")

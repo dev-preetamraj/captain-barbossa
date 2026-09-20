@@ -67,8 +67,9 @@ class InstructionSizeTests(unittest.TestCase):
                 crew = instruction_prompts.agent_instructions(
                     self.directory, "crew member Jack", provider
                 )
-                self.assertEqual(len([line for line in crew.splitlines() if " memory " in line]), 1)
+                self.assertEqual(len([line for line in crew.splitlines() if " memory " in line]), 2)
                 self.assertIn("memory add Jack report '<summary>'", crew)
+                self.assertIn("memory show --scope repo", crew)
                 for phrase in (
                     "CAPTAIN",
                     "Do not create Herdr panes/tabs",
