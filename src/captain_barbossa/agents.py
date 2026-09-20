@@ -445,6 +445,8 @@ def create_crew(args, pane, project):
         launcher = current.directory / f"crew-{name}.sh"
         environment = [
             "--env",
+            "CAPTAIN_ROLE=crew",
+            "--env",
             f"CAPTAIN_SESSION={meta['id']}",
             "--env",
             f"CAPTAIN_PROJECT={project.resolve()}",
@@ -468,7 +470,10 @@ def create_crew(args, pane, project):
         command = shlex.join(
             [binary, *instructions.native_args(provider, instruction_text, model, events)]
         )
-        launcher.write_text(f"#!/bin/sh\nexec {command}\n", encoding="utf-8")
+        launcher.write_text(
+            f'#!/bin/sh\nrm -f -- "$0"\nunset CAPTAIN_CREW_LAUNCHER\nexec {command}\n',
+            encoding="utf-8",
+        )
         launcher.chmod(0o600)
         if placement == "tab":
             created = runtime.herdr(

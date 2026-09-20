@@ -222,6 +222,32 @@ class CaptainFlowTests(unittest.TestCase):
             captain,
         )
 
+    def test_crew_role_cannot_reach_captain_commands_or_non_repo_memory(self):
+        commands = (
+            ["status"],
+            ["memory", "query", "assignments"],
+            ["memory", "add", "x", "y", "z", "--scope", "project"],
+        )
+        with patch.dict(os.environ, {"CAPTAIN_ROLE": "crew"}):
+            for command in commands:
+                with (
+                    self.subTest(command=command),
+                    patch.object(cli, "current_pane", side_effect=AssertionError("dispatched")),
+                    contextlib.redirect_stderr(io.StringIO()) as error,
+                ):
+                    self.assertEqual(cli.main(command), 1)
+                    self.assertIn("captain:", error.getvalue())
+
+            with (
+                patch.object(cli, "current_pane", return_value=self.pane),
+                patch.object(cli, "project_root", return_value=self.project),
+                patch.object(cli, "memory") as show,
+            ):
+                self.assertEqual(cli.main(["memory", "show", "--scope", "session", "--json"]), 0)
+        args = show.call_args.args[0]
+        self.assertEqual(args.scope, "repo")
+        self.assertFalse(args.json)
+
     def test_instructions_keep_crew_prompts_short(self):
         instructions = " ".join(
             instruction_prompts.agent_instructions(self.directory, "captain").split()
@@ -317,7 +343,7 @@ class CaptainFlowTests(unittest.TestCase):
             with self.subTest(role=role):
                 text = instruction_prompts.agent_instructions(self.directory, role)
                 instructions = " ".join(text.split())
-                expected = 2 if role.startswith("crew member ") else 1
+                expected = 0 if role.startswith("crew member ") else 1
                 self.assertEqual(text.count(str(self.directory.name)), expected)
                 for phrase in (
                     f"You are {role}",
@@ -416,8 +442,12 @@ class CaptainFlowTests(unittest.TestCase):
 
                 record = json.loads(output.getvalue())
                 launcher = self.directory / f"crew-{record['id']}.sh"
-                argv = shlex.split(launcher.read_text(), comments=True)
+                script = launcher.read_text()
+                launcher_argv = shlex.split(script, comments=True)
+                argv = launcher_argv[launcher_argv.index("exec") :]
                 self.assertEqual(argv[:2], ["exec", f"/bin/{provider}"])
+                self.assertIn('rm -f -- "$0"', script)
+                self.assertIn("unset CAPTAIN_CREW_LAUNCHER", script)
                 if provider == "codex":
                     prompt = json.loads(
                         next(
@@ -434,19 +464,15 @@ class CaptainFlowTests(unittest.TestCase):
                 self.assertIn(
                     "Complete your assignment yourself; do not delegate or use subagents", prompt
                 )
-                session_argv = [
-                    sys.executable,
-                    "-m",
-                    "captain_barbossa",
-                    "--session",
-                    self.directory.name,
-                    "memory",
-                ]
                 self.assertEqual(
-                    [shlex.split(line) for line in prompt.splitlines() if " memory " in line],
                     [
-                        [*session_argv, "add", record["name"], "report", "<summary>"],
-                        [*session_argv, "show", "--scope", "repo"],
+                        shlex.split(line)
+                        for line in prompt.splitlines()
+                        if line.strip().startswith("captain memory ")
+                    ],
+                    [
+                        ["captain", "memory", "add", record["name"], "report", "<summary>"],
+                        ["captain", "memory", "show", "--scope", "repo"],
                     ],
                 )
                 self.assertNotIn("CAPTAIN", prompt)
@@ -1167,11 +1193,16 @@ class CaptainFlowTests(unittest.TestCase):
                     self.assertEqual(calls[-2].args, ("agent", "get", agent_name))
                     self.assertEqual(calls[-1].args[:2], ("tab", "rename"))
                 else:
-                    self.assertEqual(calls[-4].args[:2], ("agent", "rename"))
-                    self.assertEqual(calls[-3].args, ("agent", "get", run.args[2]))
-                    self.assertEqual(calls[-2].args, ("agent", "prompt", agent_name, task))
+                    self.assertEqual(calls[-5].args[:2], ("agent", "rename"))
+                    self.assertEqual(calls[-4].args, ("agent", "get", run.args[2]))
+                    self.assertEqual(calls[-3].args, ("agent", "prompt", agent_name, task))
+                    # Codex always needs the Enter; only Claude submits from the prompt alone.
+                    self.assertEqual(calls[-2].args, ("agent", "send-keys", agent_name, "enter"))
                     self.assertEqual(calls[-1].args, ("agent", "get", agent_name))
-                self.assertFalse(any(call.args[:2] == ("agent", "send-keys") for call in calls))
+                self.assertEqual(
+                    [call.args[:2] for call in calls].count(("agent", "send-keys")),
+                    1 if provider == "codex" else 0,
+                )
                 saved = memory.read_json(self.directory / "session.json")["crew"][name]
                 self.assertEqual(saved["task"], task)
                 self.assertEqual(saved["id"], name)

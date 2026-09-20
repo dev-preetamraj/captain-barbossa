@@ -38,6 +38,10 @@ focus, and the task is submitted once the native agent is ready. A task that
 never starts, or an agent waiting for approval, preserves the pane for
 inspection and reports an error naming the `herdr agent prompt` command to
 send the task by hand; nothing is retried automatically beyond one resend.
+The startup launcher deletes itself before starting the native CLI and removes
+its path from that process's environment. Crew-side `captain` calls are limited
+to adding session memory and reading committed repo memory; the latter is forced
+to repo scope even if other flags are supplied.
 
 Placement flags and tab shapes are documented in
 [placement.md](https://github.com/dev-preetamraj/captain-barbossa/blob/main/docs/placement.md).
