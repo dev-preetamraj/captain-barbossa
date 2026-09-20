@@ -7,7 +7,7 @@ import shlex
 import sys
 from itertools import cycle
 
-from . import dashboard, instructions, runtime
+from . import config, dashboard, instructions, runtime
 from .crew import WAIT_TIMEOUT as WAIT_TIMEOUT
 from .crew import Crew
 from .memory import (
@@ -86,13 +86,15 @@ def launch(args, pane, project):
     # can find its transcript. Nothing reads this file as a roster entry.
     events = current.events("captain")
     private_dir(events.parent)
-    command = [binary, *instructions.native_args(provider, instruction_text, events=events)]
+    wanted = config.text("captain", "model")
+    model = resolve_model(provider, wanted) if wanted else None
+    command = [binary, *instructions.native_args(provider, instruction_text, model, events=events)]
     if provider == "pi":
         command.extend(["--extension", str(captain_extension(current.directory))])
     if args.prompt:
         command.extend(["--", args.prompt])
     board = None
-    if not args.no_dashboard:
+    if config.flag("dashboard", "enabled") and not args.no_dashboard:
         try:
             board = start_dashboard(current, pane, project)
         except Exception as exc:  # a dashboard pane must never cost the captain its launch

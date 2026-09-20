@@ -49,6 +49,8 @@ class LaunchHarness(unittest.TestCase):
             patch.object(agents.os, "execvpe", lambda b, c, e: self.execs.append((b, c, e)))
         )
         self.enterContext(patch.object(agents, "executable", lambda name: f"/bin/{name}"))
+        # This harness exists to test the dashboard pane, so opt in to [dashboard] enabled.
+        self.enterContext(patch.object(agents.config, "flag", lambda *names: True))
 
     def _herdr(self, *args, **kwargs):
         self.calls.append(args)

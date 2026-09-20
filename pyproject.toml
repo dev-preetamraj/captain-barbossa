@@ -24,6 +24,9 @@ where = ["src"]
 include = ["captain_barbossa*"]
 namespaces = false
 
+[tool.setuptools.package-data]
+captain_barbossa = ["defaults.toml"]
+
 [tool.ruff]
 target-version = "py311"
 line-length = 100

@@ -17,6 +17,7 @@ from .agents import (
     tell_crew,
     wait_crew,
 )
+from .config import init_settings
 from .layout import HERDR_DIRECTIONS
 from .memory import PRUNE_DAYS, memory, project_root
 from .models import PROVIDERS, TIER_NAMES
@@ -40,7 +41,7 @@ def parser():
     root.add_argument(
         "--no-dashboard",
         action="store_true",
-        help="do not open the crew token-usage pane below the captain",
+        help="skip the crew token-usage pane even when [dashboard] enabled is set",
     )
     commands = root.add_subparsers(dest="command")
     crew = commands.add_parser("crew", help="create a native crew after agent and pane/tab choices")
@@ -92,6 +93,13 @@ def parser():
     focus = commands.add_parser("focus", help="focus an existing crew's pane and tab")
     focus.add_argument("name", help="crew name or ID (case-insensitive)")
     commands.add_parser("session", help="print the current session id")
+    start = commands.add_parser("init", help="write a commented .captain/settings.toml template")
+    start.add_argument(
+        "--global",
+        dest="home",
+        action="store_true",
+        help="write ~/.captain/settings.toml instead of the project's",
+    )
     status = commands.add_parser("status", help="print a table of this session's crew")
     status.add_argument("--all", action="store_true", help="include dismissed crew")
     board = commands.add_parser(
@@ -142,6 +150,9 @@ def main(argv=None):
     try:
         if args.command is None:
             bootstrap(args)
+        if args.command == "init":
+            init_settings(args)
+            return 0
         pane = current_pane()
         project = project_root()
         if args.command == "crew":

@@ -144,6 +144,16 @@ spellings): Claude Code additionally offers `claude-fable-5-1` (fable);
 Codex additionally offers `gpt-5.6-terra` (terra) and `gpt-5.5`. Ambiguous
 or unknown text reports the options and creates nothing.
 
+**Settings.** Nothing is required: with no settings file anywhere, the
+defaults above apply. `<project>/.captain/settings.toml` overrides
+`~/.captain/settings.toml`, which overrides the defaults, one key at a time.
+`captain init` (or `captain init --global`) writes a template with every
+setting commented out at its default, and never overwrites an existing file.
+You can retier any provider, set the captain's own model, and turn on the
+dashboard pane; see
+[docs/settings.md](https://github.com/dev-preetamraj/captain-barbossa/blob/main/docs/settings.md)
+for the full reference.
+
 New crew panes/tabs open in the same workspace and project without stealing
 focus, and the task is submitted once the native agent is ready. A task that
 never starts, or an agent waiting for approval, preserves the pane for
@@ -210,10 +220,13 @@ captain dashboard
 captain dashboard --interval 5
 ```
 
-Launching `captain` opens a second pane below it, titled **Dashboard**, that
-refreshes a plain-text table of the session's crew every 2 seconds by default
-(`--interval SECONDS` to change that). Pass `--no-dashboard` to `captain` to
-skip it; run it by hand later with `captain dashboard`.
+`captain dashboard` refreshes a plain-text table of the session's crew in the
+current pane every 2 seconds by default (`--interval SECONDS` to change that).
+
+A captain can also open it for you: set `[dashboard] enabled = true` in
+`.captain/settings.toml` and launching `captain` splits a second pane below
+itself, titled **Dashboard**, running the same table. It is off by default;
+`captain --no-dashboard` skips it for one launch even when it is enabled.
 
 ```text
 NAME    AGENT               STATUS   CTX NOW    CUM TOK  CUM $ $/h 10m
@@ -498,6 +511,7 @@ conversation, not a provider transcript resume.
 | `captain dashboard [--interval SECONDS]` | Refresh a crew token-usage table until interrupted |
 | `captain focus NAME` | Focus crew's pane and tab |
 | `captain session` | Print the current session id |
+| `captain init [--global]` | Write a commented `.captain/settings.toml` template |
 | `captain dismiss NAME` | Close and retire crew |
 | `captain memory add SUBJECT RELATION TARGET [--scope session\|project]` | Save a memory relationship |
 | `captain memory query QUESTION` | Search memory with Graphify |

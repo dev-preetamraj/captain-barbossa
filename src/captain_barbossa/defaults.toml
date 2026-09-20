@@ -1,0 +1,24 @@
+[captain]
+# The captain's own model: a tier (cheap|mid|strong), a model ID, or an alias.
+# Empty means the captain's CLI keeps whatever model it defaults to.
+model = ""
+
+[dashboard]
+# Open the crew token-usage pane below the captain at launch.
+# `captain --no-dashboard` skips it even when this is true, and
+# `captain dashboard` still runs one by hand in any pane.
+enabled = false
+
+# Which model each provider-neutral tier means, per agent CLI. Values take a
+# model ID or an alias, so `mid = "opus"` works. pi is absent on purpose: its
+# tiers are ranked from `pi --list-models`, but a [models.pi] table of your own
+# overrides them the same way, using pi's `provider/model` IDs.
+[models.claude]
+cheap = "claude-haiku-4-5"
+mid = "claude-sonnet-5"
+strong = "claude-opus-5"
+
+[models.codex]
+cheap = "gpt-5.6-luna"
+mid = "gpt-5.6-sol"
+strong = "gpt-6-astra"
