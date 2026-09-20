@@ -1,4 +1,4 @@
-"""Crew placement into declared tab shapes, decided from the session roster alone."""
+"""Crew placement into declared tab shapes, decided from the roster, evened by Herdr."""
 
 import contextlib
 import io
@@ -21,16 +21,25 @@ def pinned(**keys):
 
 
 class GridHarness(unittest.TestCase):
-    """A roster the test owns. Auto placement may not call Herdr at all."""
+    """A roster the test owns. Auto placement may only ever call Herdr to resize an
+
+    existing pane, evening out a column or row a new crew is about to join; any other
+    call is a bug and fails the test.
+    """
 
     def setUp(self):
         self.pane = {"workspace_id": "w1", "tab_id": "captain", "pane_id": "captain"}
         self.meta = {"crew": {}}
         self.tabs = 0
+        self.herdr_calls = []
         self.enterContext(contextlib.redirect_stderr(io.StringIO()))
-        self.api = self.enterContext(
-            patch.object(runtime, "herdr", side_effect=AssertionError("placement asked Herdr"))
-        )
+        self.api = self.enterContext(patch.object(runtime, "herdr", side_effect=self._herdr))
+
+    def _herdr(self, *args, **_):
+        if args[:2] != ("pane", "resize"):
+            raise AssertionError(f"placement asked Herdr: {args}")
+        self.herdr_calls.append(args)
+        return {"resize": {"changed": True}}
 
     def choose(self, direction=None, target="auto", placement="pane"):
         args = SimpleNamespace(direction=direction, split_pane=target)
@@ -124,15 +133,61 @@ class FillOrderTests(GridHarness):
             ],
         )
 
-    def test_ratios_divide_the_declared_shape_evenly(self):
+    def test_a_new_splits_own_ratio_is_always_half_whatever_the_declared_depth(self):
+        """A pane's own split is always even against the one new pane joining it,
+
+        whatever the declared shape's eventual depth; re_even (tested below) is what
+        brings the rest of the chain back to an even share once that pane exists.
+        """
         with pinned(captain_tab=[1, 2, 2]):
-            self.assertAlmostEqual(self.recruit()[0].ratio, 1 / 3)  # column 2 of 3
-            self.assertAlmostEqual(self.recruit()[0].ratio, 1 / 2)  # column 3 of 3
-            self.assertAlmostEqual(self.recruit()[0].ratio, 1 / 2)  # row 2 of 2
+            self.assertAlmostEqual(self.recruit()[0].ratio, 0.5)  # column 2 of 3
+            self.assertAlmostEqual(self.recruit()[0].ratio, 0.5)  # column 3 of 3
+            self.assertAlmostEqual(self.recruit()[0].ratio, 0.5)  # row 2 of 2
         with pinned(captain_tab=[1], crew_tab=[3]):
             self.recruit()
-            self.assertAlmostEqual(self.recruit()[0].ratio, 1 / 3)  # row 2 of 3
-            self.assertAlmostEqual(self.recruit()[0].ratio, 1 / 2)  # row 3 of 3
+            self.assertAlmostEqual(self.recruit()[0].ratio, 0.5)  # row 2 of 3
+            self.assertAlmostEqual(self.recruit()[0].ratio, 0.5)  # row 3 of 3
+
+    def test_a_third_pane_arriving_resizes_the_first_back_to_a_third(self):
+        with pinned(captain_tab=[1, 2, 2]):
+            self.recruit()  # opens column 2: captain and column 2 are already even
+            self.herdr_calls.clear()
+            self.recruit()  # opens column 3: the captain alone must give ground
+        self.assertEqual(
+            self.herdr_calls,
+            [("pane", "resize", "--pane", "captain", "--direction", "left", "--amount", "0.1667")],
+        )
+
+    def test_a_fourth_pane_arriving_resizes_the_first_two_back_to_a_quarter(self):
+        with pinned(captain_tab=[1], crew_tab=[4]):
+            self.recruit(name="crew1")
+            self.recruit(name="crew2")
+            self.recruit(name="crew3")
+            self.herdr_calls.clear()
+            self.recruit(name="crew4")
+        self.assertEqual(
+            self.herdr_calls,
+            [
+                ("pane", "resize", "--pane", "crew1", "--direction", "up", "--amount", "0.0833"),
+                ("pane", "resize", "--pane", "crew2", "--direction", "up", "--amount", "0.1667"),
+            ],
+        )
+
+    def test_a_shape_too_deep_for_herdrs_resizable_range_is_reported_not_approximated(self):
+        with pinned(captain_tab=[1], crew_tab=[11]):
+            for _ in range(10):
+                self.recruit()
+            with self.assertRaisesRegex(CaptainError, "cannot size 11 panes evenly"):
+                self.recruit()
+
+    def test_herdr_declining_a_resize_is_reported_not_approximated(self):
+        with pinned(captain_tab=[1, 2, 2]):
+            self.recruit()
+            with (
+                patch.object(runtime, "herdr", return_value={"resize": {"changed": False}}),
+                self.assertRaisesRegex(CaptainError, "would not resize"),
+            ):
+                self.recruit()
 
 
 class DeterminismTests(GridHarness):
@@ -173,12 +228,17 @@ class DeterminismTests(GridHarness):
             (first.column, first.row, first.pane), (later.column, later.row, later.pane)
         )
 
-    def test_placement_never_asks_herdr_anything(self):
+    def test_placement_only_ever_asks_herdr_to_resize(self):
+        """Deciding a slot may re-even existing panes, but never lists, splits, or reads:
+
+        the harness fails the test on any other call, so surviving this walk is the
+        assertion.
+        """
         self.roster()
         with pinned(captain_tab=[1, 2, 2]):
             self.choose()
             self.walk(3, captain_tab=[1, 2, 2])
-        self.api.assert_not_called()
+        self.assertTrue(all(call[:2] == ("pane", "resize") for call in self.herdr_calls))
 
 
 class DismissalTests(GridHarness):
