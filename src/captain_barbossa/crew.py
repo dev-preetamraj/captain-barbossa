@@ -10,18 +10,18 @@ from .runtime import HERDR_ERRORS, CaptainError
 WAIT_INTERVAL = 2
 # Consecutive idle polls before a crew that only paused between tools counts as finished.
 WAIT_POLLS = 3
+# Codex's own title-generation turn notifies like any other; its prompt names what it is.
+CODEX_TITLE_PROMPT = "single-line task title"
 
 
-def event_status(event, task=None):
+def event_status(event):
     kind = event.get("hook_event_name", event.get("type"))
     if kind == "agent-turn-complete":
-        # Codex also notifies for internal title-generation turns.
-        messages = event.get("input-messages")
-        return (
-            "done"
-            if task is not None and isinstance(messages, list) and messages and messages[0] == task
-            else None
-        )
+        # agent-turn-complete is the only event Codex sends, so every turn but its internal
+        # title generation counts as the crew's. Matching the submitted text instead dropped
+        # any turn the composer reflowed or the user retyped, and nothing else reported it.
+        first = next(iter(event.get("input-messages") or []), None)
+        return None if isinstance(first, str) and CODEX_TITLE_PROMPT in first else "done"
     if kind == "Stop":
         return "done"
     if kind == "SessionStart":
@@ -169,7 +169,6 @@ class Crew:
         if self.record.get("provider") == "pi":
             return self.pi_status(timeout), None
         events = self.events
-        task = self.record.get("task")
         deadline = time.monotonic() + timeout
         fallback_at = time.monotonic() + WAIT_INTERVAL * WAIT_POLLS
         cursor = self.cursor
@@ -179,12 +178,12 @@ class Crew:
         previous = None
         while True:
             batch, offset = read_events(events, offset)
-            batch = [event for event in batch if event_status(event, task) is not None]
+            batch = [event for event in batch if event_status(event) is not None]
             seen = seen or bool(batch)
             if batch:
                 # Only the newest lifecycle event describes the current state.
                 event = batch[-1]
-                status = event_status(event, task)
+                status = event_status(event)
                 if status != "working":
                     write_json(cursor, offset)
                     return status, event

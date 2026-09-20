@@ -108,8 +108,8 @@ captain crew Gibbs --task "Review the current changes" --agent claude --model mi
 ```
 
 With no preferences, the captain uses its own CLI, automatic placement, and
-the `cheap` tier. Only the captain recruits; crew forward delegation requests
-back to it. See
+the `cheap` tier. Only the captain recruits; captain-only commands are refused
+for crew, which forward delegation requests back to it. See
 [crew-lifecycle.md](https://github.com/dev-preetamraj/captain-barbossa/blob/main/docs/crew-lifecycle.md)
 for naming, launch behavior, failure handling, and shared-checkout guardrails.
 

@@ -71,8 +71,9 @@ in place, so pulling a teammate's graph cannot rewrite your checkout. Its
 lock lives in the state root, so no lock file is ever committed. A
 `.captain/graph.json` that is not a graph fails loudly with the path to fix.
 
-Crew are told to read `memory show --scope repo` at startup; only the captain
-reads session and project memory, which holds other crew's assignments.
+Crew are required to read `memory show --scope repo` at startup; the CLI
+enforces repo scope for crew. Only the captain reads session and project
+memory, which holds other crew's assignments.
 
 `$XDG_STATE_HOME` is honored in place of `~/.local/state` when set. Git
 repositories use their checkout root as project identity; other directories

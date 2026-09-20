@@ -13,6 +13,9 @@
   sign-in. Inspect the pane in Herdr; the task is not retried automatically
   past one resend. Send it by hand with
   `herdr agent prompt <agent-name> '<task>'`.
+- **Codex crew blocked on approval is invisible to `captain wait <crew>
+  --timeout 0`** — pane fallback starts after 6 seconds; use a non-zero
+  timeout.
 - **"... is waiting for input or approval instead of starting the task."** —
   read the pane before approving, then send the requested key with
   `herdr agent send-keys <name> <key>` (Claude Code may need Enter or a

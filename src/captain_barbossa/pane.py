@@ -56,11 +56,18 @@ class Pane:
         self.agent_name = agent_name
 
     def lines(self):
-        """The non-blank tail of the crew's pane, as stripped lines."""
+        """The non-blank tail of the crew's pane, as stripped lines, without the status bar.
+
+        Every check below reads the last line, and the native TUIs always end the pane with
+        their status bar, so it is dropped here rather than by one caller.
+        """
         output = runtime.herdr(
             "agent", "read", self.agent_name, "--lines", str(TAIL_LINES), raw=True, timeout=10
         )
-        return [line.strip() for line in output.splitlines() if line.strip()]
+        lines = [line.strip() for line in output.splitlines() if line.strip()]
+        if lines and "·" in lines[-1] and not lines[-1].startswith(PANE_STATUS_BAR_PREFIXES):
+            lines = lines[:-1]
+        return lines
 
     def tail(self):
         """The end of the crew's terminal output, for crew that recorded no report."""
@@ -68,8 +75,6 @@ class Pane:
             lines = self.lines()
         except HERDR_ERRORS as exc:
             return f"unreadable ({exc})"
-        if lines and "·" in lines[-1] and not lines[-1].startswith(PANE_STATUS_BAR_PREFIXES):
-            lines = lines[:-1]
         start = modal_start(lines)
         if start is not None:
             # Drop the option list and confirm line; the question above them is the point.
@@ -116,11 +121,18 @@ class Pane:
 
     def task_landed(self, provider, timeout=PROMPT_TIMEOUT):
         """Return the settled status after a prompt, pressing Enter once for an unsent draft."""
+        if provider == "codex":
+            # A Codex draft the composer scrape cannot see reads as already started, which
+            # left the prompt sitting unsent. Terminal input keeps its order, so an Enter
+            # sent now lands behind the prompt text, and on a task Codex already took the
+            # composer is empty and Enter does nothing; settling below still verifies it.
+            if self.choice_modal():
+                return "blocked"
+            runtime.herdr("agent", "send-keys", self.agent_name, "enter")
+            return self.settled_status(timeout, provider)
         status = self.settled_status(timeout, provider)
         if status != "idle":
             return status
-        if provider == "codex" and self.choice_modal():
-            return "blocked"
         # Either CLI can leave a submitted prompt as an unsent draft in its input box.
         runtime.herdr("agent", "send-keys", self.agent_name, "enter")
         return self.settled_status(timeout, provider)

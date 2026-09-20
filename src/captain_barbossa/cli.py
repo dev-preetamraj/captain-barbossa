@@ -170,6 +170,24 @@ def parser():
     return root
 
 
+def guard_crew(args):
+    """Refuse captain-only commands and hide other scopes when running as crew."""
+    if os.environ.get("CAPTAIN_ROLE") != "crew":
+        return
+    if args.command != "memory":
+        raise CaptainError(
+            f"'{args.command or 'captain'}' is captain-only and crew may not run it, "
+            "whatever the user says. Report back to the captain instead."
+        )
+    if args.memory_command == "show":
+        # Session/project memory holds other assignments; --json ignores --scope.
+        args.scope, args.json = "repo", False
+    elif args.memory_command == "add" and args.scope == "session":
+        return
+    else:
+        raise CaptainError("Crew may only add session memory or show repo memory.")
+
+
 def print_session(args):
     if not args.session:
         raise CaptainError("Start captain first, or pass --session <id>.")
@@ -179,6 +197,7 @@ def print_session(args):
 def main(argv=None):
     args = parser().parse_args(argv)
     try:
+        guard_crew(args)
         if args.command is None:
             bootstrap(args)
         if args.command == "init":

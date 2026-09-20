@@ -17,13 +17,15 @@ class CodexPane:
 
     Herdr sees the renaming turn as activity even though the task is still an unsent
     draft in the composer; Enter submits it unless `swallows_enter` is set, which is what
-    a usage-limit notice over the composer does.
+    a usage-limit notice over the composer does. `readable` off is a composer whose draft
+    the pane scrape cannot make out, which is indistinguishable from an empty one.
     """
 
-    def __init__(self, status="working", swallows_enter=False):
+    def __init__(self, status="working", swallows_enter=False, readable=True):
         self.status = status
         self.draft = True
         self.swallows_enter = swallows_enter
+        self.readable = readable
         self.calls = []
 
     def __call__(self, *call, **kwargs):
@@ -38,7 +40,10 @@ class CodexPane:
         return {}
 
     def text(self):
-        composer = f"› {TASK}" if self.draft else "› Ask Codex to do anything"
+        if self.draft:
+            composer = f"› {TASK}" if self.readable else f"  {TASK}"
+        else:
+            composer = "› Ask Codex to do anything"
         return "\n".join(["• Ran uv run --locked python -m unittest -q", composer, "renaming..."])
 
     def verbs(self):
@@ -72,11 +77,20 @@ class SubmitTaskTests(unittest.TestCase):
         self.assertEqual(pane.verbs().count(("agent", "prompt")), 1)
         self.assertEqual(pane.verbs().count(("agent", "send-keys")), 1)
 
-    def test_a_working_codex_with_an_empty_composer_lands_without_enter(self):
+    def test_a_draft_the_composer_scrape_cannot_read_is_still_submitted(self):
+        """A Codex composer whose draft the pane does not render readably reads as empty,
+        which used to count as started and left the prompt sitting unsent."""
+        pane = CodexPane(readable=False)
+        self.submit(pane)
+        self.assertEqual(pane.verbs().count(("agent", "send-keys")), 1)
+        self.assertFalse(pane.draft)
+
+    def test_an_already_submitted_codex_task_takes_the_extra_enter_harmlessly(self):
         pane = CodexPane()
         pane.draft = False
         self.submit(pane)
-        self.assertNotIn(("agent", "send-keys"), pane.verbs())
+        self.assertEqual(pane.verbs().count(("agent", "prompt")), 1)
+        self.assertEqual(pane.verbs().count(("agent", "send-keys")), 1)
 
     def test_prompt_starting_with_a_dash_gets_a_leading_space(self):
         """A task like "-x" must reach the agent as text, not get parsed as a flag; herdr
