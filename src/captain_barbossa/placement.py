@@ -10,10 +10,11 @@ from .runtime import CaptainError
 
 
 class Placement:
-    """The captain's origin and the active crew geometry used to choose a split."""
+    """The captain's origin, the dashboard pane to avoid, and the active crew geometry."""
 
-    def __init__(self, pane, current):
+    def __init__(self, pane, current, dashboard=None):
         self.pane = pane
+        self.dashboard = dashboard
         active = [crew.record for crew in Crew.members(current) if not crew.is_dismissed]
         self.crew_panes = {crew["pane"] for crew in active if crew.get("pane")}
         self.crew_tabs = []
@@ -44,6 +45,8 @@ class Placement:
                 continue
             pane_id, tab_id = entry.get("pane_id"), entry.get("tab_id")
             if not (isinstance(pane_id, str) and pane_id and isinstance(tab_id, str) and tab_id):
+                continue
+            if pane_id == self.dashboard:
                 continue
             title = entry.get("label") or entry.get("terminal_title_stripped") or pane_id
             if pane_id == self.pane["pane_id"]:
@@ -93,6 +96,9 @@ class Placement:
                         runtime.herdr("pane", "layout", "--pane", sample_pane), sample_pane
                     )
 
+                # A few rows of table: splitting it would leave half a dashboard and half
+                # a crew pane, so it is never a candidate.
+                geometry = {p: rect for p, rect in geometry.items() if p != self.dashboard}
                 split_pane, chosen, reason = pick_auto_split(
                     geometry, captain_pane, self.crew_panes, direction
                 )

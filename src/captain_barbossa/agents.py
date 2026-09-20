@@ -7,7 +7,7 @@ import shlex
 import sys
 from itertools import cycle
 
-from . import instructions, runtime
+from . import dashboard, instructions, runtime
 from .crew import WAIT_TIMEOUT as WAIT_TIMEOUT
 from .crew import Crew
 from .memory import (
@@ -18,6 +18,7 @@ from .memory import (
     prune_sessions,
     read_cursor,
     read_events,
+    read_json,
     session,
     state_root,
     temp_root,
@@ -35,6 +36,10 @@ from .update_check import check_for_update
 # A hook payload carries a whole assistant turn or tool_input; the wait line only needs
 # enough to decide what to do next, and the event file keeps the rest.
 HOOK_LIMIT = 500
+
+# Fraction of the captain pane kept when the dashboard splits off below it: the
+# dashboard is a few rows of table, not half a screen.
+DASHBOARD_RATIO = 0.8
 
 # One word each: the roster name is the crew ID, the display name, and the agent suffix.
 CREW_NAMES = (
@@ -68,10 +73,6 @@ def launch(args, pane, project):
     instruction_text = instructions.agent_instructions(
         current.directory, "Captain Barbossa", provider
     )
-    write_json(
-        current.directory / "captain.json",
-        {"provider": provider, "pane": pane["pane_id"], "terminal_id": pane.get("terminal_id")},
-    )
     add_memory(current.graph, f"session:{meta['id']}", "captain", provider)
     runtime.herdr("tab", "rename", pane["tab_id"], "Captain Barbossa")
     env = dict(
@@ -81,12 +82,126 @@ def launch(args, pane, project):
         CAPTAIN_STATE_ROOT=str(state_root()),
         CAPTAIN_TEMP_ROOT=str(temp_root()),
     )
-    command = [binary, *instructions.native_args(provider, instruction_text)]
+    # The captain's own hooks write the same lifecycle events crew do, so the dashboard
+    # can find its transcript. Nothing reads this file as a roster entry.
+    events = current.events("captain")
+    private_dir(events.parent)
+    command = [binary, *instructions.native_args(provider, instruction_text, events=events)]
     if provider == "pi":
         command.extend(["--extension", str(captain_extension(current.directory))])
     if args.prompt:
         command.extend(["--", args.prompt])
+    board = None
+    if not args.no_dashboard:
+        try:
+            board = start_dashboard(current, pane, project)
+        except Exception as exc:  # a dashboard pane must never cost the captain its launch
+            print(f"captain: no dashboard pane: {exc}", file=sys.stderr)
+    write_json(
+        current.directory / "captain.json",
+        {
+            "provider": provider,
+            "pane": pane["pane_id"],
+            "terminal_id": pane.get("terminal_id"),
+            "dashboard": board,
+        },
+    )
     os.execvpe(binary, command, env)
+
+
+def start_dashboard(current, pane, project):
+    """Split a short pane below the captain and run `captain dashboard` in it."""
+    # Env var, not shell text, so a quote in the session path can't inject commands.
+    launcher = current.directory / "dashboard.sh"
+    launcher.write_text(
+        "#!/bin/sh\nexec "
+        + shlex.join(
+            [sys.executable, "-m", "captain_barbossa", "--session", current.meta["id"], "dashboard"]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    launcher.chmod(0o600)
+    split_args = [
+        "--pane",
+        pane["pane_id"],
+        "--direction",
+        "down",
+        "--ratio",
+        str(DASHBOARD_RATIO),
+        "--cwd",
+        str(project),
+        "--no-focus",
+        "--env",
+        f"CAPTAIN_SESSION={current.meta['id']}",
+        "--env",
+        f"CAPTAIN_PROJECT={project.resolve()}",
+        "--env",
+        f"CAPTAIN_STATE_ROOT={state_root()}",
+        "--env",
+        f"CAPTAIN_TEMP_ROOT={temp_root()}",
+        "--env",
+        f"CAPTAIN_DASHBOARD_LAUNCHER={launcher}",
+    ]
+    # usage.context_limit() reads this in the dashboard's own fresh process, so a
+    # shell-set override must be forwarded explicitly or the context % never appears.
+    context_limit = os.environ.get("CAPTAIN_CONTEXT_LIMIT")
+    if context_limit:
+        split_args.extend(["--env", f"CAPTAIN_CONTEXT_LIMIT={context_limit}"])
+    created = runtime.herdr("pane", "split", *split_args)
+    board = created.get("pane", {}).get("pane_id")
+    if not isinstance(board, str) or not board:
+        raise CaptainError("Herdr split a pane for the dashboard but returned no pane ID.")
+    runtime.herdr("pane", "rename", board, "Dashboard")
+    # A new shell may still be in canonical mode: keep terminal input short.
+    runtime.herdr(
+        "pane", "run", board, '/bin/sh "$CAPTAIN_DASHBOARD_LAUNCHER"', expect_output=False
+    )
+    return board
+
+
+def dashboard_pane(current):
+    """The dashboard's pane id from captain.json, or None when this session has none."""
+    try:
+        record = read_json(current.directory / "captain.json")
+    except CaptainError:
+        return None
+    return record.get("dashboard") if isinstance(record, dict) else None
+
+
+def renest_dashboard(pane, captain_pane):
+    """Re-attach the dashboard directly under the captain pane after a crew split.
+
+    Splitting the captain pane sideways turns it into a row, and the dashboard, its former
+    sibling, ends up under that whole row instead of under the captain. `pane move` is the
+    only Herdr command that reparents, and it is a no-op within one tab, so the dashboard
+    goes out to a scratch tab and straight back. Herdr closes the emptied tab itself.
+    """
+    runtime.herdr("pane", "move", pane, "--new-tab", "--no-focus")
+    runtime.herdr(
+        "pane",
+        "move",
+        pane,
+        "--tab",
+        captain_pane["tab_id"],
+        "--target-pane",
+        captain_pane["pane_id"],
+        "--split",
+        "down",
+        "--ratio",
+        str(DASHBOARD_RATIO),
+        "--no-focus",
+    )
+
+
+def run_dashboard(args, pane, project):
+    """Refresh the crew token-usage table in this pane until interrupted."""
+    current = session(project, pane, args.session)
+    # Omitted --interval leaves the cadence to dashboard.run rather than restating it here.
+    if args.interval is None:
+        dashboard.run(current)
+    else:
+        dashboard.run(current, args.interval)
 
 
 def tail_note(current, crew, tail):
@@ -299,7 +414,10 @@ def create_crew(args, pane, project):
     current = session(project, pane, args.session)
     with crew_meta(current.directory) as meta:
         current = current._replace(meta=meta)
-        direction, split_pane, tab_id, auto = Placement(pane, current).choose_split(args, placement)
+        board = dashboard_pane(current)
+        direction, split_pane, tab_id, auto = Placement(pane, current, board).choose_split(
+            args, placement
+        )
         if auto and split_pane is None:
             placement = "tab"
         model = resolve_model(provider, args.model)
@@ -380,6 +498,11 @@ def create_crew(args, pane, project):
                 ) from exc
             new_pane = created.get("pane", {}).get("pane_id")
             tab_id = created.get("pane", {}).get("tab_id") or tab_id
+            if board and tab_id == pane["tab_id"]:
+                try:
+                    renest_dashboard(board, pane)
+                except HERDR_ERRORS as exc:  # geometry is cosmetic; never lose the crew over it
+                    print(f"captain: dashboard not re-nested: {exc}", file=sys.stderr)
         if not new_pane:
             raise CaptainError(
                 "Herdr created a layout but returned no pane ID. Inspect the workspace before retrying."

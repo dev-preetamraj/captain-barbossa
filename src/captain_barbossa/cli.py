@@ -11,6 +11,7 @@ from .agents import (
     dismiss_crew,
     focus_crew,
     launch,
+    run_dashboard,
     status_crew,
     switch_model,
     tell_crew,
@@ -36,6 +37,11 @@ def parser():
         help="reuse graph memory for this session",
     )
     root.add_argument("--prompt", help="initial captain prompt")
+    root.add_argument(
+        "--no-dashboard",
+        action="store_true",
+        help="do not open the crew token-usage pane below the captain",
+    )
     commands = root.add_subparsers(dest="command")
     crew = commands.add_parser("crew", help="create a native crew after agent and pane/tab choices")
     crew.add_argument(
@@ -88,6 +94,15 @@ def parser():
     commands.add_parser("session", help="print the current session id")
     status = commands.add_parser("status", help="print a table of this session's crew")
     status.add_argument("--all", action="store_true", help="include dismissed crew")
+    board = commands.add_parser(
+        "dashboard", help="refresh a crew token-usage table in this pane until interrupted"
+    )
+    board.add_argument(
+        "--interval",
+        type=float,
+        metavar="SECONDS",
+        help="seconds between refreshes (dashboard default when omitted)",
+    )
     dismiss = commands.add_parser("dismiss", help="close an existing crew's pane and retire it")
     dismiss.add_argument("name", help="crew name or ID (case-insensitive)")
     mem = commands.add_parser("memory", help="project/session graph memory outside the repo")
@@ -143,6 +158,8 @@ def main(argv=None):
             print_session(args)
         elif args.command == "status":
             status_crew(args, pane, project)
+        elif args.command == "dashboard":
+            run_dashboard(args, pane, project)
         elif args.command == "dismiss":
             dismiss_crew(args, pane, project)
         elif args.command == "memory":
