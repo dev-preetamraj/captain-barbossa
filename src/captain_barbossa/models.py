@@ -16,8 +16,6 @@ MODELS = {
         ("claude-fable-5-1", ("fable",)),
     ),
     "codex": (
-        ("gpt-5.3-codex-spark", ("spark",)),
-        ("gpt-5.4-mini", ("mini",)),
         ("gpt-5.6-luna", ("luna",)),
         ("gpt-5.6-terra", ("terra",)),
         ("gpt-5.6-sol", ("sol",)),
@@ -31,7 +29,9 @@ PROVIDERS = ("claude", "codex", "pi")
 # Provider-neutral tiers: the captain picks one from the task, each CLI resolves its own.
 TIERS = {
     "claude": {"cheap": "claude-haiku-4-5", "mid": "claude-sonnet-5", "strong": "claude-opus-5"},
-    "codex": {"cheap": "gpt-5.3-codex-spark", "mid": "gpt-5.6-terra", "strong": "gpt-6-astra"},
+    # Codex picker on 2026-09-20 offers exactly these five: gpt-6-astra (default),
+    # gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna, gpt-5.5.
+    "codex": {"cheap": "gpt-5.6-luna", "mid": "gpt-5.6-sol", "strong": "gpt-6-astra"},
 }
 TIER_NAMES = ("cheap", "mid", "strong")
 
