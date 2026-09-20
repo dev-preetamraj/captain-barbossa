@@ -4,9 +4,8 @@ import argparse
 import os
 import sys
 
-from . import __version__
+from . import __version__, config
 from .agents import (
-    WAIT_TIMEOUT,
     create_crew,
     dismiss_crew,
     focus_crew,
@@ -17,7 +16,6 @@ from .agents import (
     tell_crew,
     wait_crew,
 )
-from .config import init_settings
 from .layout import HERDR_DIRECTIONS
 from .memory import PRUNE_DAYS, memory, project_root
 from .models import PROVIDERS, TIER_NAMES
@@ -70,9 +68,9 @@ def parser():
     )
     crew.add_argument(
         "--model",
-        default="cheap",
         help=f"tier ({'|'.join(TIER_NAMES)}) resolved for the crew CLI, or a model name/alias "
-        "(default: cheap, so routine work never silently lands on an expensive default)",
+        "([crew] model when omitted, so routine work never silently lands on an expensive "
+        "default)",
     )
     wait = commands.add_parser(
         "wait", help="wait for a crew to finish, then record and print its completion"
@@ -81,8 +79,8 @@ def parser():
     wait.add_argument(
         "--timeout",
         type=float,
-        default=WAIT_TIMEOUT,
-        help=f"seconds to wait before giving up (default {WAIT_TIMEOUT})",
+        metavar="SECONDS",
+        help="seconds to wait before giving up ([crew] wait_timeout when omitted)",
     )
     tell = commands.add_parser("tell", help="send a follow-up prompt to an existing crew")
     tell.add_argument("name", help="crew name or ID (case-insensitive)")
@@ -109,7 +107,7 @@ def parser():
         "--interval",
         type=float,
         metavar="SECONDS",
-        help="seconds between refreshes (dashboard default when omitted)",
+        help="seconds between refreshes ([dashboard] interval when omitted)",
     )
     dismiss = commands.add_parser("dismiss", help="close an existing crew's pane and retire it")
     dismiss.add_argument("name", help="crew name or ID (case-insensitive)")
@@ -151,7 +149,7 @@ def main(argv=None):
         if args.command is None:
             bootstrap(args)
         if args.command == "init":
-            init_settings(args)
+            config.init_settings(args)
             return 0
         pane = current_pane()
         project = project_root()

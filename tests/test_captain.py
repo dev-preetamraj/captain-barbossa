@@ -18,7 +18,7 @@ from unittest.mock import patch
 
 import questionary
 
-from captain_barbossa import agents, cli, layout, memory, models, runtime
+from captain_barbossa import agents, cli, config, memory, models, runtime
 from captain_barbossa import instructions as instruction_prompts
 from captain_barbossa import pane as panes
 from captain_barbossa.crew import Crew
@@ -114,7 +114,7 @@ class CaptainFlowTests(unittest.TestCase):
             {"pane": "w1:p1"},
             {"agent": None},
             {"agent": "x"},
-            {"layout": []},
+            {"root_pane": []},
         ):
             with (
                 self.subTest(response=response),
@@ -722,7 +722,7 @@ class CaptainFlowTests(unittest.TestCase):
     EMPTY_COMPOSER = "› Ask Codex to do anything"
     LISTING_CALLS = (("tab", "list", "--workspace", "w1"), ("pane", "list", "--workspace", "w1"))
     LISTED_PANES = (
-        "auto Auto (balanced by layout); Captain Barbossa: w1:p1 zsh (captain) / w1:p5 Will; "
+        "auto Auto (next slot in the tab shape); Captain Barbossa: w1:p1 zsh (captain) / w1:p5 Will; "
         "Tab 2: w1:p9 vim; w1:t3: w1:p8 w1:p8"
     )
 
@@ -890,7 +890,7 @@ class CaptainFlowTests(unittest.TestCase):
                 self.assertIn("Captain Barbossa", rows)
                 self.assertEqual(
                     [row.title for row in rows if isinstance(row, questionary.Choice)],
-                    ["Auto (balanced by layout)", "zsh (captain)", "Will", "vim", "w1:p8"],
+                    ["Auto (next slot in the tab shape)", "zsh (captain)", "Will", "vim", "w1:p8"],
                 )
                 self.assertLess(rows.index("Captain Barbossa"), rows.index("Tab 2"))
                 self.assertLess(rows.index("Tab 2"), rows.index("w1:t3"))
@@ -900,70 +900,6 @@ class CaptainFlowTests(unittest.TestCase):
             self.assertEqual(result["tab"], tab)
             self.assertEqual(result["pane"], "w1:p6")
             memory.write_json(self.directory / "session.json", {**self.meta, "crew": {}})
-
-    @staticmethod
-    def layout(*panes):
-        """Build a Herdr pane layout from (pane_id, x, y, width, height) rows."""
-        return {
-            "layout": {
-                "panes": [
-                    {"pane_id": pane_id, "rect": {"x": x, "y": y, "width": w, "height": h}}
-                    for pane_id, x, y, w, h in panes
-                ]
-                + [{"pane_id": None, "rect": {}}, "junk"]
-            }
-        }
-
-    def test_auto_split_balances_the_tab_and_falls_back_when_crowded(self):
-        fresh = {"w1:p1": (0, 0, 156, 51)}
-        slivers = {"w1:p1": (0, 0, 78, 51), "w1:p2": (78, 0, 78, 51), "w1:p5": (156, 0, 78, 51)}
-        rows = {"w1:p1": (0, 0, 156, 17), "w1:p2": (0, 17, 156, 17), "w1:p5": (0, 34, 156, 17)}
-        short_captain = {
-            "w1:p1": (0, 0, 78, 25),
-            "w1:p3": (0, 25, 78, 26),
-            "w1:p2": (78, 0, 78, 51),
-            "w1:p5": (156, 0, 78, 51),
-        }
-        far_shell = {"w1:p2": (0, 0, 78, 51), "w1:p5": (78, 0, 78, 51), "w1:p1": (156, 0, 78, 51)}
-        bigger_captain = {
-            "w1:p1": (0, 0, 110, 60),
-            "w1:p2": (110, 0, 118, 40),
-            "w1:p5": (110, 40, 118, 20),
-        }
-        only_captain_down = {
-            "w1:p1": (0, 0, 78, 51),
-            "w1:p2": (78, 0, 78, 25),
-            "w1:p5": (78, 25, 78, 26),
-        }
-        grid = {
-            "w1:p1": (0, 0, 78, 25),
-            "w1:p2": (78, 0, 78, 25),
-            "w1:p3": (0, 25, 78, 26),
-            "w1:p5": (78, 25, 78, 26),
-        }
-        for geometry, direction, expected in (
-            (fresh, None, ("w1:p1", "vertical")),
-            (fresh, "horizontal", (None, None)),
-            (slivers, None, ("w1:p2", "horizontal")),
-            (slivers, "vertical", (None, None)),
-            (rows, None, ("w1:p1", "vertical")),
-            (rows, "horizontal", (None, None)),
-            (short_captain, None, ("w1:p2", "horizontal")),
-            (far_shell, None, ("w1:p2", "horizontal")),
-            (only_captain_down, None, (None, None)),
-            (bigger_captain, None, ("w1:p2", "horizontal")),
-            (grid, None, (None, None)),
-        ):
-            with self.subTest(geometry=geometry, direction=direction):
-                pane_id, chosen, reason = layout.pick_split(geometry, "w1:p1", {"w1:p5"}, direction)
-                self.assertEqual((pane_id, chosen), expected)
-                if pane_id is None:
-                    self.assertIn("below 60x15 cells", reason)
-                else:
-                    self.assertIn(f"pane {pane_id} split", reason)
-                    self.assertIn("halves", reason)
-        self.assertIn("captain's own pane", layout.pick_split(fresh, "w1:p1", set())[2])
-        self.assertIn("holds no crew", layout.pick_split(short_captain, "w1:p1", {"w1:p5"})[2])
 
     def test_default_recruiting_flags_create_a_crew_without_any_selector(self):
         created = {
@@ -977,8 +913,6 @@ class CaptainFlowTests(unittest.TestCase):
         }
 
         def api(*call, **_):
-            if call[:2] == ("pane", "layout"):
-                return self.layout(("w1:p1", 0, 0, 156, 51))
             return self.listing(*call) or created
 
         args = self.args(
@@ -1011,7 +945,8 @@ class CaptainFlowTests(unittest.TestCase):
         self.assertEqual(result["direction"], "vertical")
         self.assertEqual(result["model"], "claude-sonnet-5")
 
-    def test_auto_placement_splits_from_the_layout_and_records_the_choice(self):
+    def test_auto_placement_takes_a_slot_in_the_shape_and_records_it(self):
+        """The shape decides, so no pane is measured and no layout is fetched."""
         created = {
             "pane": {
                 "pane_id": "w1:p6",
@@ -1023,53 +958,61 @@ class CaptainFlowTests(unittest.TestCase):
             "tab_id": "w1:t9",
             "agent": {"name": f"c-{self.meta['id'][:8]}-jack", "agent_status": "working"},
         }
-        fresh = self.layout(("w1:p1", 0, 0, 156, 51))
-        two = self.layout(("w1:p1", 0, 0, 78, 51), ("w1:p5", 78, 0, 78, 51))
-        grid = self.layout(
-            ("w1:p1", 0, 0, 78, 25),
-            ("w1:p2", 78, 0, 78, 25),
-            ("w1:p3", 0, 25, 78, 26),
-            ("w1:p5", 78, 25, 78, 26),
-        )
         base = ("crew", "--agent", "codex", "--task", "build", "--placement", "pane")
-        for flags, response, layout_pane, expected, chosen in (
-            (("--split-pane", "auto"), fresh, "w1:p1", ("split", "w1:p1", "right"), "vertical"),
+        for flags, roster, expected, chosen, ratio in (
+            # An empty captain tab: the first crew opens column 2 beside the captain.
+            (("--split-pane", "auto"), {}, ("split", "w1:p1", "right"), "vertical", "0.5000"),
+            # Column 2 taken, so [1, 2] stacks the next crew under it.
             (
                 ("--split-pane", "auto", "--direction", "auto"),
-                two,
-                "w1:p1",
+                {
+                    "will": {
+                        "pane": "w1:p5",
+                        "tab": "w1:t1",
+                        "status": "started",
+                        "column": 2,
+                        "row": 1,
+                    }
+                },
                 ("split", "w1:p5", "down"),
                 "horizontal",
+                "0.5000",
             ),
+            # A forced direction keeps the slot but drops the even ratio.
             (
                 ("--split-pane", "auto", "--direction", "horizontal"),
-                two,
-                "w1:p1",
-                ("split", "w1:p5", "down"),
+                {},
+                ("split", "w1:p1", "down"),
                 "horizontal",
+                None,
             ),
+            # Both slots of [1, 2] taken: the shape is full and a tab opens.
             (
-                ("--split-pane", "w1:p5", "--direction", "auto"),
-                two,
-                "w1:p5",
-                ("split", "w1:p5", "down"),
-                "horizontal",
-            ),
-            (("--split-pane", "auto", "--direction", "vertical"), two, "w1:p1", ("tab",), None),
-            (("--split-pane", "auto"), grid, "w1:p1", ("tab",), None),
-        ):
-            if response is two:
-                memory.write_json(
-                    self.directory / "session.json",
-                    {
-                        **self.meta,
-                        "crew": {"will": {"pane": "w1:p5", "tab": "w1:t1", "status": "started"}},
+                ("--split-pane", "auto"),
+                {
+                    "will": {
+                        "pane": "w1:p5",
+                        "tab": "w1:t1",
+                        "status": "started",
+                        "column": 2,
+                        "row": 1,
                     },
-                )
+                    "gibbs": {
+                        "pane": "w1:p7",
+                        "tab": "w1:t1",
+                        "status": "started",
+                        "column": 2,
+                        "row": 2,
+                    },
+                },
+                ("tab",),
+                None,
+                None,
+            ),
+        ):
+            memory.write_json(self.directory / "session.json", {**self.meta, "crew": roster})
 
             def api(*call, **_):
-                if call[:2] == ("pane", "layout"):
-                    return response
                 return self.listing(*call) or created
 
             with (
@@ -1082,47 +1025,35 @@ class CaptainFlowTests(unittest.TestCase):
             ):
                 agents.create_crew(self.args(*base, *flags), self.pane, self.project)
             made = [call.args for call in calls.call_args_list]
-            listing = list(self.LISTING_CALLS) if layout_pane != "w1:p1" else []
-            self.assertEqual(made[: len(listing)], listing)
-            self.assertEqual(made[len(listing)], ("pane", "layout", "--pane", layout_pane))
-            creation = made[len(listing) + 1]
+            self.assertFalse([call for call in made if call[:2] == ("pane", "layout")])
+            creation = made[0]
             result = json.loads(output.getvalue())
             if expected[0] == "split":
                 self.assertEqual(creation[:2], ("pane", "split"))
                 self.assertEqual(creation[creation.index("--pane") + 1], expected[1])
                 self.assertEqual(creation[creation.index("--direction") + 1], expected[2])
+                if ratio is None:
+                    self.assertNotIn("--ratio", creation)
+                else:
+                    self.assertEqual(creation[creation.index("--ratio") + 1], ratio)
                 self.assertEqual(result["placement"], "pane")
                 self.assertEqual(result["split_pane"], expected[1])
                 self.assertEqual(result["direction"], chosen)
-                self.assertTrue(result["auto"].startswith(f"split {expected[1]} {chosen}"))
+                self.assertEqual((result["column"], result["row"]), (2, 1 + len(roster)))
                 self.assertIn(f"Auto placement: split {expected[1]} {chosen}", notice.getvalue())
             else:
                 self.assertEqual(creation[:2], ("tab", "create"))
                 self.assertEqual(result["placement"], "tab")
-                self.assertEqual(result["tab"], "w1:t9")
                 self.assertIsNone(result["split_pane"])
-                self.assertTrue(result["auto"].startswith("new tab; every pane"))
-                self.assertIn("Auto placement: new tab; every pane", notice.getvalue())
-            self.assertNotIn("--direction", notice.getvalue())
+                self.assertEqual((result["column"], result["row"]), (1, 1))
+                self.assertTrue(result["auto"].startswith("new tab; every slot"))
             graph = memory.read_json(self.directory / "graph.json")
             self.assertIn(f"auto: {result['auto']}", [node["label"] for node in graph["nodes"]])
-            memory.write_json(self.directory / "session.json", {**self.meta, "crew": {}})
             memory.write_json(self.directory / "graph.json", {"nodes": [], "links": []})
-        for response in ({}, {"layout": {}}, {"layout": {"panes": [{"pane_id": "w1:p9"}]}}):
-            with (
-                self.subTest(response=response),
-                patch.object(runtime, "herdr", return_value=response),
-                patch.object(agents, "executable", return_value="/bin/codex"),
-                patch.object(sys.stdin, "isatty", return_value=False),
-            ):
-                with self.assertRaisesRegex(runtime.CaptainError, "layout"):
-                    agents.create_crew(
-                        self.args(*base, "--split-pane", "auto"), self.pane, self.project
-                    )
-                self.assertEqual(memory.read_json(self.directory / "session.json")["crew"], {})
+        memory.write_json(self.directory / "session.json", {**self.meta, "crew": {}})
 
-    def test_auto_placement_searches_crew_tabs_before_creating_new_tab(self):
-        """When current tab is full, auto splits a pane in an existing crew tab."""
+    def test_auto_placement_fills_a_crew_tab_before_opening_another(self):
+        """The captain tab is full, so the next crew reuses the oldest crew tab with room."""
         created = {
             "pane": {
                 "pane_id": "w1:p10",
@@ -1130,39 +1061,22 @@ class CaptainFlowTests(unittest.TestCase):
                 "agent": "claude",
                 "agent_status": "idle",
             },
-            "agent": {"name": f"c-{self.meta['id'][:8]}-will", "agent_status": "working"},
+            "agent": {"name": f"c-{self.meta['id'][:8]}-elizabeth", "agent_status": "working"},
         }
-
-        grid = self.layout(
-            ("w1:p1", 0, 0, 78, 25),
-            ("w1:p2", 78, 0, 78, 25),
-            ("w1:p3", 0, 25, 78, 26),
-            ("w1:p5", 78, 25, 78, 26),
-        )
-        spacious = self.layout(("w1:p9", 0, 0, 156, 51))
-
         meta = memory.read_json(self.directory / "session.json")
-        meta["crew"]["jack"] = {
-            "id": "jack",
-            "name": "Jack",
-            "agent": f"c-{meta['id'][:8]}-jack",
-            "pane": "w1:p9",
-            "tab": "w1:t2",
-            "status": "started",
+        meta["crew"] = {
+            "will": {"pane": "w1:p5", "tab": "w1:t1", "status": "started", "column": 2, "row": 1},
+            "gibbs": {"pane": "w1:p7", "tab": "w1:t1", "status": "started", "column": 2, "row": 2},
+            "jack": {"pane": "w1:p9", "tab": "w1:t2", "status": "started", "column": 1, "row": 1},
         }
         memory.write_json(self.directory / "session.json", meta)
 
         def api(*call, **_):
-            if call[:2] == ("pane", "layout"):
-                if call[3] == "w1:p1":
-                    return grid
-                elif call[3] == "w1:p9":
-                    return spacious
             return self.listing(*call) or created
 
         base = ("crew", "--agent", "claude", "--task", "review code", "--placement", "pane")
         with (
-            patch.object(runtime, "herdr", side_effect=api),
+            patch.object(runtime, "herdr", side_effect=api) as calls,
             patch.object(agents, "executable", return_value="/bin/claude"),
             patch.object(sys.stdin, "isatty", return_value=False),
             contextlib.redirect_stdout(io.StringIO()) as output,
@@ -1174,8 +1088,10 @@ class CaptainFlowTests(unittest.TestCase):
         self.assertEqual(result["placement"], "pane")
         self.assertEqual(result["split_pane"], "w1:p9")
         self.assertEqual(result["tab"], "w1:t2")
+        self.assertEqual((result["column"], result["row"]), (2, 1))
+        self.assertFalse([c.args for c in calls.call_args_list if c.args[:2] == ("pane", "layout")])
         self.assertIn("Auto placement: split w1:p9", notice.getvalue())
-        self.assertNotIn("Auto placement: new tab", notice.getvalue())
+        self.assertNotIn("new tab", notice.getvalue())
 
     def test_crew_creates_chosen_topology_then_starts_native_agent(self):
         for placement, provider, name, display_name in (
@@ -1407,7 +1323,8 @@ class CaptainFlowTests(unittest.TestCase):
 
     def test_crew_without_a_model_recruits_cheap_instead_of_the_native_default(self):
         args = self.args("crew", "--agent", "claude", "--task", "build", "--placement", "tab")
-        self.assertEqual(args.model, "cheap")
+        # The parser leaves it unset; create_crew is what reads [crew] model.
+        self.assertIsNone(args.model)
         created = {
             "pane": {"pane_id": "w1:p2", "agent": "claude", "agent_status": "idle"},
             "root_pane": {"pane_id": "w1:p3"},
@@ -1431,7 +1348,10 @@ class CaptainFlowTests(unittest.TestCase):
         for provider, cheap in (("claude", "claude-haiku-4-5"), ("codex", "gpt-5.6-luna")):
             with self.subTest(provider=provider):
                 args = self.args("crew", "--agent", provider, "--task", "commit the fix")
-                self.assertEqual(models.resolve_model(provider, args.model), cheap)
+                self.assertIsNone(args.model)
+                self.assertEqual(
+                    models.resolve_model(provider, config.text("crew", "model")), cheap
+                )
                 tiers = models.tiers_for(provider)
                 self.assertEqual(tiers["cheap"], cheap)
                 self.assertNotIn(cheap, (tiers["mid"], tiers["strong"]))
@@ -2621,12 +2541,37 @@ class CaptainFlowTests(unittest.TestCase):
         with (
             patch.object(runtime, "herdr", side_effect=self.wait_api(["working"])),
             patch.object(panes.time, "sleep"),
+            patch.object(panes.time, "monotonic", side_effect=count(0, 2)),
         ):
-            with self.assertRaisesRegex(runtime.CaptainError, "still working after 0.0 seconds"):
+            with self.assertRaisesRegex(runtime.CaptainError, "still working after 1.0 seconds"):
                 agents.wait_crew(
-                    self.args("wait", "Jack", "--timeout", "0"), self.pane, self.project
+                    self.args("wait", "Jack", "--timeout", "1"), self.pane, self.project
                 )
         self.assertEqual(self.completions(), [])
+
+    def test_an_omitted_timeout_falls_back_to_the_crew_setting(self):
+        """The parser leaves --timeout unset, so wait itself reads [crew] wait_timeout."""
+        self.wait_crew_record()
+        seen = []
+        with (
+            patch.object(
+                agents.Crew,
+                "status",
+                lambda _self, timeout: seen.append(timeout) or ("idle", None),
+            ),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            agents.wait_crew(self.args("wait", "Jack"), self.pane, self.project)
+        self.assertEqual(seen, [config.lookup("crew", "wait_timeout", kind=int)])
+
+    def test_a_negative_timeout_is_refused_rather_than_quietly_clamped(self):
+        """0 still means "report what has already arrived"; below that is a mistake."""
+        self.wait_crew_record()
+        with patch.object(runtime, "herdr", side_effect=AssertionError("polled")):
+            with self.assertRaisesRegex(runtime.CaptainError, "--timeout must be a number"):
+                agents.wait_crew(
+                    self.args("wait", "Jack", "--timeout", "-5"), self.pane, self.project
+                )
 
     def test_wait_rejects_unknown_crew_before_polling_herdr(self):
         self.wait_crew_record()

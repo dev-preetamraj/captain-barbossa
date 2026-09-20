@@ -163,15 +163,11 @@ class DashboardWiringTests(LaunchHarness):
         self.assertEqual(record["dashboard"], "w1:p2")
         self.assertEqual(record["pane"], "w1:p1")
 
-    def test_context_limit_forwarded_when_set(self):
-        with patch.dict(os.environ, {"CAPTAIN_CONTEXT_LIMIT": "42000"}):
-            self.launch(["--agent", "claude"])
-        self.assertIn("CAPTAIN_CONTEXT_LIMIT=42000", self.split_call())
-
-    def test_context_limit_omitted_when_unset(self):
-        os.environ.pop("CAPTAIN_CONTEXT_LIMIT", None)
+    def test_the_split_forwards_no_dashboard_tuning(self):
+        """The dashboard is its own process and reads [dashboard] itself."""
         self.launch(["--agent", "claude"])
-        self.assertFalse(any(arg.startswith("CAPTAIN_CONTEXT_LIMIT=") for arg in self.split_call()))
+        passed = [arg for arg in self.split_call() if arg.startswith("CAPTAIN_")]
+        self.assertFalse([arg for arg in passed if "CONTEXT_LIMIT" in arg or "PRICES" in arg])
 
     def test_no_dashboard_records_no_pane(self):
         self.launch(["--agent", "claude", "--no-dashboard"])
@@ -208,12 +204,15 @@ class DashboardCommandTests(unittest.TestCase):
         return seen[0]
 
     def test_resolves_the_session_like_status_does(self):
-        (current,) = self.run_dashboard(["dashboard"])
+        current, _ = self.run_dashboard(["dashboard"])
         self.assertTrue(current.directory.exists())
         self.assertIn("id", current.meta)
 
     def test_interval_is_forwarded_when_given(self):
         self.assertEqual(self.run_dashboard(["dashboard", "--interval", "5"])[1], 5.0)
+
+    def test_an_omitted_interval_is_left_to_the_setting(self):
+        self.assertIsNone(self.run_dashboard(["dashboard"])[1])
 
     def test_only_interval_is_added(self):
         board = cli.parser()._subparsers._group_actions[0].choices["dashboard"]
@@ -234,7 +233,7 @@ class RenestTests(unittest.TestCase):
         self.assertEqual(back[back.index("--tab") + 1], "w1:t1")
         self.assertEqual(back[back.index("--target-pane") + 1], "w1:p1")
         self.assertEqual(back[back.index("--split") + 1], "down")
-        self.assertEqual(float(back[back.index("--ratio") + 1]), agents.DASHBOARD_RATIO)
+        self.assertEqual(float(back[back.index("--ratio") + 1]), agents.dashboard_ratio())
 
 
 class CrewRenestTests(LaunchHarness):
@@ -275,21 +274,12 @@ class CrewRenestTests(LaunchHarness):
 class DashboardSplitTargetTests(unittest.TestCase):
     """The dashboard is a few rows of table; crew must never be split off it."""
 
-    PANES = {"w1:p1": (0, 0, 480, 100), "w1:p2": (0, 100, 480, 20)}
+    PANES = ("w1:p1", "w1:p2")
 
     def setUp(self):
         self.enterContext(contextlib.redirect_stderr(io.StringIO()))
 
     def herdr(self, *call, **kwargs):
-        if call[:2] == ("pane", "layout"):
-            return {
-                "layout": {
-                    "panes": [
-                        {"pane_id": p, "rect": dict(zip(("x", "y", "width", "height"), r))}
-                        for p, r in self.PANES.items()
-                    ]
-                }
-            }
         if call[:2] == ("tab", "list"):
             return {"tabs": [{"tab_id": "w1:t1", "label": "Captain Barbossa"}]}
         return {"panes": [{"pane_id": p, "tab_id": "w1:t1"} for p in self.PANES]}
@@ -297,10 +287,11 @@ class DashboardSplitTargetTests(unittest.TestCase):
     def placement(self):
         return Placement(PANE, Session(None, {"crew": {}}), "w1:p2")
 
-    def test_auto_placement_ignores_the_dashboard_pane(self):
+    def test_auto_placement_can_never_target_the_dashboard_pane(self):
+        """The shape only ever splits the captain's pane or a pane it placed itself."""
         with patch.object(runtime, "herdr", self.herdr):
-            _, split_pane, _, _ = self.placement().auto_split()
-        self.assertEqual(split_pane, "w1:p1")
+            spot = self.placement().auto_split()
+        self.assertEqual(spot.pane, "w1:p1")
 
     def test_the_pane_menu_omits_the_dashboard(self):
         with patch.object(runtime, "herdr", self.herdr):

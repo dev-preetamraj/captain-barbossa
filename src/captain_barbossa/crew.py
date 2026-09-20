@@ -10,7 +10,6 @@ from .runtime import HERDR_ERRORS, CaptainError
 WAIT_INTERVAL = 2
 # Consecutive idle polls before a crew that only paused between tools counts as finished.
 WAIT_POLLS = 3
-WAIT_TIMEOUT = 900
 
 
 def event_status(event, task=None):

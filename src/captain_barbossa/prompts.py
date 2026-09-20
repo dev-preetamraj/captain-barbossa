@@ -14,7 +14,7 @@ LABELS = {
     "tab": "New tab",
     "vertical": "Vertical (side by side)",
     "horizontal": "Horizontal (stacked)",
-    "auto": "Auto (balanced by layout)",
+    "auto": "Auto (next slot in the tab shape)",
 }
 PLACEMENTS = ("pane", "tab")
 STYLE = questionary.Style(

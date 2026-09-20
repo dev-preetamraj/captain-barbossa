@@ -127,7 +127,9 @@ def normalized(text):
 
 def resolve_model(provider, text):
     """Map a tier or free text to a model ID for provider, or raise listing the options."""
-    wanted = normalized(text)
+    # A blank or unset setting is a user mistake to report, not a crash: None reaches
+    # here whenever a settings key is left empty.
+    wanted = normalized(text or "")
     names = {}
     tiers = tiers_for(provider)
     for model, aliases in models_for(provider):

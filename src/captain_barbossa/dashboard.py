@@ -5,7 +5,7 @@ import shutil
 import textwrap
 import time
 
-from . import runtime
+from . import config, runtime
 from .crew import Crew
 from .memory import Session, read_json
 from .models import MODELS
@@ -331,8 +331,17 @@ def render(current, size=None):
     return _notice(rows, retired)
 
 
-def run(current, interval=2.0):
-    """Clear the screen and print a fresh frame every `interval` seconds until interrupted."""
+def run(current, interval=None):
+    """Clear the screen and print a fresh frame every `interval` seconds until interrupted.
+
+    A None interval takes the cadence from [dashboard] interval, since the dashboard runs
+    in its own process and reads the settings itself.
+    """
+    interval = (
+        config.number("dashboard", "interval")
+        if interval is None
+        else config.in_range(interval, "--interval")
+    )
     try:
         while True:
             print("\033[2J\033[H" + render(current), flush=True)

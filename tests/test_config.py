@@ -11,8 +11,12 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from captain_barbossa import agents, cli, config, memory, models, runtime
+import questionary
+
+from captain_barbossa import agents, cli, config, dashboard, memory, models, runtime
 from captain_barbossa.runtime import CaptainError
+
+PANE = {"workspace_id": "w1", "tab_id": "w1:t1", "pane_id": "w1:p1"}
 
 
 class SettingsTests(unittest.TestCase):
@@ -135,6 +139,35 @@ class SettingsTests(unittest.TestCase):
         with self.assertRaisesRegex(CaptainError, str(path)):
             config.settings()
 
+    def test_malformed_settings_reach_the_user_through_main_not_a_traceback(self):
+        """Settings are read by the command, so a bad file is an error, not a traceback."""
+        path = self.project / ".captain" / "settings.toml"
+        with patch.dict(os.environ, {"CAPTAIN_MEMORY_ROOT": str(self.root / "state")}):
+            current = memory.session(self.project, PANE, create=True)
+            path.write_text("[captain\nmodel = ", encoding="utf-8")
+            config.settings.cache_clear()
+            stderr = io.StringIO()
+            with (
+                contextlib.redirect_stderr(stderr),
+                patch.object(cli, "current_pane", lambda: PANE),
+                patch.object(cli, "project_root", lambda: self.project),
+            ):
+                self.assertEqual(cli.main(["--session", current.meta["id"], "dashboard"]), 1)
+        self.assertIn(str(path), stderr.getvalue())
+
+    def test_version_and_help_never_read_settings(self):
+        """--version must not parse a settings file, nor go looking for a project."""
+        (self.project / ".captain" / "settings.toml").write_text(
+            "[captain\nmodel = ", encoding="utf-8"
+        )
+        config.settings.cache_clear()
+        with patch.object(config, "settings", side_effect=AssertionError("read settings")):
+            for flag in ("--version", "--help"):
+                with self.subTest(flag=flag), contextlib.redirect_stdout(io.StringIO()):
+                    with self.assertRaises(SystemExit) as exit_code:
+                        cli.main([flag])
+                    self.assertEqual(exit_code.exception.code, 0)
+
 
 class LaunchTestCase(unittest.TestCase):
     """Launch a captain against a temp home and project whose settings the test writes."""
@@ -166,10 +199,11 @@ class LaunchTestCase(unittest.TestCase):
 
     def launch(self, *flags, provider="claude"):
         """Run a captain launch; returns the exec'd command, with self.board the pane call."""
-        args = cli.parser().parse_args(["--session", self.meta["id"], "--agent", provider, *flags])
+        agent = ["--agent", provider] if provider else []
+        args = cli.parser().parse_args(["--session", self.meta["id"], *agent, *flags])
         with (
             patch.object(runtime, "herdr", return_value={}),
-            patch.object(agents, "executable", return_value=f"/bin/{provider}"),
+            patch.object(agents, "executable", side_effect=lambda name: f"/bin/{name}"),
             patch.object(agents.sys.stdin, "isatty", return_value=True),
             patch.object(agents, "start_dashboard", return_value="w1:p2") as board,
             patch.object(os, "execvpe") as execute,
@@ -255,6 +289,162 @@ class DashboardSettingTests(LaunchTestCase):
                 self.write(f"[dashboard]\n{body}\n")
                 self.launch()
                 self.board.assert_not_called()
+
+
+class CaptainAgentTests(LaunchTestCase):
+    """[captain] agent skips the launch question; --agent still wins."""
+
+    def test_a_configured_agent_launches_without_asking(self):
+        self.write("""
+            [captain]
+            agent = "codex"
+        """)
+        with patch.object(questionary, "select", side_effect=AssertionError("asked a question")):
+            self.assertEqual(self.launch(provider=None)[0], "/bin/codex")
+
+    def test_the_flag_wins_over_the_setting(self):
+        self.write("""
+            [captain]
+            agent = "codex"
+        """)
+        self.assertEqual(self.launch(provider="claude")[0], "/bin/claude")
+
+    def test_an_agent_outside_providers_is_refused(self):
+        self.write("""
+            [captain]
+            agent = "gpt"
+        """)
+        with self.assertRaisesRegex(CaptainError, r"\[captain\] agent is 'gpt'"):
+            self.launch(provider=None)
+
+    def test_the_refusal_names_the_file_that_set_it_not_always_the_project(self):
+        path = self.home / ".captain" / "settings.toml"
+        path.write_text('[captain]\nagent = "gpt"\n', encoding="utf-8")
+        config.settings.cache_clear()
+        with self.assertRaisesRegex(CaptainError, f"Fix it in {path}"):
+            self.launch(provider=None)
+
+    def test_no_setting_still_asks(self):
+        with patch.object(agents, "choose", return_value="claude") as asked:
+            self.launch(provider=None)
+        self.assertEqual(asked.call_args.args[0], None)
+
+
+class TunableTests(unittest.TestCase):
+    """The settings with no launch of their own: read where they are used."""
+
+    def setUp(self):
+        self.root = Path(self.enterContext(tempfile.TemporaryDirectory())).resolve()
+        (self.root / ".captain").mkdir()
+        self.enterContext(patch.dict(os.environ, {"HOME": str(self.root / "nohome")}))
+        self.enterContext(patch.object(config, "project_root", return_value=self.root))
+        config.settings.cache_clear()
+        self.addCleanup(config.settings.cache_clear)
+
+    def write(self, body):
+        (self.root / ".captain" / "settings.toml").write_text(
+            textwrap.dedent(body), encoding="utf-8"
+        )
+        config.settings.cache_clear()
+
+    def test_the_shipped_defaults_are_the_ones_the_code_used_to_hardcode(self):
+        self.assertEqual(config.text("crew", "model"), "cheap")
+        self.assertEqual(config.lookup("crew", "wait_timeout", kind=int), 900)
+        self.assertEqual(config.lookup("dashboard", "interval", kind=float), 2.0)
+        self.assertEqual(agents.dashboard_ratio(), 0.8)
+
+    def test_building_the_parser_resolves_no_setting_at_all(self):
+        """Defaults belong to the command: a parser that reads them breaks --version."""
+        self.write("""
+            [crew]
+            model = "strong"
+            wait_timeout = 30
+        """)
+        with patch.object(config, "settings", side_effect=AssertionError("read settings")):
+            args = cli.parser().parse_args(["crew", "--task", "x"])
+            self.assertIsNone(args.model)
+            self.assertIsNone(cli.parser().parse_args(["wait", "Jack"]).timeout)
+            # A flag still overrules the file, and is the only thing the parser sets.
+            self.assertEqual(
+                cli.parser().parse_args(["wait", "Jack", "--timeout", "5"]).timeout, 5.0
+            )
+        self.assertEqual(config.text("crew", "model"), "strong")
+        self.assertEqual(config.number("crew", "wait_timeout", kind=int), 30)
+
+    def test_a_blank_crew_model_is_reported_not_an_attribute_error(self):
+        self.write("""
+            [crew]
+            model = ""
+        """)
+        with self.assertRaisesRegex(CaptainError, "Provide a tier"):
+            models.resolve_model("claude", config.text("crew", "model"))
+
+    def test_a_number_outside_its_range_is_refused_and_names_the_file(self):
+        path = self.root / ".captain" / "settings.toml"
+        for body, names, kwargs in (
+            ("[dashboard]\ninterval = -5\n", ("dashboard", "interval"), {}),
+            ("[dashboard]\ninterval = 0\n", ("dashboard", "interval"), {}),
+            ("[dashboard]\nratio = 1.5\n", ("dashboard", "ratio"), {"below": 1}),
+            ("[dashboard]\nratio = 0\n", ("dashboard", "ratio"), {"below": 1}),
+            ("[crew]\nwait_timeout = 0\n", ("crew", "wait_timeout"), {"kind": int}),
+            ("[crew]\nwait_timeout = -1\n", ("crew", "wait_timeout"), {"kind": int}),
+        ):
+            with self.subTest(body=body):
+                self.write(body)
+                with self.assertRaisesRegex(CaptainError, f"must be a number.*{path}"):
+                    config.number(*names, **kwargs)
+
+    def test_an_out_of_range_interval_never_reaches_sleep(self):
+        """time.sleep(-5) raises where the dashboard pane cannot report it."""
+        self.write("""
+            [dashboard]
+            interval = -5
+            ratio = 0
+        """)
+        with patch.object(dashboard.time, "sleep", side_effect=AssertionError("slept")):
+            with self.assertRaisesRegex(CaptainError, r"\[dashboard\] interval"):
+                dashboard.run(memory.Session(self.root, {"id": "x", "crew": {}}))
+        with self.assertRaisesRegex(CaptainError, r"\[dashboard\] ratio"):
+            agents.dashboard_ratio()
+
+    def test_an_out_of_range_flag_is_refused_the_same_way_as_a_file(self):
+        with patch.object(dashboard.time, "sleep", side_effect=AssertionError("slept")):
+            with self.assertRaisesRegex(CaptainError, "--interval must be a number above 0"):
+                dashboard.run(memory.Session(self.root, {"id": "x", "crew": {}}), -5)
+
+    def test_interval_and_ratio_are_read_where_they_are_used(self):
+        self.write("""
+            [dashboard]
+            interval = 10
+            ratio = 0.5
+        """)
+        self.assertEqual(agents.dashboard_ratio(), 0.5)
+        slept = []
+
+        def stop(seconds):
+            slept.append(seconds)
+            raise KeyboardInterrupt
+
+        with (
+            patch.object(dashboard.time, "sleep", stop),
+            patch.object(dashboard, "render", return_value=""),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            dashboard.run(memory.Session(self.root, {"id": "x", "crew": {}}))
+        self.assertEqual(slept, [10.0])
+
+    def test_a_wrong_type_leaves_the_shipped_default_standing(self):
+        self.write("""
+            [crew]
+            wait_timeout = "900"
+
+            [dashboard]
+            interval = true
+            ratio = "wide"
+        """)
+        self.assertEqual(config.lookup("crew", "wait_timeout", kind=int), 900)
+        self.assertEqual(config.lookup("dashboard", "interval", kind=float), 2.0)
+        self.assertEqual(agents.dashboard_ratio(), 0.8)
 
 
 class InitTests(unittest.TestCase):
