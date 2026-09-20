@@ -27,8 +27,6 @@ class CrewTabLabelTests(unittest.TestCase):
                 },
             )
         )
-        for name in ("CAPTAIN_STATE_ROOT", "CAPTAIN_TEMP_ROOT"):
-            os.environ.pop(name, None)
         self.enterContext(patch.object(panes, "READY_POLLS", 1))
         self.pane = {"workspace_id": "w1", "tab_id": "w1:t1", "pane_id": "w1:p1"}
         self.directory, self.meta = memory.session(self.project, self.pane, create=True)
