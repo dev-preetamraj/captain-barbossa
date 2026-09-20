@@ -60,81 +60,66 @@ class PlacementTests(unittest.TestCase):
         self.meta["crew"][name] = {"pane": name, "tab": tab, "status": "started"}
         return chosen, target, tab, reason
 
-    def test_recruits_fill_captain_then_four_pane_crew_tabs(self):
-        expected = [
-            ("vertical", "captain", "captain"),
-            ("horizontal", "crew1", "captain"),
-            (None, None, "crew3"),
-            ("vertical", "crew3", "crew3"),
-            ("horizontal", "crew3", "crew3"),
-            ("horizontal", "crew4", "crew3"),
-            (None, None, "crew7"),
-            ("vertical", "crew7", "crew7"),
-            ("horizontal", "crew7", "crew7"),
-            ("horizontal", "crew8", "crew7"),
-            (None, None, "crew11"),
-        ]
-        for choice in expected:
-            with self.subTest(choice=choice):
-                self.assertEqual(self.recruit()[:3], choice)
-                self.assertLessEqual(len(self.tabs["captain"]), 3)
-                self.assertEqual(self.tabs["captain"]["captain"], (0, 0, 240, 120))
-                self.assertTrue(all(len(panes) <= 4 for panes in self.tabs.values()))
-        self.assertEqual(self.tabs["captain"]["crew1"], (240, 0, 240, 60))
-        self.assertEqual(self.tabs["captain"]["crew2"], (240, 60, 240, 60))
+    def test_wide_screen_fits_more_than_two_crew_in_the_captain_tab(self):
+        for _ in range(6):
+            chosen, target, tab, _ = self.recruit()
+            self.assertIsNotNone(target)
+            self.assertEqual(tab, "captain")
+        self.assertEqual(set(self.tabs), {"captain"})
+        self.assertGreater(len(self.tabs["captain"]) - 1, 2)
 
-    def test_first_crew_tab_split_is_vertical_even_when_horizontal_scores_better(self):
-        for _ in range(3):
-            self.recruit()
-        self.tabs["crew3"]["crew3"] = (0, 0, 180, 120)
-        self.assertEqual(self.choose()[:3], ("vertical", "crew3", "crew3"))
+    def test_captain_pane_is_never_split_down(self):
+        for _ in range(15):
+            chosen, target, tab, _ = self.recruit()
+            if target == "captain":
+                self.assertEqual(chosen, "vertical")
+            self.assertEqual(self.tabs["captain"]["captain"][3], 120)
 
     def test_small_captain_tab_opens_another_tab_without_shrinking_the_captain(self):
         self.tabs["captain"]["captain"] = (0, 0, 100, 120)
         self.assertEqual(self.choose()[:2], (None, None))
-        self.tabs["captain"]["captain"] = (0, 0, 480, 40)
-        self.recruit()
-        self.tabs["captain"]["crew1"] = (240, 0, 240, 20)
+        self.tabs["captain"] = {"captain": (0, 0, 100, 20), "crew1": (100, 0, 100, 20)}
+        self.meta["crew"]["crew1"] = {"pane": "crew1", "tab": "captain", "status": "started"}
         self.assertEqual(self.choose()[:2], (None, None))
-        self.assertEqual(self.tabs["captain"]["captain"], (0, 0, 240, 40))
+        self.assertEqual(self.tabs["captain"]["captain"], (0, 0, 100, 20))
 
     def test_reuses_space_in_earlier_crew_tab(self):
-        for _ in range(7):
-            self.recruit()
-        self.meta["crew"]["crew6"]["status"] = "dismissed"
-        del self.tabs["crew3"]["crew6"]
-        self.tabs["crew3"]["crew4"] = (240, 0, 240, 120)
-        self.assertEqual(self.choose()[:3], ("horizontal", "crew4", "crew3"))
+        self.tabs["captain"]["captain"] = (0, 0, 60, 15)
+        self.meta["crew"]["crew1"] = {"pane": "crew1", "tab": "crew3", "status": "started"}
+        self.meta["crew"]["crew2"] = {"pane": "crew2", "tab": "crew3", "status": "started"}
+        self.tabs["crew3"] = {"crew1": (0, 0, 240, 120), "crew2": (240, 0, 240, 120)}
+        self.assertEqual(self.choose()[:3], ("vertical", "crew1", "crew3"))
 
     def test_skips_mixed_and_closed_crew_tabs(self):
-        for _ in range(7):
-            self.recruit()
-        self.tabs["crew3"] = {"crew3": (0, 0, 240, 120), "editor": (240, 0, 240, 120)}
-        self.assertEqual(self.choose()[:3], ("vertical", "crew7", "crew7"))
-        del self.tabs["crew3"]
-        self.assertEqual(self.choose()[:3], ("vertical", "crew7", "crew7"))
+        self.tabs["captain"]["captain"] = (0, 0, 60, 15)
+        self.meta["crew"]["crew1"] = {"pane": "crew1", "tab": "mixed", "status": "started"}
+        self.tabs["mixed"] = {"crew1": (0, 0, 240, 120), "editor": (240, 0, 240, 120)}
+        self.meta["crew"]["crew2"] = {"pane": "crew2", "tab": "closed", "status": "started"}
+        self.meta["crew"]["crew3"] = {"pane": "crew3", "tab": "roomy", "status": "started"}
+        self.tabs["roomy"] = {"crew3": (0, 0, 240, 120)}
+        self.assertEqual(self.choose()[:3], ("vertical", "crew3", "roomy"))
+        del self.tabs["mixed"]
+        self.assertEqual(self.choose()[:3], ("vertical", "crew3", "roomy"))
 
     def test_small_tabs_are_skipped_and_closed_captain_layout_is_an_error(self):
-        for _ in range(3):
-            self.recruit()
-        self.tabs["crew3"]["crew3"] = (0, 0, 100, 20)
+        self.tabs["captain"]["captain"] = (0, 0, 100, 20)
+        self.meta["crew"]["crew1"] = {"pane": "crew1", "tab": "crew3", "status": "started"}
+        self.tabs["crew3"] = {"crew1": (0, 0, 100, 20)}
         self.assertEqual(self.choose()[:2], (None, None))
         del self.tabs["captain"]
         with self.assertRaisesRegex(CaptainError, "pane closed"):
             self.choose()
 
-    def test_manual_directions_override_grid_order_but_keep_caps(self):
-        self.assertEqual(self.recruit("horizontal")[:2], ("horizontal", "captain"))
-        self.assertEqual(self.recruit("vertical")[:2], ("vertical", "crew1"))
-        self.assertEqual(self.recruit("vertical")[:2], (None, None))
-        self.assertEqual(self.recruit("horizontal")[:2], ("horizontal", "crew3"))
-        self.assertEqual(self.recruit("vertical")[:2], ("vertical", "crew3"))
-        self.assertEqual(self.recruit("vertical")[0], "vertical")
-        self.assertEqual(self.choose("horizontal")[:2], (None, None))
+    def test_manual_directions_never_split_the_captain_down(self):
+        self.assertEqual(self.recruit("horizontal")[:2], (None, None))
+        self.assertEqual(self.recruit("vertical")[:2], ("vertical", "captain"))
+        self.assertEqual(self.recruit("horizontal")[:2], ("horizontal", "crew2"))
+        self.assertEqual(self.recruit("vertical")[:2], ("vertical", "captain"))
+        self.assertEqual(self.choose("horizontal")[0], "horizontal")
 
-    def test_explicit_pane_bypasses_caps_with_auto_or_manual_direction(self):
-        for _ in range(6):
-            self.recruit()
+    def test_explicit_pane_bypasses_the_guard_with_auto_or_manual_direction(self):
+        self.meta["crew"]["crew1"] = {"pane": "crew3", "tab": "crew3", "status": "started"}
+        self.tabs["crew3"] = {"crew3": (0, 0, 480, 120)}
         groups = {tab: (tab, dict.fromkeys(panes, "Crew")) for tab, panes in self.tabs.items()}
         with patch.object(Placement, "workspace_panes", return_value=groups):
             for target, tab in (("captain", "captain"), ("crew3", "crew3")):
@@ -149,8 +134,10 @@ class PlacementTests(unittest.TestCase):
         self.api.assert_not_called()
 
     def test_recruit_selects_from_fresh_metadata_under_the_crew_lock(self):
-        self.recruit()
-        self.recruit()
+        self.tabs["captain"]["captain"] = (0, 0, 60, 15)
+        self.meta["crew"]["crew1"] = {"pane": "crew1", "tab": "crew3", "status": "started"}
+        self.meta["crew"]["crew2"] = {"pane": "crew2", "tab": "crew3", "status": "started"}
+        self.tabs["crew3"] = {"crew1": (0, 0, 240, 120), "crew2": (240, 0, 240, 120)}
         choose_split = Placement.choose_split
         args = cli.parser().parse_args(
             [
@@ -168,7 +155,7 @@ class PlacementTests(unittest.TestCase):
 
         def check_selection(*args):
             guard.return_value.__enter__.assert_called_once()
-            self.assertEqual(choose_split(*args)[:2], (None, None))
+            self.assertEqual(choose_split(*args)[:2], ("vertical", "crew1"))
             raise CaptainError("selection checked")
 
         with (

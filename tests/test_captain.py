@@ -490,8 +490,8 @@ class CaptainFlowTests(unittest.TestCase):
             "Ask at most one question, only when the user hands a choice back to you "
             "or names one too vaguely to map to a flag, and wait for the answer;",
             "never ask about a choice they did not raise",
-            "Auto searches crew tabs for the best split (current tab first), splits the captain's",
-            "pane down only as a last resort, or opens a new tab when crowded",
+            "Auto searches crew tabs for the best split (current tab first) or opens",
+            "a new tab when geometry doesn't allow a split",
         ):
             self.assertIn(phrase, instructions)
         for gone in (
@@ -925,7 +925,6 @@ class CaptainFlowTests(unittest.TestCase):
             "w1:p5": (156, 0, 78, 51),
         }
         far_shell = {"w1:p2": (0, 0, 78, 51), "w1:p5": (78, 0, 78, 51), "w1:p1": (156, 0, 78, 51)}
-        # The captain's down split leaves larger halves (110x30) than p2's (118x20) but still loses.
         bigger_captain = {
             "w1:p1": (0, 0, 110, 60),
             "w1:p2": (110, 0, 118, 40),
@@ -944,14 +943,14 @@ class CaptainFlowTests(unittest.TestCase):
         }
         for geometry, direction, expected in (
             (fresh, None, ("w1:p1", "vertical")),
-            (fresh, "horizontal", ("w1:p1", "horizontal")),
+            (fresh, "horizontal", (None, None)),
             (slivers, None, ("w1:p2", "horizontal")),
             (slivers, "vertical", (None, None)),
             (rows, None, ("w1:p1", "vertical")),
             (rows, "horizontal", (None, None)),
             (short_captain, None, ("w1:p2", "horizontal")),
             (far_shell, None, ("w1:p2", "horizontal")),
-            (only_captain_down, None, ("w1:p1", "horizontal")),
+            (only_captain_down, None, (None, None)),
             (bigger_captain, None, ("w1:p2", "horizontal")),
             (grid, None, (None, None)),
         ):
@@ -965,7 +964,6 @@ class CaptainFlowTests(unittest.TestCase):
                     self.assertIn("halves", reason)
         self.assertIn("captain's own pane", layout.pick_split(fresh, "w1:p1", set())[2])
         self.assertIn("holds no crew", layout.pick_split(short_captain, "w1:p1", {"w1:p5"})[2])
-        self.assertIn("last resort", layout.pick_split(only_captain_down, "w1:p1", {"w1:p5"})[2])
 
     def test_default_recruiting_flags_create_a_crew_without_any_selector(self):
         created = {

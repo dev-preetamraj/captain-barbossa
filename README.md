@@ -107,17 +107,15 @@ crew ID, the pane/tab label, and the name in memory, `wait`, `focus`,
 
 **Placement.** `--placement pane|tab`, and for a pane, `--direction
 vertical|horizontal|auto` with `--split-pane <pane-id>|auto`. `auto` searches
-the captain tab for room for two crew panes: the first splits the captain pane
-vertically, and the second splits that right half horizontally. The captain
-stays full height on the left. Further crew fill this session's crew-only tabs
-in recruitment order, with at most four crew panes per tab. Crew tabs split
-vertically first, then horizontally, choosing the largest balanced halves.
-When all eligible tabs are full or no split keeps both halves at least 60
-columns by 15 rows, the crew opens in a new tab. Explicit `--placement tab`
-always opens a new tab; `--split-pane <pane-id>` bypasses the auto tab limits.
-Manual `--direction vertical|horizontal` overrides the automatic direction.
-The chosen pane, direction, and a one-line reason are printed and recorded in
-memory.
+this tab first, then this session's crew tabs, and splits whichever pane leaves
+the largest, squarest halves, preferring panes that hold no crew. The captain's
+own pane can be split beside it, never below it, so the captain keeps its full
+height. When no split would leave both halves at least 60 columns by 15 rows,
+the crew opens in a new tab instead. Explicit `--placement tab` always opens a
+new tab; `--split-pane <pane-id>` splits the pane you name instead of searching.
+Manual `--direction vertical|horizontal` overrides the automatic direction, and
+naming both splits that pane that way whatever its size. The chosen pane,
+direction, and a one-line reason are printed and recorded in memory.
 
 **Model tiers.** `--model` takes a provider-neutral tier or free text:
 
