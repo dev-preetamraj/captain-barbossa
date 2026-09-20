@@ -11,7 +11,8 @@ workspace. It launches a native agent CLI (Claude Code or Codex) as the **captai
 and the captain recruits further native agents as **crew** in new Herdr panes or
 tabs. Crew get one-word Pirates of the Caribbean names. All coordination happens
 through generated role instructions and a small graph memory stored outside the
-repo; there is no daemon, custom UI, or tmux layer.
+repo; there is no daemon or tmux layer, and the crew token-usage dashboard is a
+plain-text refresh loop in a Herdr pane, not a TUI.
 
 ## Layout
 

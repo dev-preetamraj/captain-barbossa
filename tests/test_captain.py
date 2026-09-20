@@ -547,7 +547,11 @@ class CaptainFlowTests(unittest.TestCase):
                 patch.object(agents, "captain_extension") as extension,
             ):
                 args = self.args(
-                    "--agent", provider, "--prompt", "literal `touch /tmp/no` $(false)"
+                    "--agent",
+                    provider,
+                    "--no-dashboard",
+                    "--prompt",
+                    "literal `touch /tmp/no` $(false)",
                 )
                 agents.launch(args, self.pane, self.project)
                 api.assert_called_once_with("tab", "rename", "w1:t1", "Captain Barbossa")
@@ -559,6 +563,7 @@ class CaptainFlowTests(unittest.TestCase):
                     instruction_prompts.native_args(
                         provider,
                         instruction_prompts.agent_instructions(self.directory, "Captain Barbossa"),
+                        events=self.directory / "events" / "captain.jsonl",
                     ),
                 )
                 self.assertEqual(env["CAPTAIN_SESSION"], self.meta["id"])
@@ -1425,7 +1430,7 @@ class CaptainFlowTests(unittest.TestCase):
 
     def test_the_cheap_default_never_silently_reaches_a_mid_or_strong_model(self):
         """The whole point of the default: an unspecified tier cannot cost mid/strong money."""
-        for provider, cheap in (("claude", "claude-haiku-4-5"), ("codex", "gpt-5.3-codex-spark")):
+        for provider, cheap in (("claude", "claude-haiku-4-5"), ("codex", "gpt-5.6-luna")):
             with self.subTest(provider=provider):
                 args = self.args("crew", "--agent", provider, "--task", "commit the fix")
                 self.assertEqual(models.resolve_model(provider, args.model), cheap)
@@ -2672,7 +2677,7 @@ class ModelTests(unittest.TestCase):
             ("codex", "gpt-5.5", "gpt-5.5"),
             ("codex", "astra", "gpt-6-astra"),
             ("codex", "gpt-6", "gpt-6-astra"),
-            ("codex", "codex", "gpt-5.3-codex-spark"),
+            ("codex", ".6-sol", "gpt-5.6-sol"),
             ("codex", "terra", "gpt-5.6-terra"),
         ):
             with self.subTest(provider=provider, text=text):

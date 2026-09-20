@@ -16,12 +16,13 @@ Select Model and Effort
 › 1. gpt-6-astra (current)  Our most capable model for complex, demanding work.
   2. gpt-5.6-sol            Reliable agentic workhorse for everyday tasks.
   3. gpt-5.6-terra          Balanced agentic coding model for everyday work.
-  4. gpt-5.3-codex-spark    Ultra-fast coding model.
+  4. gpt-5.6-luna           Fast and affordable agentic coding.
+  5. gpt-5.5                Proven previous generation.
 
 Press enter to confirm or esc to go back
 """
 CODEX_EFFORT = """
-Select Reasoning Level for gpt-5.6-terra
+Select Reasoning Level for gpt-5.6-sol
 
   1. Low               Fast responses with lighter reasoning
 › 2. Medium (default)  Balances speed and reasoning depth for everyday tasks
@@ -121,17 +122,15 @@ class SwitchModelTests(unittest.TestCase):
     def test_codex_switch_picks_the_numbered_row_and_keeps_the_default_effort(self):
         agent_name = self.crew("codex", "gpt-6-astra")
         herdr = self.switch(
-            self.reader(
-                ["", CODEX_PICKER, CODEX_EFFORT, "• Model changed to gpt-5.6-terra medium"]
-            ),
+            self.reader(["", CODEX_PICKER, CODEX_EFFORT, "• Model changed to gpt-5.6-sol medium"]),
             "mid",
         )
         keys = [call.args for call in herdr.call_args_list if call.args[1] == "send-keys"]
         self.assertEqual(
             keys,
-            [("agent", "send-keys", agent_name, "3"), ("agent", "send-keys", agent_name, "enter")],
+            [("agent", "send-keys", agent_name, "2"), ("agent", "send-keys", agent_name, "enter")],
         )
-        self.assertIn("Jack switched to gpt-5.6-terra.", self.output.getvalue())
+        self.assertIn("Jack switched to gpt-5.6-sol.", self.output.getvalue())
 
     def test_a_pane_that_never_confirms_reports_an_error_and_records_nothing(self):
         self.crew("claude")
@@ -148,8 +147,12 @@ class SwitchModelTests(unittest.TestCase):
 
     def test_codex_reports_a_model_its_picker_does_not_offer(self):
         self.crew("codex", "gpt-6-astra")
+        # A screen from a Codex build whose picker dropped a row we still list.
+        stale_picker = "\n".join(
+            line for line in CODEX_PICKER.splitlines() if "gpt-5.5" not in line
+        )
         with self.assertRaises(CaptainError) as error:
-            self.switch(self.reader(["", CODEX_PICKER]), "gpt-5.5")
+            self.switch(self.reader(["", stale_picker]), "gpt-5.5")
         self.assertIn("/model picker", str(error.exception))
 
     def pi_catalog(self):

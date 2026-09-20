@@ -108,7 +108,7 @@ class ModelTierTests(unittest.TestCase):
 
     def test_tiers_are_case_and_spacing_insensitive(self):
         self.assertEqual(models.resolve_model("claude", " Strong "), "claude-opus-5")
-        self.assertEqual(models.resolve_model("codex", "CHEAP"), "gpt-5.3-codex-spark")
+        self.assertEqual(models.resolve_model("codex", "CHEAP"), "gpt-5.6-luna")
 
     def test_tiers_are_ordered_cheapest_to_strongest_per_provider(self):
         for provider, tiers in models.TIERS.items():
