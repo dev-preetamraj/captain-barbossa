@@ -15,6 +15,19 @@ from captain_barbossa import instructions as instruction_prompts
 from captain_barbossa import pane as panes
 from captain_barbossa.crew import Crew
 
+APPROVAL_PANE = "\n".join(
+    [
+        "• Ran git status",
+        "",
+        "Allow Codex to run this command?",
+        "› 1. Yes, proceed",
+        "  2. No, and tell Codex what to do differently",
+        "Press enter to confirm or esc to go back",
+        "",
+        "  gpt-6-astra high · ~/code/projects/hrly",
+    ]
+)
+
 
 class WaitCrewMemoryTests(unittest.TestCase):
     """Regression tests for wait_crew's graph memory writes (agents.wait_crew, ~L381)."""
@@ -171,6 +184,14 @@ class WaitCrewMemoryTests(unittest.TestCase):
         with self.event_path().open("a", encoding="utf-8") as file:
             file.write(json.dumps(event) + "\n")
 
+    def test_an_approval_modal_behind_the_status_bar_reports_blocked(self):
+        self.meta["crew"]["jack"]["provider"] = "codex"
+        with patch.object(runtime, "herdr", return_value=APPROVAL_PANE):
+            crew = Crew(
+                "jack", self.meta["crew"]["jack"], memory.Session(self.directory, self.meta)
+            )
+            self.assertEqual(crew.status(60), ("blocked", None))
+
     def test_native_hook_commands_append_one_json_line_from_stdin_or_argv(self):
         events = self.root / "events with 'quotes' $() and spaces.jsonl"
         expected = []
@@ -259,7 +280,7 @@ class WaitCrewMemoryTests(unittest.TestCase):
         )
         completion = {
             "type": "agent-turn-complete",
-            "input-messages": ["build"],
+            "input-messages": ["build\nand run the gate"],
             "last-assistant-message": "Real task finished",
         }
         with patch.object(runtime, "herdr") as api:
