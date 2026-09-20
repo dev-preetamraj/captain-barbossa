@@ -7,7 +7,7 @@ commit style are in [CONTRIBUTING.md](CONTRIBUTING.md); user-facing behavior is 
 ## What this is
 
 Captain Barbossa is a small Python CLI (`captain`) that runs inside a Herdr
-workspace. It launches a native agent CLI (Claude Code or Codex) as the **captain**,
+workspace. It launches a native agent CLI (Claude Code, Codex, or pi) as the **captain**,
 and the captain recruits further native agents as **crew** in new Herdr panes or
 tabs. Crew get one-word Pirates of the Caribbean names. All coordination happens
 through generated role instructions and a small graph memory stored outside the
@@ -18,15 +18,28 @@ plain-text refresh loop in a Herdr pane, not a TUI.
 
 ```text
 src/captain_barbossa/
-  cli.py       argparse entry point and dispatch (captain, crew, wait, focus, model, dismiss, memory)
-  agents.py    role instructions, native launch, crew create/wait/submit/focus/retier/dismiss
-  memory.py    session/project dirs, locks, atomic JSON, graph memory, hook events, Graphify
-  runtime.py   herdr subprocess wrapper, JSON validation, current pane discovery
-  layout.py    pane geometry scoring for auto placement
-  models.py    provider-neutral model tiers and free-text matching
-  prompts.py   keyboard selectors for agent and placement choices
-tests/         unittest suite; Herdr and model sessions are mocked, a real PTY is used
-docs/          plan.md is current scope
+  cli.py          argparse entry point and dispatch: captain, crew, wait, tell, model,
+                  focus, session, init, status, dashboard, dismiss, memory
+  agents.py       native launch, dashboard pane, crew create/wait/tell/model/focus/status/dismiss
+  instructions.py role instructions and per-provider native CLI arguments
+  config.py       settings layering, typed lookup, range checks
+  defaults.toml   every shipped default, read as package data by config
+  placement.py    workspace pane discovery and the Spot a crew opens in
+  layout.py       declared tab shapes: slot order, split target, even ratios
+  crew.py         crew identities, roster queries, native lifecycle events
+  pane.py         native agent terminal interaction and pane parsing
+  memory.py       session/project dirs, locks, atomic JSON, graph memory, hook events, Graphify
+  models.py       provider-neutral model tiers and free-text matching
+  runtime.py      herdr subprocess wrapper, JSON validation, current pane discovery
+  dashboard.py    plain-text crew token-usage frame and refresh loop
+  usage.py        tokens and cost read from the native CLI's own session file
+  prompts.py      keyboard selectors for agent and placement choices
+  onboarding.py   bootstrap Herdr when captain runs outside a workspace
+  pi_captain.py   pi delivery bridge, shipped inside the wheel
+  update_check.py startup PyPI update check
+tests/            unittest suite; Herdr and model sessions are mocked, a real PTY is used
+docs/             plan.md is current scope; settings, placement, dashboard, memory,
+                  crew-lifecycle and troubleshooting are the user guides
 ```
 
 Key facts:
@@ -41,6 +54,10 @@ Key facts:
   Codex `notify`), which append JSON lines to `sessions/<id>/events/<crew>.jsonl`.
   `wait` tails that file from a `.cursor` offset; pane reading is only a fallback for
   when no event has arrived. Filter Codex's title-generation turn.
+- Settings layer bottom to top: `defaults.toml` (package data, the only place a default
+  is written), `~/.captain/settings.toml`, the project's `.captain/settings.toml`, then
+  CLI flags. Read a value with `config.lookup/text/flag/number` when the command needs
+  it, never while `cli.parser()` is built.
 - Crew share one checkout. Generated instructions carry the editing contract
   (disjoint files, re-read before edit, stage only owned hunks). Nothing locks files.
 - Generated instructions are token-budgeted. Every added line costs context in every
