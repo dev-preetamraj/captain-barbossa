@@ -192,6 +192,72 @@ class InspectionTests(unittest.TestCase):
         self.assertIn("+changed", self.inspect("git", "diff", "--staged")["text"])
         self.assertEqual(self.inspect("git", "diff")["text"], "")
 
+    def test_git_metadata_disappearing_before_stat_or_open_is_tolerated(self):
+        self.init_git()
+        lock = self.project / ".git/maintenance.lock"
+        original_open, original_scandir = os.open, os.scandir
+
+        def open_after_removal(path, flags, **kwargs):
+            if path == lock.name:
+                lock.unlink()
+            return original_open(path, flags, **kwargs)
+
+        @contextlib.contextmanager
+        def scan_before_removal(fd):
+            with original_scandir(fd) as entries:
+                entries = list(entries)
+                if any(entry.name == lock.name for entry in entries):
+                    lock.unlink()
+                yield iter(entries)
+
+        for operation, replacement in (
+            ("open", open_after_removal),
+            ("scandir", scan_before_removal),
+        ):
+            with self.subTest(operation=operation):
+                lock.touch()
+                with patch.object(inspection.os, operation, replacement):
+                    self.assertEqual(self.inspect("git", "current-branch")["text"], "main\n")
+                self.assertFalse(lock.exists())
+
+    def test_metadata_race_handling_preserves_missing_permission_and_symlink_errors(self):
+        self.init_git()
+        for metadata in (False, True):
+            with self.subTest(metadata=metadata), self.assertRaises(FileNotFoundError):
+                list(
+                    inspection._walk(self.project, Path("missing"), float("inf"), metadata=metadata)
+                )
+        lock = self.project / ".git/maintenance.lock"
+        lock.touch()
+        original_open = os.open
+
+        def denied(path, flags, **kwargs):
+            if path == lock.name:
+                raise PermissionError("denied")
+            return original_open(path, flags, **kwargs)
+
+        with (
+            patch.object(inspection.os, "open", denied),
+            self.assertRaisesRegex(CaptainError, "unreadable"),
+        ):
+            self.inspect("git", "status")
+
+        def swapped(path, flags, **kwargs):
+            if path == lock.name:
+                lock.unlink()
+                lock.symlink_to(self.root)
+            return original_open(path, flags, **kwargs)
+
+        with (
+            patch.object(inspection.os, "open", swapped),
+            self.assertRaisesRegex(CaptainError, "unreadable"),
+        ):
+            self.inspect("git", "status")
+        lock.unlink()
+        (self.project / ".git/config").unlink()
+        with self.assertRaisesRegex(CaptainError, "missing"):
+            self.inspect("git", "status")
+
     def test_git_scrubs_environment_and_ignores_user_configuration(self):
         self.init_git()
         poison = self.root / "poison"

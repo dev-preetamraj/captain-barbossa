@@ -13,7 +13,7 @@ import stat
 import subprocess
 import sys
 import time
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 
 from . import memory
@@ -110,7 +110,14 @@ def _walk(root, path, deadline, *, metadata=False):
         current = pending.pop()
         if len(current.parts) > 64:
             _fail("limit", "directory nesting exceeds 64 levels.")
-        with _open(root, current) as fd:
+        with ExitStack() as stack:
+            try:
+                fd = stack.enter_context(_open(root, current))
+            except FileNotFoundError:
+                # Git maintenance can remove discovered metadata before we open it.
+                if metadata and current != path:
+                    continue
+                raise
             mode = os.fstat(fd).st_mode
             if stat.S_ISREG(mode):
                 yield current
@@ -126,7 +133,12 @@ def _walk(root, path, deadline, *, metadata=False):
                         _fail("limit", f"scan exceeds {MAX_ENTRIES} directory entries.")
                     if not metadata and entry.name == ".git":
                         continue
-                    mode = entry.stat(follow_symlinks=False).st_mode
+                    try:
+                        mode = entry.stat(follow_symlinks=False).st_mode
+                    except FileNotFoundError:
+                        if metadata:
+                            continue
+                        raise
                     if stat.S_ISLNK(mode):
                         if metadata:
                             _fail("unsupported-git", "Git metadata contains a symlink.")
