@@ -156,6 +156,24 @@ class UsageTests(LimitTestCase):
             ],
         )
 
+    def test_passive_usage_does_not_refresh_until_explicitly_requested(self):
+        self.point_at_transcript()
+        _jsonl(self.transcript, [_turn(input=10, output=20)])
+        absent = self.root / "absent-cache"
+        with (
+            _dashboard(prices_file=""),
+            patch.dict(os.environ, {"CAPTAIN_STATE_ROOT": str(absent)}),
+            patch.object(usage, "_start_refresh") as refresh,
+        ):
+            result = usage_for_events(self.events)
+            self.assertEqual(result["tokens"], 30)
+            self.assertIsNone(result["cost"])
+            self.assertEqual(result["limit"], 1_000_000)
+            refresh.assert_not_called()
+            self.assertFalse(absent.exists())
+            usage_for_events(self.events, cached_only=False)
+            refresh.assert_called()
+
     def test_sums_totals_and_reports_last_turn_context(self):
         self.point_at_transcript()
         _jsonl(
@@ -613,10 +631,31 @@ class PriceSourceTests(unittest.TestCase):
         cache.write_text(json.dumps(PRICES), encoding="utf-8")
         os.utime(cache, (0, 0))
         with patch.object(usage.threading, "Thread") as thread:
-            self.assertIn("claude-opus-5", usage._prices())
+            self.assertIn("claude-opus-5", usage._prices(cached_only=False))
         thread.assert_called_once()
         self.assertTrue(thread.call_args.kwargs["daemon"])
         thread.return_value.start.assert_called_once()
+
+    def test_passive_prices_do_not_create_chmod_or_refresh_cache(self):
+        absent = self.root / "absent"
+        with (
+            patch.dict(os.environ, {"CAPTAIN_STATE_ROOT": str(absent)}),
+            patch.object(usage.memory, "private_dir", side_effect=AssertionError("mkdir")),
+            patch.object(usage, "_start_refresh", side_effect=AssertionError("network")),
+        ):
+            self.assertEqual(usage._prices(), {})
+            self.assertEqual(context_limit("claude-opus-5"), 1_000_000)
+        self.assertFalse(absent.exists())
+        cache = self.root / "prices.json"
+        cache.write_text(json.dumps(PRICES))
+        cache.chmod(0o640)
+        os.utime(cache, (0, 0))
+        before = cache.read_bytes(), cache.stat().st_mode, cache.stat().st_mtime_ns
+        with patch.object(usage, "_start_refresh", side_effect=AssertionError("network")):
+            self.assertEqual(usage._prices(), PRICES)
+        self.assertEqual(
+            (cache.read_bytes(), cache.stat().st_mode, cache.stat().st_mtime_ns), before
+        )
 
     def test_no_cache_and_no_network_means_no_price_at_all(self):
         # Deliberate: prices get no bundled fallback. A stale bundled price renders a

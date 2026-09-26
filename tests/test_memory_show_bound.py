@@ -89,6 +89,26 @@ class MemoryShowBoundTests(unittest.TestCase):
         self._seed(project_count=1, session_count=2)
         self.assertEqual(len(self.show()) - 1, 3)
 
+    def test_legacy_relation_is_capped_only_in_text_output(self):
+        relation = "r" * 100_000
+        graph = memory.empty_graph()
+        graph["nodes"] = [{"id": "s", "label": "subject"}, {"id": "t", "label": "target"}]
+        graph["links"] = [{"source": "s", "target": "t", "relation": relation}]
+        path = self.directory / "graph.json"
+        path.write_text(json.dumps(graph), encoding="utf-8")
+        before = path.read_bytes(), path.stat().st_mtime_ns
+
+        for flags in ((), ("--all",), ("--scope", "session")):
+            with self.subTest(flags=flags):
+                lines = self.show(*flags)
+                self.assertEqual(
+                    json.loads(lines[1].removeprefix("[session] "))[1],
+                    "r" * (memory.LABEL_LIMIT - 3) + "...",
+                )
+                self.assertLess(len("\n".join(lines)), 1000)
+        self.assertEqual(json.loads("\n".join(self.show("--json"))), graph)
+        self.assertEqual((path.read_bytes(), path.stat().st_mtime_ns), before)
+
     def test_json_output_is_unbounded_and_unprefixed(self):
         self._seed(project_count=0, session_count=30)
         with contextlib.redirect_stdout(io.StringIO()) as output:

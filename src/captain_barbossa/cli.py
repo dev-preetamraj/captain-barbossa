@@ -1,15 +1,17 @@
 """Command-line arguments and dispatch for the captain command."""
 
 import argparse
+import json
 import os
 import sys
 
-from . import __version__, config
+from . import __version__, config, inspection, protocol
 from .agents import (
     create_crew,
     dismiss_crew,
     focus_crew,
     launch,
+    protocol_command,
     run_dashboard,
     status_crew,
     switch_model,
@@ -42,6 +44,7 @@ def parser():
         help="skip the crew token-usage pane even when [dashboard] enabled is set",
     )
     commands = root.add_subparsers(dest="command")
+    inspection.add_arguments(commands)
     crew = commands.add_parser("crew", help="create a native crew after agent and pane/tab choices")
     crew.add_argument(
         "name", nargs="?", help="Pirates character name (automatically assigned when omitted)"
@@ -53,6 +56,9 @@ def parser():
         help="crew CLI (asks when omitted)",
     )
     crew.add_argument("--task", required=True)
+    crew.add_argument("--owns", action="append", default=[], metavar="PATH")
+    crew.add_argument("--allow", action="append", default=[], choices=protocol.ACTIONS)
+    crew.add_argument("--handoff", metavar="ASSIGNMENT_ID", help="explicitly reuse a retired name")
     crew.add_argument(
         "--placement", choices=PLACEMENTS, help="the placement explicitly chosen by the user"
     )
@@ -73,9 +79,11 @@ def parser():
         "default)",
     )
     wait = commands.add_parser(
-        "wait", help="wait for a crew to finish, then record and print its completion"
+        "wait", help="wait for a crew notification (legacy crew report native completion)"
     )
     wait.add_argument("name", help="crew name or ID (case-insensitive)")
+    wait.add_argument("--json", action="store_true", help="acknowledged protocol notification")
+    wait.add_argument("--ack", metavar="DELIVERY_ID")
     wait.add_argument(
         "--timeout",
         type=float,
@@ -85,6 +93,31 @@ def parser():
     tell = commands.add_parser("tell", help="send a follow-up prompt to an existing crew")
     tell.add_argument("name", help="crew name or ID (case-insensitive)")
     tell.add_argument("message")
+    tell.add_argument("--assignment", help="required for protocol crew")
+    for verb in ("assign", "ask", "answer", "done", "check", "resolve"):
+        command = commands.add_parser(verb, help=f"{verb} an explicit crew assignment")
+        command.add_argument("name")
+        if verb == "assign":
+            command.add_argument("--task", required=True)
+            command.add_argument("--owns", action="append", default=[], metavar="PATH")
+            command.add_argument("--allow", action="append", default=[], choices=protocol.ACTIONS)
+            command.add_argument("--handoff", required=True, metavar="ASSIGNMENT_ID")
+        else:
+            command.add_argument("--assignment", required=verb not in ("ask", "done", "check"))
+            command.add_argument("--incarnation", default=os.environ.get("CAPTAIN_INCARNATION"))
+        if verb == "ask":
+            command.add_argument("question")
+        elif verb == "answer":
+            command.add_argument("question_id")
+            command.add_argument("message")
+        elif verb == "done":
+            command.add_argument("--report", required=True)
+        elif verb == "check":
+            command.add_argument("action", choices=protocol.ACTIONS)
+            command.add_argument("path", nargs="*")
+        elif verb == "resolve":
+            command.add_argument("message_id")
+            command.add_argument("outcome", choices=("sent", "cancelled"))
     model = commands.add_parser("model", help="switch a running crew to another model")
     model.add_argument("name", help="crew name or ID (case-insensitive)")
     model.add_argument("model", help=f"tier ({'|'.join(TIER_NAMES)}), model name, or alias")
@@ -102,6 +135,11 @@ def parser():
     status.add_argument("--all", action="store_true", help="include dismissed crew")
     board = commands.add_parser(
         "dashboard", help="refresh a crew token-usage table in this pane until interrupted"
+    )
+    board.add_argument(
+        "--refresh-prices",
+        action="store_true",
+        help="explicitly refresh the price cache in the background",
     )
     board.add_argument(
         "--interval",
@@ -158,7 +196,8 @@ def parser():
     seed.add_argument(
         "--apply", action="store_true", help="write the proposed facts instead of previewing them"
     )
-    actions.add_parser("path", help="print this session's memory directory")
+    path = actions.add_parser("path", help="print a memory scope's directory without creating it")
+    path.add_argument("--scope", choices=("session", "project", "repo"), default="session")
     prune = actions.add_parser("prune", help="remove finished sessions' memory directories")
     prune.add_argument(
         "--older-than",
@@ -174,6 +213,12 @@ def guard_crew(args):
     """Refuse captain-only commands and hide other scopes when running as crew."""
     if os.environ.get("CAPTAIN_ROLE") != "crew":
         return
+    if args.command in ("ask", "done", "check"):
+        if args.name.casefold() != os.environ.get("CAPTAIN_CREW", "").casefold():
+            raise CaptainError("Crew may act only on its own assignment.")
+        return
+    if args.command == "inspect":
+        return  # inspection.run validates paths and limits crew state to repo scope.
     if args.command != "memory":
         raise CaptainError(
             f"'{args.command or 'captain'}' is captain-only and crew may not run it, "
@@ -203,6 +248,18 @@ def main(argv=None):
         if args.command == "init":
             config.init_settings(args)
             return 0
+        if args.command == "session":
+            print_session(args)
+            return 0
+        if args.command == "inspect":
+            inspection.run(args, project_root())
+            return 0
+        if args.command == "status":
+            status_crew(args, None, project_root())
+            return 0
+        if args.command == "memory" and args.memory_command in ("show", "path"):
+            memory(args, None, project_root())
+            return 0
         pane = current_pane()
         project = project_root()
         if args.command == "crew":
@@ -211,14 +268,12 @@ def main(argv=None):
             wait_crew(args, pane, project)
         elif args.command == "tell":
             tell_crew(args, pane, project)
+        elif args.command in ("assign", "ask", "answer", "done", "check", "resolve"):
+            protocol_command(args, pane, project)
         elif args.command == "model":
             switch_model(args, pane, project)
         elif args.command == "focus":
             focus_crew(args, pane, project)
-        elif args.command == "session":
-            print_session(args)
-        elif args.command == "status":
-            status_crew(args, pane, project)
         elif args.command == "dashboard":
             run_dashboard(args, pane, project)
         elif args.command == "dismiss":
@@ -228,6 +283,19 @@ def main(argv=None):
         else:
             launch(args, pane, project)
     except (*HERDR_ERRORS, EOFError) as exc:
+        if args.command == "wait" and args.json:
+            print(
+                json.dumps(
+                    {
+                        "status": "error",
+                        "delivery_id": None,
+                        "crew": args.name,
+                        "assignment_id": None,
+                        "summary": str(exc)[:1600],
+                    }
+                )
+            )
+            return 1
         print(f"captain: {exc}", file=sys.stderr)
         return 1
     except KeyboardInterrupt:

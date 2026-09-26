@@ -81,12 +81,24 @@ class SwitchModelTests(unittest.TestCase):
             agents.switch_model(args, self.pane, self.project)
         return herdr
 
-    def reader(self, screens):
+    def reader(self, screens, status="idle", composer=None):
         """Answer pane reads from screens, advancing when the driven keys are sent."""
         state = {"screen": 0}
 
         def api(*args, **kwargs):
+            if args[:2] == ("agent", "get"):
+                return {"agent": {"agent_status": status}}
             if args[:2] == ("agent", "read"):
+                if state["screen"] == 0:
+                    return (
+                        composer
+                        if composer is not None
+                        else (
+                            "────────\n\n────────\n~/project\n0.0%/272k (auto)"
+                            if self.meta["crew"]["jack"]["provider"] == "pi"
+                            else "❯"
+                        )
+                    )
                 return screens[min(state["screen"], len(screens) - 1)]
             if args[:2] in (("agent", "send-keys"), ("agent", "prompt")):
                 state["screen"] += 1
@@ -136,7 +148,7 @@ class SwitchModelTests(unittest.TestCase):
         self.crew("claude")
         with self.assertRaises(CaptainError) as error:
             self.switch(self.reader(["still working"]), "cheap")
-        self.assertIn("did not confirm", str(error.exception))
+        self.assertIn("delivery is unknown", str(error.exception))
         record = memory.read_json(self.directory / "session.json")["crew"]["jack"]
         self.assertEqual(record["model"], "claude-haiku-4-5")
 
@@ -185,6 +197,44 @@ class SwitchModelTests(unittest.TestCase):
         with self.assertRaises(CaptainError) as error:
             agents.switch_model(args, self.pane, self.project)
         self.assertIn("Jack", str(error.exception))
+
+    def test_blocked_unknown_or_nonempty_composer_never_gets_model_input(self):
+        self.crew("claude")
+        for status, composer in (
+            ("blocked", "❯"),
+            (None, "❯"),
+            ("idle", "❯ user draft"),
+            ("idle", "unreadable"),
+            ("idle", CODEX_PICKER),
+        ):
+            with self.subTest(status=status, composer=composer):
+                api = self.reader([], status=status, composer=composer)
+                with patch.object(runtime, "herdr", side_effect=api) as calls:
+                    args = cli.parser().parse_args(
+                        ["--session", self.meta["id"], "model", "Jack", "mid"]
+                    )
+                    with self.assertRaisesRegex(CaptainError, "empty composer"):
+                        agents.switch_model(args, self.pane, self.project)
+                self.assertFalse(
+                    any(c.args[1] in ("prompt", "send-keys") for c in calls.call_args_list)
+                )
+
+    def test_claude_enter_requires_the_exact_model_command_draft(self):
+        agent = self.crew("claude")
+        for draft, succeeds in (("❯ /model claude-sonnet-5", True), ("❯ user draft", False)):
+            with self.subTest(draft=draft):
+                api = self.reader(["❯", draft, "Set model to Sonnet 5 for this session only"])
+                with patch.object(runtime, "herdr", side_effect=api) as calls:
+                    args = cli.parser().parse_args(
+                        ["--session", self.meta["id"], "model", "Jack", "mid"]
+                    )
+                    if succeeds:
+                        agents.switch_model(args, self.pane, self.project)
+                    else:
+                        with self.assertRaisesRegex(CaptainError, "delivery is unknown"):
+                            agents.switch_model(args, self.pane, self.project)
+                keys = [c.args for c in calls.call_args_list if c.args[1] == "send-keys"]
+                self.assertEqual(keys, [("agent", "send-keys", agent, "enter")] if succeeds else [])
 
 
 if __name__ == "__main__":

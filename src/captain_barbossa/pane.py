@@ -10,6 +10,8 @@ POLL_INTERVAL = 0.2
 # Consecutive idle polls before a freshly drawn native TUI accepts a submitted prompt.
 READY_POLLS = 6
 PROMPT_TIMEOUT = 5
+# Native prompt ingestion can lag the send; observe longer without sending again.
+SUBMIT_TIMEOUT = 20
 TAIL_LINES = 40
 TAIL_LIMIT = 1500
 MODEL_INTERVAL = 1
@@ -23,7 +25,7 @@ CODEX_EFFORT_HEADER = "Select Reasoning Level"
 PROMPT_GLYPHS = ("❯", "›")
 INTERRUPT_MARKER = "esc to interrupt"
 # Pane chrome shared by the Claude Code and Codex TUIs: a bare box-drawing rule, an
-# empty input prompt (Codex shows a fixed placeholder; Claude shows just the glyph),
+# empty input prompt (provider placeholders need separate recognition),
 # and the bottom status bar, which is always the last line and never starts like
 # real transcript content (a bullet, a tree glyph, a spinner).
 PANE_RULE = re.compile(r"^[─\-=━]+$")
@@ -55,17 +57,21 @@ class Pane:
     def __init__(self, agent_name):
         self.agent_name = agent_name
 
-    def lines(self):
+    def lines(self, keep_status=False, keep_blank=False):
         """The non-blank tail of the crew's pane, as stripped lines, without the status bar.
 
-        Every check below reads the last line, and the native TUIs always end the pane with
-        their status bar, so it is dropped here rather than by one caller.
+        Composer checks retain chrome and blank rows to avoid mistaking a draft for a footer.
         """
         output = runtime.herdr(
             "agent", "read", self.agent_name, "--lines", str(TAIL_LINES), raw=True, timeout=10
         )
-        lines = [line.strip() for line in output.splitlines() if line.strip()]
-        if lines and "·" in lines[-1] and not lines[-1].startswith(PANE_STATUS_BAR_PREFIXES):
+        lines = [line.strip() for line in output.splitlines() if keep_blank or line.strip()]
+        if (
+            not keep_status
+            and lines
+            and "·" in lines[-1]
+            and not lines[-1].startswith(PANE_STATUS_BAR_PREFIXES)
+        ):
             lines = lines[:-1]
         return lines
 
@@ -87,13 +93,68 @@ class Pane:
         tail = "\n".join(lines)
         return tail[-TAIL_LIMIT:] or "empty"
 
-    def draft_pending(self):
-        """Whether the composer still holds an unsent draft, which Herdr cannot see."""
+    def draft_pending(self, provider=None):
+        """Treat an unreadable composer as potentially holding a user's draft."""
         try:
-            prompts = [line for line in self.lines() if line[:1] in PROMPT_GLYPHS]
+            return self.composer(provider) != ""
         except HERDR_ERRORS:
-            return False
-        return bool(prompts) and not PANE_EMPTY_PROMPT.match(prompts[-1])
+            return True
+
+    def composer(self, provider=None):
+        """Return a visible composer, or None when the screen cannot prove its contents."""
+        lines = self.lines(keep_status=True, keep_blank=provider == "pi")
+        while lines and not lines[-1]:
+            lines.pop()
+        if modal_start(lines) is not None:
+            return None
+        if provider == "pi":
+            # Markdown rules are draft text; extra native rulers make the boundary ambiguous.
+            borders = [
+                index for index, line in enumerate(lines) if re.fullmatch(r"─{3,}|── .+─+", line)
+            ]
+            if (
+                len(lines) >= 5
+                and lines[-2].startswith(("/", "~"))
+                and re.search(r"(?:[\d.]+%|\?)/[\d.]+[kKmM]?(?:\s|$)", lines[-1])
+                and re.fullmatch(r"─{3,}", lines[-3])
+                and borders == [len(lines) - 5, len(lines) - 3]
+                and len(lines[-5]) == len(lines[-3])
+                and not lines[-4]
+            ):
+                return ""
+            return None
+        if (
+            provider == "claude"
+            and len(lines) >= 4
+            and lines[-1] == "⏸ manual mode on · ? for shortcuts · ← for agents"
+        ):
+            # Only this captured native placeholder; arbitrary "Try ..." text is a draft.
+            if (
+                lines[-3] == '❯\u00a0Try "how do I log an error?"'
+                and re.fullmatch(r"─{3,}", lines[-4])
+                and lines[-4] == lines[-2]
+                and sum(bool(re.fullmatch(r"─{3,}", line)) for line in lines) == 2
+            ):
+                return ""
+            lines.pop()
+        if (
+            provider == "codex"
+            and len(lines) >= 3
+            and re.fullmatch(r"\? for shortcuts(?:\s+⚠ \d+ warnings? · f2 to view)?", lines[-1])
+            and re.match(r"^gpt-\S+ .* · [~/]", lines[-2], re.IGNORECASE)
+        ):
+            lines.pop()
+        if lines and (
+            re.match(r"^gpt-\S+ .* · [~/]", lines[-1], re.IGNORECASE)
+            or (len(lines) > 1 and PANE_RULE.fullmatch(lines[-2]) and lines[-1].startswith("⏵⏵ "))
+        ):
+            lines.pop()
+        # ponytail: recognize only an unobscured, single-line composer; fail closed otherwise.
+        while lines and (PANE_RULE.fullmatch(lines[-1]) or lines[-1] == "? for shortcuts"):
+            lines.pop()
+        if not lines or lines[-1][:1] not in PROMPT_GLYPHS:
+            return None
+        return "" if PANE_EMPTY_PROMPT.fullmatch(lines[-1]) else lines[-1][1:].strip()
 
     def agent_status(self):
         """Herdr's own view of the agent: idle, working, done, or blocked."""
@@ -112,54 +173,52 @@ class Pane:
             status = self.agent_status()
             if status == "blocked":
                 return status
+            if self.choice_modal():
+                return "blocked"
             if status in ("working", "done"):
-                if not (provider == "codex" and self.draft_pending()):
+                if not self.draft_pending(provider):
                     return status
                 status = "idle"
             time.sleep(POLL_INTERVAL)
         return status
 
-    def task_landed(self, provider, timeout=PROMPT_TIMEOUT):
-        """Return the settled status after a prompt, pressing Enter once for an unsent draft."""
-        if provider == "codex":
-            # A Codex draft the composer scrape cannot see reads as already started, which
-            # left the prompt sitting unsent. Terminal input keeps its order, so an Enter
-            # sent now lands behind the prompt text, and on a task Codex already took the
-            # composer is empty and Enter does nothing; settling below still verifies it.
-            if self.choice_modal():
-                return "blocked"
-            runtime.herdr("agent", "send-keys", self.agent_name, "enter")
-            return self.settled_status(timeout, provider)
-        status = self.settled_status(timeout, provider)
-        if status != "idle":
-            return status
-        # Either CLI can leave a submitted prompt as an unsent draft in its input box.
-        runtime.herdr("agent", "send-keys", self.agent_name, "enter")
+    def task_landed(self, provider, timeout=SUBMIT_TIMEOUT):
+        """Observe submission without typing into a potentially changed composer."""
         return self.settled_status(timeout, provider)
 
     def submit_task(self, task, provider, attempts=2):
-        """Submit the task and verify it landed, resending once when the pane stayed idle."""
-        for _ in range(attempts):
+        """Submit at most once; attempts is retained for compatibility, never for retries.
+
+        Pane observations are not an execution receipt. In particular, idle after sending
+        cannot distinguish a dropped prompt from a fast completed task.
+        """
+        status = self.agent_status()
+        if status == "blocked" or self.choice_modal():
+            raise CaptainError(
+                f"{self.agent_name} is waiting for input or approval; no task was sent. "
+                "Read its pane before sending any keys."
+            )
+        if status not in ("idle", "working", "done") or self.draft_pending(provider):
+            raise CaptainError(
+                f"{self.agent_name} has a draft or unreadable composer; no task was sent. "
+                f"Inspect it with: herdr agent read {self.agent_name}"
+            )
+        try:
             # herdr has no "--" terminator; a leading space defuses a task that starts with "-".
             guarded = f" {task}" if task.startswith("-") else task
             runtime.herdr("agent", "prompt", self.agent_name, guarded)
             status = self.task_landed(provider)
-            if status in ("working", "done"):
-                return
-            if status == "blocked":
-                raise CaptainError(
-                    f"{self.agent_name} is waiting for input or approval instead of starting the task. "
-                    "Read its pane before sending any keys."
-                )
-            if status != "idle":
-                raise CaptainError(
-                    f"{self.agent_name} reported status {status!r} after the task was submitted. "
-                    "Inspect its pane before retrying."
-                )
+        except HERDR_ERRORS as exc:
+            raise CaptainError(
+                f"{self.agent_name} delivery outcome is unknown ({exc}); no resend was attempted. "
+                f"Inspect it with: herdr agent read {self.agent_name}"
+            ) from exc
+        if status in ("working", "done"):
+            return
         raise CaptainError(
-            f"{self.agent_name} did not start working after the task was submitted {attempts} times. "
-            "The task may still be an unsent draft in its input box; "
-            f"read the pane, then resend it with: herdr agent prompt {self.agent_name} '<task>'."
+            f"{self.agent_name} delivery outcome is unknown (status {status!r}); "
+            "the task may have run or remain an unsent draft. No resend or Enter was attempted. "
+            f"Inspect it with: herdr agent read {self.agent_name}"
         )
 
     def wait_for_crew(self, pane_id, provider, timeout=30):
@@ -207,7 +266,7 @@ class Pane:
         try:
             return modal_start(self.lines()) is not None
         except HERDR_ERRORS:
-            return False
+            return True
 
     def model_landed(self, names, timeout, provider=None):
         """Whether the pane shows the native CLI's own switch confirmation for this model.

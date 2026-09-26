@@ -7,6 +7,7 @@ crew in the current pane. It refreshes every 2 seconds by default; use
 ```sh
 captain dashboard
 captain dashboard --interval 5
+captain dashboard --refresh-prices
 ```
 
 A captain can also open it for you: set `[dashboard] enabled = true` in
@@ -88,10 +89,13 @@ have cost on the API, which is the only comparable number across providers.
 
 ## Prices and context windows
 
-Prices come from LiteLLM's `model_prices_and_context_window.json`, cached for
-a day under the state root (`~/.local/state/captain-barbossa/<project>/`) and
-refreshed on a background thread, so a frame never blocks on the network. Until
-that cache lands the money columns read `$?` rather than a confident `$0.00`.
+Prices come from LiteLLM's `model_prices_and_context_window.json`, cached at
+`~/.local/state/captain-barbossa/prices.json` (or the configured state root).
+Passive usage reads use this cache without network calls, directory creation,
+or cache writes, even when stale. `captain dashboard --refresh-prices` explicitly
+opts into one background refresh attempt when the cache is missing or older than
+a day; frames keep using existing data while it runs. Without cached prices,
+money columns read `$?` rather than a confident `$0.00`.
 Point `[dashboard] prices_file` at a JSON file of the same shape to override
 it, for a negotiated rate or a model LiteLLM does not carry.
 

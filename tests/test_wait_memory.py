@@ -344,9 +344,11 @@ class WaitCrewMemoryTests(unittest.TestCase):
             agents.wait_crew(self.args("wait", "Jack", "--timeout", "0"), self.pane, self.project)
         printed = output.getvalue()
         api.assert_not_called()
-        self.assertLess(len(printed), 800)
+        hook, event_suffix = printed.split("; hook: ", 1)[1].split(" (full event: ", 1)
+        self.assertEqual(len(hook), 500)
+        self.assertTrue(hook.endswith("..."))
         self.assertIn("y" * 400, printed)
-        self.assertIn(str(self.event_path()), printed)
+        self.assertEqual(event_suffix, f"{self.event_path()})\n")
         # The raw event keeps the whole payload; only the wait line is capped.
         self.assertIn(message, self.event_path().read_text(encoding="utf-8"))
 
@@ -365,8 +367,11 @@ class WaitCrewMemoryTests(unittest.TestCase):
             agents.wait_crew(self.args("wait", "Jack", "--timeout", "0"), self.pane, self.project)
         printed = output.getvalue()
         self.assertIn("hook: Bash ", printed)
-        self.assertLess(len(printed), 800)
-        self.assertIn(str(self.event_path()), printed)
+        hook, event_suffix = printed.split("; hook: ", 1)[1].split(" (full event: ", 1)
+        self.assertEqual(len(hook), 500)
+        self.assertTrue(hook.endswith("..."))
+        self.assertEqual(event_suffix, f"{self.event_path()})\n")
+        self.assertIn("z" * 4000, self.event_path().read_text(encoding="utf-8"))
 
     def test_wait_uses_report_written_before_an_unconsumed_stop(self):
         memory.add_memory(self.directory / "graph.json", "Jack", "report", "tests pass")
