@@ -1,7 +1,10 @@
+import shlex
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 
+from captain_barbossa import cli
 from captain_barbossa import instructions as instruction_prompts
 
 
@@ -67,11 +70,20 @@ class InstructionSizeTests(unittest.TestCase):
                 crew = instruction_prompts.agent_instructions(
                     self.directory, "crew member Jack", provider
                 )
-                self.assertEqual(len([line for line in crew.splitlines() if " memory " in line]), 2)
+                self.assertEqual(
+                    len(
+                        [
+                            line
+                            for line in crew.splitlines()
+                            if line.startswith("  ") and " memory " in line
+                        ]
+                    ),
+                    2,
+                )
                 self.assertIn("memory add Jack report '<summary>'", crew)
                 self.assertIn("memory show --scope repo", crew)
                 for phrase in (
-                    "CAPTAIN",
+                    "CAPTAIN ",
                     "Do not create Herdr panes/tabs",
                     "Only the captain manages crew",
                     "Read project/session memory",
@@ -83,17 +95,50 @@ class InstructionSizeTests(unittest.TestCase):
                 ):
                     self.assertNotIn(phrase, crew)
 
+    def test_crew_protocol_commands_use_own_name_and_session_prefix(self):
+        for provider in ("codex", "claude", "pi"):
+            for name in ("Jack", "Gibbs"):
+                with self.subTest(provider=provider, name=name):
+                    text = instruction_prompts.agent_instructions(
+                        self.directory, f"crew member {name}", provider
+                    )
+                    prefix = [sys.executable, "-m", "captain_barbossa"]
+                    commands = [
+                        shlex.split(line) for line in text.splitlines() if line.startswith("  ")
+                    ]
+                    self.assertEqual(len(commands), 5)
+                    for command in commands:
+                        self.assertEqual(command[:3], prefix)
+                        self.assertEqual(command[3:5], ["--session", self.directory.name])
+                        args = cli.parser().parse_args(
+                            ["read" if arg == "ACTION" else arg for arg in command[3:]]
+                        )
+                        self.assertEqual(args.session, self.directory.name)
+                        if args.command in ("check", "ask", "done"):
+                            self.assertEqual(command[6], name)
+                            self.assertIsNone(args.assignment)
+                    self.assertIn("launch-bound CAPTAIN_ASSIGNMENT", text)
+                    self.assertNotIn("NAME", text)
+                    self.assertIn(
+                        "Check filesystem/work actions only; protocol commands validate "
+                        "themselves without check:",
+                        text,
+                    )
+                    self.assertIn(
+                        f"identify you, {name}; ask sends your question to the captain", text
+                    )
+
     def test_captain_instructions_keep_the_full_memory_ruleset(self):
         captain_text = instruction_prompts.agent_instructions(self.directory, "Captain Barbossa")
         self.assertIn("Do not store secrets", captain_text)
         self.assertIn("Commit and PR attribution", captain_text)
 
     def test_a_quiet_wait_result_is_rearmed_without_spending_a_captain_turn(self):
-        """Every delivery wakes the captain; the rule decides whether that costs a turn."""
+        """Quiet results must not need a model turn to rearm."""
         text = instruction_prompts.agent_instructions(self.directory, "Captain Barbossa", "pi")
-        block = text.split("it falls back to the pane tail. ")[1].split(" For more detail")[0]
-        self.assertIn("rearm at once, silently", block)
-        self.assertIn("Act only on a new report, a newly blocked crew, or an error", block)
+        block = text.split("Use the captain_wait tool")[1].split(" For more detail")[0]
+        self.assertIn("Quiet results rearm without a model turn", block)
+        self.assertIn("Acknowledge delivery IDs only after receipt", block)
         # The old rule made every delivery, timeout included, a full working turn.
         self.assertNotIn("Rearm after a timeout if work remains", block)
         # Token-budgeted: rewording the rule must not buy itself more lines.

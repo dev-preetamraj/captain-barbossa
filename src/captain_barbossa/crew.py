@@ -3,7 +3,7 @@
 import time
 from dataclasses import dataclass
 
-from .memory import Session, read_cursor, read_events, read_json, session, write_json
+from .memory import Session, read_cursor, read_events, read_json, read_session, write_json
 from .pane import INTERRUPT_MARKER, PANE_EMPTY_PROMPT, Pane, modal_start
 from .runtime import HERDR_ERRORS, CaptainError
 
@@ -55,7 +55,8 @@ class Crew:
 
     @property
     def events(self):
-        return self.session.events(self.crew_id)
+        incarnation = self.record.get("incarnation_id")
+        return self.session.events(f"{self.crew_id}-{incarnation}" if incarnation else self.crew_id)
 
     @property
     def cursor(self):
@@ -76,7 +77,7 @@ class Crew:
     @classmethod
     def for_args(cls, args, pane, project):
         """The session named by args and the crew it names, for a command that takes a name."""
-        current = session(project, pane, args.session)
+        current = read_session(project, args.session, pane)
         return current, cls.resolve(current, args.name)
 
     @classmethod

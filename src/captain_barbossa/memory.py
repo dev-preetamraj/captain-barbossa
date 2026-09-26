@@ -7,6 +7,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -26,16 +27,9 @@ def project_root():
         if not cwd.is_relative_to(project):
             raise CaptainError("This directory is outside the active captain project.")
         return project
-    if shutil.which("git"):
-        result = subprocess.run(
-            ["git", "rev-parse", "--show-toplevel"],
-            cwd=cwd,
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        if result.returncode == 0:
-            return Path(result.stdout.strip()).resolve()
+    for directory in (cwd, *cwd.parents):
+        if (directory / ".git").exists():
+            return directory
     return cwd
 
 
@@ -102,6 +96,41 @@ def state_storage(project):
     return rooted_storage(state_root(), project)
 
 
+def read_storage(root, project):
+    """Resolve an existing storage namespace without mkdir, chmod, locks or migration."""
+    project = project.resolve()
+    if root.resolve().is_relative_to(project):
+        raise CaptainError("Memory root must be outside the project repository.")
+    path = root / hashlib.sha256(os.fsencode(project)).hexdigest()
+    for item in (root, path):
+        if item.is_symlink():
+            raise CaptainError(f"Memory directory must not be a symlink: {item}")
+    return root.resolve() / path.name
+
+
+def read_session(project, session_id, pane=None, *, max_bytes=None):
+    """Open only the selected session's metadata; never initialize or repair state."""
+    if not session_id:
+        raise CaptainError("Start captain first, or pass --session <id>.")
+    if not SESSION_ID.fullmatch(session_id):
+        raise CaptainError("Invalid captain session ID.")
+    base = read_storage(temp_root(), project)
+    directory = base / "sessions" / session_id
+    if directory.resolve() != base.resolve() / "sessions" / session_id:
+        raise CaptainError("Session memory must not be a symlink.")
+    path = directory / "session.json"
+    if path.is_symlink():
+        raise CaptainError("Session metadata must not be a symlink.")
+    if not path.is_file():
+        raise CaptainError("This session does not exist for the current project.")
+    meta = read_json(path, max_bytes=max_bytes)
+    if not isinstance(meta, dict) or meta.get("project") != str(project.resolve()):
+        raise CaptainError("This session belongs to another project.")
+    if pane is not None and meta.get("workspace") != pane["workspace_id"]:
+        raise CaptainError("This session belongs to another Herdr workspace.")
+    return Session(directory, meta)
+
+
 def migrate_project_graph(project):
     """Copy a pre-split project graph from the temp root into the state root, once."""
     source = storage(project) / "graph.json"
@@ -136,8 +165,17 @@ def backfill_terminal_id(directory, pane):
         write_json(path, {**data, "terminal_id": terminal_id})
 
 
-def read_json(path):
+def read_json(path, *, max_bytes=None):
     try:
+        if max_bytes is not None:
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            with os.fdopen(fd, "rb") as file:
+                if not stat.S_ISREG(os.fstat(file.fileno()).st_mode):
+                    raise CaptainError("Memory read requires a regular file.")
+                data = file.read(max_bytes + 1)
+            if len(data) > max_bytes:
+                raise CaptainError(f"Memory read exceeds {max_bytes} bytes.")
+            return json.loads(data)
         return json.loads(path.read_text(encoding="utf-8"))
     except (ValueError, OSError) as exc:
         raise CaptainError(f"Cannot read memory at {path}: {exc}") from exc
@@ -693,17 +731,45 @@ REPO_RESERVE = 5
 def _scoped_rows(graph, scope):
     labels = {node["id"]: truncate_label(node["label"]) for node in graph["nodes"]}
     return [
-        (scope, labels[link["source"]], link["relation"], labels[link["target"]])
+        (scope, labels[link["source"]], truncate_label(link["relation"]), labels[link["target"]])
         for link in reversed(graph["links"])
         if link["source"] in labels and link["target"] in labels
     ]
 
 
+def read_scoped_graphs(directory, project=None, scope=None):
+    """Read only requested scopes, preserving legacy graph bytes and labels."""
+    graphs = {}
+    for name in (scope,) if scope else ("project", "session", "repo"):
+        if name == "repo":
+            graphs[name] = read_repo_graph(project)
+            continue
+        if name == "session":
+            path = directory / "graph.json"
+        elif project is not None:
+            path = read_storage(state_root(), project) / "graph.json"
+        else:
+            path = state_root() / directory.parent.parent.name / "graph.json"
+        if path.is_symlink():
+            raise CaptainError(f"Memory graph must not be a symlink: {path}")
+        if name == "project" and not path.exists():
+            base = (
+                read_storage(temp_root(), project)
+                if project is not None
+                else directory.parent.parent
+            )
+            path = base / "graph.json"
+            if path.is_symlink():
+                raise CaptainError(f"Memory graph must not be a symlink: {path}")
+        graphs[name] = read_json(path) if path.exists() else empty_graph()
+    return graphs
+
+
 def show_memory(directory, show_all, project=None, scope=None):
-    project_graph, session_graph = project_and_session_graphs(directory)
-    session_rows = _scoped_rows(session_graph, "session")
-    project_rows = _scoped_rows(project_graph, "project")
-    repo_rows = _scoped_rows(read_repo_graph(project), "repo")
+    graphs = read_scoped_graphs(directory, project, scope)
+    session_rows = _scoped_rows(graphs.get("session", empty_graph()), "session")
+    project_rows = _scoped_rows(graphs.get("project", empty_graph()), "project")
+    repo_rows = _scoped_rows(graphs.get("repo", empty_graph()), "repo")
     if scope:
         rows = {"session": session_rows, "project": project_rows, "repo": repo_rows}[scope]
         rows = rows if show_all else rows[:SHOW_LIMIT]
@@ -796,6 +862,35 @@ def prune_sessions(project, days=PRUNE_DAYS, current=None):
 
 
 def memory(args, pane, project):
+    if args.memory_command in ("show", "path"):
+        scope = getattr(args, "scope", None)
+        directory = None
+        if scope in (None, "session"):
+            directory = read_session(project, args.session, pane).directory
+        if args.memory_command == "path":
+            if scope == "project":
+                directory = read_storage(state_root(), project)
+            elif scope == "repo":
+                directory = repo_graph(project).parent
+            print(directory)
+        elif args.json:
+            graph, seen = empty_graph(), set()
+            for source in read_scoped_graphs(directory, project, scope).values():
+                for node in source["nodes"]:
+                    if node["id"] not in seen:
+                        graph["nodes"].append(node)
+                        seen.add(node["id"])
+                graph["links"].extend(source["links"])
+            raw = json.dumps(graph, ensure_ascii=False, indent=2) + "\n"
+            print(
+                f"captain: dumping the whole graph: {len(graph['nodes'])} nodes, "
+                f"{len(graph['links'])} links, {len(raw.encode('utf-8'))} bytes.",
+                file=sys.stderr,
+            )
+            print(raw, end="")
+        else:
+            show_memory(directory, args.all, project, scope)
+        return
     if args.memory_command == "init":
         init_repo_memory(project, args.source, args.apply)
         return
@@ -822,37 +917,22 @@ def memory(args, pane, project):
         base = state_storage(project) if args.scope == "project" else directory
         add_memory(base / "graph.json", args.subject, args.relation, args.target)
         print(f"Saved {args.scope} memory.")
-    elif args.memory_command == "path":
-        print(directory)
     else:
         with memory_snapshot(directory, project) as snapshot:
-            if args.memory_command == "show":
-                if args.json:
-                    raw = (snapshot / "graph.json").read_text(encoding="utf-8")
-                    graph = json.loads(raw)
-                    print(
-                        f"captain: dumping the whole graph: {len(graph['nodes'])} nodes, "
-                        f"{len(graph['links'])} links, {len(raw.encode('utf-8'))} bytes.",
-                        file=sys.stderr,
-                    )
-                    print(raw, end="")
-                else:
-                    show_memory(directory, args.all, project, args.scope)
-            else:
-                env = dict(os.environ, GRAPHIFY_OUT=str(snapshot), GRAPHIFY_QUERY_LOG_DISABLE="1")
-                # No "--" terminator in graphify; a leading space defuses a "-"-led question.
-                question = f" {args.question}" if args.question.startswith("-") else args.question
-                result = subprocess.run(
-                    [
-                        executable("graphify"),
-                        "query",
-                        question,
-                        "--graph",
-                        str(snapshot / "graph.json"),
-                    ],
-                    cwd=snapshot,
-                    env=env,
-                    timeout=60,
-                )
-                if result.returncode:
-                    raise CaptainError(f"Graphify exited with status {result.returncode}.")
+            env = dict(os.environ, GRAPHIFY_OUT=str(snapshot), GRAPHIFY_QUERY_LOG_DISABLE="1")
+            # No "--" terminator in graphify; a leading space defuses a "-"-led question.
+            question = f" {args.question}" if args.question.startswith("-") else args.question
+            result = subprocess.run(
+                [
+                    executable("graphify"),
+                    "query",
+                    question,
+                    "--graph",
+                    str(snapshot / "graph.json"),
+                ],
+                cwd=snapshot,
+                env=env,
+                timeout=60,
+            )
+            if result.returncode:
+                raise CaptainError(f"Graphify exited with status {result.returncode}.")

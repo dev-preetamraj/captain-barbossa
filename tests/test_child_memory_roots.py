@@ -73,7 +73,11 @@ class ChildMemoryRootTests(unittest.TestCase):
         }
         args = self.args("crew", "--agent", "claude", "--task", "build", "--placement", "tab")
         with (
-            patch.object(runtime, "herdr", return_value=created) as api,
+            patch.object(
+                runtime,
+                "herdr",
+                side_effect=lambda *call, **_: "❯" if call[:2] == ("agent", "read") else created,
+            ) as api,
             patch.object(agents, "executable", return_value="/bin/claude"),
         ):
             agents.create_crew(args, self.pane, self.project)

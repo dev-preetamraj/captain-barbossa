@@ -214,10 +214,38 @@ class DashboardCommandTests(unittest.TestCase):
     def test_an_omitted_interval_is_left_to_the_setting(self):
         self.assertIsNone(self.run_dashboard(["dashboard"])[1])
 
-    def test_only_interval_is_added(self):
+    def test_passive_startup_preserves_existing_state_permissions_and_bytes(self):
+        directory = self.current.directory
+        directory.chmod(0o750)
+        self.current.meta_path.chmod(0o640)
+        before = {
+            path: (
+                path.stat().st_mode,
+                path.stat().st_mtime_ns,
+                path.read_bytes() if path.is_file() else None,
+            )
+            for path in (directory, *directory.rglob("*"))
+        }
+        with (
+            patch.object(memory, "private_dir", side_effect=AssertionError("state mutation")),
+            patch.object(agents.usage, "_prices") as prices,
+        ):
+            self.run_dashboard(["dashboard"])
+        prices.assert_not_called()
+        after = {
+            path: (
+                path.stat().st_mode,
+                path.stat().st_mtime_ns,
+                path.read_bytes() if path.is_file() else None,
+            )
+            for path in (directory, *directory.rglob("*"))
+        }
+        self.assertEqual(after, before)
+
+    def test_interval_and_explicit_price_refresh_are_exposed(self):
         board = cli.parser()._subparsers._group_actions[0].choices["dashboard"]
         flags = {option for action in board._actions for option in action.option_strings}
-        self.assertEqual(flags - {"-h", "--help"}, {"--interval"})
+        self.assertEqual(flags - {"-h", "--help"}, {"--interval", "--refresh-prices"})
 
 
 class RenestTests(unittest.TestCase):
@@ -242,7 +270,7 @@ class CrewRenestTests(LaunchHarness):
     def setUp(self):
         super().setUp()
         self.enterContext(patch.object(Pane, "wait_for_crew", lambda *a: None))
-        self.enterContext(patch.object(Pane, "submit_task", lambda *a: None))
+        self.enterContext(patch.object(Pane, "submit_task", lambda *a, **kw: None))
         self.renests = []
         self.enterContext(
             patch.object(agents, "renest_dashboard", lambda *call: self.renests.append(call))

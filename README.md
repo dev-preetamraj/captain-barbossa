@@ -10,6 +10,8 @@ native agent sessions can work on the same checkout at once. There is no
 daemon, custom UI, or tmux layer: everything runs through Herdr, plus a small
 graph memory stored outside the repo and a curated repo scope committed with it.
 
+![Captain coordinating crew in separate Herdr panes](docs/assets/captain-barbossa-demo.png)
+
 ## Requirements
 
 - macOS or Linux, Python 3.11+
@@ -186,9 +188,13 @@ for precedence, validation, and the complete key list.
 ```sh
 captain wait Jack
 captain wait Jack --timeout 300
+captain wait Jack --json --ack <delivery-id>
 ```
 
-`wait` blocks until the crew is done, idle, or blocked and prints its report.
+New crew use explicit assignments: `wait` reports activity, questions, approval
+prompts, or completion; native idle alone does not mean the assignment is done.
+Notifications repeat until acknowledged with `--ack`; `--json` returns a stable
+envelope with status, delivery ID, crew, assignment ID, and summary.
 `--timeout SECONDS` overrides the 900-second default. It follows native
 lifecycle events, with pane-tail fallbacks documented in
 [crew-lifecycle.md](https://github.com/dev-preetamraj/captain-barbossa/blob/main/docs/crew-lifecycle.md).
@@ -196,11 +202,18 @@ lifecycle events, with pane-tail fallbacks documented in
 ## Sending a follow-up
 
 ```sh
-captain tell Jack "also update the changelog"
+captain tell Jack "also update the changelog" --assignment <assignment-id>
 ```
 
-`tell` has no flags. It prompts an existing crew in place while keeping its
-pane, model, and conversation; dismissed crew are refused. See
+`tell` appends to an active assignment while keeping the pane, model, and
+conversation; it does not replace the original task. New assignments declare
+owned paths with repeated `--owns PATH` and grants with repeated `--allow ACTION`.
+Use `ask`/`answer` for a question, `done --report` for completion, and
+`assign --handoff` to reuse a finished assignment's crew. Dismissed crew are refused.
+Newly launched crew may omit `--assignment` on `ask`, `done`, and `check`: their
+launch-bound `CAPTAIN_ASSIGNMENT` is validated against crew identity, incarnation,
+and the active assignment. Missing or stale context fails; captain calls and
+replacement assignments still require explicit IDs. See
 [crew-lifecycle.md](https://github.com/dev-preetamraj/captain-barbossa/blob/main/docs/crew-lifecycle.md)
 for assignment and event-cursor behavior.
 
@@ -221,10 +234,13 @@ for fallbacks and output details.
 ```sh
 captain dashboard
 captain dashboard --interval 5
+captain dashboard --refresh-prices
 ```
 
 `captain dashboard` refreshes a plain-text table of the session's crew in the
 current pane every 2 seconds by default (`--interval SECONDS` to change that).
+Usage reads use cached prices; only `--refresh-prices` opts into a background
+network refresh when the cache is missing or stale.
 
 A captain can also open it for you: set `[dashboard] enabled = true` in
 `.captain/settings.toml` and launching `captain` splits a second pane below
@@ -283,17 +299,44 @@ captain dismiss Jack
 ```
 
 `dismiss` has no flags. It permanently closes the pane, records the dismissal,
-and frees the name for reuse; handle unreported or uncommitted work first. See
+and permits name reuse with an explicit handoff; handle unreported or uncommitted work first. See
 [crew-lifecycle.md](https://github.com/dev-preetamraj/captain-barbossa/blob/main/docs/crew-lifecycle.md)
 for dismissal and shared-checkout guardrails.
+
+## Inspecting files, state, and Git
+
+```sh
+captain inspect files src
+captain inspect read README.md
+captain inspect search "literal text" src
+captain inspect state repo graph.json
+captain inspect git diff --staged
+```
+
+`inspect` runs without Herdr lookup. Paths are literal and project-bounded;
+`state` selects only `session`, `project`, or `repo` storage (crew: repo only).
+Git operations are fixed: `status`, `log`, `current-branch`, `root`, and `diff`.
+No shell, arbitrary flags, or external helpers are accepted. Results are JSON,
+bounded to 64 KiB, 200 results, 10,000 entries, 8 MiB searched, and five seconds;
+limits produce truncation markers or explicit errors. Filesystem deadlines are
+cooperative. Git requires a trusted system installation and an ordinary stable
+local checkout; linked worktrees, partial clones, alternates, and unsupported
+config are refused. Git must be root-owned at `/usr/bin/git` on Linux or the
+Command Line Tools installation on macOS; the macOS `/usr/bin/git` launcher is
+not used. Reads accept regular UTF-8 text files; enumeration skips symlinks and
+`.git`, and direct symlink reads fail. Native sandbox permissions still apply. See
+[crew-lifecycle.md](docs/crew-lifecycle.md) for protocol and safety limits.
 
 ## Memory
 
 Captain stores session and project graph relationships outside the repository,
 and a third `repo` scope committed with the code as `.captain/graph.json`.
 `add` accepts `--scope session|project|repo` plus `--because` and `--supersede`
-for repo scope; `show` accepts `--scope`, `--all`, and `--json`; `prune` accepts
+for repo scope; `show` accepts `--scope`, `--all`, and `--json`; `path` accepts
+`--scope session|project|repo`; `prune` accepts
 `--older-than DAYS`. `query` uses optional Graphify.
+`show` and `path` do not create, migrate, lock, or rewrite memory; scoped JSON
+reads only the selected scope.
 
 ```sh
 captain memory add "rate limiter" "uses" "per-user windows"
@@ -356,12 +399,19 @@ Read the affected pane before retrying or approving anything.
 | Command | Purpose |
 |---|---|
 | `captain [--agent claude\|codex\|pi] [--prompt TEXT] [--no-dashboard]` | Start a captain in this pane |
-| `captain crew [NAME] --task TEXT [--agent ...] [--placement pane\|tab] [--direction ...] [--split-pane ...] [--model ...]` | Recruit crew |
-| `captain wait NAME [--timeout SECONDS]` | Wait for crew to finish |
+| `captain crew [NAME] --task TEXT [--owns PATH] [--allow ACTION] [--handoff ID] [--agent ...] [--placement pane\|tab] [--direction ...] [--split-pane ...] [--model ...]` | Recruit crew |
+| `captain wait NAME [--timeout SECONDS] [--json] [--ack DELIVERY_ID]` | Read and acknowledge a crew notification |
 | `captain model NAME cheap\|mid\|strong\|<model>` | Switch a running crew's model |
-| `captain tell NAME MESSAGE` | Send a follow-up prompt to crew |
+| `captain tell NAME MESSAGE [--assignment ID]` | Append a follow-up to an active assignment |
+| `captain assign NAME --task TEXT --handoff ID [--owns PATH] [--allow ACTION]` | Start the next assignment after acknowledged completion |
+| `captain ask NAME QUESTION [--assignment ID]` | Record one pending question; ID may default for newly launched crew |
+| `captain answer NAME QUESTION_ID MESSAGE --assignment ID` | Answer that question |
+| `captain done NAME [--assignment ID] --report TEXT` | Record explicit completion; ID may default for newly launched crew |
+| `captain check NAME ACTION [PATH ...] [--assignment ID]` | Check grants; ID may default for newly launched crew; executes nothing |
+| `captain resolve NAME MESSAGE_ID sent\|cancelled --assignment ID` | Resolve uncertain prompt delivery after inspection |
+| `captain inspect files\|read\|search\|state\|git ...` | Bounded local inspection |
 | `captain status [--all]` | Print a table of this session's crew |
-| `captain dashboard [--interval SECONDS]` | Refresh a crew token-usage table until interrupted |
+| `captain dashboard [--interval SECONDS] [--refresh-prices]` | Refresh a crew token-usage table; optionally refresh prices |
 | `captain focus NAME` | Focus crew's pane and tab |
 | `captain session` | Print the current session id |
 | `captain init [--global]` | Write a commented `.captain/settings.toml` template |
@@ -370,7 +420,7 @@ Read the affected pane before retrying or approving anything.
 | `captain memory init [--from PATH] [--apply]` | Seed repo memory from the project rulebook |
 | `captain memory query QUESTION` | Search memory with Graphify |
 | `captain memory show [--scope SCOPE] [--json] [--all]` | Print memory relationships |
-| `captain memory path` | Print this session's memory directory |
+| `captain memory path [--scope session\|project\|repo]` | Print a scope's directory without creating it |
 | `captain memory prune [--older-than DAYS]` | Remove finished sessions' memory |
 | `captain --session ID ...` | Run any command against another shell's session |
 | `captain --version` | Print the installed version |

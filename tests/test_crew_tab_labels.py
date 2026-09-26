@@ -6,8 +6,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from captain_barbossa import agents, cli, memory, runtime
+from captain_barbossa import agents, cli, memory, protocol, runtime
 from captain_barbossa import pane as panes
+from captain_barbossa.crew import Crew
 
 
 class CrewTabLabelTests(unittest.TestCase):
@@ -61,7 +62,13 @@ class CrewTabLabelTests(unittest.TestCase):
             "tab",
         )
         with (
-            patch.object(runtime, "herdr", return_value=created_jack),
+            patch.object(
+                runtime,
+                "herdr",
+                side_effect=lambda *call, **_: (
+                    "❯" if call[:2] == ("agent", "read") else created_jack
+                ),
+            ),
             patch.object(agents, "executable", return_value="/bin/claude"),
             contextlib.redirect_stdout(io.StringIO()),
         ):
@@ -71,6 +78,8 @@ class CrewTabLabelTests(unittest.TestCase):
 
         def track_herdr(*call, **_):
             herdr_calls.append(call)
+            if call[:2] == ("agent", "read"):
+                return "❯"
             if call[:2] == ("tab", "rename"):
                 return {}
             return created_will
@@ -97,6 +106,22 @@ class CrewTabLabelTests(unittest.TestCase):
             return {}
 
         args_dismiss = self.args("dismiss", "jack")
+        current = memory.read_session(self.project, self.meta["id"], self.pane)
+        crew = Crew.resolve(current, "Jack")
+        protocol.change(
+            crew,
+            self.args(
+                "done",
+                "Jack",
+                "--assignment",
+                crew.record["assignment_id"],
+                "--report",
+                "Fixture complete; no files changed; no blockers",
+            ),
+            self.project,
+        )
+        delivery = protocol.poll(crew)
+        protocol.poll(crew, delivery["delivery_id"])
         with (
             patch.object(runtime, "herdr", side_effect=track_dismiss),
             contextlib.redirect_stdout(io.StringIO()),

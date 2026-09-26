@@ -524,5 +524,124 @@ Key facts:
         self.assertEqual(len(self.graph()["links"]), 5)
 
 
+class PureMemoryReadTests(unittest.TestCase):
+    def setUp(self):
+        self.root = Path(self.enterContext(tempfile.TemporaryDirectory())).resolve()
+        self.project = self.root / "project"
+        self.project.mkdir()
+        self.enterContext(
+            patch.dict(
+                os.environ,
+                {
+                    "CAPTAIN_TEMP_ROOT": str(self.root / "temp"),
+                    "CAPTAIN_STATE_ROOT": str(self.root / "state"),
+                },
+            )
+        )
+        self.enterContext(patch.object(memory, "_warned_temp_state_root", True))
+
+    def read(self, *args):
+        parsed = cli.parser().parse_args(list(args))
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            memory.memory(parsed, None, self.project)
+        return out.getvalue()
+
+    def test_project_discovery_never_launches_git(self):
+        (self.project / ".git").mkdir()
+        child = self.project / "src"
+        child.mkdir()
+        with (
+            patch.dict(os.environ, {"CAPTAIN_PROJECT": ""}),
+            patch.object(Path, "cwd", return_value=child),
+            patch.object(memory.subprocess, "run", side_effect=AssertionError("Git launched")),
+        ):
+            self.assertEqual(memory.project_root(), self.project)
+
+    def test_scoped_paths_need_no_session_and_create_nothing(self):
+        for scope, expected in (
+            ("repo", self.project / ".captain"),
+            ("project", memory.read_storage(memory.state_root(), self.project)),
+        ):
+            args = cli.parser().parse_args(["memory", "path"])
+            args.scope = scope
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                memory.memory(args, None, self.project)
+            self.assertEqual(out.getvalue().strip(), str(expected))
+        self.assertEqual(list(self.root.iterdir()), [self.project])
+
+    def test_repo_and_project_show_need_no_session_and_create_nothing(self):
+        for scope in ("repo", "project"):
+            self.assertEqual(
+                json.loads(self.read("memory", "show", "--scope", scope, "--json")),
+                memory.empty_graph(),
+            )
+        self.assertEqual(list(self.root.iterdir()), [self.project])
+
+    def test_legacy_project_fallback_reads_without_migration_and_durable_wins(self):
+        legacy = memory.read_storage(memory.temp_root(), self.project) / "graph.json"
+        legacy.parent.mkdir(parents=True)
+        graph = memory.empty_graph()
+        graph["nodes"] = [{"id": "legacy-id", "label": "legacy project fact"}]
+        legacy.write_text(json.dumps(graph))
+        before = legacy.read_bytes(), legacy.stat().st_mode, legacy.stat().st_mtime_ns
+        self.assertEqual(
+            json.loads(self.read("memory", "show", "--scope", "project", "--json")), graph
+        )
+        self.assertEqual(
+            (legacy.read_bytes(), legacy.stat().st_mode, legacy.stat().st_mtime_ns), before
+        )
+        self.assertEqual(list(legacy.parent.iterdir()), [legacy])
+        self.assertFalse((self.root / "state").exists())
+        durable = memory.read_storage(memory.state_root(), self.project) / "graph.json"
+        durable.parent.mkdir(parents=True)
+        durable.write_text(json.dumps(memory.empty_graph()))
+        self.assertEqual(
+            json.loads(self.read("memory", "show", "--scope", "project", "--json")),
+            memory.empty_graph(),
+        )
+
+    def test_scoped_json_does_not_read_other_scopes_or_migrate(self):
+        path = memory.repo_graph(self.project)
+        path.parent.mkdir()
+        path.write_text(json.dumps(memory.empty_graph()))
+        with (
+            patch.object(memory, "read_session", side_effect=AssertionError("session")),
+            patch.object(memory, "state_root", side_effect=AssertionError("state")),
+            patch.object(memory, "memory_snapshot", side_effect=AssertionError("snapshot")),
+        ):
+            self.assertEqual(
+                json.loads(self.read("memory", "show", "--scope", "repo", "--json")),
+                memory.empty_graph(),
+            )
+
+    def test_legacy_show_and_path_leave_bytes_permissions_and_tree_unchanged(self):
+        session = "b" * 32
+        directory = memory.read_storage(memory.temp_root(), self.project) / "sessions" / session
+        directory.mkdir(parents=True)
+        (directory / "session.json").write_text(json.dumps({"project": str(self.project)}))
+        graph = memory.empty_graph()
+        graph["nodes"] = [{"id": "old", "label": "x" * 400}, {"id": "other", "label": "y"}]
+        graph["links"] = [{"source": "old", "target": "other", "relation": "rel"}]
+        (directory / "graph.json").write_text(json.dumps(graph))
+        directory.chmod(0o750)
+
+        def snapshot():
+            return {
+                str(p): (
+                    p.stat().st_mode,
+                    p.stat().st_mtime_ns,
+                    p.read_bytes() if p.is_file() else None,
+                )
+                for p in self.root.rglob("*")
+            }
+
+        before = snapshot()
+        self.assertEqual(self.read("--session", session, "memory", "path").strip(), str(directory))
+        result = self.read("--session", session, "memory", "show", "--scope", "session", "--json")
+        self.assertEqual(json.loads(result)["nodes"], graph["nodes"])
+        self.read("--session", session, "memory", "show")
+        self.assertEqual(snapshot(), before)
+
+
 if __name__ == "__main__":
     unittest.main()

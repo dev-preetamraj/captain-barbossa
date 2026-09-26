@@ -62,6 +62,8 @@ class TellCrewTests(unittest.TestCase):
                 return {}
             if args[:2] == ("agent", "get"):
                 return {"agent": {"agent_status": "working"}}
+            if args[:2] == ("agent", "read"):
+                return "❯"
             raise AssertionError(f"unexpected herdr call: {args}")
 
         with (

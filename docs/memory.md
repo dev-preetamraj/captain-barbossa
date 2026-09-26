@@ -15,7 +15,8 @@ not; repo memory is committed with the code and shared by the team:
   sessions/<session-id>/
     session.json                  # workspace and crew references
     graph.json                    # this session's memory only
-    events/<crew>.jsonl           # native hook events, plus cursor files
+    protocol.json                 # assignments, questions, delivery acknowledgements
+    events/<crew>-<incarnation>.jsonl  # native events; legacy crew omit incarnation
 ```
 
 ## Repo scope
@@ -95,16 +96,34 @@ captain memory show
 captain memory show --scope repo
 captain memory query "rate limiter"
 captain memory path
+captain memory path --scope project
 ```
 
 `memory show` prints the most recent relationships as `[scope] [subject,
 relation, object]`; `--all` shows every link, `--json` dumps the raw graph,
-and `--scope` narrows the output to one scope. Recent session rows fill the
+and `--scope` narrows the output to one scope. Text output caps each subject,
+relation, and object at 300 characters, including with `--all`; stored values
+and explicit `--json` output remain intact. Recent session rows fill the
 25-row default, with 5 rows reserved for project and 5 for repo so durable
 facts are never crowded off the end. Default add scope is `session`; use
 `--scope project` only for facts that should survive into future sessions,
 and `--scope repo` only for team facts worth committing. `--because` and
 `--supersede` apply to `--scope repo` alone and are refused elsewhere.
+
+`show` and `path` are pure reads: no directory creation, chmod, locks, migration,
+snapshot, or graph rewrite. `show --scope ... --json` reads only that scope.
+When the durable project graph is absent, `show` reads a legacy temp-root project
+graph in place; it never copies it. `path --scope session|project|repo` prints
+the selected directory, defaulting to session. Repo/project reads need no session;
+session reads require existing matching metadata. Both commands bypass Herdr
+pane lookup. Full `--json` and `--all` output remain unbounded; use
+`inspect state SCOPE [PATH]` for bounded stored-file
+inspection. Crew can inspect only repo state.
+
+Protocol state stays session-local and is separate from graph memory. Questions,
+reports, original tasks, and message delivery records survive captain restarts;
+legacy crew are not silently adopted into the protocol. See
+[crew-lifecycle.md](crew-lifecycle.md) for explicit completion and acknowledgements.
 
 [Graphify](https://graphify.com/docs/cli) is optional: install it with
 `uv tool install graphifyy` to enable `memory query`, which runs against an

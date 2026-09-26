@@ -52,22 +52,22 @@ _PRICE_KEYS = (
 )
 
 
-def usage_for_events(events_path):
+def usage_for_events(events_path, *, cached_only=True):
     """Token totals, context, estimated cost and burn rate for one crew's native session.
 
     Cumulative over every transcript the events file has ever named, so a crew that runs
     /clear (new session id, new transcript) keeps the spend from the earlier one. Claude
     hooks name a transcript outright; Codex notifications name a thread whose rollout log
     we resolve. Returns None when neither yields a usable turn. Never raises, and never
-    blocks on the network.
+    blocks on the network. Pass cached_only=False to opt into price-cache refresh writes.
     """
     # ponytail: re-reads every transcript whole on each call, so a long session re-parses
     # a large file each refresh tick; carry byte offsets like read_cursor if it drags.
     transcripts = _transcript_paths(events_path)
     if not transcripts:
-        return _codex_usage(events_path)
+        return _codex_usage(events_path, cached_only=cached_only)
 
-    prices = _prices()
+    prices = _prices(cached_only=cached_only)
     totals = dict.fromkeys(_FIELDS, 0)
     cost, spend, last = 0.0, [], None
     seen = set()
@@ -109,16 +109,18 @@ def usage_for_events(events_path):
     if last is None:
         return None
     counts, model = last
-    return _frame(totals, _context(counts), context_limit(model), model, cost, spend)
+    return _frame(
+        totals, _context(counts), context_limit(model, cached_only=cached_only), model, cost, spend
+    )
 
 
-def _codex_usage(events_path):
+def _codex_usage(events_path, *, cached_only=True):
     """Token totals for the Codex rollout log the newest notification points at."""
     rollout = _rollout_path(events_path)
     if rollout is None:
         return None
 
-    prices = _prices()
+    prices = _prices(cached_only=cached_only)
     totals = last = model = limit = None
     cost, spend = 0.0, []
     for record in _records(rollout):
@@ -265,7 +267,7 @@ def model_for_events(events_path):
     return model
 
 
-def context_limit(model):
+def context_limit(model, *, cached_only=True):
     """The context window for a Claude `model`, or None when nothing covers it.
 
     An explicit [dashboard] context_limit wins, so an unlisted model is never stuck. Nothing
@@ -280,7 +282,7 @@ def context_limit(model):
         return override
     if not model or not any(model.startswith(name) for name, _ in models.MODELS["claude"]):
         return None
-    price = _for_model(_prices(), model) or {}
+    price = _for_model(_prices(cached_only=cached_only), model) or {}
     return _count(price.get("max_input_tokens")) or _for_model(CONTEXT_WINDOWS, model)
 
 
@@ -294,7 +296,7 @@ def _for_model(table, model):
     return table[max(matches, key=len)] if matches else None
 
 
-def _prices():
+def _prices(*, cached_only=True):
     """Per-token prices for the models we launch, keyed by model id.
 
     Empty until a cached extract or a [dashboard] prices_file exists, which is how an
@@ -304,11 +306,11 @@ def _prices():
     if override:
         # Set in a file, not a shell, so nothing has expanded ~ on the way in.
         return _read_json(Path(override).expanduser())
-    cache = _prices_cache()
+    cache = memory.state_root() / "prices.json" if cached_only else _prices_cache()
     if cache is None:
         return {}
     extract = _read_json(cache)
-    if not extract or _age(cache) > PRICES_TTL:
+    if not cached_only and (not extract or _age(cache) > PRICES_TTL):
         _start_refresh(cache)
     return extract
 

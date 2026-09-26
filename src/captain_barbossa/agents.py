@@ -6,8 +6,9 @@ import re
 import shlex
 import sys
 from itertools import cycle
+from uuid import uuid4
 
-from . import config, dashboard, instructions, runtime
+from . import config, dashboard, instructions, protocol, runtime, usage
 from .crew import Crew
 from .memory import (
     add_memory,
@@ -18,6 +19,7 @@ from .memory import (
     read_cursor,
     read_events,
     read_json,
+    read_session,
     session,
     state_root,
     temp_root,
@@ -201,7 +203,9 @@ def renest_dashboard(pane, captain_pane):
 
 def run_dashboard(args, pane, project):
     """Refresh the crew token-usage table in this pane until interrupted."""
-    current = session(project, pane, args.session)
+    current = read_session(project, args.session, pane)
+    if getattr(args, "refresh_prices", False):
+        usage._prices(cached_only=False)
     # Omitted --interval leaves the cadence to dashboard.run, which reads the setting.
     dashboard.run(current, args.interval)
 
@@ -223,6 +227,22 @@ def tail_note(current, crew, tail):
 
 def wait_crew(args, pane, project):
     current, crew = Crew.for_args(args, pane, project)
+    if crew.record.get("incarnation_id") or getattr(args, "json", False):
+        timeout = (
+            config.number("crew", "wait_timeout", kind=int)
+            if args.timeout is None
+            else config.in_range(args.timeout, "--timeout", least=0)
+        )
+        response = protocol.wait(crew, timeout, getattr(args, "ack", None))
+        print(
+            json.dumps(response)
+            if args.json
+            else f"{response['crew']} {response['status']}: {response['summary']} "
+            f"(delivery {response['delivery_id']}; acknowledge with wait --ack)"
+        )
+        return
+    if getattr(args, "ack", None):
+        raise CaptainError("Legacy wait has no acknowledged deliveries.")
     report_cursor = crew.report_cursor
     # Reports are consumed by cursor alone: pi installs no hooks, so an events file may
     # never exist, and a report written before this wait started is still undelivered.
@@ -297,8 +317,10 @@ def focus_crew(args, pane, project):
 
 def status_crew(args, pane, project):
     """Print a table of this session's crew, refreshing status from Herdr best-effort."""
-    current = session(project, pane, args.session)
+    current = read_session(project, args.session, pane)
     rows = []
+    path = current.directory / "protocol.json"
+    state = read_json(path) if path.exists() else None
     for crew in Crew.members(current):
         if crew.is_dismissed and not args.all:
             continue
@@ -309,6 +331,14 @@ def status_crew(args, pane, project):
         except HERDR_ERRORS:
             pass
         task = (crew.record.get("task") or "").splitlines()
+        if crew.record.get("incarnation_id") and state and not crew.is_dismissed:
+            assignment = protocol.active(state, crew)
+            task = assignment["original_task"].splitlines()
+            status = "idle" if status == "done" else status
+            if assignment["state"] in ("asked", "done"):
+                status = assignment["state"]
+            elif any(m["delivery"] in ("pending", "unknown") for m in assignment["messages"]):
+                status = "delivery_unknown"
         rows.append(
             (
                 crew.display_name,
@@ -333,7 +363,16 @@ def status_crew(args, pane, project):
 def tell_crew(args, pane, project):
     """Send a follow-up prompt to a running crew."""
     check_text(args.message, "message")
-    current = session(project, pane, args.session)
+    current = read_session(project, args.session, pane)
+    crew = Crew.resolve(current, args.name)
+    if crew.record.get("incarnation_id"):
+        if crew.is_dismissed:
+            raise CaptainError("Crew was dismissed; recruit new crew instead.")
+        if not args.assignment:
+            raise CaptainError("Protocol follow-ups require --assignment ID.")
+        message_id = protocol.deliver(crew, args.message, assignment_id=args.assignment)
+        print(json.dumps({"crew": crew.display_name, "message_id": message_id}))
+        return
     with crew_meta(current.directory) as meta:
         current = current._replace(meta=meta)
         crew = Crew.resolve(current, args.name)
@@ -351,6 +390,31 @@ def tell_crew(args, pane, project):
     print(f"Sent to {crew.display_name}.")
 
 
+def protocol_command(args, pane, project):
+    _, crew = Crew.for_args(args, pane, project)
+    if crew.is_dismissed:
+        raise CaptainError("Crew was dismissed; recruit new crew instead.")
+    if args.command == "assign":
+        assignment = protocol.begin(crew, project, args.task, args.owns, args.allow, args.handoff)
+        message_id = protocol.deliver(crew, args.task, assignment_id=assignment["id"], initial=True)
+        response = {"assignment_id": assignment["id"], "message_id": message_id}
+    elif args.command == "answer":
+        message_id = protocol.deliver(
+            crew, args.message, assignment_id=args.assignment, question_id=args.question_id
+        )
+        response = {"assignment_id": args.assignment, "message_id": message_id}
+    elif args.command == "resolve":
+        protocol.resolve_delivery(crew, args.assignment, args.message_id, args.outcome)
+        response = {
+            "assignment_id": args.assignment,
+            "message_id": args.message_id,
+            "delivery": args.outcome,
+        }
+    else:
+        response = protocol.change(crew, args, project)
+    print(json.dumps(response))
+
+
 def switch_model(args, pane, project):
     """Switch a running crew to another model through the native CLI's own /model command."""
     current, crew = Crew.for_args(args, pane, project)
@@ -358,10 +422,26 @@ def switch_model(args, pane, project):
     model = resolve_model(provider, args.model)
     crew_agent = crew.record["agent"]
     names = [name.casefold() for name in model_names(provider, model)]
+    if (
+        crew.pane.agent_status() not in ("idle", "working", "done")
+        or crew.pane.choice_modal()
+        or crew.pane.draft_pending(provider)
+    ):
+        raise CaptainError(
+            "Model switch needs a readable empty composer without an approval prompt."
+        )
     if provider == "claude":
         runtime.herdr("agent", "prompt", crew_agent, f"/model {model}")
         if not crew.pane.model_landed(names, PROMPT_TIMEOUT, provider):
             # Claude Code can leave a submitted line as an unsent draft in its input box.
+            if (
+                crew.pane.agent_status() == "blocked"
+                or crew.pane.choice_modal()
+                or crew.pane.composer(provider) != f"/model {model}"
+            ):
+                raise CaptainError(
+                    "Model switch delivery is unknown; inspect the pane before retrying."
+                )
             runtime.herdr("agent", "send-keys", crew_agent, "enter")
     elif provider == "pi":
         # An exact pi model ID selects straight away, with no picker and no draft state.
@@ -390,10 +470,22 @@ def dismiss_crew(args, pane, project):
         crew = Crew.resolve(current, args.name)
         if crew.is_dismissed:
             raise CaptainError(f"{crew.display_name} was already dismissed.")
-        if not crew.record.get("pane"):
+        if crew.record.get("incarnation_id"):
+            with protocol.checkpoint(current.directory) as state:
+                assignment = protocol.active(state, crew)
+                if (
+                    assignment["state"] != "done"
+                    or assignment["pending"]
+                    or assignment["ack_seq"] != len(assignment["notices"])
+                ):
+                    raise CaptainError(
+                        "Finish with a report and acknowledge delivery before dismissal."
+                    )
+        if not crew.record.get("pane") and not crew.record.get("incarnation_id"):
             raise CaptainError(f"{crew.display_name} has no recorded pane to close.")
         try:
-            runtime.herdr("pane", "close", crew.record["pane"])
+            if crew.record.get("pane"):
+                runtime.herdr("pane", "close", crew.record["pane"])
         except CaptainError as exc:
             raise CaptainError(f"Could not dismiss {crew.display_name}: {exc}") from exc
         (current.directory / f"crew-{crew.crew_id}.sh").unlink(missing_ok=True)
@@ -436,16 +528,40 @@ def create_crew(args, pane, project):
             for index, character in enumerate(cycle(CREW_NAMES)):
                 round_number = index // len(CREW_NAMES) + 1
                 name = f"{character}-{round_number}" if round_number > 1 else character
+                if meta["crew"].get(name, {}).get("incarnation_id"):
+                    continue  # Reusing a protocol identity needs a named, explicit handoff.
                 if not Crew.name_reserved(current, name):
                     break
         display_name = name.capitalize()
         if Crew.name_reserved(current, name):
             raise CaptainError(f"Crew '{display_name}' already exists in this session.")
         crew_agent = agent_name(meta["id"], name)
+        incarnation = uuid4().hex
+        crew = Crew(
+            name,
+            {"id": name, "name": display_name, "agent": crew_agent, "incarnation_id": incarnation},
+            current,
+        )
+        assignment = protocol.begin(crew, project, args.task, args.owns, args.allow, args.handoff)
+        # A failed layout/launcher must leave a resolvable owner for the reservation.
+        crew.record.update(
+            assignment_id=assignment["id"],
+            provider=provider,
+            task=args.task,
+            status="needs_attention",
+        )
+        meta["crew"][name] = crew.record
+        write_json(current.meta_path, meta)
         launcher = current.directory / f"crew-{name}.sh"
         environment = [
             "--env",
             "CAPTAIN_ROLE=crew",
+            "--env",
+            f"CAPTAIN_CREW={name}",
+            "--env",
+            f"CAPTAIN_INCARNATION={incarnation}",
+            "--env",
+            f"CAPTAIN_ASSIGNMENT={assignment['id']}",
             "--env",
             f"CAPTAIN_SESSION={meta['id']}",
             "--env",
@@ -460,7 +576,6 @@ def create_crew(args, pane, project):
         instruction_text = instructions.agent_instructions(
             current.directory, f"crew member {display_name}", provider
         )
-        crew = Crew(name, {"id": name, "name": display_name, "agent": crew_agent}, current)
         events = crew.events
         private_dir(events.parent)
         events.write_text("", encoding="utf-8")
@@ -523,6 +638,8 @@ def create_crew(args, pane, project):
             )
         record = {
             "id": name,
+            "incarnation_id": incarnation,
+            "assignment_id": assignment["id"],
             "name": display_name,
             "agent": crew_agent,
             "provider": provider,
@@ -557,7 +674,7 @@ def create_crew(args, pane, project):
                 "pane", "run", new_pane, '/bin/sh "$CAPTAIN_CREW_LAUNCHER"', expect_output=False
             )
             crew.pane.wait_for_crew(new_pane, provider)
-            crew.pane.submit_task(args.task, provider)
+            protocol.deliver(crew, args.task, assignment_id=assignment["id"], initial=True)
             record["status"] = "started"
             if tab_id != pane["tab_id"]:
                 label = Crew.tab_label(current, tab_id)

@@ -18,7 +18,7 @@ from unittest.mock import patch
 
 import questionary
 
-from captain_barbossa import agents, cli, config, memory, models, runtime
+from captain_barbossa import agents, cli, config, memory, models, protocol, runtime
 from captain_barbossa import instructions as instruction_prompts
 from captain_barbossa import pane as panes
 from captain_barbossa.crew import Crew
@@ -179,9 +179,9 @@ class CaptainFlowTests(unittest.TestCase):
         instructions = " ".join(
             instruction_prompts.agent_instructions(self.directory, "captain").split()
         )
-        self.assertIn("captain memory reads/writes without asking the user", instructions)
+        self.assertIn("checking assignment ownership and actions", instructions)
         self.assertIn("herdr agent send-keys <name> y", instructions)
-        self.assertIn('choose "don\'t ask again" when available', instructions)
+        self.assertIn("Never grant global shell/Python approval", instructions)
         self.assertIn("Escalate only destructive commands", instructions)
         self.assertIn("Decline clearly wrong commands", instructions)
         self.assertIn("Never type over the user's draft in the captain pane", instructions)
@@ -189,8 +189,8 @@ class CaptainFlowTests(unittest.TestCase):
     def test_instructions_require_captain_to_delegate_user_tasks_to_new_crew(self):
         rule = (
             "Before any edit, file write, build, test, or debug step, recruit crew and "
-            "assign it; never do it yourself. Only reading memory, answering questions, "
-            "and captain commands (crew/wait/focus/dismiss/memory) are done directly. "
+            "assign it; never do it yourself. Direct read/search, bounded CAPTAIN inspect, "
+            "memory reads, answers, and coordination commands are allowed. "
             "Self-check first: about to edit a file, write output, or run a "
             "build/test/debug step yourself? Stop, recruit crew instead. Work directly "
             'only if the user explicitly says "yourself", "no crew", or "do not recruit".'
@@ -288,12 +288,12 @@ class CaptainFlowTests(unittest.TestCase):
             instruction_prompts.agent_instructions(self.directory, "crew member Gibbs").split()
         )
         for phrase in (
-            "End every assignment with a report: files changed, checks run and their result",
-            "anything left or blocked",
-            "Record it before you stop, under your own name",
+            f"--session {self.directory.name} done Gibbs --report",
+            "files changed; checks/results; remaining",
+            "For legacy assignments only, record the report before stopping",
             "memory add Gibbs report '<summary>'",
-            "Then print the same report as your final message",
-            "Going idle is your done signal",
+            "Print the same report as your final message",
+            "Native idle is inactivity, never completion",
         ):
             self.assertIn(phrase, crew)
         captain = " ".join(
@@ -301,10 +301,9 @@ class CaptainFlowTests(unittest.TestCase):
         )
         for phrase in (
             "CAPTAIN wait 'NAME' [--timeout <seconds>]",
-            "Wait reads native hook events until the crew is idle, done, or blocked",
-            "records and prints its completion",
-            "the crew's own report or hook message",
-            "Without events, it falls back to the pane tail",
+            "Explicit done with report completes protocol assignments",
+            "acknowledge only received notifications",
+            "Legacy wait retains its old meaning",
         ):
             self.assertIn(phrase, captain)
         self.assertNotIn("herdr agent wait", captain)
@@ -331,7 +330,7 @@ class CaptainFlowTests(unittest.TestCase):
             "Name the files each crew owns",
             "Give simultaneous writers disjoint files",
             "wait for the current owner's report before reassigning a file",
-            "formatting of owned files",
+            "owned edits/formatting",
             "commit the user's leftover edits after crew have committed their own",
         ):
             self.assertIn(phrase, captain)
@@ -343,7 +342,7 @@ class CaptainFlowTests(unittest.TestCase):
             with self.subTest(role=role):
                 text = instruction_prompts.agent_instructions(self.directory, role)
                 instructions = " ".join(text.split())
-                expected = 0 if role.startswith("crew member ") else 1
+                expected = 5 if role.startswith("crew member ") else 1
                 self.assertEqual(text.count(str(self.directory.name)), expected)
                 for phrase in (
                     f"You are {role}",
@@ -427,7 +426,7 @@ class CaptainFlowTests(unittest.TestCase):
                 )
                 created = {"pane": {"pane_id": "w1:p2"}}
                 with (
-                    patch.object(runtime, "herdr", return_value=created),
+                    patch.object(runtime, "herdr", return_value=created) as api,
                     patch.object(agents, "executable", return_value=f"/bin/{provider}"),
                     patch.object(Pane, "wait_for_crew"),
                     patch.object(Pane, "submit_task") as submit,
@@ -441,6 +440,12 @@ class CaptainFlowTests(unittest.TestCase):
                     agents.create_crew(args, self.pane, self.project)
 
                 record = json.loads(output.getvalue())
+                self.assertTrue(
+                    any(
+                        f"CAPTAIN_ASSIGNMENT={record['assignment_id']}" in call.args
+                        for call in api.call_args_list
+                    )
+                )
                 launcher = self.directory / f"crew-{record['id']}.sh"
                 script = launcher.read_text()
                 launcher_argv = shlex.split(script, comments=True)
@@ -460,22 +465,29 @@ class CaptainFlowTests(unittest.TestCase):
                     prompt = argv[argv.index("--append-system-prompt") + 1]
                 self.assertIn(f"You are crew member {record['name']}", prompt)
                 self.assertIn("Edit only files in your assignment", prompt)
-                self.assertIn("Then print the same report as your final message", prompt)
+                self.assertIn("Print the same report as your final message", prompt)
                 self.assertIn(
                     "Complete your assignment yourself; do not delegate or use subagents", prompt
                 )
+                command_prefix = [
+                    sys.executable,
+                    "-m",
+                    "captain_barbossa",
+                    "--session",
+                    self.meta["id"],
+                ]
                 self.assertEqual(
                     [
                         shlex.split(line)
                         for line in prompt.splitlines()
-                        if line.strip().startswith("captain memory ")
+                        if line.startswith("  ") and " memory " in line
                     ],
                     [
-                        ["captain", "memory", "add", record["name"], "report", "<summary>"],
-                        ["captain", "memory", "show", "--scope", "repo"],
+                        [*command_prefix, "memory", "add", record["name"], "report", "<summary>"],
+                        [*command_prefix, "memory", "show", "--scope", "repo"],
                     ],
                 )
-                self.assertNotIn("CAPTAIN", prompt)
+                self.assertNotIn("CAPTAIN ", prompt)
                 for phrase in (
                     "Do not create Herdr panes/tabs",
                     "Only the captain manages crew",
@@ -498,7 +510,11 @@ class CaptainFlowTests(unittest.TestCase):
                     self.assertNotIn(phrase, prompt)
                     self.assertNotIn(phrase.casefold(), prompt.casefold())
                 self.assertNotIn("--extension", argv)
-                submit.assert_called_once_with("build", provider)
+                submit.assert_called_once()
+                self.assertTrue(submit.call_args.args[0].endswith("\nbuild"))
+                self.assertIn(record["assignment_id"], submit.call_args.args[0])
+                self.assertEqual(submit.call_args.args[1], provider)
+                self.assertEqual(submit.call_args.kwargs, {"attempts": 1})
 
     def test_instructions_recruit_on_defaults_and_ask_at_most_one_question(self):
         instructions = " ".join(
@@ -621,7 +637,7 @@ class CaptainFlowTests(unittest.TestCase):
         self.assertIn(env["CAPTAIN_SESSION"], extension.read_text())
         text = argv[argv.index("--append-system-prompt") + 1]
         self.assertIn("Use the captain_wait tool", text)
-        self.assertIn("rearm too after approving\na prompt, CAPTAIN tell, or a pi reload", text)
+        self.assertIn("rearm after answers", text)
         self.assertNotIn("Run every\nwait in the background", text)
         self.assertEqual(list(self.project.iterdir()), [])
 
@@ -803,7 +819,7 @@ class CaptainFlowTests(unittest.TestCase):
                     agents.create_crew(args, self.pane, self.project)
                 api.assert_not_called()
 
-    def test_pane_split_that_fails_asks_for_the_pane_again_and_creates_nothing(self):
+    def test_pane_split_failure_preserves_a_recoverable_assignment_reservation(self):
         def api(*call, **_):
             if call[:2] == ("pane", "split"):
                 raise runtime.CaptainError("pane_not_found")
@@ -833,7 +849,11 @@ class CaptainFlowTests(unittest.TestCase):
         self.assertIn("pane_not_found", str(error.exception))
         self.assertIn("Ask the user which pane to split again", str(error.exception))
         self.assertEqual(calls.call_args_list[-1].args[:2], ("pane", "split"))
-        self.assertEqual(memory.read_json(self.directory / "session.json")["crew"], {})
+        record = memory.read_json(self.directory / "session.json")["crew"]["jack"]
+        self.assertEqual(record["status"], "needs_attention")
+        self.assertNotIn("pane", record)
+        state = memory.read_json(self.directory / "protocol.json")
+        self.assertIn(record["assignment_id"], state["assignments"])
 
     def test_pane_split_rejects_panes_missing_from_the_workspace(self):
         for bad in ("w1:p7", "w2:p1", "w1:p1 "):
@@ -929,6 +949,7 @@ class CaptainFlowTests(unittest.TestCase):
             self.assertEqual(result["tab"], tab)
             self.assertEqual(result["pane"], "w1:p6")
             memory.write_json(self.directory / "session.json", {**self.meta, "crew": {}})
+            memory.write_json(self.directory / "protocol.json", {"active": {}, "assignments": {}})
 
     def test_default_recruiting_flags_create_a_crew_without_any_selector(self):
         created = {
@@ -1040,6 +1061,7 @@ class CaptainFlowTests(unittest.TestCase):
             ),
         ):
             memory.write_json(self.directory / "session.json", {**self.meta, "crew": roster})
+            memory.write_json(self.directory / "protocol.json", {"active": {}, "assignments": {}})
 
             def api(*call, **_):
                 return self.listing(*call) or created
@@ -1186,22 +1208,14 @@ class CaptainFlowTests(unittest.TestCase):
                 self.assertEqual(run.args[-1], '/bin/sh "$CAPTAIN_CREW_LAUNCHER"')
                 self.assertEqual(run.kwargs, {"expect_output": False})
                 agent_name = f"c-{self.meta['id'][:8]}-{name}"
-                if placement == "tab":
-                    self.assertEqual(calls[-5].args[:2], ("agent", "rename"))
-                    self.assertEqual(calls[-4].args, ("agent", "get", run.args[2]))
-                    self.assertEqual(calls[-3].args, ("agent", "prompt", agent_name, task))
-                    self.assertEqual(calls[-2].args, ("agent", "get", agent_name))
-                    self.assertEqual(calls[-1].args[:2], ("tab", "rename"))
-                else:
-                    self.assertEqual(calls[-5].args[:2], ("agent", "rename"))
-                    self.assertEqual(calls[-4].args, ("agent", "get", run.args[2]))
-                    self.assertEqual(calls[-3].args, ("agent", "prompt", agent_name, task))
-                    # Codex always needs the Enter; only Claude submits from the prompt alone.
-                    self.assertEqual(calls[-2].args, ("agent", "send-keys", agent_name, "enter"))
-                    self.assertEqual(calls[-1].args, ("agent", "get", agent_name))
+                prompts = [call.args for call in calls if call.args[:2] == ("agent", "prompt")]
+                self.assertEqual(len(prompts), 1)
+                self.assertEqual(prompts[0][:3], ("agent", "prompt", agent_name))
+                self.assertTrue(prompts[0][-1].endswith("\n" + task))
+                self.assertIn(result["assignment_id"], prompts[0][-1])
                 self.assertEqual(
                     [call.args[:2] for call in calls].count(("agent", "send-keys")),
-                    1 if provider == "codex" else 0,
+                    0,
                 )
                 saved = memory.read_json(self.directory / "session.json")["crew"][name]
                 self.assertEqual(saved["task"], task)
@@ -1295,7 +1309,11 @@ class CaptainFlowTests(unittest.TestCase):
                             provider,
                             instructions,
                             models.tiers_for(provider)["cheap"],
-                            events=self.directory / "events" / f"{name}.jsonl",
+                            events=Crew(
+                                name,
+                                memory.read_json(self.directory / "session.json")["crew"][name],
+                                memory.Session(self.directory, self.meta),
+                            ).events,
                         ),
                     )
                 finally:
@@ -1332,7 +1350,13 @@ class CaptainFlowTests(unittest.TestCase):
                         runtime,
                         "herdr",
                         side_effect=lambda *call, **_: (
-                            self.EMPTY_COMPOSER if call[:2] == ("agent", "read") else created
+                            (
+                                "────────\n\n────────\n/tmp/project\n0.1%/200k"
+                                if provider == "pi"
+                                else self.EMPTY_COMPOSER
+                            )
+                            if call[:2] == ("agent", "read")
+                            else created
                         ),
                     ),
                     patch.object(agents, "executable", return_value=f"/bin/{provider}"),
@@ -1366,7 +1390,13 @@ class CaptainFlowTests(unittest.TestCase):
             "agent": {"name": f"c-{self.meta['id'][:8]}-jack", "agent_status": "working"},
         }
         with (
-            patch.object(runtime, "herdr", return_value=created),
+            patch.object(
+                runtime,
+                "herdr",
+                side_effect=lambda *call, **_: (
+                    self.EMPTY_COMPOSER if call[:2] == ("agent", "read") else created
+                ),
+            ),
             patch.object(agents, "executable", return_value="/bin/claude"),
             contextlib.redirect_stdout(io.StringIO()) as output,
             contextlib.redirect_stderr(io.StringIO()) as errors,
@@ -1572,6 +1602,8 @@ class CaptainFlowTests(unittest.TestCase):
         def api(*call, **kwargs):
             if call[:2] == ("agent", "get") and call[2] == agent_name:
                 return {"agent": {"name": agent_name, "agent_status": next(statuses)}}
+            if call[:2] == ("agent", "read"):
+                return self.EMPTY_COMPOSER
             return {
                 "pane": {"pane_id": "w1:p2", "agent": "claude", "agent_status": "idle"},
                 "agent": {"name": agent_name},
@@ -1579,7 +1611,7 @@ class CaptainFlowTests(unittest.TestCase):
 
         return agent_name, api
 
-    def test_unsent_draft_gets_one_enter_then_is_confirmed_working(self):
+    def test_slow_submission_is_observed_without_enter(self):
         args = self.args(
             "crew",
             "jack",
@@ -1602,20 +1634,13 @@ class CaptainFlowTests(unittest.TestCase):
             patch.object(panes.time, "monotonic", side_effect=count(0, 2)),
         ):
             agents.create_crew(args, self.pane, self.project)
-        self.assertEqual(
-            [call.args for call in calls.call_args_list[-5:]],
-            [
-                ("agent", "prompt", agent_name, "build"),
-                ("agent", "get", agent_name),
-                ("agent", "get", agent_name),
-                ("agent", "send-keys", agent_name, "enter"),
-                ("agent", "get", agent_name),
-            ],
-        )
+        sent = [call.args[:2] for call in calls.call_args_list]
+        self.assertEqual(sent.count(("agent", "prompt")), 1)
+        self.assertNotIn(("agent", "send-keys"), sent)
         saved = memory.read_json(self.directory / "session.json")["crew"]["jack"]
         self.assertEqual(saved["status"], "started")
 
-    def test_dropped_prompt_is_resent_once_and_then_confirmed(self):
+    def test_dropped_prompt_needs_attention_without_resend(self):
         args = self.args(
             "crew",
             "jack",
@@ -1630,31 +1655,22 @@ class CaptainFlowTests(unittest.TestCase):
             "--split-pane",
             "w1:p1",
         )
-        agent_name, api = self.crew_status_api(iter(["idle", "idle", "idle", "idle", "working"]))
+        agent_name, api = self.crew_status_api(repeat("idle"))
         with (
             patch.object(runtime, "herdr", side_effect=api) as calls,
             patch.object(agents, "executable", return_value="/bin/claude"),
             patch.object(panes.time, "sleep"),
             patch.object(panes.time, "monotonic", side_effect=count(0, 2)),
         ):
-            agents.create_crew(args, self.pane, self.project)
-        self.assertEqual(
-            [call.args for call in calls.call_args_list[-8:]],
-            [
-                ("agent", "prompt", agent_name, "build"),
-                ("agent", "get", agent_name),
-                ("agent", "get", agent_name),
-                ("agent", "send-keys", agent_name, "enter"),
-                ("agent", "get", agent_name),
-                ("agent", "get", agent_name),
-                ("agent", "prompt", agent_name, "build"),
-                ("agent", "get", agent_name),
-            ],
-        )
+            with self.assertRaisesRegex(runtime.CaptainError, "unknown"):
+                agents.create_crew(args, self.pane, self.project)
+        sent = [call.args[:2] for call in calls.call_args_list]
+        self.assertEqual(sent.count(("agent", "prompt")), 1)
+        self.assertNotIn(("agent", "send-keys"), sent)
         saved = memory.read_json(self.directory / "session.json")["crew"]["jack"]
-        self.assertEqual(saved["status"], "started")
+        self.assertEqual(saved["status"], "needs_attention")
 
-    def test_task_that_never_starts_sends_enter_once_and_needs_attention(self):
+    def test_task_that_never_starts_needs_attention_without_enter(self):
         args = self.args(
             "crew",
             "jack",
@@ -1678,17 +1694,18 @@ class CaptainFlowTests(unittest.TestCase):
         ):
             with self.assertRaisesRegex(runtime.CaptainError, "pane was preserved") as error:
                 agents.create_crew(args, self.pane, self.project)
-        for phrase in ("did not start working", "submitted 2 times", "unsent draft"):
+        for phrase in ("outcome is unknown", "No resend or Enter", "unsent draft"):
             self.assertIn(phrase, str(error.exception))
-        self.assertIn(f"herdr agent prompt {agent_name}", str(error.exception))
+        self.assertIn(f"herdr agent read {agent_name}", str(error.exception))
         sent = [
             call.args for call in calls.call_args_list if call.args[:2] == ("agent", "send-keys")
         ]
-        self.assertEqual(sent, [("agent", "send-keys", agent_name, "enter")] * 2)
+        self.assertEqual(sent, [])
         prompts = [
             call.args for call in calls.call_args_list if call.args[:2] == ("agent", "prompt")
         ]
-        self.assertEqual(prompts, [("agent", "prompt", agent_name, "build")] * 2)
+        self.assertEqual(len(prompts), 1)
+        self.assertTrue(prompts[0][-1].endswith("\nbuild"))
         self.assertFalse(any(call.args[:2] == ("pane", "close") for call in calls.call_args_list))
         saved = memory.read_json(self.directory / "session.json")["crew"]["jack"]
         self.assertEqual(saved["status"], "needs_attention")
@@ -1734,19 +1751,20 @@ class CaptainFlowTests(unittest.TestCase):
                     "herdr",
                     return_value={"agent": {"name": "builder", "agent_status": status}},
                 ) as api,
+                patch.object(Pane, "lines", return_value=["❯"]),
                 patch.object(panes.time, "sleep") as sleep,
             ):
                 Pane("builder").submit_task("build", "claude")
                 self.assertEqual(
-                    [call.args for call in api.call_args_list],
+                    [call.args for call in api.call_args_list[1:]],
                     [("agent", "prompt", "builder", "build"), ("agent", "get", "builder")],
                 )
                 sleep.assert_not_called()
 
-    def test_enter_that_leads_to_a_prompt_or_unknown_status_needs_attention(self):
+    def test_post_submit_block_or_unknown_needs_attention_without_enter(self):
         for statuses, message in (
-            (["idle", "idle", "blocked"], "waiting for input or approval"),
-            (["idle", "idle", "idle", None], "reported status None"),
+            (["idle", "idle", "blocked"], "outcome is unknown"),
+            (["idle", "idle", "idle", None], "outcome is unknown"),
         ):
             with (
                 self.subTest(statuses=statuses),
@@ -1762,6 +1780,7 @@ class CaptainFlowTests(unittest.TestCase):
                         }
                     },
                 ) as api,
+                patch.object(Pane, "lines", return_value=["❯"]),
                 patch.object(panes.time, "sleep"),
                 patch.object(panes.time, "monotonic", side_effect=count(0, 2)),
             ):
@@ -1772,15 +1791,16 @@ class CaptainFlowTests(unittest.TestCase):
                     for call in api.call_args_list
                     if call.args[:2] == ("agent", "send-keys")
                 ]
-                self.assertEqual(sent, [("agent", "send-keys", "builder", "enter")])
+                self.assertEqual(sent, [])
 
     def test_unknown_status_after_prompt_never_receives_enter(self):
         with (
             patch.object(runtime, "herdr", return_value={"agent": {"name": "builder"}}) as api,
+            patch.object(Pane, "lines", return_value=["❯"]),
             patch.object(panes.time, "sleep"),
             patch.object(panes.time, "monotonic", side_effect=count(0, 2)),
         ):
-            with self.assertRaisesRegex(runtime.CaptainError, "reported status None"):
+            with self.assertRaisesRegex(runtime.CaptainError, "no task was sent"):
                 Pane("builder").submit_task("build", "claude")
         self.assertFalse(
             any(call.args[:2] == ("agent", "send-keys") for call in api.call_args_list)
@@ -1810,17 +1830,17 @@ class CaptainFlowTests(unittest.TestCase):
             any(call.args[:2] == ("agent", "send-keys") for call in api.call_args_list)
         )
 
-    def test_an_idle_codex_pane_is_pressed_enter_before_the_task_is_resent(self):
+    def test_an_idle_codex_pane_never_receives_enter_or_resend(self):
         with (
-            patch.object(runtime, "herdr", side_effect=self.prompt_api(repeat("idle"))) as api,
+            patch.object(runtime, "herdr", side_effect=self.prompt_api(repeat("idle"), "❯")) as api,
             patch.object(panes.time, "sleep"),
             patch.object(panes.time, "monotonic", side_effect=count(0, 2)),
         ):
-            with self.assertRaisesRegex(runtime.CaptainError, "did not start working"):
+            with self.assertRaisesRegex(runtime.CaptainError, "outcome is unknown"):
                 Pane("builder").submit_task("build", "codex")
         sent = [call.args[:2] for call in api.call_args_list]
-        self.assertEqual(sent.count(("agent", "prompt")), 2)
-        self.assertEqual(sent.count(("agent", "send-keys")), 2)
+        self.assertEqual(sent.count(("agent", "prompt")), 1)
+        self.assertEqual(sent.count(("agent", "send-keys")), 0)
 
     def test_automatic_names_are_unique_across_concurrent_recruits_and_session_scoped(self):
         self.meta["crew"] = {
@@ -1906,6 +1926,21 @@ class CaptainFlowTests(unittest.TestCase):
         self.assertEqual(record["name"], "Jack")
         self.assertEqual(record["agent"], f"c-{self.meta['id'][:8]}-jack")
         self.assertIn(("pane", "rename", "w1:p2", "Jack"), [c.args for c in api.call_args_list])
+        crew = Crew("jack", record, memory.Session(self.directory, self.meta))
+        protocol.change(
+            crew,
+            self.args(
+                "done",
+                "Jack",
+                "--assignment",
+                record["assignment_id"],
+                "--report",
+                "No files changed; checks passed; finished",
+            ),
+            self.project,
+        )
+        delivery = protocol.poll(crew)
+        protocol.poll(crew, delivery["delivery_id"])
         with (
             patch.object(runtime, "herdr", return_value={}),
             contextlib.redirect_stdout(io.StringIO()) as dismissed,
@@ -1982,6 +2017,21 @@ class CaptainFlowTests(unittest.TestCase):
                 )
             roster["jack"]["status"] = "dismissed"
             memory.write_json(self.directory / "session.json", {**self.meta, "crew": roster})
+            crew = Crew("jack", roster["jack"], memory.Session(self.directory, self.meta))
+            protocol.change(
+                crew,
+                self.args(
+                    "done",
+                    "Jack",
+                    "--assignment",
+                    result["assignment_id"],
+                    "--report",
+                    "No files changed; checks passed; handoff",
+                ),
+                self.project,
+            )
+            delivery = protocol.poll(crew)
+            protocol.poll(crew, delivery["delivery_id"])
             with contextlib.redirect_stdout(io.StringIO()) as output:
                 agents.create_crew(
                     self.args(
@@ -1991,6 +2041,8 @@ class CaptainFlowTests(unittest.TestCase):
                         "codex",
                         "--task",
                         "again",
+                        "--handoff",
+                        result["assignment_id"],
                         "--placement",
                         "pane",
                         "--direction",
@@ -2269,8 +2321,8 @@ class CaptainFlowTests(unittest.TestCase):
             patch.object(memory, "private_dir", side_effect=runtime.CaptainError("not private")),
         ):
             with self.subTest(fail=fail.attribute), fail:
-                with self.assertRaises((OSError, runtime.CaptainError)):
-                    memory.memory(self.args("memory", "show"), self.pane, self.project)
+                # Showing memory is now a pure read, even when writes are unavailable.
+                memory.memory(self.args("memory", "show"), self.pane, self.project)
                 with self.assertRaises((OSError, runtime.CaptainError)):
                     with memory.memory_snapshot(self.directory):
                         self.fail("snapshot should not be yielded")
