@@ -64,12 +64,12 @@ class DismissMailTests(unittest.TestCase):
             agents.dismiss_crew(args, self.pane, self.project)
         return output.getvalue()
 
-    def test_dismiss_bounces_mail_left_over_from_a_cancelled_message(self):
-        """A message resolved to cancelled leaves its mail file queued; dismiss must bounce it."""
+    def test_dismiss_bounces_mail_the_crew_never_read(self):
+        """A sent message the crew never read leaves its mail file queued; dismiss must bounce it."""
         message_id = protocol.deliver(self.crew, "original", initial=True)
         with protocol.checkpoint(self.directory) as state:
             assignment = protocol.active(state, self.crew, self.assignment["id"])
-            assignment["messages"][0]["delivery"] = "cancelled"
+            assignment["state"] = "done"
         self.assertEqual(self.mail(message_id)["state"], "queued")
         output = self.dismiss()
         self.assertIn(message_id, output)

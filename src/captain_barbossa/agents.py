@@ -337,8 +337,6 @@ def status_crew(args, pane, project):
             status = "idle" if status == "done" else status
             if assignment["state"] in ("asked", "done"):
                 status = assignment["state"]
-            elif any(m["delivery"] in ("pending", "unknown") for m in assignment["messages"]):
-                status = "delivery_unknown"
             if protocol.unread(crew):
                 try:
                     gate = crew.pane.nudge_block(crew)
@@ -410,13 +408,6 @@ def protocol_command(args, pane, project):
             crew, args.message, assignment_id=args.assignment, question_id=args.question_id
         )
         response = {"assignment_id": args.assignment, "message_id": message_id}
-    elif args.command == "resolve":
-        protocol.resolve_delivery(crew, args.assignment, args.message_id, args.outcome)
-        response = {
-            "assignment_id": args.assignment,
-            "message_id": args.message_id,
-            "delivery": args.outcome,
-        }
     else:
         response = protocol.change(crew, args, project)
     print(json.dumps(response))
@@ -470,9 +461,31 @@ def switch_model(args, pane, project):
         print("Claude Code also saved it as the default for new sessions.")
 
 
+def dismiss_blocker(crew, assignment):
+    """Name the one thing that actually holds the dismissal, not both at once."""
+    if not assignment["messages"]:
+        # A launch that failed before its first delivery: nothing was ever sent, so there is
+        # nothing to report, and no crew process is alive to run done. Refusing here would
+        # reserve the name forever.
+        return
+    if assignment["state"] != "done":
+        raise CaptainError(
+            f"{crew.display_name} has no done report; finish with a report before dismissal."
+        )
+    unacked = len(assignment["notices"]) - assignment["ack_seq"]
+    if assignment["pending"]:
+        # A notification returned but never acked; a native one has no notice behind it to count.
+        unacked = max(unacked, 1)
+    if unacked:
+        raise CaptainError(
+            f"{crew.display_name} has {unacked} unacknowledged notification(s); "
+            "acknowledge them with wait --ack before dismissal."
+        )
+
+
 def dismiss_crew(args, pane, project):
     current = session(project, pane, args.session)
-    bounced = []
+    bounced, undelivered = [], False
     with crew_meta(current.directory) as meta:
         current = current._replace(meta=meta)
         crew = Crew.resolve(current, args.name)
@@ -481,23 +494,8 @@ def dismiss_crew(args, pane, project):
         if crew.record.get("incarnation_id"):
             with protocol.checkpoint(current.directory) as state:
                 assignment = protocol.active(state, crew)
-                undelivered = all(
-                    message["delivery"] == "cancelled" for message in assignment["messages"]
-                )
-                if not undelivered and (
-                    assignment["state"] != "done"
-                    or assignment["pending"]
-                    or assignment["ack_seq"] != len(assignment["notices"])
-                ):
-                    if any(message["delivery"] == "sent" for message in assignment["messages"]):
-                        raise CaptainError(
-                            "Crew received a message; finish with a report and acknowledge "
-                            "delivery before dismissal."
-                        )
-                    raise CaptainError(
-                        "Crew message delivery is unresolved; inspect and cancel it before "
-                        "dismissal."
-                    )
+                undelivered = not assignment["messages"]
+                dismiss_blocker(crew, assignment)
             # protocol.bounce takes protocol.lock itself; call it outside the checkpoint
             # above, or a crew with mail still queued at dismissal would deadlock here.
             bounced = protocol.unread(crew)
@@ -511,11 +509,12 @@ def dismiss_crew(args, pane, project):
         except CaptainError as exc:
             if not re.search(r"\bpane_not_found\b", str(exc)):
                 raise CaptainError(f"Could not dismiss {crew.display_name}: {exc}") from exc
-        if crew.record.get("incarnation_id") and undelivered:
+        if undelivered:
+            # Close the reservation with its reason; a working assignment would linger forever.
             with protocol.checkpoint(current.directory) as state:
                 assignment = protocol.active(state, crew)
                 assignment["state"] = "done"
-                assignment["report"] = "Dismissed before message delivery."
+                assignment["report"] = "Dismissed before any message was delivered."
         (current.directory / f"crew-{crew.crew_id}.sh").unlink(missing_ok=True)
         crew.record["status"] = "dismissed"
         tab_id = crew.record.get("tab")

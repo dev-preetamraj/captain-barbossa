@@ -11,7 +11,7 @@ from unittest.mock import patch
 
 from captain_barbossa import agents, cli, memory, protocol
 from captain_barbossa.crew import Crew
-from captain_barbossa.pane import Pane
+from captain_barbossa.pane import DRAFT_GATE, Pane
 from captain_barbossa.runtime import CaptainError
 from tests import home_isolation  # noqa: F401
 
@@ -71,27 +71,10 @@ class ProtocolTests(unittest.TestCase):
         with self.crew.events.open("a") as stream:
             stream.write(json.dumps(event) + "\n")
 
-    def force_unknown_message(self, text="original"):
-        """Bypass deliver to reach a state only a genuine terminal accident used to leave."""
-        with protocol.checkpoint(self.directory) as state:
-            assignment = protocol.active(state, self.crew, self.assignment["id"])
-            message_id = protocol.uuid4().hex
-            assignment["messages"].append(
-                {
-                    "id": message_id,
-                    "text": text,
-                    "kind": "followup",
-                    "question_id": None,
-                    "delivery": "unknown",
-                }
-            )
-            protocol.notice(
-                assignment,
-                "delivery_unknown",
-                f"Inspect message {message_id} before resolving.",
-                message_id,
-            )
-        return message_id
+    def finish(self, report="src/a.py changed; checks pass; nothing left"):
+        """Done with its notification acknowledged, which is what dismissal requires."""
+        self.command("done", report=report)
+        protocol.poll(self.crew, protocol.poll(self.crew)["delivery_id"])
 
     def test_persist_before_single_send_and_preserve_original_task(self):
         first = protocol.deliver(self.crew, "original", initial=True)
@@ -137,37 +120,158 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(self.mail(message_id)["state"], "queued")
 
     def test_poll_drains_held_mail_at_most_once_per_cooldown(self):
+        clock = [1000.0]
         with (
+            patch.object(protocol.time, "time", side_effect=lambda: clock[0]),
             patch.object(Pane, "nudge_block", return_value="cooldown"),
             patch.object(Pane, "nudge") as nudge,
         ):
             protocol.deliver(self.crew, "original", initial=True)
-        nudge.assert_not_called()
-        clock = [1000.0]
+            nudge.assert_not_called()
         with (
             patch.object(protocol.time, "time", side_effect=lambda: clock[0]),
             patch.object(Pane, "nudge_block", return_value=None),
             patch.object(Pane, "nudge") as nudge,
         ):
             protocol.poll(self.crew)
-            protocol.poll(self.crew)
-            nudge.assert_called_once()
+            nudge.assert_not_called()
             clock[0] += protocol.DRAIN_INTERVAL + 1
             protocol.poll(self.crew)
+            protocol.poll(self.crew)
+            nudge.assert_called_once()
+
+    def test_a_landed_ring_is_not_repeated_by_the_next_poll(self):
+        """The delivery ring already landed, so a wait a second later must not nudge again."""
+        clock = [1000.0]
+        with (
+            patch.object(protocol.time, "time", side_effect=lambda: clock[0]),
+            patch.object(Pane, "nudge") as nudge,
+        ):
+            message_id = protocol.deliver(self.crew, "original", initial=True)
+            nudge.assert_called_once()
+            self.assertEqual(
+                memory.read_json(protocol.drain_stamp(self.crew)),
+                {"id": message_id, "at": 1000.0, "landed": True, "gate": None},
+            )
+            clock[0] += protocol.DRAIN_INTERVAL + 1
+            protocol.poll(self.crew)
+            nudge.assert_called_once()
+            # Still unread much later: ring again, so a pane that died after the nudge bounces.
+            clock[0] += protocol.DRAIN_LANDED_INTERVAL
+            protocol.poll(self.crew)
             self.assertEqual(nudge.call_count, 2)
+
+    def held_drain(self, clock):
+        """One poll under a frozen clock with the user's draft on the composer.
+
+        Each poll acknowledges whatever the last one reported, the way a captain's wait does.
+        """
+        with (
+            patch.object(protocol.time, "time", side_effect=lambda: clock[0]),
+            patch.object(Pane, "nudge_block", return_value=DRAFT_GATE),
+            patch.object(Pane, "nudge") as nudge,
+        ):
+            response = protocol.poll(self.crew, ack=getattr(self, "last_delivery", None))
+        self.last_delivery = response["delivery_id"]
+        nudge.assert_not_called()
+        return response
+
+    def held_notices(self):
+        return [n for n in self.saved()["notices"] if n["status"] == "held"]
+
+    def test_a_draft_held_ring_escalates_once_and_never_again(self):
+        clock = [1000.0]
+        with (
+            patch.object(protocol.time, "time", side_effect=lambda: clock[0]),
+            patch.object(Pane, "nudge_block", return_value=DRAFT_GATE),
+            patch.object(Pane, "nudge"),
+        ):
+            message_id = protocol.deliver(self.crew, "original", initial=True)
+        stamp = memory.read_json(protocol.drain_stamp(self.crew))
+        self.assertEqual(
+            (stamp["gate"], stamp["held_since"], stamp["noticed"]), (DRAFT_GATE, 1000.0, False)
+        )
+
+        clock[0] += protocol.DRAIN_INTERVAL + 1
+        self.held_drain(clock)
+        self.assertEqual(self.held_notices(), [])
+
+        clock[0] = 1000.0 + protocol.HELD_NOTICE_INTERVAL
+        self.assertEqual(self.held_drain(clock)["status"], "held")
+        self.assertEqual(len(self.held_notices()), 1)
+        summary = self.held_notices()[0]["summary"]
+        for part in ("Jack", message_id, DRAFT_GATE, "5 min"):
+            self.assertIn(part, summary)
+        self.assertTrue(memory.read_json(protocol.drain_stamp(self.crew))["noticed"])
+
+        for _ in range(2):
+            clock[0] += protocol.DRAIN_INTERVAL + 1
+            self.held_drain(clock)
+        self.assertEqual(len(self.held_notices()), 1)
+
+    def test_a_landed_ring_never_notices_a_hold(self):
+        clock = [1000.0]
+        with (
+            patch.object(protocol.time, "time", side_effect=lambda: clock[0]),
+            patch.object(Pane, "nudge_block", return_value=DRAFT_GATE),
+            patch.object(Pane, "nudge"),
+        ):
+            protocol.deliver(self.crew, "original", initial=True)
+        clock[0] += protocol.HELD_NOTICE_INTERVAL
+        with (
+            patch.object(protocol.time, "time", side_effect=lambda: clock[0]),
+            patch.object(Pane, "nudge_block", return_value=None),
+            patch.object(Pane, "nudge") as nudge,
+        ):
+            protocol.poll(self.crew)
+        nudge.assert_called_once()
+        stamp = memory.read_json(protocol.drain_stamp(self.crew))
+        self.assertTrue(stamp["landed"])
+        self.assertNotIn("held_since", stamp)
+        self.assertEqual(self.held_notices(), [])
+        # A later hold of the same message starts its clock over rather than escalating at once.
+        clock[0] += protocol.DRAIN_LANDED_INTERVAL
+        self.held_drain(clock)
+        self.assertEqual(self.held_notices(), [])
+        self.assertEqual(memory.read_json(protocol.drain_stamp(self.crew))["held_since"], clock[0])
+
+    def test_a_hold_past_a_float_only_stamp_still_escalates_once(self):
+        clock = [1000.0]
+        with (
+            patch.object(protocol.time, "time", side_effect=lambda: clock[0]),
+            patch.object(Pane, "nudge_block", return_value=DRAFT_GATE),
+            patch.object(Pane, "nudge"),
+        ):
+            protocol.deliver(self.crew, "original", initial=True)
+        memory.write_json(protocol.drain_stamp(self.crew), clock[0])
+        clock[0] += protocol.HELD_NOTICE_INTERVAL
+        self.held_drain(clock)
+        # The bare float carries no message id, so this hold is new: no notice yet.
+        self.assertEqual(self.held_notices(), [])
+        clock[0] += protocol.HELD_NOTICE_INTERVAL
+        self.held_drain(clock)
+        self.assertEqual(len(self.held_notices()), 1)
+
+    def test_drain_tolerates_a_float_only_stamp_from_an_older_session(self):
+        clock = [1000.0]
+        stamp = protocol.drain_stamp(self.crew)
+        with patch.object(protocol.time, "time", side_effect=lambda: clock[0]):
+            with patch.object(Pane, "nudge"):
+                protocol.deliver(self.crew, "original", initial=True)
+            memory.write_json(stamp, clock[0])
+            with patch.object(Pane, "nudge") as nudge:
+                protocol.poll(self.crew)
+            nudge.assert_not_called()
+            clock[0] += protocol.DRAIN_INTERVAL + 1
+            with patch.object(Pane, "nudge") as nudge:
+                protocol.poll(self.crew)
+            nudge.assert_called_once()
+            self.assertTrue(memory.read_json(stamp)["landed"])
 
     def test_poll_does_not_drain_when_there_is_no_unread_mail(self):
         with patch.object(Pane, "nudge") as nudge:
             protocol.poll(self.crew)
         nudge.assert_not_called()
-
-    def test_an_unknown_message_blocks_new_delivery_until_resolved(self):
-        protocol.deliver(self.crew, "original", initial=True)
-        unknown = self.force_unknown_message("second")
-        with self.assertRaisesRegex(CaptainError, "never auto-resend"):
-            protocol.deliver(self.crew, "third")
-        protocol.resolve_delivery(self.crew, self.assignment["id"], unknown, "cancelled")
-        protocol.deliver(self.crew, "third")
 
     def test_a_process_crash_during_the_ring_still_leaves_the_message_sent_and_mailed(self):
         with patch.object(Pane, "nudge", side_effect=KeyboardInterrupt):
@@ -287,34 +391,6 @@ class ProtocolTests(unittest.TestCase):
             self.assertEqual(modal.call_count, 4)
         self.assertGreaterEqual(elapsed, 70)
 
-    def test_resolving_an_uncertain_delivery_retires_its_queued_notice(self):
-        message = self.force_unknown_message()
-        protocol.resolve_delivery(self.crew, self.assignment["id"], message, "cancelled")
-        self.assertEqual(protocol.wait(self.crew, 0)["status"], "timeout")
-        self.assertEqual(self.saved()["notices"], [])
-        self.assertEqual(self.saved()["ack_seq"], 0)
-        # The retired notice must not keep the assignment from being handed off either.
-        self.command("done", report="cancelled; nothing changed; nothing left")
-        report = protocol.poll(self.crew)
-        self.assertEqual(report["status"], "done")
-        protocol.poll(self.crew, report["delivery_id"])
-        protocol.begin(self.crew, self.project, "next", handoff=self.assignment["id"])
-
-    def test_retiring_a_notice_keeps_acknowledged_and_pending_indexes_aligned(self):
-        self.command("ask", question="Which path?")
-        first = protocol.poll(self.crew)
-        self.assertEqual(first["status"], "asked")
-        protocol.poll(self.crew, first["delivery_id"])
-        self.force_unknown_message("src")
-        unknown = protocol.poll(self.crew)
-        self.assertEqual(unknown["status"], "delivery_unknown")
-        message = self.saved()["messages"][0]["id"]
-        protocol.resolve_delivery(self.crew, self.assignment["id"], message, "sent")
-        saved = self.saved()
-        self.assertEqual([entry["status"] for entry in saved["notices"]], ["asked"])
-        self.assertEqual(saved["ack_seq"], 1)
-        self.assertEqual(saved["pending"]["seq"], 1)
-
     def test_a_second_approval_event_is_not_swallowed_by_the_first(self):
         self.event({"hook_event_name": "PermissionRequest"})
         first = protocol.poll(self.crew)
@@ -421,6 +497,44 @@ class ProtocolTests(unittest.TestCase):
         protocol.bounce(self.crew, second, "pane not found")
         protocol.mark_read(self.crew, [second])
         self.assertEqual(self.mail(second)["state"], "bounced")
+
+    def test_a_read_receipt_advances_the_assignment_message_and_reads_again_change_nothing(self):
+        first = protocol.deliver(self.crew, "original", initial=True)
+        second = protocol.deliver(self.crew, "followup")
+        protocol.mark_read(self.crew, [first])
+        self.assertEqual([m["delivery"] for m in self.saved()["messages"]], ["read", "sent"])
+        before = self.saved()
+        protocol.mark_read(self.crew, [first])
+        self.assertEqual(self.saved(), before)
+        protocol.mark_read(self.crew, [second])
+        self.assertEqual([m["delivery"] for m in self.saved()["messages"]], ["read", "read"])
+
+    def test_a_read_receipt_lands_on_the_assignment_the_mail_names(self):
+        message_id = protocol.deliver(self.crew, "original", initial=True)
+        path = protocol.mail_dir(self.directory, self.crew.crew_id) / f"{message_id}.json"
+        record = memory.read_json(path)
+        record["assignment_id"] = "retired"
+        memory.write_json(path, record)
+        protocol.mark_read(self.crew, [message_id])
+        self.assertEqual(self.mail(message_id)["state"], "read")
+        self.assertEqual(self.saved()["messages"][0]["delivery"], "sent")
+
+    def test_dismiss_names_the_blocker_that_actually_holds(self):
+        self.crew.record.update(pane="w1:p2", assignment_id=self.assignment["id"])
+        memory.write_json(self.current.meta_path, self.current.meta)
+        args = SimpleNamespace(session=self.current.meta["id"], name="Jack")
+
+        def refuse(pattern):
+            with patch.object(agents.runtime, "herdr") as send:
+                with self.assertRaisesRegex(CaptainError, pattern):
+                    agents.dismiss_crew(args, self.pane, self.project)
+            send.assert_not_called()
+
+        message_id = protocol.deliver(self.crew, "original", initial=True)
+        protocol.mark_read(self.crew, [message_id])
+        refuse("Jack has no done report")
+        self.command("done", report="src/a.py changed; checks pass; nothing left")
+        refuse(r"Jack has 1 unacknowledged notification\(s\)")
 
     def run_cli(self, *arguments):
         with (
@@ -636,36 +750,10 @@ class ProtocolTests(unittest.TestCase):
                 agents.switch_model(args, self.pane, self.project)
         send.assert_not_called()
 
-    def test_dismiss_releases_an_assignment_with_no_delivered_message(self):
-        self.crew.record.update(pane="w1:p2", assignment_id=self.assignment["id"])
-        memory.write_json(self.current.meta_path, self.current.meta)
-        args = SimpleNamespace(session=self.current.meta["id"], name="Jack")
-        with patch.object(agents.runtime, "herdr", return_value={}):
-            agents.dismiss_crew(args, self.pane, self.project)
-        self.assertEqual(self.saved()["state"], "done")
-        replacement = Crew(
-            "will",
-            {"name": "Will", "agent": "will", "incarnation_id": "second"},
-            memory.read_session(self.project, self.current.meta["id"], self.pane),
-        )
-        protocol.begin(replacement, self.project, "replacement", ["src"], ["edit"])
-
-    def test_dismiss_releases_an_assignment_with_only_cancelled_messages(self):
-        self.crew.record.update(pane="w1:p2", assignment_id=self.assignment["id"])
-        memory.write_json(self.current.meta_path, self.current.meta)
-        message = self.force_unknown_message()
-        protocol.resolve_delivery(self.crew, self.assignment["id"], message, "cancelled")
-        with patch.object(agents.runtime, "herdr", return_value={}):
-            agents.dismiss_crew(
-                SimpleNamespace(session=self.current.meta["id"], name="Jack"),
-                self.pane,
-                self.project,
-            )
-        self.assertEqual(self.saved()["state"], "done")
-
     def test_dismiss_missing_pane_retires_record_and_releases_paths(self):
         self.crew.record.update(pane="w1:p2", assignment_id=self.assignment["id"])
         memory.write_json(self.current.meta_path, self.current.meta)
+        self.finish()
         args = SimpleNamespace(session=self.current.meta["id"], name="Jack")
         with patch.object(
             agents.runtime, "herdr", side_effect=CaptainError('Herdr: {"code": "pane_not_found"}')
@@ -684,6 +772,7 @@ class ProtocolTests(unittest.TestCase):
     def test_dismiss_other_close_failure_preserves_record_and_assignment(self):
         self.crew.record.update(pane="w1:p2", assignment_id=self.assignment["id"])
         memory.write_json(self.current.meta_path, self.current.meta)
+        self.finish()
         before = self.saved()
         args = SimpleNamespace(session=self.current.meta["id"], name="Jack")
         with (
@@ -700,13 +789,30 @@ class ProtocolTests(unittest.TestCase):
         memory.write_json(self.current.meta_path, self.current.meta)
         protocol.deliver(self.crew, "original", initial=True)
         with patch.object(agents.runtime, "herdr") as send:
-            with self.assertRaisesRegex(CaptainError, "received a message"):
+            with self.assertRaisesRegex(CaptainError, "Jack has no done report"):
                 agents.dismiss_crew(
                     SimpleNamespace(session=self.current.meta["id"], name="Jack"),
                     self.pane,
                     self.project,
                 )
         send.assert_not_called()
+
+    def test_dismiss_releases_an_assignment_that_never_got_a_message(self):
+        """A launch that died before its first delivery: no crew is alive to run done."""
+        self.crew.record.update(pane="w1:p2", assignment_id=self.assignment["id"])
+        memory.write_json(self.current.meta_path, self.current.meta)
+        args = SimpleNamespace(session=self.current.meta["id"], name="Jack")
+        with patch.object(agents.runtime, "herdr", return_value={}):
+            agents.dismiss_crew(args, self.pane, self.project)
+        saved = self.saved()
+        self.assertEqual(saved["state"], "done")
+        self.assertEqual(saved["report"], "Dismissed before any message was delivered.")
+        replacement = Crew(
+            "will",
+            {"name": "Will", "agent": "will", "incarnation_id": "second"},
+            memory.read_session(self.project, self.current.meta["id"], self.pane),
+        )
+        protocol.begin(replacement, self.project, "replacement", ["src"], ["edit"])
 
     def test_failed_launch_preserves_a_retryable_launcher(self):
         args = cli.parser().parse_args(

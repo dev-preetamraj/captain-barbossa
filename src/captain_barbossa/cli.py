@@ -99,7 +99,7 @@ def parser():
         "inbox", help="print a crew's queued mail oldest first and write the read receipt"
     )
     inbox.add_argument("name", help="crew name or ID (case-insensitive)")
-    for verb in ("assign", "ask", "answer", "done", "check", "resolve"):
+    for verb in ("assign", "ask", "answer", "done", "check"):
         command = commands.add_parser(verb, help=f"{verb} an explicit crew assignment")
         command.add_argument("name")
         if verb == "assign":
@@ -120,9 +120,6 @@ def parser():
         elif verb == "check":
             command.add_argument("action", choices=protocol.ACTIONS)
             command.add_argument("path", nargs="*")
-        elif verb == "resolve":
-            command.add_argument("message_id")
-            command.add_argument("outcome", choices=("sent", "cancelled"))
     model = commands.add_parser("model", help="switch a running crew to another model")
     model.add_argument("name", help="crew name or ID (case-insensitive)")
     model.add_argument("model", help=f"tier ({'|'.join(TIER_NAMES)}), model name, or alias")
@@ -287,7 +284,7 @@ def main(argv=None):
             tell_crew(args, pane, project)
         elif args.command == "inbox":
             print_inbox(args, pane, project)
-        elif args.command in ("assign", "ask", "answer", "done", "check", "resolve"):
+        elif args.command in ("assign", "ask", "answer", "done", "check"):
             protocol_command(args, pane, project)
         elif args.command == "model":
             switch_model(args, pane, project)
