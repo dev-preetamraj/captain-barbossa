@@ -8,6 +8,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from .memory import lock, read_json, write_json
+from .pane import DRAFT_GATE
 from .runtime import HERDR_ERRORS, CaptainError, check_text
 
 ACTIONS = ("read", "search", "edit", "test", "build", "format", "commit", "version", "delete")
@@ -19,6 +20,11 @@ MODAL_PROVIDERS = ("codex", "pi")
 MODAL_INTERVAL = 30
 # No daemon drains held mail; the wait loop already polls, so it retries the doorbell instead.
 DRAIN_INTERVAL = 30
+# A ring that landed needs no retry for the crew's sake; this only exists so a pane that died
+# after the nudge eventually bounces its mail instead of sitting on it forever.
+DRAIN_LANDED_INTERVAL = 600
+# A draft gate can hold mail all session, so one hold this long is escalated to the captain.
+HELD_NOTICE_INTERVAL = 300
 
 
 @contextmanager
@@ -47,27 +53,6 @@ def overlaps(left, right):
     return a.is_relative_to(b) or b.is_relative_to(a)
 
 
-def retire_notices(assignment):
-    """Drop notices for deliveries since resolved; they shift, so acknowledged counts shift too.
-
-    A delivery_unknown notice describes an uncertain send. Once the captain has inspected
-    and resolved it, waking anyone for it again is noise, and leaving it queued forever
-    blocks handoff and dismissal, which both require every notice acknowledged.
-    """
-    settled = {
-        m["id"] for m in assignment["messages"] if m["delivery"] not in ("pending", "unknown")
-    }
-    pending, kept, acked = assignment["pending"], [], assignment["ack_seq"]
-    for index, entry in enumerate(assignment["notices"]):
-        if entry.get("message_id") in settled:
-            acked -= index < assignment["ack_seq"]
-            if pending:
-                pending["seq"] -= index < pending["seq"]
-        else:
-            kept.append(entry)
-    assignment["notices"], assignment["ack_seq"] = kept, acked
-
-
 def active(state, crew, assignment_id=None, incarnation=None):
     key = state["active"].get(crew.crew_id)
     assignment = state["assignments"].get(key)
@@ -79,8 +64,6 @@ def active(state, crew, assignment_id=None, incarnation=None):
         raise CaptainError("Stale assignment ID.")
     if incarnation is not None and incarnation != assignment["incarnation_id"]:
         raise CaptainError("Stale crew incarnation.")
-    # Every protocol path reads the assignment here, so stale notices are retired once.
-    retire_notices(assignment)
     return assignment
 
 
@@ -134,11 +117,8 @@ def begin(crew, project, task, paths=(), actions=(), handoff=None):
     return assignment
 
 
-def notice(assignment, status, summary, message_id=None):
-    entry = {"status": status, "summary": summary[:1600]}
-    if message_id:
-        entry["message_id"] = message_id
-    assignment["notices"].append(entry)
+def notice(assignment, status, summary):
+    assignment["notices"].append({"status": status, "summary": summary[:1600]})
 
 
 def validate_actor(crew, args):
@@ -190,8 +170,6 @@ def change(crew, args, project):
         check_text(args.report, "report")
         if assignment["question"]:
             raise CaptainError("Answer the pending question before done.")
-        if any(message["delivery"] in ("pending", "unknown") for message in assignment["messages"]):
-            raise CaptainError("Resolve uncertain prompt delivery before done.")
         if unread(crew):
             raise CaptainError("Unread mail is waiting; run inbox before done.")
         assignment["report"] = args.report
@@ -235,6 +213,7 @@ def unread(crew):
 def mark_read(crew, ids):
     """The crew's own read writes the receipt; a bounced message is never resurrected."""
     directory = mail_dir(crew.session.directory, crew.crew_id)
+    receipts = {}
     with lock(crew.session.directory / "protocol.lock"):
         for message_id in ids:
             path = directory / f"{message_id}.json"
@@ -243,6 +222,16 @@ def mark_read(crew, ids):
                 message["state"] = "read"
                 message["read_at"] = time.time()
                 write_json(path, message)
+                receipts.setdefault(message.get("assignment_id"), []).append(message_id)
+    # checkpoint takes protocol.lock too, so mirror the receipt after the mail writes, like bounce.
+    if receipts:
+        with checkpoint(crew.session.directory) as state:
+            for assignment_id, read_ids in receipts.items():
+                assignment = state["assignments"].get(assignment_id)
+                for message in assignment["messages"] if assignment else ():
+                    # A second read finds the mail already off "queued", so nothing to mirror.
+                    if message["id"] in read_ids and message["delivery"] == "sent":
+                        message["delivery"] = "read"
 
 
 def bounce(crew, message_id, reason):
@@ -256,8 +245,6 @@ def bounce(crew, message_id, reason):
         write_json(path, message)
     with checkpoint(directory) as state:
         assignment = state["assignments"].get(state["active"].get(crew.crew_id))
-        # No message_id here: retire_notices reads that key against assignment["messages"]
-        # delivery state, unrelated to mail, and would drop this the moment the send settles.
         if assignment:
             notice(
                 assignment,
@@ -273,18 +260,61 @@ def ring(crew, message_id):
     a missing or misbehaving nudge is the harness, not the crew, so it holds instead.
     Mail is already durable, so no outcome here can lose the message.
     """
+    prior = last_ring(crew)
+    landed, unreachable, gate = False, None, None
     try:
         gate = crew.pane.nudge_block(crew)
         if gate is None:
             crew.pane.nudge(crew)
+            landed = True
     except HERDR_ERRORS as exc:
-        bounce(crew, message_id, str(exc))
+        unreachable = str(exc)
     except Exception:
         pass
+    # The one record of a ring, so drain can tell a held doorbell from one the crew already got.
+    now = time.time()
+    record = {"id": message_id, "at": now, "landed": landed, "gate": gate}
+    if not landed:
+        held_over = bool(prior) and prior["id"] == message_id and not prior["landed"]
+        record["held_since"] = (prior.get("held_since") or prior["at"]) if held_over else now
+        record["noticed"] = bool(held_over and prior.get("noticed"))
+        if (
+            gate == DRAFT_GATE
+            and not record["noticed"]
+            and now - record["held_since"] >= HELD_NOTICE_INTERVAL
+        ):
+            record["noticed"] = held_notice(crew, message_id, gate, now - record["held_since"])
+    write_json(drain_stamp(crew), record)
+    if unreachable is not None:
+        bounce(crew, message_id, unreachable)
+
+
+def held_notice(crew, message_id, gate, held):
+    """Escalate a long hold to the captain once; the gate is a human's draft, never typed over."""
+    with checkpoint(crew.session.directory) as state:
+        assignment = state["assignments"].get(state["active"].get(crew.crew_id))
+        if assignment:
+            notice(
+                assignment,
+                "held",
+                f"Mail to {crew.display_name} ({message_id}) has waited about "
+                f"{round(held / 60)} min behind the {gate} gate and stays queued; "
+                f"the crew's composer has to clear before the doorbell lands.",
+            )
+        return assignment is not None
 
 
 def drain_stamp(crew):
     return mail_dir(crew.session.directory, crew.crew_id) / ".drain"
+
+
+def last_ring(crew):
+    """An older session stamped a bare float; read it as a held ring for an unknown message."""
+    stamp = drain_stamp(crew)
+    if not stamp.exists():
+        return None
+    record = read_json(stamp)
+    return record if isinstance(record, dict) else {"id": None, "at": record, "landed": False}
 
 
 def drain(crew):
@@ -292,10 +322,11 @@ def drain(crew):
     messages = unread(crew)
     if not messages:
         return
-    stamp = drain_stamp(crew)
-    if stamp.exists() and time.time() - read_json(stamp) < DRAIN_INTERVAL:
-        return
-    write_json(stamp, time.time())
+    record = last_ring(crew)
+    if record:
+        landed = record["landed"] and record["id"] == messages[0]["id"]
+        if time.time() - record["at"] < (DRAIN_LANDED_INTERVAL if landed else DRAIN_INTERVAL):
+            return
     ring(crew, messages[0]["id"])
 
 
@@ -305,12 +336,7 @@ def deliver(crew, text, *, assignment_id=None, question_id=None, initial=False):
         assignment = active(state, crew, assignment_id)
         if assignment["state"] == "done":
             raise CaptainError("Assignment is done; use assign with an explicit handoff.")
-        if any(message["delivery"] in ("pending", "unknown") for message in assignment["messages"]):
-            raise CaptainError("Delivery is unknown; inspect and resolve it, never auto-resend.")
-        # A cancelled message was never received, so re-delivering its text is not a resend.
-        last = next(
-            (m for m in reversed(assignment["messages"]) if m["delivery"] != "cancelled"), None
-        )
+        last = assignment["messages"][-1] if assignment["messages"] else None
         if last and last["text"] == text:
             raise CaptainError(
                 f"Message {last['id']} already carried this exact text; never auto-resend."
@@ -349,24 +375,6 @@ def mark_sent(assignment, message):
     if question and question["id"] == message["question_id"]:
         assignment["question"] = None
         assignment["state"] = "working"
-
-
-def resolve_delivery(crew, assignment_id, message_id, outcome):
-    """A captain records observed delivery; this command never sends terminal input."""
-    if outcome not in ("sent", "cancelled"):
-        raise CaptainError("Resolution must be sent or cancelled after inspection.")
-    with checkpoint(crew.session.directory) as state:
-        assignment = active(state, crew, assignment_id)
-        message = next((m for m in assignment["messages"] if m["id"] == message_id), None)
-        if not message or message["delivery"] not in ("pending", "unknown"):
-            raise CaptainError("No uncertain delivery with that message ID.")
-        if outcome == "sent":
-            message["delivery"] = "sent"
-            mark_sent(assignment, message)
-        else:
-            # Keep the failed message; cancellation permits an explicit next action, not a retry.
-            message["delivery"] = "cancelled"
-        retire_notices(assignment)
 
 
 def native_events(path, offset):
@@ -432,16 +440,6 @@ def poll(crew, ack=None, modal=True):
             entry = assignment["notices"][seq]
             seq += 1
             status, summary = entry["status"], entry["summary"]
-            if status == "delivery_unknown":
-                native_status = status
-        elif any(m["delivery"] in ("pending", "unknown") for m in assignment["messages"]):
-            status, summary = (
-                "delivery_unknown",
-                "Inspect pending terminal delivery before resolving.",
-            )
-            if native_status == status:
-                return result(crew, assignment, "working")
-            native_status = status
         elif assignment["state"] == "done":
             if acked:
                 return result(crew, assignment, "idle")

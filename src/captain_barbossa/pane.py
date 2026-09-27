@@ -49,6 +49,9 @@ ANSI_SGR = re.compile(r"\x1b\[([\d;]*)m")
 # trailing "?" is not enough on its own; a normal prompt can end in one too.
 SHELL_QUESTION = re.compile(r"(\[[YyNn]/[YyNn]\]|\([YyNn]/[YyNn]\))\s*$")
 SHELL_READY_TIMEOUT = 3
+# nudge_block's gate for unsubmitted human text, which protocol escalates rather than
+# typing over.
+DRAFT_GATE = "user draft"
 
 
 def modal_start(lines):
@@ -257,7 +260,7 @@ class Pane:
         if status != "idle":
             return "agent not idle"
         if self._draft_pending(crew.record.get("provider")):
-            return "user draft"
+            return DRAFT_GATE
         return None
 
     def nudge(self, crew):

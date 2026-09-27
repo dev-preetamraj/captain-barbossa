@@ -6,21 +6,21 @@ and `answer` reach a crew, and leaves the assignment protocol in
 
 ## The problem this solves
 
-Today a message to a crew *is* a terminal write. `deliver` persists the message,
-then types it into the native CLI's composer and infers from the pane whether it
-landed. Every quirk of that composer is therefore a delivery failure:
+Before 0.22.0 a message to a crew *was* a terminal write. `deliver` persisted the
+message, then typed it into the native CLI's composer and inferred from the pane
+whether it landed. Every quirk of that composer was therefore a delivery failure:
 
-- a contextual suggestion (`Try "refactor agents.py"`) reads as a user draft, so
-  the send is refused;
-- a native permission prompt raised *by the task we just sent* reports `blocked`,
-  so a delivery that plainly landed is recorded `unknown`;
-- input arriving mid-turn is queued by the CLI, which the pane reports as `idle`;
-- every one of those leaves an `unknown` message that blocks all later messages
-  until a human runs `resolve`.
+- a contextual suggestion (`Try "refactor agents.py"`) read as a user draft, so
+  the send was refused;
+- a native permission prompt raised *by the task we just sent* reported `blocked`,
+  so a delivery that plainly landed was recorded `unknown`;
+- input arriving mid-turn was queued by the CLI, which the pane reported as `idle`;
+- every one of those left an `unknown` message that blocked all later messages
+  until a human ran `resolve`.
 
-Because a re-type could duplicate real work, the protocol forbids auto-resend, so
-each failure needs a human. The cost is not the typing; it is that **delivery is
-inferred from a TUI instead of being proven**.
+Because a re-type could duplicate real work, the protocol forbade auto-resend, so
+each failure needed a human. The cost was not the typing; it was that **delivery
+was inferred from a TUI instead of being proven**.
 
 ## The change
 
@@ -37,11 +37,13 @@ captain assign/tell/answer ──▶ mail/<crew>/<id>.json ──▶ (doorbell) 
 Three consequences, all of which remove a class of bug rather than patch it:
 
 1. **Delivery is proven, not inferred.** The crew's own `inbox` read writes a
-   receipt. `sent` stops meaning "the pane looked right after we typed".
+   receipt, which carries the message from `sent` to the terminal `read` on the
+   assignment the mail names. `sent` stops meaning "the pane looked right after
+   we typed"; `read` means the crew has it.
 2. **The doorbell is idempotent.** Re-ringing costs nothing, so a failed or
-   uncertain ring is retried instead of escalated. `unknown` deliveries, and the
-   `resolve` command that exists to clear them, lose their reason to exist for
-   ordinary sends.
+   uncertain ring is retried, not escalated at once. `pending` and `unknown`
+   deliveries, the `cancelled` state and the `resolve` command that cleared them
+   are gone with the keystroke transport; a delivery is `sent` then `read`.
 3. **A blocked composer delays a nudge instead of losing a message.** The mail is
    already durable before the pane is touched.
 
@@ -89,7 +91,7 @@ It fires only when all of these hold. Their drain applies the same shape
 
 | Gate | Why |
 |---|---|
-| unread mail exists whose ids were not already announced | edge-triggered: undrained mail is never re-announced on a timer. Their `announced` set |
+| unread mail exists whose head was not already rung | edge-triggered: `ring` records the message, the time and whether the nudge landed; a landed ring is repeated only on the slow retry that exists to bounce a pane that died after it. Their `announced` set |
 | the pane is quiescent | don't interrupt a turn |
 | past a boot grace window from launch | the CLI is still painting its banner |
 | no native approval prompt is waiting | a human is deciding; typing into that is how we lost a crew today |
@@ -100,13 +102,23 @@ A gate that does not clear is not an error. The mail stays queued, `status` says
 which gate is holding it, and the next ring tries again. Nothing is lost by
 waiting, which is the opposite of today, where a held composer loses the message.
 
+Waiting forever is still a failure, though, so a hold is escalated rather than
+forced: when the user-draft gate has held one message for
+`protocol.HELD_NOTICE_INTERVAL` (300s), the next drain appends a single `held`
+notice naming the crew, the gate and roughly how long, so the captain's next
+`wait` surfaces it. Exactly one per message, recorded in the `.drain` stamp. The
+nudge is still never typed over the draft and the draft is never cleared for us:
+submitting a human's unsubmitted text is what this design exists to prevent. The
+other gates need no escalation - an approval prompt already raises
+`awaiting_approval`, and a busy agent is just working.
+
 ## Signals count only after they are asked for
 
 Every notification carries the `queued_at` of the message that prompted it, and a
 crew signal older than the message it answers is ignored. That kills stale
 notices by construction rather than by retiring them after the fact, and it
 removes the race where a `wait` polls between "message written" and "send
-finished" and reports `delivery_unknown` for a healthy send.
+finished" and calls a healthy send uncertain.
 
 Their completion watcher does the same with a `dispatchedAt` stamp
 (`src/main/realtimeCompletionWatcher.ts`).
@@ -139,7 +151,7 @@ Two crews can build against this without touching the same file:
 ```
 protocol.enqueue(crew, text, kind, assignment_id) -> message id   # writes the file
 protocol.unread(crew) -> [message]                                # queued, oldest first
-protocol.mark_read(crew, ids) -> None                             # receipt, sets read_at
+protocol.mark_read(crew, ids) -> None                             # receipt: read_at, sent -> read
 protocol.bounce(crew, message_id, reason) -> None                 # notification
 pane.nudge_block(crew) -> str | None                              # which gate holds, or None
 ```
@@ -154,8 +166,8 @@ pane.nudge_block(crew) -> str | None                              # which gate h
    a message surviving a refused ring, and a receipt proving delivery.
 2. **Doorbell and gates.** `pane.py`, `agents.py`. Tests cover each gate holding
    the ring and none of them losing the message, plus bounce on a dead pane.
-3. **Retire the workarounds.** Once receipts exist: no `unknown` state for an
-   ordinary send, `resolve` narrows to genuine terminal accidents, and the
-   stale-notice retirement added earlier can go.
+3. **Retire the workarounds.** Landed as a deletion once receipts existed: the
+   `pending`/`unknown`/`cancelled` delivery states, `resolve`, and the
+   stale-notice retirement are gone, with nothing left that can reach them.
 
 Phase 3 only lands if phases 1 and 2 prove out on a real session.

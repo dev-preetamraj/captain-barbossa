@@ -416,7 +416,6 @@ Read the affected pane before retrying or approving anything.
 | `captain answer NAME QUESTION_ID MESSAGE --assignment ID` | Answer that question |
 | `captain done NAME [--assignment ID] --report TEXT` | Record explicit completion; ID may default for newly launched crew |
 | `captain check NAME ACTION [PATH ...] [--assignment ID]` | Check grants; ID may default for newly launched crew; executes nothing |
-| `captain resolve NAME MESSAGE_ID sent\|cancelled --assignment ID` | Resolve uncertain prompt delivery after inspection |
 | `captain inspect files\|read\|search\|state\|git ...` | Bounded local inspection |
 | `captain status [--all]` | Print a table of this session's crew |
 | `captain dashboard [--interval SECONDS] [--refresh-prices]` | Refresh a crew token-usage table; optionally refresh prices |

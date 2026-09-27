@@ -37,13 +37,13 @@ pane/tab label, and the name in memory, `wait`, `focus`, `model`, and `dismiss`.
 New crew panes/tabs open in the same workspace and project without stealing
 focus, and the task is submitted once the native agent is ready. A task that
 never starts, or an agent waiting for approval, preserves the pane for
-inspection. Protocol delivery is attempted once; uncertain delivery must be
-inspected and explicitly resolved before sending another message.
+inspection. Protocol delivery is mail plus one doorbell: the message is durable
+before the pane is touched, so it is queued for the crew to read or bounced.
 The startup launcher deletes itself before starting the native CLI and removes
 its path from that process's environment. Crew may inspect project files and Git,
 read repo state, add session memory, and use `ask`, `done`, and `check` for their
 own assignment. `memory show` is forced to repo scope. Crew cannot inspect other
-session/project state or recruit, answer, resolve, reassign, or dismiss crew.
+session/project state or recruit, answer, reassign, or dismiss crew.
 
 Placement flags and tab shapes are documented in
 [placement.md](https://github.com/dev-preetamraj/captain-barbossa/blob/main/docs/placement.md).
@@ -77,7 +77,7 @@ must match; missing or stale context fails. Captain calls still require explicit
 IDs, and replacement assignments require their new explicit `--assignment ID`.
 Crew commands also validate `--incarnation`, defaulting to the launcher's
 `CAPTAIN_INCARNATION`. Only one question may be pending. `done` requires a report,
-an answered question, no uncertain prompt delivery, and no unread mail.
+an answered question, and no unread mail.
 Reassignment requires `done`, acknowledgement of prior notifications, and the
 exact handoff ID. Stale assignment, incarnation, and question IDs are refused.
 
@@ -86,7 +86,8 @@ Each writes the message to a durable file, then rings a content-free doorbell
 in the crew's pane: the fixed sentence `read your mail with captain inbox
 <name>`, which carries no task text. `captain inbox NAME` prints that crew's
 queued mail oldest first and writes the read receipt, which is what proves
-delivery; `done` refuses while mail is unread. See
+delivery and moves that message from `sent` to `read` on its own assignment;
+`done` refuses while mail is unread. See
 [crew-mail.md](crew-mail.md) for the doorbell's gates and bounce handling.
 
 ## Waiting for crew to finish
@@ -101,7 +102,7 @@ captain wait Jack --json --ack <delivery-id> --timeout 0
 For protocol crew, `wait` returns a notification with `status`, `delivery_id`,
 `crew`, `assignment_id`, and a summary capped at 1,600 characters. `--json`
 selects JSON output. Statuses distinguish `working`, `idle`, `asked`,
-`awaiting_approval`, `done`, `delivery_unknown`, `timeout`, and `error`. Native
+`awaiting_approval`, `done`, `held`, `bounced`, `timeout`, and `error`. Native
 idle is activity evidence only; assignment completion requires explicit `done`.
 Approval notifications never approve the underlying native prompt.
 
@@ -120,10 +121,8 @@ instead of the next notification. Waiting again once the assignment is done and
 every notification is acknowledged fails: dismiss the crew or hand off. Timeouts
 have no delivery ID and do not imply completion. `--timeout 0` polls once; the
 default is 900 seconds. Neither waiting nor timing out retries a terminal prompt.
-After inspecting an uncertain prompt, use
-`resolve NAME MESSAGE_ID sent|cancelled --assignment ID`; this records the
-observed outcome, sends no input, and retires that delivery's notification so it
-never wakes the captain again.
+Mail is durable before the pane is touched, so a delivery is never uncertain: it
+is either queued for the crew to read, or `bounced` with its reason.
 
 Legacy crew retain the older non-JSON wait below; they are not silently adopted
 into the protocol. Recruit new crew to use acknowledged notifications.
@@ -156,8 +155,7 @@ captain tell Jack "also update the changelog" --assignment <assignment-id>
 
 `tell` prompts an existing crew in place; its pane, model, and running
 conversation are kept. A message whose text repeats the last message on the
-assignment is refused by that message's ID; a cancelled message does not count,
-so a delivery cancelled after inspection can be sent again. For protocol crew,
+assignment is refused by that message's ID. For protocol crew,
 `--assignment` is required and the message is appended without replacing the
 original task, ownership, or grants.
 Use `answer` for a pending question and `assign --handoff` after completion.
@@ -218,10 +216,11 @@ captain dismiss Jack
 
 This closes the crew's pane, retires the name (freeing it for reuse), and
 records the dismissal in memory. Protocol crew must first finish with a report
-and have all notifications acknowledged. Any mail still unread at that point is
-bounced with a reason instead of being left queued, and the command names each
-bounced message. It is permanent, so handle unreported or uncommitted work
-first; commit only when the user explicitly requested it.
+and have all notifications acknowledged; a refusal names whichever of those, or
+an unresolved delivery, is actually holding it. Any mail still unread at that
+point is bounced with a reason instead of being left queued, and the command
+names each bounced message. It is permanent, so handle unreported or
+uncommitted work first; commit only when the user explicitly requested it.
 
 ## Editing guardrails
 
