@@ -24,6 +24,9 @@ CODEX_EFFORT_HEADER = "Select Reasoning Level"
 # Input-prompt glyphs of the native TUIs, which also open their status bars.
 PROMPT_GLYPHS = ("❯", "›")
 INTERRUPT_MARKER = "esc to interrupt"
+# Claude Code's own signature for a prompt queued mid-turn, not a draft or a drop.
+QUEUED_SEND_NOW = "ctrl+enter to send now"
+QUEUED_COMPOSER = "Press up to edit queued messages"
 # Pane chrome shared by the Claude Code and Codex TUIs: a bare box-drawing rule, an
 # empty input prompt (provider placeholders need separate recognition),
 # and the bottom status bar, which is always the last line and never starts like
@@ -37,6 +40,15 @@ PANE_STATUS_BAR_PREFIXES = ("•", "⏺", "└", "│", "✻", "✳", "?", "…"
 PANE_MODAL_CONFIRM = re.compile(r"^Press enter to confirm or esc to \w+")
 PANE_MODAL_OPTION = re.compile(r"^[›»]?\s*([1-9])\.\s+(\S+)")
 PANE_MODAL_LINES = 20
+# A contextual suggestion is drawn dim (SGR 2); a typed draft carries no styling at all.
+# Group captures the whole parameter list so a multi-parameter code (a truecolor prefix,
+# "38;2;153;153;153") is consumed as one sequence instead of failing to match at all.
+ANSI_SGR = re.compile(r"\x1b\[([\d;]*)m")
+# A shell startup hook (oh-my-zsh's update check, etc.) asks a yes/no question that
+# swallows the first keystroke of anything typed before it is answered. A bare
+# trailing "?" is not enough on its own; a normal prompt can end in one too.
+SHELL_QUESTION = re.compile(r"(\[[YyNn]/[YyNn]\]|\([YyNn]/[YyNn]\))\s*$")
+SHELL_READY_TIMEOUT = 3
 
 
 def modal_start(lines):
@@ -49,6 +61,27 @@ def modal_start(lines):
     window = range(max(len(lines) - PANE_MODAL_LINES, 0), len(lines) - 1)
     options = [index for index in window if PANE_MODAL_OPTION.match(lines[index])]
     return options[0] if options else None
+
+
+def shell_ready_for_input(pane_id, timeout=SHELL_READY_TIMEOUT):
+    """Whether a brand-new shell pane shows no persistent yes/no question.
+
+    Only reports: a shell startup question is left for a human, never answered or
+    typed into. Blank, changing, or unreadable panes fail open so launch is not
+    blocked by inconclusive observations.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            output = runtime.herdr("pane", "read", pane_id, "--lines", "5", raw=True, timeout=10)
+        except HERDR_ERRORS:
+            return True
+        lines = [line.strip() for line in output.splitlines() if line.strip()]
+        if not lines or not SHELL_QUESTION.search(lines[-1]):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(POLL_INTERVAL)
 
 
 class Pane:
@@ -96,9 +129,50 @@ class Pane:
     def draft_pending(self, provider=None):
         """Treat an unreadable composer as potentially holding a user's draft."""
         try:
-            return self.composer(provider) != ""
+            text = self.composer(provider)
         except HERDR_ERRORS:
             return True
+        if not text:
+            return text is None
+        return not self._dim_suggestion(text)
+
+    def _dim_suggestion(self, text):
+        """Whether the composer's plain-text content is really a dim native suggestion.
+
+        Plain-text reads strip styling, so a contextual suggestion ("Try ...") and a
+        real typed draft look identical there. Re-read with SGR intact: the native TUI
+        dims a suggestion (SGR 2) between the prompt glyph and the text, and never dims
+        what the user actually typed. Only that span decides it; a coloured glyph or a
+        trailing reset elsewhere on the line must not change the verdict.
+        """
+        try:
+            output = runtime.herdr(
+                "agent",
+                "read",
+                self.agent_name,
+                "--lines",
+                str(TAIL_LINES),
+                "--format",
+                "ansi",
+                raw=True,
+                timeout=10,
+            )
+        except HERDR_ERRORS:
+            return False
+        for line in output.splitlines():
+            stripped = ANSI_SGR.sub("", line)
+            if stripped[:1] not in PROMPT_GLYPHS or stripped[1:].strip() != text:
+                continue
+            after = line[line.index(stripped[0]) + 1 :].lstrip("\xa0")
+            codes = []
+            while True:
+                match = ANSI_SGR.match(after)
+                if not match:
+                    break
+                codes.extend(match.group(1).split(";") if match.group(1) else ["0"])
+                after = after[match.end() :]
+            return bool(codes) and "2" in codes and all(code in ("0", "2") for code in codes)
+        return False
 
     def composer(self, provider=None):
         """Return a visible composer, or None when the screen cannot prove its contents."""
@@ -126,7 +200,11 @@ class Pane:
         if (
             provider == "claude"
             and len(lines) >= 4
-            and lines[-1] == "⏸ manual mode on · ? for shortcuts · ← for agents"
+            and lines[-1]
+            in (
+                "⏸ manual mode on · ? for shortcuts · ← for agents",
+                "⏵⏵ auto mode on (shift+tab to cycle) · ← for agents",
+            )
         ):
             # Only this captured native placeholder; arbitrary "Try ..." text is a draft.
             if (
@@ -179,8 +257,27 @@ class Pane:
                 if not self.draft_pending(provider):
                     return status
                 status = "idle"
+            elif self.message_queued():
+                return "working"
             time.sleep(POLL_INTERVAL)
         return status
+
+    def message_queued(self):
+        """Whether the pane shows Claude Code's own mid-turn message-queue signature.
+
+        A prompt that arrives while the previous turn is still running gets queued and
+        flushed once it ends, so it landed even though agent_status reads idle for the
+        whole window; this composer/footer trio is the only proof of that.
+        """
+        try:
+            lines = self.lines()
+        except HERDR_ERRORS:
+            return False
+        return (
+            any(QUEUED_SEND_NOW in line for line in lines)
+            and any(QUEUED_COMPOSER in line for line in lines)
+            and any(INTERRUPT_MARKER in line for line in lines)
+        )
 
     def task_landed(self, provider, timeout=SUBMIT_TIMEOUT):
         """Observe submission without typing into a potentially changed composer."""

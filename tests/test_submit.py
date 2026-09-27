@@ -278,6 +278,126 @@ class SubmitTaskTests(unittest.TestCase):
                     [("agent", "prompt", "builder", TASK)] if accepted else [],
                 )
 
+    def test_claude_auto_mode_placeholder_is_an_empty_composer(self):
+        """Auto mode has its own footer; reading its placeholder as a draft sent no task."""
+        rule = "─" * 78
+        screen = "\n".join(
+            [
+                " ▝▜   ▝▝   ~/code/projects/captain-barbossa",
+                rule,
+                '❯\u00a0Try "how do I log an error?"',
+                rule,
+                "  ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents",
+            ]
+        )
+        sent = False
+
+        def api(*call, **kwargs):
+            nonlocal sent
+            if call[:2] == ("agent", "read"):
+                return screen
+            if call[:2] == ("agent", "prompt"):
+                sent = True
+            return {"agent": {"agent_status": "working" if sent else "idle"}}
+
+        with patch.object(runtime, "herdr", side_effect=api) as calls:
+            Pane("builder").submit_task(TASK, "claude")
+        self.assertEqual(
+            [c.args for c in calls.call_args_list if c.args[1] in ("prompt", "send-keys")],
+            [("agent", "prompt", "builder", TASK)],
+        )
+
+    def test_a_dim_contextual_suggestion_is_empty_but_the_same_typed_text_is_a_draft(self):
+        """A plain read cannot tell them apart; only the SGR codes of an ansi read can."""
+        suggestion = "go ahead and format pane.py"
+        for styled, accepted in (
+            ("\x1b[0m\x1b[2m" + suggestion + "\x1b[0m", True),
+            (suggestion, False),
+        ):
+            with self.subTest(accepted=accepted):
+                sent = False
+
+                def api(*call, **kwargs):
+                    nonlocal sent
+                    if call[:2] == ("agent", "read"):
+                        body = styled if "--format" in call else suggestion
+                        return "\u2022 Ran the gate\n\u276f\u00a0" + body
+                    if call[:2] == ("agent", "prompt"):
+                        sent = True
+                    return {"agent": {"agent_status": "working" if sent else "idle"}}
+
+                with patch.object(runtime, "herdr", side_effect=api) as calls:
+                    self.assertEqual(Pane("builder").draft_pending("claude"), not accepted)
+                    if accepted:
+                        Pane("builder").submit_task(TASK, "claude")
+                    else:
+                        with self.assertRaisesRegex(CaptainError, "no task was sent"):
+                            Pane("builder").submit_task(TASK, "claude")
+                self.assertEqual(
+                    [c.args for c in calls.call_args_list if c.args[1] in ("prompt", "send-keys")],
+                    [("agent", "prompt", "builder", TASK)] if accepted else [],
+                )
+
+    def test_a_dim_suggestion_survives_a_multi_parameter_colour_code(self):
+        """Real captured line: a truecolor SGR on the glyph used to make ANSI_SGR fail to
+        match at all, leaving escape bytes in the stripped text and refusing every draft."""
+        suggestion = 'Try "refactor agents.py"'
+        styled = "\x1b[0m\x1b[38;2;153;153;153m❯ \x1b[0m\x1b[2m" + suggestion + "\x1b[0m"
+        sent = False
+
+        def api(*call, **kwargs):
+            nonlocal sent
+            if call[:2] == ("agent", "read"):
+                body = styled if "--format" in call else "❯ " + suggestion
+                return "• Ran the gate\n" + body
+            if call[:2] == ("agent", "prompt"):
+                sent = True
+            return {"agent": {"agent_status": "working" if sent else "idle"}}
+
+        with patch.object(runtime, "herdr", side_effect=api) as calls:
+            self.assertFalse(Pane("builder").draft_pending("claude"))
+            Pane("builder").submit_task(TASK, "claude")
+        self.assertEqual(
+            [c.args for c in calls.call_args_list if c.args[1] in ("prompt", "send-keys")],
+            [("agent", "prompt", "builder", TASK)],
+        )
+
+    def test_a_queued_message_mid_turn_lands_without_a_resend(self):
+        """Claude Code queues a prompt that arrives mid-turn and flushes it when the turn
+        ends; agent_status reads idle the whole time, so this trio is the only landing proof."""
+        empty = "\n".join(
+            [
+                "─" * 78,
+                '❯ Try "how do I log an error?"',
+                "─" * 78,
+                "  ⏸ manual mode on · ? for shortcuts · ← for agents",
+            ]
+        )
+        queued = "\n".join(
+            [
+                TASK,
+                "ctrl+enter to send now",
+                "Press up to edit queued messages",
+                "esc to interrupt",
+            ]
+        )
+        sent = False
+
+        def api(*call, **kwargs):
+            nonlocal sent
+            if call[:2] == ("agent", "read"):
+                return queued if sent else empty
+            if call[:2] == ("agent", "prompt"):
+                sent = True
+            return {"agent": {"agent_status": "idle"}}
+
+        with patch.object(runtime, "herdr", side_effect=api) as calls:
+            Pane("builder").submit_task(TASK, "claude")
+        self.assertEqual(
+            [c.args for c in calls.call_args_list if c.args[1] in ("prompt", "send-keys")],
+            [("agent", "prompt", "builder", TASK)],
+        )
+
     def test_pi_requires_an_empty_editor_above_its_native_footer(self):
         footer = "~/project\n0.0%/272k (auto) gpt-5.5 • medium"
         for draft in ("", "user draft", "user\nmultiline draft", "────────────", "── draft──"):
@@ -321,6 +441,45 @@ class SubmitTaskTests(unittest.TestCase):
             [call.args for call in calls.call_args_list if call.args[1] in ("prompt", "send-keys")],
             [("agent", "prompt", "builder", TASK)],
         )
+
+
+class ShellReadyForInputTests(unittest.TestCase):
+    """Only a visible shell startup question blocks launch."""
+
+    def setUp(self):
+        self.enterContext(patch.object(panes.time, "sleep"))
+
+    def test_a_settled_prompt_is_ready(self):
+        with patch.object(runtime, "herdr", return_value="~/project $ "):
+            self.assertTrue(panes.shell_ready_for_input("pane-1"))
+
+    def test_a_blank_pane_is_ready(self):
+        with patch.object(runtime, "herdr", return_value=""):
+            self.assertTrue(panes.shell_ready_for_input("pane-1"))
+
+    def test_a_yes_no_question_is_not_ready(self):
+        screen = "[oh-my-zsh] Would you like to update? [Y/n]"
+        with patch.object(runtime, "herdr", return_value=screen):
+            self.assertFalse(panes.shell_ready_for_input("pane-1", timeout=0))
+
+    def test_a_prompt_ending_in_a_bare_question_mark_is_still_ready(self):
+        """A trailing "?" alone is not proof of a pending question; a real one carries
+        an explicit [Y/n] or (y/n) marker."""
+        with patch.object(runtime, "herdr", return_value="Continue? "):
+            self.assertTrue(panes.shell_ready_for_input("pane-1"))
+
+    def test_an_unreadable_pane_is_ready(self):
+        with patch.object(runtime, "herdr", side_effect=OSError("read failed")):
+            self.assertTrue(panes.shell_ready_for_input("pane-1"))
+
+    def test_a_pane_with_a_live_clock_is_ready(self):
+        counter = count()
+
+        def api(*call, **kwargs):
+            return f"~/project $ {next(counter)}"
+
+        with patch.object(runtime, "herdr", side_effect=api):
+            self.assertTrue(panes.shell_ready_for_input("pane-1"))
 
 
 if __name__ == "__main__":

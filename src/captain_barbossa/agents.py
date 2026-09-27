@@ -27,7 +27,7 @@ from .memory import (
     write_json,
 )
 from .models import PROVIDERS, model_names, resolve_model
-from .pane import MODEL_TIMEOUT, PROMPT_TIMEOUT
+from .pane import MODEL_TIMEOUT, PROMPT_TIMEOUT, shell_ready_for_input
 from .pi_captain import captain_extension
 from .placement import Placement
 from .prompts import PLACEMENTS, choose
@@ -473,13 +473,22 @@ def dismiss_crew(args, pane, project):
         if crew.record.get("incarnation_id"):
             with protocol.checkpoint(current.directory) as state:
                 assignment = protocol.active(state, crew)
-                if (
+                undelivered = all(
+                    message["delivery"] == "cancelled" for message in assignment["messages"]
+                )
+                if not undelivered and (
                     assignment["state"] != "done"
                     or assignment["pending"]
                     or assignment["ack_seq"] != len(assignment["notices"])
                 ):
+                    if any(message["delivery"] == "sent" for message in assignment["messages"]):
+                        raise CaptainError(
+                            "Crew received a message; finish with a report and acknowledge "
+                            "delivery before dismissal."
+                        )
                     raise CaptainError(
-                        "Finish with a report and acknowledge delivery before dismissal."
+                        "Crew message delivery is unresolved; inspect and cancel it before "
+                        "dismissal."
                     )
         if not crew.record.get("pane") and not crew.record.get("incarnation_id"):
             raise CaptainError(f"{crew.display_name} has no recorded pane to close.")
@@ -487,7 +496,13 @@ def dismiss_crew(args, pane, project):
             if crew.record.get("pane"):
                 runtime.herdr("pane", "close", crew.record["pane"])
         except CaptainError as exc:
-            raise CaptainError(f"Could not dismiss {crew.display_name}: {exc}") from exc
+            if not re.search(r"\bpane_not_found\b", str(exc)):
+                raise CaptainError(f"Could not dismiss {crew.display_name}: {exc}") from exc
+        if crew.record.get("incarnation_id") and undelivered:
+            with protocol.checkpoint(current.directory) as state:
+                assignment = protocol.active(state, crew)
+                assignment["state"] = "done"
+                assignment["report"] = "Dismissed before message delivery."
         (current.directory / f"crew-{crew.crew_id}.sh").unlink(missing_ok=True)
         crew.record["status"] = "dismissed"
         tab_id = crew.record.get("tab")
@@ -586,7 +601,7 @@ def create_crew(args, pane, project):
             [binary, *instructions.native_args(provider, instruction_text, model, events)]
         )
         launcher.write_text(
-            f'#!/bin/sh\nrm -f -- "$0"\nunset CAPTAIN_CREW_LAUNCHER\nexec {command}\n',
+            f"#!/bin/sh\nunset CAPTAIN_CREW_LAUNCHER\nexec {command}\n",
             encoding="utf-8",
         )
         launcher.chmod(0o600)
@@ -669,7 +684,11 @@ def create_crew(args, pane, project):
             if auto:
                 add_memory(current.graph, crew_agent, "placement", f"auto: {auto}")
             runtime.herdr("pane", "rename", new_pane, display_name)
-            # A new shell may still be in canonical mode: keep terminal input short.
+            if not shell_ready_for_input(new_pane):
+                raise CaptainError(
+                    f"Shell in pane {new_pane} is not ready for input; answer any interactive "
+                    "question before retrying."
+                )
             runtime.herdr(
                 "pane", "run", new_pane, '/bin/sh "$CAPTAIN_CREW_LAUNCHER"', expect_output=False
             )
@@ -683,10 +702,14 @@ def create_crew(args, pane, project):
         except HERDR_ERRORS as exc:
             record["status"] = "needs_attention"
             write_json(current.meta_path, meta)
-            launcher.unlink(missing_ok=True)
             raise CaptainError(
                 f"Crew pane {new_pane} was created but startup needs attention: {exc}. "
-                f"Inspect pane {new_pane} in Herdr. The pane was preserved; "
+                f"Inspect pane {new_pane} in Herdr. The pane was preserved, and launcher "
+                f"{launcher} was preserved. If the pane is at a shell prompt, retry there with: "
+                f"/bin/sh {shlex.quote(str(launcher))}. Once Herdr detects {provider} in that pane, "
+                f"register it from the captain pane with: herdr agent rename {new_pane} {crew_agent}. "
+                f"Verify with: herdr agent get {crew_agent}. Inspect assignment {assignment['id']} "
+                "before using tell to deliver any unsent task; "
                 "the task was not automatically retried."
             ) from exc
     print(json.dumps({key: value for key, value in record.items() if key != "task"}))

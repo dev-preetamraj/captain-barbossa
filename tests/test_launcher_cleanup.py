@@ -51,17 +51,26 @@ class LauncherCleanupTests(unittest.TestCase):
         create_args = self.args(
             "crew", "jack", "--agent", "claude", "--task", "build", "--placement", "tab"
         )
+
+        # create_crew's shell_ready_for_input polls a raw `pane read`, which needs text;
+        # only "agent read" carries the ambiguous "❯" composer check.
+        def herdr_stub(*call, **_):
+            if call[:2] == ("agent", "read"):
+                return "❯"
+            if call[:2] == ("pane", "read"):
+                return "~/project $ "
+            return created
+
         with (
-            patch.object(
-                runtime,
-                "herdr",
-                side_effect=lambda *call, **_: "❯" if call[:2] == ("agent", "read") else created,
-            ),
+            patch.object(runtime, "herdr", side_effect=herdr_stub),
             patch.object(agents, "executable", return_value="/bin/claude"),
         ):
             agents.create_crew(create_args, self.pane, self.project)
         launcher = self.directory / "crew-jack.sh"
+        # A launcher that deleted itself the moment it ran made a failed startup
+        # unrecoverable; it now survives, and dismiss_crew is what unlinks it.
         self.assertTrue(launcher.exists())
+        self.assertNotIn('rm -f -- "$0"', launcher.read_text())
 
         current = memory.read_session(self.project, self.meta["id"], self.pane)
         crew = Crew.resolve(current, "Jack")

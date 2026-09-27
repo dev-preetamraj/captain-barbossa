@@ -103,11 +103,15 @@ Name the files each crew owns. Give simultaneous writers disjoint files; seriali
 same-file work and wait for the current owner's report before reassigning a file.
 Declare --owns PATH and --allow ACTION when recruiting; read/search are implicit.
 Use assign --handoff ASSIGNMENT_ID only after done/report and delivery acknowledgement.
-Keep original tasks immutable; tell --assignment ID adds follow-ups.
+Keep original tasks immutable; tell --assignment ID adds follow-ups, never the same
+text twice.
 Use answer NAME QUESTION_ID 'text' --assignment ID for the one pending question.
 Recruiting prints one canonical name; use it for CAPTAIN and Herdr commands:
   CAPTAIN wait 'NAME' [--timeout <seconds>]
 Use wait NAME --json [--ack DELIVERY_ID]; acknowledge only received notifications.
+Each notification returns once; the next wait without its --ack fails naming it.
+Quiet native work never notifies; idle notifies once per message you send. After an
+acknowledged done, wait fails: dismiss or hand off.
 Explicit done with report completes protocol assignments; native finish is inactivity.
 Legacy wait retains its old meaning; never reinterpret legacy records.
 {wait_guidance} For more detail: herdr agent read <name>

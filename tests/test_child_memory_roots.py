@@ -72,12 +72,18 @@ class ChildMemoryRootTests(unittest.TestCase):
             "agent": {"name": f"c-{self.meta['id'][:8]}-jack", "agent_status": "working"},
         }
         args = self.args("crew", "--agent", "claude", "--task", "build", "--placement", "tab")
+
+        # create_crew's shell_ready_for_input polls a raw `pane read`, which needs text;
+        # only "agent read" carries the ambiguous "❯" composer check.
+        def herdr_stub(*call, **_):
+            if call[:2] == ("agent", "read"):
+                return "❯"
+            if call[:2] == ("pane", "read"):
+                return "~/project $ "
+            return created
+
         with (
-            patch.object(
-                runtime,
-                "herdr",
-                side_effect=lambda *call, **_: "❯" if call[:2] == ("agent", "read") else created,
-            ) as api,
+            patch.object(runtime, "herdr", side_effect=herdr_stub) as api,
             patch.object(agents, "executable", return_value="/bin/claude"),
         ):
             agents.create_crew(args, self.pane, self.project)

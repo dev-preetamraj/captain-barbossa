@@ -60,6 +60,9 @@ class LaunchHarness(unittest.TestCase):
             return {"pane": {"pane_id": f"w1:p{self.splits + 1}", "tab_id": "w1:t1"}}
         if args[:2] == ("tab", "create"):
             return {"root_pane": {"pane_id": "w1:p9", "tab_id": "w1:t2"}, "tab_id": "w1:t2"}
+        # create_crew's shell_ready_for_input polls a raw `pane read`, which needs text.
+        if args[:2] == ("pane", "read"):
+            return "~/project $ "
         return {}
 
     def launch(self, argv=()):

@@ -29,6 +29,22 @@ from captain_barbossa.runtime import CaptainError
 # for every test in this process. tests/test_isolation.py guards it.
 from tests import home_isolation  # noqa: F401
 
+# create_crew's shell_ready_for_input polls a raw `pane read`, which needs text; a
+# fixture built to return a dict for every herdr call would otherwise blow up on it.
+SETTLED_SHELL_TEXT = "~/project $ "
+
+
+def pane_stub(base):
+    """Wrap a herdr stub so a `pane read` returns settled shell text instead of
+    whatever `base` answers everything else with (a dict, `base` being callable or not)."""
+
+    def api(*call, **kwargs):
+        if call[:2] == ("pane", "read"):
+            return SETTLED_SHELL_TEXT
+        return base(*call, **kwargs) if callable(base) else base
+
+    return api
+
 
 class CaptainFlowTests(unittest.TestCase):
     def setUp(self):
@@ -426,7 +442,7 @@ class CaptainFlowTests(unittest.TestCase):
                 )
                 created = {"pane": {"pane_id": "w1:p2"}}
                 with (
-                    patch.object(runtime, "herdr", return_value=created) as api,
+                    patch.object(runtime, "herdr", side_effect=pane_stub(created)) as api,
                     patch.object(agents, "executable", return_value=f"/bin/{provider}"),
                     patch.object(Pane, "wait_for_crew"),
                     patch.object(Pane, "submit_task") as submit,
@@ -451,7 +467,9 @@ class CaptainFlowTests(unittest.TestCase):
                 launcher_argv = shlex.split(script, comments=True)
                 argv = launcher_argv[launcher_argv.index("exec") :]
                 self.assertEqual(argv[:2], ["exec", f"/bin/{provider}"])
-                self.assertIn('rm -f -- "$0"', script)
+                # A self-deleting launcher made a failed startup unrecoverable; it now
+                # survives on disk, and dismiss_crew is what eventually unlinks it.
+                self.assertNotIn('rm -f -- "$0"', script)
                 self.assertIn("unset CAPTAIN_CREW_LAUNCHER", script)
                 if provider == "codex":
                     prompt = json.loads(
@@ -912,7 +930,7 @@ class CaptainFlowTests(unittest.TestCase):
             args = self.args("crew", "--task", "build", *flags)
             with (
                 self.subTest(direction=direction, flags=flags),
-                patch.object(runtime, "herdr", side_effect=api) as calls,
+                patch.object(runtime, "herdr", side_effect=pane_stub(api)) as calls,
                 patch.object(agents, "executable", return_value="/bin/codex"),
                 patch.object(sys.stdin, "isatty", return_value=True),
                 patch(
@@ -981,7 +999,7 @@ class CaptainFlowTests(unittest.TestCase):
             "sonnet",
         )
         with (
-            patch.object(runtime, "herdr", side_effect=api),
+            patch.object(runtime, "herdr", side_effect=pane_stub(api)),
             patch.object(agents, "executable", return_value="/bin/claude"),
             patch.object(sys.stdin, "isatty", return_value=True),
             patch.object(questionary, "select", side_effect=AssertionError("asked a question")),
@@ -1068,7 +1086,7 @@ class CaptainFlowTests(unittest.TestCase):
 
             with (
                 self.subTest(flags=flags),
-                patch.object(runtime, "herdr", side_effect=api) as calls,
+                patch.object(runtime, "herdr", side_effect=pane_stub(api)) as calls,
                 patch.object(agents, "executable", return_value="/bin/codex"),
                 patch.object(sys.stdin, "isatty", return_value=False),
                 contextlib.redirect_stdout(io.StringIO()) as output,
@@ -1127,7 +1145,7 @@ class CaptainFlowTests(unittest.TestCase):
 
         base = ("crew", "--agent", "claude", "--task", "review code", "--placement", "pane")
         with (
-            patch.object(runtime, "herdr", side_effect=api) as calls,
+            patch.object(runtime, "herdr", side_effect=pane_stub(api)) as calls,
             patch.object(agents, "executable", return_value="/bin/claude"),
             patch.object(sys.stdin, "isatty", return_value=False),
             contextlib.redirect_stdout(io.StringIO()) as output,
@@ -1165,7 +1183,7 @@ class CaptainFlowTests(unittest.TestCase):
                     patch.object(
                         runtime,
                         "herdr",
-                        side_effect=lambda *call, **_: self.listing(*call) or created,
+                        side_effect=pane_stub(lambda *call, **_: self.listing(*call) or created),
                     ) as api,
                     patch.object(agents, "executable", return_value=f"/bin/{provider}"),
                     patch.object(sys.stdin, "isatty", return_value=True),
@@ -1270,7 +1288,7 @@ class CaptainFlowTests(unittest.TestCase):
                 created = {"pane": {"pane_id": "w1:p2", "agent": provider, "agent_status": "idle"}}
                 created["agent"] = {"name": f"c-{self.meta['id'][:8]}-{name}"}
                 with (
-                    patch.object(runtime, "herdr", return_value=created) as api,
+                    patch.object(runtime, "herdr", side_effect=pane_stub(created)) as api,
                     patch.object(agents, "executable", return_value=str(native)),
                     patch.object(
                         instruction_prompts, "agent_instructions", return_value=instructions
@@ -1349,14 +1367,16 @@ class CaptainFlowTests(unittest.TestCase):
                     patch.object(
                         runtime,
                         "herdr",
-                        side_effect=lambda *call, **_: (
-                            (
-                                "────────\n\n────────\n/tmp/project\n0.1%/200k"
-                                if provider == "pi"
-                                else self.EMPTY_COMPOSER
+                        side_effect=pane_stub(
+                            lambda *call, **_: (
+                                (
+                                    "────────\n\n────────\n/tmp/project\n0.1%/200k"
+                                    if provider == "pi"
+                                    else self.EMPTY_COMPOSER
+                                )
+                                if call[:2] == ("agent", "read")
+                                else created
                             )
-                            if call[:2] == ("agent", "read")
-                            else created
                         ),
                     ),
                     patch.object(agents, "executable", return_value=f"/bin/{provider}"),
@@ -1393,8 +1413,10 @@ class CaptainFlowTests(unittest.TestCase):
             patch.object(
                 runtime,
                 "herdr",
-                side_effect=lambda *call, **_: (
-                    self.EMPTY_COMPOSER if call[:2] == ("agent", "read") else created
+                side_effect=pane_stub(
+                    lambda *call, **_: (
+                        self.EMPTY_COMPOSER if call[:2] == ("agent", "read") else created
+                    )
                 ),
             ),
             patch.object(agents, "executable", return_value="/bin/claude"),
@@ -1469,6 +1491,8 @@ class CaptainFlowTests(unittest.TestCase):
         def api(*args, **kwargs):
             if args[:2] == ("pane", "run"):
                 raise runtime.CaptainError("agent_not_ready")
+            if args[:2] == ("pane", "read"):
+                return SETTLED_SHELL_TEXT
             return {"pane": {"pane_id": "w1:p2"}}
 
         with (
@@ -1487,7 +1511,9 @@ class CaptainFlowTests(unittest.TestCase):
                 agents.create_crew(args, self.pane, self.project)
         saved = memory.read_json(self.directory / "session.json")
         self.assertEqual(saved["crew"]["jack"]["status"], "needs_attention")
-        self.assertFalse((self.directory / "crew-jack.sh").exists())
+        # A launcher that deleted itself made a failed startup unrecoverable; it now
+        # survives, and dismiss_crew is what eventually unlinks crew-<id>.sh.
+        self.assertTrue((self.directory / "crew-jack.sh").exists())
 
     def test_startup_waits_for_the_expected_native_agent(self):
         states = [
@@ -1579,9 +1605,11 @@ class CaptainFlowTests(unittest.TestCase):
                 created = {"pane": {"pane_id": "w1:p2", "agent": "codex", "agent_status": status}}
                 created["agent"] = {"name": f"c-{self.meta['id'][:8]}-{name}"}
                 with (
-                    patch.object(runtime, "herdr", return_value=created) as calls,
+                    patch.object(runtime, "herdr", side_effect=pane_stub(created)) as calls,
                     patch.object(agents, "executable", return_value="/bin/codex"),
-                    patch.object(panes.time, "monotonic", side_effect=[0, 1, 31]),
+                    # One extra tick: shell_ready_for_input's own deadline check runs
+                    # (and settles at once) before wait_for_crew consumes [0, 1, 31].
+                    patch.object(panes.time, "monotonic", side_effect=[0, 0, 1, 31]),
                     patch.object(panes.time, "sleep"),
                 ):
                     message = "input or approval" if status == "blocked" else "did not become ready"
@@ -1609,7 +1637,7 @@ class CaptainFlowTests(unittest.TestCase):
                 "agent": {"name": agent_name},
             }
 
-        return agent_name, api
+        return agent_name, pane_stub(api)
 
     def test_slow_submission_is_observed_without_enter(self):
         args = self.args(
@@ -1863,7 +1891,7 @@ class CaptainFlowTests(unittest.TestCase):
         )
         created = {"pane": {"pane_id": "w1:p2", "agent": "codex", "agent_status": "idle"}}
         with (
-            patch.object(runtime, "herdr", return_value=created),
+            patch.object(runtime, "herdr", side_effect=pane_stub(created)),
             patch.object(agents, "executable", return_value="/bin/codex"),
             patch.object(Pane, "wait_for_crew"),
             patch.object(Pane, "submit_task"),
@@ -1914,7 +1942,7 @@ class CaptainFlowTests(unittest.TestCase):
         )
         created = {"pane": {"pane_id": "w1:p2", "agent": "codex", "agent_status": "idle"}}
         with (
-            patch.object(runtime, "herdr", return_value=created) as api,
+            patch.object(runtime, "herdr", side_effect=pane_stub(created)) as api,
             patch.object(agents, "executable", return_value="/bin/codex"),
             patch.object(Pane, "wait_for_crew"),
             patch.object(Pane, "submit_task"),
@@ -1963,7 +1991,7 @@ class CaptainFlowTests(unittest.TestCase):
         memory.write_json(self.directory / "session.json", self.meta)
         created = {"pane": {"pane_id": "w1:p2", "agent": "codex", "agent_status": "idle"}}
         with (
-            patch.object(runtime, "herdr", return_value=created),
+            patch.object(runtime, "herdr", side_effect=pane_stub(created)),
             patch.object(agents, "executable", return_value="/bin/codex"),
             patch.object(Pane, "wait_for_crew"),
             patch.object(Pane, "submit_task"),
@@ -2228,18 +2256,40 @@ class CaptainFlowTests(unittest.TestCase):
         with (
             patch.object(cli, "current_pane", return_value=self.pane),
             patch.object(cli, "project_root", return_value=self.project),
-            patch.object(
-                runtime, "herdr", side_effect=runtime.CaptainError("pane_not_found")
-            ) as api,
+            patch.object(runtime, "herdr", side_effect=runtime.CaptainError("boom")) as api,
             contextlib.redirect_stderr(io.StringIO()) as error,
         ):
             self.assertEqual(
                 cli.main(["--session", self.meta["id"], "dismiss", "c-session-jack"]), 1
             )
-            self.assertIn("Could not dismiss Jack: pane_not_found", error.getvalue())
+            self.assertIn("Could not dismiss Jack: boom", error.getvalue())
             api.assert_called_once_with("pane", "close", "w1:p2")
         self.assertEqual(memory.read_json(self.directory / "session.json"), self.meta)
         self.assertFalse((self.directory / "graph.json").exists())
+
+    def test_dismiss_treats_a_pane_already_gone_as_already_closed(self):
+        """pane_not_found means someone else already closed it; the record still retires."""
+        self.meta["crew"] = {
+            "jack": {"name": "Jack", "agent": "c-session-jack", "pane": "w1:p2"},
+        }
+        memory.write_json(self.directory / "session.json", self.meta)
+        with (
+            patch.object(cli, "current_pane", return_value=self.pane),
+            patch.object(cli, "project_root", return_value=self.project),
+            patch.object(
+                runtime, "herdr", side_effect=runtime.CaptainError("pane_not_found")
+            ) as api,
+            contextlib.redirect_stdout(io.StringIO()) as output,
+        ):
+            self.assertEqual(
+                cli.main(["--session", self.meta["id"], "dismiss", "c-session-jack"]), 0
+            )
+            self.assertEqual(output.getvalue(), "Dismissed Jack.\n")
+            api.assert_called_once_with("pane", "close", "w1:p2")
+        roster = memory.read_json(self.directory / "session.json")["crew"]
+        self.assertEqual(roster["jack"]["status"], "dismissed")
+        graph = memory.read_json(self.directory / "graph.json")
+        self.assertIn("c-session-jack", [node["label"] for node in graph["nodes"]])
 
     def test_graph_scopes_projects_sessions_and_parallel_relationships(self):
         shared = self.directory.parent.parent / "graph.json"
