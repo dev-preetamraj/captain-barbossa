@@ -44,7 +44,16 @@ class ProtocolTests(unittest.TestCase):
         self.enterContext(patch.dict(os.environ, {"CAPTAIN_ROLE": "captain"}))
         self.enterContext(patch.object(Pane, "agent_status", return_value=None))
         self.enterContext(patch.object(Pane, "choice_modal", return_value=False))
+        # nudge/nudge_block are pane.py's, built concurrently; stub the doorbell for delivery.
+        self.enterContext(patch.object(Pane, "nudge_block", return_value=None, create=True))
+        self.enterContext(patch.object(Pane, "nudge", create=True))
         self.assignment = protocol.begin(self.crew, self.project, "original", ["src"], ["edit"])
+
+    def mail(self, message_id):
+        crew_id, session = self.crew.crew_id, self.current
+        return memory.read_json(
+            protocol.mail_dir(session.directory, crew_id) / f"{message_id}.json"
+        )
 
     def saved(self):
         return memory.read_json(self.directory / "protocol.json")["assignments"][
@@ -62,46 +71,111 @@ class ProtocolTests(unittest.TestCase):
         with self.crew.events.open("a") as stream:
             stream.write(json.dumps(event) + "\n")
 
-    def test_persist_before_single_send_and_preserve_original_task(self):
-        def submitted(text, provider, attempts):
-            saved = self.saved()
-            self.assertEqual(saved["messages"][-1]["delivery"], "pending")
-            self.assertTrue(
-                text.startswith(f"Crew name: Jack.\nAssignment {saved['id']}; incarnation first; ")
+    def force_unknown_message(self, text="original"):
+        """Bypass deliver to reach a state only a genuine terminal accident used to leave."""
+        with protocol.checkpoint(self.directory) as state:
+            assignment = protocol.active(state, self.crew, self.assignment["id"])
+            message_id = protocol.uuid4().hex
+            assignment["messages"].append(
+                {
+                    "id": message_id,
+                    "text": text,
+                    "kind": "followup",
+                    "question_id": None,
+                    "delivery": "unknown",
+                }
             )
-            self.assertIn(saved["messages"][-1]["id"], text)
-            self.assertEqual(attempts, 1)
+            protocol.notice(
+                assignment,
+                "delivery_unknown",
+                f"Inspect message {message_id} before resolving.",
+                message_id,
+            )
+        return message_id
 
-        with patch.object(Pane, "submit_task", side_effect=submitted):
-            protocol.deliver(self.crew, "original", initial=True)
-            protocol.deliver(self.crew, "followup")
+    def test_persist_before_single_send_and_preserve_original_task(self):
+        first = protocol.deliver(self.crew, "original", initial=True)
+        second = protocol.deliver(self.crew, "followup")
         saved = self.saved()
         self.assertEqual(saved["original_task"], "original")
         self.assertEqual([m["text"] for m in saved["messages"]], ["original", "followup"])
+        self.assertEqual([m["delivery"] for m in saved["messages"]], ["sent", "sent"])
         self.assertEqual(len({m["id"] for m in saved["messages"]}), 2)
+        for message_id, text in ((first, "original"), (second, "followup")):
+            mail = self.mail(message_id)
+            self.assertEqual(mail["state"], "queued")
+            self.assertTrue(
+                mail["text"].startswith(f"Crew name: Jack.\nAssignment {saved['id']}; ")
+            )
+            self.assertIn(text, mail["text"])
 
-    def test_unknown_delivery_is_durable_and_never_retried(self):
-        with patch.object(Pane, "submit_task", side_effect=CaptainError("unconfirmed")) as send:
-            with self.assertRaises(CaptainError):
-                protocol.deliver(self.crew, "original")
-            with self.assertRaisesRegex(CaptainError, "never auto-resend"):
-                protocol.deliver(self.crew, "retry")
-            send.assert_called_once()
-        message = self.saved()["messages"][0]
-        self.assertEqual(message["delivery"], "unknown")
-        self.assertEqual(protocol.poll(self.crew)["status"], "delivery_unknown")
-        protocol.resolve_delivery(self.crew, self.assignment["id"], message["id"], "sent")
+    def test_a_refused_ring_never_loses_the_mail(self):
+        with (
+            patch.object(Pane, "nudge_block", return_value="cooldown"),
+            patch.object(Pane, "nudge") as nudge,
+        ):
+            message_id = protocol.deliver(self.crew, "original", initial=True)
+        nudge.assert_not_called()
         self.assertEqual(self.saved()["messages"][0]["delivery"], "sent")
+        self.assertEqual(self.mail(message_id)["state"], "queued")
 
-    def test_process_exit_during_send_leaves_unknown_delivery(self):
-        with patch.object(Pane, "submit_task", side_effect=KeyboardInterrupt):
-            with self.assertRaises(KeyboardInterrupt):
-                protocol.deliver(self.crew, "original")
-        self.assertEqual(self.saved()["messages"][0]["delivery"], "pending")
+    def test_a_dead_pane_bounces_the_mail_instead_of_losing_it(self):
+        with patch.object(Pane, "nudge", side_effect=CaptainError("pane not found")):
+            message_id = protocol.deliver(self.crew, "original", initial=True)
+        self.assertEqual(self.saved()["messages"][0]["delivery"], "sent")
+        mail = self.mail(message_id)
+        self.assertEqual(mail["state"], "bounced")
+        self.assertIn("pane not found", mail["reason"])
         response = protocol.poll(self.crew)
-        self.assertEqual(response["status"], "delivery_unknown")
-        with self.assertRaisesRegex(CaptainError, response["delivery_id"]):
+        self.assertEqual(response["status"], "bounced")
+        self.assertIn(message_id, response["summary"])
+
+    def test_ring_holds_on_a_broken_doorbell_without_bouncing(self):
+        with patch.object(Pane, "nudge", side_effect=AttributeError("no nudge yet")):
+            message_id = protocol.deliver(self.crew, "original", initial=True)
+        self.assertEqual(self.saved()["messages"][0]["delivery"], "sent")
+        self.assertEqual(self.mail(message_id)["state"], "queued")
+
+    def test_poll_drains_held_mail_at_most_once_per_cooldown(self):
+        with (
+            patch.object(Pane, "nudge_block", return_value="cooldown"),
+            patch.object(Pane, "nudge") as nudge,
+        ):
+            protocol.deliver(self.crew, "original", initial=True)
+        nudge.assert_not_called()
+        clock = [1000.0]
+        with (
+            patch.object(protocol.time, "time", side_effect=lambda: clock[0]),
+            patch.object(Pane, "nudge_block", return_value=None),
+            patch.object(Pane, "nudge") as nudge,
+        ):
             protocol.poll(self.crew)
+            protocol.poll(self.crew)
+            nudge.assert_called_once()
+            clock[0] += protocol.DRAIN_INTERVAL + 1
+            protocol.poll(self.crew)
+            self.assertEqual(nudge.call_count, 2)
+
+    def test_poll_does_not_drain_when_there_is_no_unread_mail(self):
+        with patch.object(Pane, "nudge") as nudge:
+            protocol.poll(self.crew)
+        nudge.assert_not_called()
+
+    def test_an_unknown_message_blocks_new_delivery_until_resolved(self):
+        protocol.deliver(self.crew, "original", initial=True)
+        unknown = self.force_unknown_message("second")
+        with self.assertRaisesRegex(CaptainError, "never auto-resend"):
+            protocol.deliver(self.crew, "third")
+        protocol.resolve_delivery(self.crew, self.assignment["id"], unknown, "cancelled")
+        protocol.deliver(self.crew, "third")
+
+    def test_a_process_crash_during_the_ring_still_leaves_the_message_sent_and_mailed(self):
+        with patch.object(Pane, "nudge", side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                protocol.deliver(self.crew, "original", initial=True)
+        message = self.saved()["messages"][0]
+        self.assertEqual(message["delivery"], "sent")
+        self.assertEqual(self.mail(message["id"])["state"], "queued")
 
     def test_one_question_correlated_answer_and_explicit_done(self):
         asked = self.command("ask", question="Which path?")
@@ -109,11 +183,9 @@ class ProtocolTests(unittest.TestCase):
             self.command("ask", question="Another?")
         with self.assertRaisesRegex(CaptainError, "pending question"):
             self.command("done", report="finished")
-        with patch.object(Pane, "submit_task") as send:
-            with self.assertRaises(CaptainError):
-                protocol.deliver(self.crew, "wrong", question_id="old")
-            send.assert_not_called()
-            protocol.deliver(self.crew, "src", question_id=asked["question_id"])
+        with self.assertRaises(CaptainError):
+            protocol.deliver(self.crew, "wrong", question_id="old")
+        protocol.deliver(self.crew, "src", question_id=asked["question_id"])
         self.command("done", report="src/a.py changed; test passed; nothing left")
         self.assertEqual(self.saved()["state"], "done")
         first = protocol.poll(self.crew)
@@ -160,8 +232,7 @@ class ProtocolTests(unittest.TestCase):
         protocol.poll(self.crew, first["delivery_id"])
         self.event({"hook_event_name": "Stop"})
         self.assertIsNone(protocol.poll(self.crew)["delivery_id"])
-        with patch.object(Pane, "submit_task"):
-            protocol.deliver(self.crew, "followup")
+        protocol.deliver(self.crew, "followup")
         self.event({"hook_event_name": "Stop"})
         self.assertEqual(protocol.poll(self.crew)["status"], "idle")
 
@@ -216,10 +287,7 @@ class ProtocolTests(unittest.TestCase):
         self.assertGreaterEqual(elapsed, 70)
 
     def test_resolving_an_uncertain_delivery_retires_its_queued_notice(self):
-        with patch.object(Pane, "submit_task", side_effect=CaptainError("unconfirmed")):
-            with self.assertRaises(CaptainError):
-                protocol.deliver(self.crew, "original")
-        message = self.saved()["messages"][0]["id"]
+        message = self.force_unknown_message()
         protocol.resolve_delivery(self.crew, self.assignment["id"], message, "cancelled")
         self.assertEqual(protocol.wait(self.crew, 0)["status"], "timeout")
         self.assertEqual(self.saved()["notices"], [])
@@ -232,13 +300,11 @@ class ProtocolTests(unittest.TestCase):
         protocol.begin(self.crew, self.project, "next", handoff=self.assignment["id"])
 
     def test_retiring_a_notice_keeps_acknowledged_and_pending_indexes_aligned(self):
-        asked = self.command("ask", question="Which path?")["question_id"]
+        self.command("ask", question="Which path?")
         first = protocol.poll(self.crew)
         self.assertEqual(first["status"], "asked")
         protocol.poll(self.crew, first["delivery_id"])
-        with patch.object(Pane, "submit_task", side_effect=CaptainError("unconfirmed")):
-            with self.assertRaises(CaptainError):
-                protocol.deliver(self.crew, "src", question_id=asked)
+        self.force_unknown_message("src")
         unknown = protocol.poll(self.crew)
         self.assertEqual(unknown["status"], "delivery_unknown")
         message = self.saved()["messages"][0]["id"]
@@ -258,20 +324,11 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(second["status"], "awaiting_approval")
         self.assertNotEqual(first["delivery_id"], second["delivery_id"])
 
-    def test_identical_text_is_refused_until_the_last_message_is_cancelled(self):
-        with patch.object(Pane, "submit_task") as send:
-            protocol.deliver(self.crew, "original", initial=True)
-            with self.assertRaisesRegex(CaptainError, self.saved()["messages"][0]["id"]):
-                protocol.deliver(self.crew, "original")
-            send.assert_called_once()
-        with patch.object(Pane, "submit_task", side_effect=CaptainError("unconfirmed")):
-            with self.assertRaises(CaptainError):
-                protocol.deliver(self.crew, "second")
-        cancelled = self.saved()["messages"][-1]["id"]
-        protocol.resolve_delivery(self.crew, self.assignment["id"], cancelled, "cancelled")
-        with patch.object(Pane, "submit_task") as send:
-            protocol.deliver(self.crew, "second")
-            send.assert_called_once()
+    def test_identical_text_is_refused_until_a_different_message_is_sent(self):
+        protocol.deliver(self.crew, "original", initial=True)
+        with self.assertRaisesRegex(CaptainError, self.saved()["messages"][0]["id"]):
+            protocol.deliver(self.crew, "original")
+        protocol.deliver(self.crew, "second")
 
     def test_stale_assignment_incarnation_and_foreign_actor_are_refused(self):
         for assignment, incarnation in (("old", "first"), (self.assignment["id"], "old")):
@@ -332,6 +389,20 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(response["status"], "timeout")
         self.assertIsNone(response["delivery_id"])
 
+    def test_unread_mail_is_oldest_first_and_mark_read_writes_the_receipt(self):
+        first = protocol.deliver(self.crew, "original", initial=True)
+        second = protocol.deliver(self.crew, "followup")
+        self.assertEqual([m["id"] for m in protocol.unread(self.crew)], [first, second])
+        protocol.mark_read(self.crew, [first])
+        self.assertEqual([m["id"] for m in protocol.unread(self.crew)], [second])
+        read = self.mail(first)
+        self.assertEqual(read["state"], "read")
+        self.assertIsNotNone(read["read_at"])
+        # A bounced message is not resurrected by a later mark_read.
+        protocol.bounce(self.crew, second, "pane not found")
+        protocol.mark_read(self.crew, [second])
+        self.assertEqual(self.mail(second)["state"], "bounced")
+
     def run_cli(self, *arguments):
         with (
             patch.object(cli, "current_pane", return_value=self.pane),
@@ -339,6 +410,36 @@ class ProtocolTests(unittest.TestCase):
         ):
             code = cli.main(["--session", self.current.meta["id"], *arguments])
         return code, output.getvalue()
+
+    def test_cli_inbox_prints_queued_mail_oldest_first_and_marks_it_read(self):
+        with patch.dict(
+            os.environ,
+            {
+                "CAPTAIN_ROLE": "crew",
+                "CAPTAIN_CREW": "jack",
+                "CAPTAIN_INCARNATION": "first",
+                "CAPTAIN_ASSIGNMENT": self.assignment["id"],
+            },
+        ):
+            code, output = self.run_cli("inbox", "Jack")
+        self.assertEqual(code, 0)
+        self.assertEqual(output.strip(), "No mail.")
+        protocol.deliver(self.crew, "original", initial=True)
+        protocol.deliver(self.crew, "followup")
+        with patch.dict(
+            os.environ,
+            {"CAPTAIN_ROLE": "crew", "CAPTAIN_CREW": "jack", "CAPTAIN_INCARNATION": "first"},
+        ):
+            code, output = self.run_cli("inbox", "Jack")
+        self.assertEqual(code, 0)
+        self.assertIn("original", output)
+        self.assertIn("followup", output)
+        self.assertLess(output.index("original"), output.index("followup"))
+        self.assertEqual(protocol.unread(self.crew), [])
+        with patch.dict(os.environ, {"CAPTAIN_ROLE": "crew", "CAPTAIN_CREW": "will"}):
+            with contextlib.redirect_stderr(io.StringIO()) as error:
+                self.assertEqual(self.run_cli("inbox", "Jack")[0], 1)
+        self.assertIn("only on its own assignment", error.getvalue())
 
     def test_launch_assignment_defaults_and_explicit_replacement(self):
         with patch.dict(
@@ -353,10 +454,7 @@ class ProtocolTests(unittest.TestCase):
             self.assertEqual(self.run_cli("check", "Jack", "read")[0], 0)
             code, output = self.run_cli("ask", "Jack", "Which file?")
             self.assertEqual(code, 0)
-            with patch.object(Pane, "submit_task"):
-                protocol.deliver(
-                    self.crew, "src/a.py", question_id=json.loads(output)["question_id"]
-                )
+            protocol.deliver(self.crew, "src/a.py", question_id=json.loads(output)["question_id"])
             self.assertEqual(self.run_cli("done", "Jack", "--report", "Finished")[0], 0)
             event = protocol.poll(self.crew)
             while event["delivery_id"]:
@@ -427,12 +525,10 @@ class ProtocolTests(unittest.TestCase):
         code, repeated = self.run_cli("wait", "Jack", "--json", "--timeout", "0")
         self.assertEqual(code, 1)
         self.assertIn(event["delivery_id"], json.loads(repeated)["summary"])
-        with patch.object(Pane, "submit_task") as send:
-            code, _ = self.run_cli(
-                "answer", "Jack", question, "src/a.py", "--assignment", self.assignment["id"]
-            )
+        code, _ = self.run_cli(
+            "answer", "Jack", question, "src/a.py", "--assignment", self.assignment["id"]
+        )
         self.assertEqual(code, 0)
-        send.assert_called_once()
         self.run_cli("wait", "Jack", "--json", "--ack", event["delivery_id"], "--timeout", "0")
         code, _ = self.run_cli(
             "done",
@@ -530,10 +626,7 @@ class ProtocolTests(unittest.TestCase):
     def test_dismiss_releases_an_assignment_with_only_cancelled_messages(self):
         self.crew.record.update(pane="w1:p2", assignment_id=self.assignment["id"])
         memory.write_json(self.current.meta_path, self.current.meta)
-        with patch.object(Pane, "submit_task", side_effect=CaptainError("not delivered")):
-            with self.assertRaises(CaptainError):
-                protocol.deliver(self.crew, "original", initial=True)
-        message = self.saved()["messages"][0]["id"]
+        message = self.force_unknown_message()
         protocol.resolve_delivery(self.crew, self.assignment["id"], message, "cancelled")
         with patch.object(agents.runtime, "herdr", return_value={}):
             agents.dismiss_crew(
@@ -578,8 +671,7 @@ class ProtocolTests(unittest.TestCase):
     def test_dismiss_refuses_an_assignment_with_a_sent_message(self):
         self.crew.record.update(pane="w1:p2", assignment_id=self.assignment["id"])
         memory.write_json(self.current.meta_path, self.current.meta)
-        with patch.object(Pane, "submit_task"):
-            protocol.deliver(self.crew, "original", initial=True)
+        protocol.deliver(self.crew, "original", initial=True)
         with patch.object(agents.runtime, "herdr") as send:
             with self.assertRaisesRegex(CaptainError, "received a message"):
                 agents.dismiss_crew(
@@ -631,22 +723,3 @@ class ProtocolTests(unittest.TestCase):
         self.assertIn(f"/bin/sh {launcher}", str(error.exception))
         self.assertIn(f"herdr agent rename w1:p2 {crew_agent}", str(error.exception))
         self.assertIn(f"herdr agent get {crew_agent}", str(error.exception))
-
-    def test_late_send_result_cannot_complete_a_newer_unknown_answer(self):
-        first_question = self.command("ask", question="First?")["question_id"]
-
-        def delayed_send(*args, **kwargs):
-            first = self.saved()["messages"][-1]["id"]
-            protocol.resolve_delivery(self.crew, self.assignment["id"], first, "sent")
-            second_question = self.command("ask", question="Second?")["question_id"]
-            with patch.object(Pane, "submit_task", side_effect=CaptainError("unknown second send")):
-                with self.assertRaises(CaptainError):
-                    protocol.deliver(self.crew, "second answer", question_id=second_question)
-
-        with patch.object(Pane, "submit_task", side_effect=delayed_send):
-            first = protocol.deliver(self.crew, "first answer", question_id=first_question)
-        protocol.record_delivery(self.crew, self.assignment["id"], first, "unknown")
-        assignment = self.saved()
-        self.assertEqual([m["delivery"] for m in assignment["messages"]], ["sent", "unknown"])
-        self.assertEqual(assignment["question"]["text"], "Second?")
-        self.assertEqual(assignment["state"], "asked")

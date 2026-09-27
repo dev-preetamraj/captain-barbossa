@@ -8,7 +8,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from .memory import lock, read_json, write_json
-from .runtime import CaptainError, check_text
+from .runtime import HERDR_ERRORS, CaptainError, check_text
 
 ACTIONS = ("read", "search", "edit", "test", "build", "format", "commit", "version", "delete")
 # Native "working" is a wake, not news: it fires at recruit and at every crew turn end.
@@ -17,6 +17,8 @@ APPROVAL_SUMMARY = "Inspect native approval prompt; approval is not granted by t
 # Claude reports approvals through its PermissionRequest hook; these two have no such event.
 MODAL_PROVIDERS = ("codex", "pi")
 MODAL_INTERVAL = 30
+# No daemon drains held mail; the wait loop already polls, so it retries the doorbell instead.
+DRAIN_INTERVAL = 30
 
 
 @contextmanager
@@ -196,6 +198,105 @@ def change(crew, args, project):
         return {"assignment_id": assignment_id, "status": "done"}
 
 
+def mail_dir(directory, crew_id):
+    return directory / "mail" / crew_id
+
+
+def enqueue(crew, text, kind, assignment_id, message_id=None):
+    """Write a durable mail record; the crew's own `inbox` read is what proves delivery."""
+    message = {
+        "id": message_id or uuid4().hex,
+        "assignment_id": assignment_id,
+        "incarnation_id": crew.record.get("incarnation_id"),
+        "kind": kind,
+        "text": text,
+        "queued_at": time.time(),
+        "state": "queued",
+        "read_at": None,
+    }
+    directory = mail_dir(crew.session.directory, crew.crew_id)
+    with lock(crew.session.directory / "protocol.lock"):
+        directory.mkdir(parents=True, exist_ok=True)
+        write_json(directory / f"{message['id']}.json", message)
+    return message["id"]
+
+
+def unread(crew):
+    """Queued mail for this crew, oldest first."""
+    directory = mail_dir(crew.session.directory, crew.crew_id)
+    if not directory.exists():
+        return []
+    messages = (read_json(path) for path in directory.glob("*.json"))
+    return sorted((m for m in messages if m["state"] == "queued"), key=lambda m: m["queued_at"])
+
+
+def mark_read(crew, ids):
+    """The crew's own read writes the receipt; a bounced message is never resurrected."""
+    directory = mail_dir(crew.session.directory, crew.crew_id)
+    with lock(crew.session.directory / "protocol.lock"):
+        for message_id in ids:
+            path = directory / f"{message_id}.json"
+            message = read_json(path)
+            if message["state"] == "queued":
+                message["state"] = "read"
+                message["read_at"] = time.time()
+                write_json(path, message)
+
+
+def bounce(crew, message_id, reason):
+    """Undeliverable mail is reported, never parked; the next wait names it."""
+    directory = crew.session.directory
+    with lock(directory / "protocol.lock"):
+        path = mail_dir(directory, crew.crew_id) / f"{message_id}.json"
+        message = read_json(path)
+        message["state"] = "bounced"
+        message["reason"] = reason
+        write_json(path, message)
+    with checkpoint(directory) as state:
+        assignment = state["assignments"].get(state["active"].get(crew.crew_id))
+        # No message_id here: retire_notices reads that key against assignment["messages"]
+        # delivery state, unrelated to mail, and would drop this the moment the send settles.
+        if assignment:
+            notice(
+                assignment,
+                "bounced",
+                f"Mail to {crew.display_name} bounced ({message_id}): {reason}",
+            )
+
+
+def ring(crew, message_id):
+    """Best-effort doorbell: a held gate or a broken doorbell waits for the next drain.
+
+    Only a confirmed herdr failure means the crew is unreachable and bounces the mail;
+    a missing or misbehaving nudge is the harness, not the crew, so it holds instead.
+    Mail is already durable, so no outcome here can lose the message.
+    """
+    try:
+        gate = crew.pane.nudge_block(crew)
+        if gate is None:
+            crew.pane.nudge(crew)
+    except HERDR_ERRORS as exc:
+        bounce(crew, message_id, str(exc))
+    except Exception:
+        pass
+
+
+def drain_stamp(crew):
+    return mail_dir(crew.session.directory, crew.crew_id) / ".drain"
+
+
+def drain(crew):
+    """Retry a held doorbell for unread mail; rate-limited so a polling loop never hammers it."""
+    messages = unread(crew)
+    if not messages:
+        return
+    stamp = drain_stamp(crew)
+    if stamp.exists() and time.time() - read_json(stamp) < DRAIN_INTERVAL:
+        return
+    write_json(stamp, time.time())
+    ring(crew, messages[0]["id"])
+
+
 def deliver(crew, text, *, assignment_id=None, question_id=None, initial=False):
     check_text(text, "message")
     with checkpoint(crew.session.directory) as state:
@@ -222,9 +323,10 @@ def deliver(crew, text, *, assignment_id=None, question_id=None, initial=False):
             "text": text,
             "kind": "assignment" if initial else "answer" if question_id else "followup",
             "question_id": question_id,
-            "delivery": "pending",
+            "delivery": "sent",
         }
         assignment["messages"].append(message)
+        mark_sent(assignment, message)
         assignment_id = assignment["id"]
         prompt = (
             f"Crew name: {assignment['crew']}.\n"
@@ -233,12 +335,8 @@ def deliver(crew, text, *, assignment_id=None, question_id=None, initial=False):
             f"Owned paths: {', '.join(assignment['paths']) or '(none)'}. "
             f"Allowed actions: {', '.join(assignment['actions'])}.\n{text}"
         )
-    try:
-        crew.pane.submit_task(prompt, crew.record.get("provider"), attempts=1)
-    except Exception:
-        record_delivery(crew, assignment_id, message["id"], "unknown")
-        raise
-    record_delivery(crew, assignment_id, message["id"], "sent")
+    enqueue(crew, prompt, message["kind"], assignment_id, message["id"])
+    ring(crew, message["id"])
     return message["id"]
 
 
@@ -249,25 +347,6 @@ def mark_sent(assignment, message):
     if question and question["id"] == message["question_id"]:
         assignment["question"] = None
         assignment["state"] = "working"
-
-
-def record_delivery(crew, assignment_id, message_id, outcome):
-    """A late send result cannot overwrite a resolution, another send, or a new assignment."""
-    with checkpoint(crew.session.directory) as state:
-        assignment = state["assignments"][assignment_id]
-        message = next(m for m in assignment["messages"] if m["id"] == message_id)
-        if message["delivery"] != "pending":
-            return
-        message["delivery"] = outcome
-        if outcome == "unknown":
-            notice(
-                assignment,
-                "delivery_unknown",
-                f"Inspect message {message_id} before resolving.",
-                message_id,
-            )
-        else:
-            mark_sent(assignment, message)
 
 
 def resolve_delivery(crew, assignment_id, message_id, outcome):
@@ -323,6 +402,7 @@ def result(crew, assignment, status, summary="", delivery_id=None):
 def poll(crew, ack=None, modal=True):
     from .crew import event_status
 
+    drain(crew)
     with checkpoint(crew.session.directory) as state:
         assignment = active(state, crew)
         pending, acked = assignment["pending"], False

@@ -166,6 +166,43 @@ class InstructionSizeTests(unittest.TestCase):
         crew = instruction_prompts.agent_instructions(self.directory, "crew member Jack")
         self.assertNotIn("Self-check first", crew)
 
+    def test_background_wait_announces_its_own_completion(self):
+        captain = " ".join(
+            instruction_prompts.agent_instructions(self.directory, "Captain Barbossa").split()
+        )
+        self.assertIn(
+            "A background wait announces its own completion: never sleep, poll, or "
+            "re-read its output file while waiting.",
+            captain,
+        )
+        # The pi captain_wait block has its own rearm rules; it must stay untouched.
+        pi_captain = " ".join(
+            instruction_prompts.agent_instructions(self.directory, "Captain Barbossa", "pi").split()
+        )
+        self.assertNotIn("A background wait announces its own completion", pi_captain)
+        crew = instruction_prompts.agent_instructions(self.directory, "crew member Jack")
+        self.assertNotIn("A background wait announces its own completion", crew)
+
+    def test_arming_a_wait_after_recruiting_is_required_not_advisory(self):
+        captain = " ".join(
+            instruction_prompts.agent_instructions(self.directory, "Captain Barbossa").split()
+        )
+        self.assertIn(
+            "Arm a background wait right after recruiting; it is required, not "
+            "advisory, because the mail drain only runs inside a wait.",
+            captain,
+        )
+
+    def test_a_dev_mode_captain_outruns_its_installed_crew_binary(self):
+        captain = " ".join(
+            instruction_prompts.agent_instructions(self.directory, "Captain Barbossa").split()
+        )
+        self.assertIn(
+            "While a captain runs a checkout build newer than the installed CLI, its "
+            "crew cannot read mail, since crew run the installed binary.",
+            captain,
+        )
+
     def test_graphify_query_is_not_advertised_as_always_available(self):
         text = instruction_prompts.agent_instructions(self.directory, "Captain Barbossa")
         query_line = next(line for line in text.splitlines() if "memory query" in line)

@@ -33,6 +33,11 @@ from tests import home_isolation  # noqa: F401
 # fixture built to return a dict for every herdr call would otherwise blow up on it.
 SETTLED_SHELL_TEXT = "~/project $ "
 
+# Real implementations, captured before CaptainFlowTests.setUp patches the class default,
+# so a test can restore actual gate/ring behavior against its own herdr fake.
+REAL_NUDGE_BLOCK = Pane.nudge_block
+REAL_NUDGE = Pane.nudge
+
 
 def pane_stub(base):
     """Wrap a herdr stub so a `pane read` returns settled shell text instead of
@@ -64,6 +69,11 @@ class CaptainFlowTests(unittest.TestCase):
             )
         )
         self.enterContext(patch.object(panes, "READY_POLLS", 1))
+        # nudge_block/nudge read a realistic agent status these ad hoc herdr fakes don't model;
+        # a mail doorbell is not what these tests exercise, so give delivery a clean ring by
+        # default. test_submit.py covers nudge_block/nudge themselves against real fakes.
+        self.enterContext(patch.object(Pane, "nudge_block", return_value=None))
+        self.enterContext(patch.object(Pane, "nudge"))
         self.pane = {"workspace_id": "w1", "tab_id": "w1:t1", "pane_id": "w1:p1"}
         self.directory, self.meta = memory.session(self.project, self.pane, create=True)
         self.enterContext(contextlib.redirect_stdout(io.StringIO()))
@@ -358,7 +368,7 @@ class CaptainFlowTests(unittest.TestCase):
             with self.subTest(role=role):
                 text = instruction_prompts.agent_instructions(self.directory, role)
                 instructions = " ".join(text.split())
-                expected = 5 if role.startswith("crew member ") else 1
+                expected = 6 if role.startswith("crew member ") else 1
                 self.assertEqual(text.count(str(self.directory.name)), expected)
                 for phrase in (
                     f"You are {role}",
@@ -528,11 +538,12 @@ class CaptainFlowTests(unittest.TestCase):
                     self.assertNotIn(phrase, prompt)
                     self.assertNotIn(phrase.casefold(), prompt.casefold())
                 self.assertNotIn("--extension", argv)
-                submit.assert_called_once()
-                self.assertTrue(submit.call_args.args[0].endswith("\nbuild"))
-                self.assertIn(record["assignment_id"], submit.call_args.args[0])
-                self.assertEqual(submit.call_args.args[1], provider)
-                self.assertEqual(submit.call_args.kwargs, {"attempts": 1})
+                # The initial task is mailed, not typed; the doorbell carries no content.
+                submit.assert_not_called()
+                (mail_path,) = (self.directory / "mail" / record["id"]).glob("*.json")
+                mail = json.loads(mail_path.read_text())
+                self.assertTrue(mail["text"].endswith("\nbuild"))
+                self.assertIn(record["assignment_id"], mail["text"])
 
     def test_instructions_recruit_on_defaults_and_ask_at_most_one_question(self):
         instructions = " ".join(
@@ -1225,12 +1236,13 @@ class CaptainFlowTests(unittest.TestCase):
                 run = next(call for call in calls if call.args[:2] == ("pane", "run"))
                 self.assertEqual(run.args[-1], '/bin/sh "$CAPTAIN_CREW_LAUNCHER"')
                 self.assertEqual(run.kwargs, {"expect_output": False})
-                agent_name = f"c-{self.meta['id'][:8]}-{name}"
-                prompts = [call.args for call in calls if call.args[:2] == ("agent", "prompt")]
-                self.assertEqual(len(prompts), 1)
-                self.assertEqual(prompts[0][:3], ("agent", "prompt", agent_name))
-                self.assertTrue(prompts[0][-1].endswith("\n" + task))
-                self.assertIn(result["assignment_id"], prompts[0][-1])
+                # The task is mailed, not typed; the fake agent status ("working") also
+                # holds the doorbell, so no "agent prompt" call carries it either.
+                self.assertNotIn(("agent", "prompt"), [call.args[:2] for call in calls])
+                (mail_path,) = (self.directory / "mail" / name).glob("*.json")
+                mail = json.loads(mail_path.read_text())
+                self.assertTrue(mail["text"].endswith("\n" + task))
+                self.assertIn(result["assignment_id"], mail["text"])
                 self.assertEqual(
                     [call.args[:2] for call in calls].count(("agent", "send-keys")),
                     0,
@@ -1639,7 +1651,8 @@ class CaptainFlowTests(unittest.TestCase):
 
         return agent_name, pane_stub(api)
 
-    def test_slow_submission_is_observed_without_enter(self):
+    def test_slow_status_transitions_never_delay_the_durable_initial_mail(self):
+        """The initial task is mailed and rung once; it no longer polls for landing."""
         args = self.args(
             "crew",
             "jack",
@@ -1660,6 +1673,8 @@ class CaptainFlowTests(unittest.TestCase):
             patch.object(agents, "executable", return_value="/bin/claude"),
             patch.object(panes.time, "sleep"),
             patch.object(panes.time, "monotonic", side_effect=count(0, 2)),
+            patch.object(Pane, "nudge_block", REAL_NUDGE_BLOCK),
+            patch.object(Pane, "nudge", REAL_NUDGE),
         ):
             agents.create_crew(args, self.pane, self.project)
         sent = [call.args[:2] for call in calls.call_args_list]
@@ -1668,7 +1683,8 @@ class CaptainFlowTests(unittest.TestCase):
         saved = memory.read_json(self.directory / "session.json")["crew"]["jack"]
         self.assertEqual(saved["status"], "started")
 
-    def test_dropped_prompt_needs_attention_without_resend(self):
+    def test_a_settled_idle_composer_delivers_durable_mail_once(self):
+        """A clean idle composer at delivery time still rings exactly once."""
         args = self.args(
             "crew",
             "jack",
@@ -1689,56 +1705,18 @@ class CaptainFlowTests(unittest.TestCase):
             patch.object(agents, "executable", return_value="/bin/claude"),
             patch.object(panes.time, "sleep"),
             patch.object(panes.time, "monotonic", side_effect=count(0, 2)),
+            patch.object(Pane, "nudge_block", REAL_NUDGE_BLOCK),
+            patch.object(Pane, "nudge", REAL_NUDGE),
         ):
-            with self.assertRaisesRegex(runtime.CaptainError, "unknown"):
-                agents.create_crew(args, self.pane, self.project)
+            agents.create_crew(args, self.pane, self.project)
         sent = [call.args[:2] for call in calls.call_args_list]
         self.assertEqual(sent.count(("agent", "prompt")), 1)
         self.assertNotIn(("agent", "send-keys"), sent)
         saved = memory.read_json(self.directory / "session.json")["crew"]["jack"]
-        self.assertEqual(saved["status"], "needs_attention")
+        self.assertEqual(saved["status"], "started")
 
-    def test_task_that_never_starts_needs_attention_without_enter(self):
-        args = self.args(
-            "crew",
-            "jack",
-            "--agent",
-            "claude",
-            "--task",
-            "build",
-            "--placement",
-            "pane",
-            "--direction",
-            "vertical",
-            "--split-pane",
-            "w1:p1",
-        )
-        agent_name, api = self.crew_status_api(repeat("idle"))
-        with (
-            patch.object(runtime, "herdr", side_effect=api) as calls,
-            patch.object(agents, "executable", return_value="/bin/claude"),
-            patch.object(panes.time, "sleep"),
-            patch.object(panes.time, "monotonic", side_effect=count(0, 2)),
-        ):
-            with self.assertRaisesRegex(runtime.CaptainError, "pane was preserved") as error:
-                agents.create_crew(args, self.pane, self.project)
-        for phrase in ("outcome is unknown", "No resend or Enter", "unsent draft"):
-            self.assertIn(phrase, str(error.exception))
-        self.assertIn(f"herdr agent read {agent_name}", str(error.exception))
-        sent = [
-            call.args for call in calls.call_args_list if call.args[:2] == ("agent", "send-keys")
-        ]
-        self.assertEqual(sent, [])
-        prompts = [
-            call.args for call in calls.call_args_list if call.args[:2] == ("agent", "prompt")
-        ]
-        self.assertEqual(len(prompts), 1)
-        self.assertTrue(prompts[0][-1].endswith("\nbuild"))
-        self.assertFalse(any(call.args[:2] == ("pane", "close") for call in calls.call_args_list))
-        saved = memory.read_json(self.directory / "session.json")["crew"]["jack"]
-        self.assertEqual(saved["status"], "needs_attention")
-
-    def test_blocked_agent_after_prompt_never_receives_enter(self):
+    def test_a_blocked_agent_at_delivery_time_holds_the_ring_without_typing(self):
+        """A pending approval prompt holds the doorbell; the mail is still delivered."""
         args = self.args(
             "crew",
             "jack",
@@ -1759,16 +1737,16 @@ class CaptainFlowTests(unittest.TestCase):
             patch.object(agents, "executable", return_value="/bin/claude"),
             patch.object(panes.time, "sleep"),
             patch.object(panes.time, "monotonic", side_effect=count(0, 2)),
+            patch.object(Pane, "nudge_block", REAL_NUDGE_BLOCK),
+            patch.object(Pane, "nudge", REAL_NUDGE),
         ):
-            with self.assertRaisesRegex(runtime.CaptainError, "pane was preserved") as error:
-                agents.create_crew(args, self.pane, self.project)
-        self.assertIn("waiting for input or approval", str(error.exception))
-        self.assertEqual(calls.call_args_list[-1].args, ("agent", "get", agent_name))
-        self.assertFalse(
-            any(call.args[:2] == ("agent", "send-keys") for call in calls.call_args_list)
-        )
+            agents.create_crew(args, self.pane, self.project)
+        sent = [call.args[:2] for call in calls.call_args_list]
+        # A held gate never rings; the crew reads its mail once the approval clears.
+        self.assertNotIn(("agent", "prompt"), sent)
+        self.assertNotIn(("agent", "send-keys"), sent)
         saved = memory.read_json(self.directory / "session.json")["crew"]["jack"]
-        self.assertEqual(saved["status"], "needs_attention")
+        self.assertEqual(saved["status"], "started")
 
     def test_done_or_working_agent_after_prompt_is_confirmed_without_enter(self):
         for status in ("done", "working"):
@@ -1780,6 +1758,7 @@ class CaptainFlowTests(unittest.TestCase):
                     return_value={"agent": {"name": "builder", "agent_status": status}},
                 ) as api,
                 patch.object(Pane, "lines", return_value=["❯"]),
+                patch.object(Pane, "draft_pending", return_value=False),
                 patch.object(panes.time, "sleep") as sleep,
             ):
                 Pane("builder").submit_task("build", "claude")
@@ -1809,6 +1788,7 @@ class CaptainFlowTests(unittest.TestCase):
                     },
                 ) as api,
                 patch.object(Pane, "lines", return_value=["❯"]),
+                patch.object(Pane, "draft_pending", return_value=False),
                 patch.object(panes.time, "sleep"),
                 patch.object(panes.time, "monotonic", side_effect=count(0, 2)),
             ):

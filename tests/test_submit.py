@@ -3,6 +3,7 @@
 import subprocess
 import unittest
 from itertools import count
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from captain_barbossa import pane as panes
@@ -362,6 +363,19 @@ class SubmitTaskTests(unittest.TestCase):
             [("agent", "prompt", "builder", TASK)],
         )
 
+    def test_a_rotating_dim_suggestion_is_decided_from_one_read(self):
+        suggestions = iter(('Try "refactor agents.py"', 'Try "write tests"'))
+
+        def api(*call, **kwargs):
+            if call[:2] == ("agent", "read"):
+                suggestion = next(suggestions)
+                return f"❯\u00a0\x1b[2m{suggestion}\x1b[0m"
+            return {"agent": {"agent_status": "idle"}}
+
+        with patch.object(runtime, "herdr", side_effect=api) as calls:
+            self.assertFalse(Pane("builder").draft_pending("claude"))
+        self.assertEqual([c.args[:2] for c in calls.call_args_list], [("agent", "read")])
+
     def test_a_queued_message_mid_turn_lands_without_a_resend(self):
         """Claude Code queues a prompt that arrives mid-turn and flushes it when the turn
         ends; agent_status reads idle the whole time, so this trio is the only landing proof."""
@@ -441,6 +455,54 @@ class SubmitTaskTests(unittest.TestCase):
             [call.args for call in calls.call_args_list if call.args[1] in ("prompt", "send-keys")],
             [("agent", "prompt", "builder", TASK)],
         )
+
+
+class NudgeTests(unittest.TestCase):
+    def setUp(self):
+        self.crew = SimpleNamespace(crew_id="elizabeth-2", record={"provider": "codex"})
+
+    def api(self, status, screen="› Ask Codex to do anything"):
+        def call(*args, **kwargs):
+            if args[:2] == ("agent", "get"):
+                return {"agent": {"agent_status": status}} if status else {"agent": {}}
+            if args[:2] == ("agent", "read"):
+                return screen
+            return {}
+
+        return call
+
+    def test_each_live_gate_holds_without_typing(self):
+        modal = "› 1. Allow\nPress enter to confirm or esc to cancel"
+        for status, screen, reason in (
+            ("blocked", "", "approval prompt"),
+            ("idle", modal, "approval prompt"),
+            ("working", "", "agent not idle"),
+            ("idle", "› user draft", "user draft"),
+        ):
+            with (
+                self.subTest(reason=reason),
+                patch.object(runtime, "herdr", side_effect=self.api(status, screen)) as calls,
+            ):
+                self.assertEqual(Pane("builder").nudge_block(self.crew), reason)
+                self.assertFalse(
+                    any(c.args[:2] == ("agent", "prompt") for c in calls.call_args_list)
+                )
+
+    def test_an_idle_empty_composer_can_be_rung_with_only_the_fixed_sentence(self):
+        with patch.object(runtime, "herdr", side_effect=self.api("idle")) as calls:
+            pane = Pane("builder")
+            self.assertIsNone(pane.nudge_block(self.crew))
+            pane.nudge(self.crew)
+        prompts = [c.args for c in calls.call_args_list if c.args[:2] == ("agent", "prompt")]
+        self.assertEqual(
+            prompts,
+            [("agent", "prompt", "builder", "read your mail with `captain inbox elizabeth-2`")],
+        )
+
+    def test_an_unregistered_agent_raises_for_the_bounce_path(self):
+        with patch.object(runtime, "herdr", side_effect=self.api(None)):
+            with self.assertRaisesRegex(CaptainError, "not registered"):
+                Pane("builder").nudge_block(self.crew)
 
 
 class ShellReadyForInputTests(unittest.TestCase):

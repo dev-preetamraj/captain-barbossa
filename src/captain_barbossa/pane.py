@@ -129,37 +129,24 @@ class Pane:
     def draft_pending(self, provider=None):
         """Treat an unreadable composer as potentially holding a user's draft."""
         try:
-            text = self.composer(provider)
+            return self._draft_pending(provider)
         except HERDR_ERRORS:
             return True
+
+    def _draft_pending(self, provider=None):
+        text, styled = self._composer(provider)
         if not text:
             return text is None
-        return not self._dim_suggestion(text)
+        return not self._dim_suggestion(text, styled)
 
-    def _dim_suggestion(self, text):
+    def _dim_suggestion(self, text, lines):
         """Whether the composer's plain-text content is really a dim native suggestion.
 
-        Plain-text reads strip styling, so a contextual suggestion ("Try ...") and a
-        real typed draft look identical there. Re-read with SGR intact: the native TUI
-        dims a suggestion (SGR 2) between the prompt glyph and the text, and never dims
-        what the user actually typed. Only that span decides it; a coloured glyph or a
-        trailing reset elsewhere on the line must not change the verdict.
+        The native TUI dims a suggestion (SGR 2) between the prompt glyph and the text,
+        and never dims what the user actually typed. Only that span decides it; a coloured
+        glyph or a trailing reset elsewhere on the line must not change the verdict.
         """
-        try:
-            output = runtime.herdr(
-                "agent",
-                "read",
-                self.agent_name,
-                "--lines",
-                str(TAIL_LINES),
-                "--format",
-                "ansi",
-                raw=True,
-                timeout=10,
-            )
-        except HERDR_ERRORS:
-            return False
-        for line in output.splitlines():
+        for line in lines:
             stripped = ANSI_SGR.sub("", line)
             if stripped[:1] not in PROMPT_GLYPHS or stripped[1:].strip() != text:
                 continue
@@ -176,11 +163,31 @@ class Pane:
 
     def composer(self, provider=None):
         """Return a visible composer, or None when the screen cannot prove its contents."""
-        lines = self.lines(keep_status=True, keep_blank=provider == "pi")
+        return self._composer(provider)[0]
+
+    def _composer(self, provider=None):
+        """Read the composer once, retaining styling for the suggestion verdict."""
+        output = runtime.herdr(
+            "agent",
+            "read",
+            self.agent_name,
+            "--lines",
+            str(TAIL_LINES),
+            "--format",
+            "ansi",
+            raw=True,
+            timeout=10,
+        )
+        styled = output.splitlines()
+        lines = [
+            ANSI_SGR.sub("", line).strip()
+            for line in styled
+            if provider == "pi" or ANSI_SGR.sub("", line).strip()
+        ]
         while lines and not lines[-1]:
             lines.pop()
         if modal_start(lines) is not None:
-            return None
+            return None, styled
         if provider == "pi":
             # Markdown rules are draft text; extra native rulers make the boundary ambiguous.
             borders = [
@@ -195,8 +202,8 @@ class Pane:
                 and len(lines[-5]) == len(lines[-3])
                 and not lines[-4]
             ):
-                return ""
-            return None
+                return "", styled
+            return None, styled
         if (
             provider == "claude"
             and len(lines) >= 4
@@ -213,7 +220,7 @@ class Pane:
                 and lines[-4] == lines[-2]
                 and sum(bool(re.fullmatch(r"─{3,}", line)) for line in lines) == 2
             ):
-                return ""
+                return "", styled
             lines.pop()
         if (
             provider == "codex"
@@ -231,13 +238,36 @@ class Pane:
         while lines and (PANE_RULE.fullmatch(lines[-1]) or lines[-1] == "? for shortcuts"):
             lines.pop()
         if not lines or lines[-1][:1] not in PROMPT_GLYPHS:
-            return None
-        return "" if PANE_EMPTY_PROMPT.fullmatch(lines[-1]) else lines[-1][1:].strip()
+            return None, styled
+        text = "" if PANE_EMPTY_PROMPT.fullmatch(lines[-1]) else lines[-1][1:].strip()
+        return text, styled
 
     def agent_status(self):
         """Herdr's own view of the agent: idle, working, done, or blocked."""
         agent = runtime.herdr("agent", "get", self.agent_name, timeout=5).get("agent", {})
         return agent.get("agent_status")
+
+    def nudge_block(self, crew):
+        """Return the live pane gate holding a harmless mail nudge, if any."""
+        status = self.agent_status()
+        if status is None:
+            raise CaptainError(f"{self.agent_name} is not registered.")
+        if status == "blocked" or modal_start(self.lines()) is not None:
+            return "approval prompt"
+        if status != "idle":
+            return "agent not idle"
+        if self._draft_pending(crew.record.get("provider")):
+            return "user draft"
+        return None
+
+    def nudge(self, crew):
+        """Ring an idle crew without putting task content on the terminal."""
+        runtime.herdr(
+            "agent",
+            "prompt",
+            self.agent_name,
+            f"read your mail with `captain inbox {crew.crew_id}`",
+        )
 
     def settled_status(self, timeout, provider=None):
         """Poll until the agent reports working, done, or blocked; return the last status seen.

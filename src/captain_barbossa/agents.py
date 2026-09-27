@@ -339,6 +339,13 @@ def status_crew(args, pane, project):
                 status = assignment["state"]
             elif any(m["delivery"] in ("pending", "unknown") for m in assignment["messages"]):
                 status = "delivery_unknown"
+            if protocol.unread(crew):
+                try:
+                    gate = crew.pane.nudge_block(crew)
+                except HERDR_ERRORS:
+                    gate = None
+                if gate:
+                    status = f"{status}; mail held: {gate}"
         rows.append(
             (
                 crew.display_name,
