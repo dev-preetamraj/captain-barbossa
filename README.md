@@ -210,6 +210,11 @@ conversation; it does not replace the original task. New assignments declare
 owned paths with repeated `--owns PATH` and grants with repeated `--allow ACTION`.
 Use `ask`/`answer` for a question, `done --report` for completion, and
 `assign --handoff` to reuse a finished assignment's crew. Dismissed crew are refused.
+
+`assign`, `tell`, and `answer` no longer type the message into the crew's
+pane. Each writes a durable mail file, then rings a content-free doorbell in
+the pane telling the crew to run `captain inbox NAME`; that read is what
+proves delivery and writes the receipt. `done` refuses while mail is unread.
 Newly launched crew may omit `--assignment` on `ask`, `done`, and `check`: their
 launch-bound `CAPTAIN_ASSIGNMENT` is validated against crew identity, incarnation,
 and the active assignment. Missing or stale context fails; captain calls and
@@ -299,7 +304,9 @@ captain dismiss Jack
 ```
 
 `dismiss` has no flags. It permanently closes the pane, records the dismissal,
-and permits name reuse with an explicit handoff; handle unreported or uncommitted work first. See
+and permits name reuse with an explicit handoff; handle unreported or uncommitted work first.
+Unread mail is bounced, not delivered, and the command reports which messages
+bounced. See
 [crew-lifecycle.md](https://github.com/dev-preetamraj/captain-barbossa/blob/main/docs/crew-lifecycle.md)
 for dismissal and shared-checkout guardrails.
 
@@ -403,6 +410,7 @@ Read the affected pane before retrying or approving anything.
 | `captain wait NAME [--timeout SECONDS] [--json] [--ack DELIVERY_ID]` | Read and acknowledge a crew notification |
 | `captain model NAME cheap\|mid\|strong\|<model>` | Switch a running crew's model |
 | `captain tell NAME MESSAGE [--assignment ID]` | Append a follow-up to an active assignment |
+| `captain inbox NAME` | Print a crew's queued mail oldest first and write the read receipt |
 | `captain assign NAME --task TEXT --handoff ID [--owns PATH] [--allow ACTION]` | Start the next assignment after acknowledged completion |
 | `captain ask NAME QUESTION [--assignment ID]` | Record one pending question; ID may default for newly launched crew |
 | `captain answer NAME QUESTION_ID MESSAGE --assignment ID` | Answer that question |

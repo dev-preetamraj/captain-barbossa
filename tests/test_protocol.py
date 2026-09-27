@@ -185,7 +185,8 @@ class ProtocolTests(unittest.TestCase):
             self.command("done", report="finished")
         with self.assertRaises(CaptainError):
             protocol.deliver(self.crew, "wrong", question_id="old")
-        protocol.deliver(self.crew, "src", question_id=asked["question_id"])
+        message_id = protocol.deliver(self.crew, "src", question_id=asked["question_id"])
+        protocol.mark_read(self.crew, [message_id])
         self.command("done", report="src/a.py changed; test passed; nothing left")
         self.assertEqual(self.saved()["state"], "done")
         first = protocol.poll(self.crew)
@@ -246,7 +247,7 @@ class ProtocolTests(unittest.TestCase):
         self.command("done", report="src/a.py changed; checks pass; nothing left")
         report = protocol.wait(self.crew, 0)
         self.assertEqual(report["status"], "done")
-        self.assertEqual(protocol.wait(self.crew, 0, report["delivery_id"])["status"], "timeout")
+        self.assertEqual(protocol.wait(self.crew, 0, report["delivery_id"])["status"], "idle")
         with self.assertRaisesRegex(CaptainError, "dismiss the crew or hand off"):
             protocol.wait(self.crew, 0)
 
@@ -342,6 +343,24 @@ class ProtocolTests(unittest.TestCase):
         ):
             with self.assertRaises(CaptainError):
                 self.command("done", report="forged")
+
+    def test_done_refuses_while_answer_mail_is_unread(self):
+        asked = self.command("ask", question="Which path?")
+        message_id = protocol.deliver(self.crew, "src", question_id=asked["question_id"])
+        with self.assertRaisesRegex(CaptainError, "inbox"):
+            self.command("done", report="src/a.py changed; tests pass; nothing left")
+        protocol.mark_read(self.crew, [message_id])
+        self.command("done", report="src/a.py changed; tests pass; nothing left")
+        self.assertEqual(self.saved()["state"], "done")
+
+    def test_wait_returns_the_acked_done_idle_instead_of_raising_on_the_next_pass(self):
+        self.command("done", report="src/a.py changed; checks pass; nothing left")
+        report = protocol.wait(self.crew, 0)
+        self.assertEqual(report["status"], "done")
+        with patch.object(protocol.time, "sleep", side_effect=AssertionError("wait looped again")):
+            final = protocol.wait(self.crew, 5, report["delivery_id"])
+        self.assertEqual(final["status"], "idle")
+        self.assertIsNone(final["delivery_id"])
 
     def test_paths_actions_overlap_and_reported_handoff(self):
         self.command("check", action="edit", path=["src/file.py"])
@@ -454,7 +473,10 @@ class ProtocolTests(unittest.TestCase):
             self.assertEqual(self.run_cli("check", "Jack", "read")[0], 0)
             code, output = self.run_cli("ask", "Jack", "Which file?")
             self.assertEqual(code, 0)
-            protocol.deliver(self.crew, "src/a.py", question_id=json.loads(output)["question_id"])
+            message_id = protocol.deliver(
+                self.crew, "src/a.py", question_id=json.loads(output)["question_id"]
+            )
+            protocol.mark_read(self.crew, [message_id])
             self.assertEqual(self.run_cli("done", "Jack", "--report", "Finished")[0], 0)
             event = protocol.poll(self.crew)
             while event["delivery_id"]:
@@ -530,6 +552,11 @@ class ProtocolTests(unittest.TestCase):
         )
         self.assertEqual(code, 0)
         self.run_cli("wait", "Jack", "--json", "--ack", event["delivery_id"], "--timeout", "0")
+        with patch.dict(
+            os.environ,
+            {"CAPTAIN_ROLE": "crew", "CAPTAIN_CREW": "jack", "CAPTAIN_INCARNATION": "first"},
+        ):
+            self.run_cli("inbox", "Jack")
         code, _ = self.run_cli(
             "done",
             "Jack",

@@ -79,6 +79,8 @@ class LauncherCleanupTests(unittest.TestCase):
 
         current = memory.read_session(self.project, self.meta["id"], self.pane)
         crew = Crew.resolve(current, "Jack")
+        unread_messages = protocol.unread(crew)
+        protocol.mark_read(crew, [msg["id"] for msg in unread_messages])
         protocol.change(
             crew,
             self.args(

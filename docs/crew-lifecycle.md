@@ -77,9 +77,17 @@ must match; missing or stale context fails. Captain calls still require explicit
 IDs, and replacement assignments require their new explicit `--assignment ID`.
 Crew commands also validate `--incarnation`, defaulting to the launcher's
 `CAPTAIN_INCARNATION`. Only one question may be pending. `done` requires a report,
-an answered question, and no uncertain prompt delivery. Reassignment requires
-`done`, acknowledgement of prior notifications, and the exact handoff ID.
-Stale assignment, incarnation, and question IDs are refused.
+an answered question, no uncertain prompt delivery, and no unread mail.
+Reassignment requires `done`, acknowledgement of prior notifications, and the
+exact handoff ID. Stale assignment, incarnation, and question IDs are refused.
+
+`assign`, `tell`, and `answer` reach a crew as mail, not a typed message.
+Each writes the message to a durable file, then rings a content-free doorbell
+in the crew's pane: the fixed sentence `read your mail with captain inbox
+<name>`, which carries no task text. `captain inbox NAME` prints that crew's
+queued mail oldest first and writes the read receipt, which is what proves
+delivery; `done` refuses while mail is unread. See
+[crew-mail.md](crew-mail.md) for the doorbell's gates and bounce handling.
 
 ## Waiting for crew to finish
 
@@ -107,10 +115,12 @@ checked for a modal, once when a wait starts and then every 30 seconds.
 A notification is returned once. Waiting again without `wait --ack ID` fails and
 names the unacknowledged delivery, its status, and its summary, so nothing loops
 and nothing is lost. Acknowledging may return the next notification; consume that
-too. Once the assignment is done and every notification is acknowledged, `wait`
-fails: dismiss the crew or hand off. Timeouts have no delivery ID and do not imply
-completion. `--timeout 0` polls once; the default is 900 seconds. Neither waiting
-nor timing out retries a terminal prompt. After inspecting an uncertain prompt, use
+too. `wait --ack ID` on the final `done` notification returns one `idle` status
+instead of the next notification. Waiting again once the assignment is done and
+every notification is acknowledged fails: dismiss the crew or hand off. Timeouts
+have no delivery ID and do not imply completion. `--timeout 0` polls once; the
+default is 900 seconds. Neither waiting nor timing out retries a terminal prompt.
+After inspecting an uncertain prompt, use
 `resolve NAME MESSAGE_ID sent|cancelled --assignment ID`; this records the
 observed outcome, sends no input, and retires that delivery's notification so it
 never wakes the captain again.
@@ -208,8 +218,10 @@ captain dismiss Jack
 
 This closes the crew's pane, retires the name (freeing it for reuse), and
 records the dismissal in memory. Protocol crew must first finish with a report
-and have all notifications acknowledged. It is permanent, so handle unreported
-or uncommitted work first; commit only when the user explicitly requested it.
+and have all notifications acknowledged. Any mail still unread at that point is
+bounced with a reason instead of being left queued, and the command names each
+bounced message. It is permanent, so handle unreported or uncommitted work
+first; commit only when the user explicitly requested it.
 
 ## Editing guardrails
 

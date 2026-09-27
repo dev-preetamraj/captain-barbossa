@@ -472,6 +472,7 @@ def switch_model(args, pane, project):
 
 def dismiss_crew(args, pane, project):
     current = session(project, pane, args.session)
+    bounced = []
     with crew_meta(current.directory) as meta:
         current = current._replace(meta=meta)
         crew = Crew.resolve(current, args.name)
@@ -497,6 +498,11 @@ def dismiss_crew(args, pane, project):
                         "Crew message delivery is unresolved; inspect and cancel it before "
                         "dismissal."
                     )
+            # protocol.bounce takes protocol.lock itself; call it outside the checkpoint
+            # above, or a crew with mail still queued at dismissal would deadlock here.
+            bounced = protocol.unread(crew)
+            for message in bounced:
+                protocol.bounce(crew, message["id"], "Crew dismissed before mail was read.")
         if not crew.record.get("pane") and not crew.record.get("incarnation_id"):
             raise CaptainError(f"{crew.display_name} has no recorded pane to close.")
         try:
@@ -518,6 +524,8 @@ def dismiss_crew(args, pane, project):
     if label:
         runtime.herdr("tab", "rename", tab_id, label)
     add_memory(current.graph, f"session:{meta['id']}", "dismissed", crew.record["agent"])
+    for message in bounced:
+        print(f"Bounced unread mail to {crew.display_name}: {message['id']}.")
     print(f"Dismissed {crew.display_name}.")
 
 

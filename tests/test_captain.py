@@ -1935,6 +1935,8 @@ class CaptainFlowTests(unittest.TestCase):
         self.assertEqual(record["agent"], f"c-{self.meta['id'][:8]}-jack")
         self.assertIn(("pane", "rename", "w1:p2", "Jack"), [c.args for c in api.call_args_list])
         crew = Crew("jack", record, memory.Session(self.directory, self.meta))
+        unread_messages = protocol.unread(crew)
+        protocol.mark_read(crew, [msg["id"] for msg in unread_messages])
         protocol.change(
             crew,
             self.args(
@@ -2026,6 +2028,8 @@ class CaptainFlowTests(unittest.TestCase):
             roster["jack"]["status"] = "dismissed"
             memory.write_json(self.directory / "session.json", {**self.meta, "crew": roster})
             crew = Crew("jack", roster["jack"], memory.Session(self.directory, self.meta))
+            unread_messages = protocol.unread(crew)
+            protocol.mark_read(crew, [msg["id"] for msg in unread_messages])
             protocol.change(
                 crew,
                 self.args(
