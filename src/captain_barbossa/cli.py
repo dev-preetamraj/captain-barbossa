@@ -18,6 +18,7 @@ from .agents import (
     tell_crew,
     wait_crew,
 )
+from .crew import Crew
 from .layout import HERDR_DIRECTIONS
 from .memory import PRUNE_DAYS, REPO_RELATIONS, RULEBOOK_FILES, memory, project_root
 from .models import PROVIDERS, TIER_NAMES
@@ -94,6 +95,10 @@ def parser():
     tell.add_argument("name", help="crew name or ID (case-insensitive)")
     tell.add_argument("message")
     tell.add_argument("--assignment", help="required for protocol crew")
+    inbox = commands.add_parser(
+        "inbox", help="print a crew's queued mail oldest first and write the read receipt"
+    )
+    inbox.add_argument("name", help="crew name or ID (case-insensitive)")
     for verb in ("assign", "ask", "answer", "done", "check", "resolve"):
         command = commands.add_parser(verb, help=f"{verb} an explicit crew assignment")
         command.add_argument("name")
@@ -213,7 +218,7 @@ def guard_crew(args):
     """Refuse captain-only commands and hide other scopes when running as crew."""
     if os.environ.get("CAPTAIN_ROLE") != "crew":
         return
-    if args.command in ("ask", "done", "check"):
+    if args.command in ("ask", "done", "check", "inbox"):
         if args.name.casefold() != os.environ.get("CAPTAIN_CREW", "").casefold():
             raise CaptainError("Crew may act only on its own assignment.")
         return
@@ -237,6 +242,18 @@ def print_session(args):
     if not args.session:
         raise CaptainError("Start captain first, or pass --session <id>.")
     print(args.session)
+
+
+def print_inbox(args, pane, project):
+    _, crew = Crew.for_args(args, pane, project)
+    messages = protocol.unread(crew)
+    if not messages:
+        print("No mail.")
+        return
+    for message in messages:
+        print(message["text"])
+        print()
+    protocol.mark_read(crew, [message["id"] for message in messages])
 
 
 def main(argv=None):
@@ -268,6 +285,8 @@ def main(argv=None):
             wait_crew(args, pane, project)
         elif args.command == "tell":
             tell_crew(args, pane, project)
+        elif args.command == "inbox":
+            print_inbox(args, pane, project)
         elif args.command in ("assign", "ask", "answer", "done", "check", "resolve"):
             protocol_command(args, pane, project)
         elif args.command == "model":

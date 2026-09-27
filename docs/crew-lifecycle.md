@@ -97,13 +97,23 @@ selects JSON output. Statuses distinguish `working`, `idle`, `asked`,
 idle is activity evidence only; assignment completion requires explicit `done`.
 Approval notifications never approve the underlying native prompt.
 
-A notification repeats with the same delivery ID until `wait --ack ID`
-acknowledges it. Acknowledging may return the next notification; consume that
-too. Timeouts have no delivery ID and do not imply completion. `--timeout 0`
-polls once; the default is 900 seconds. Neither waiting nor timing out retries
-a terminal prompt. After inspecting an uncertain prompt, use
+`wait` returns only when a notification carries a delivery ID. Native `working`
+never notifies, and a native idle notifies at most once per message delivered, so
+quiet work runs the timeout out instead of waking the captain every turn. Claude
+Code crew are read from their event file alone, since their approvals arrive as
+hooks; Codex and pi crew, whose CLIs report no approval, also have their pane
+checked for a modal, once when a wait starts and then every 30 seconds.
+
+A notification is returned once. Waiting again without `wait --ack ID` fails and
+names the unacknowledged delivery, its status, and its summary, so nothing loops
+and nothing is lost. Acknowledging may return the next notification; consume that
+too. Once the assignment is done and every notification is acknowledged, `wait`
+fails: dismiss the crew or hand off. Timeouts have no delivery ID and do not imply
+completion. `--timeout 0` polls once; the default is 900 seconds. Neither waiting
+nor timing out retries a terminal prompt. After inspecting an uncertain prompt, use
 `resolve NAME MESSAGE_ID sent|cancelled --assignment ID`; this records the
-observed outcome and sends no input.
+observed outcome, sends no input, and retires that delivery's notification so it
+never wakes the captain again.
 
 Legacy crew retain the older non-JSON wait below; they are not silently adopted
 into the protocol. Recruit new crew to use acknowledged notifications.
@@ -135,8 +145,11 @@ captain tell Jack "also update the changelog" --assignment <assignment-id>
 ```
 
 `tell` prompts an existing crew in place; its pane, model, and running
-conversation are kept. For protocol crew, `--assignment` is required and the
-message is appended without replacing the original task, ownership, or grants.
+conversation are kept. A message whose text repeats the last message on the
+assignment is refused by that message's ID; a cancelled message does not count,
+so a delivery cancelled after inspection can be sent again. For protocol crew,
+`--assignment` is required and the message is appended without replacing the
+original task, ownership, or grants.
 Use `answer` for a pending question and `assign --handoff` after completion.
 Legacy crew still replace their recorded task and advance the old event cursor.
 Dismissed crew are refused; recruit new crew instead.

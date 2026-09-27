@@ -44,7 +44,16 @@ class ProtocolTests(unittest.TestCase):
         self.enterContext(patch.dict(os.environ, {"CAPTAIN_ROLE": "captain"}))
         self.enterContext(patch.object(Pane, "agent_status", return_value=None))
         self.enterContext(patch.object(Pane, "choice_modal", return_value=False))
+        # nudge/nudge_block are pane.py's, built concurrently; stub the doorbell for delivery.
+        self.enterContext(patch.object(Pane, "nudge_block", return_value=None, create=True))
+        self.enterContext(patch.object(Pane, "nudge", create=True))
         self.assignment = protocol.begin(self.crew, self.project, "original", ["src"], ["edit"])
+
+    def mail(self, message_id):
+        crew_id, session = self.crew.crew_id, self.current
+        return memory.read_json(
+            protocol.mail_dir(session.directory, crew_id) / f"{message_id}.json"
+        )
 
     def saved(self):
         return memory.read_json(self.directory / "protocol.json")["assignments"][
@@ -62,45 +71,111 @@ class ProtocolTests(unittest.TestCase):
         with self.crew.events.open("a") as stream:
             stream.write(json.dumps(event) + "\n")
 
-    def test_persist_before_single_send_and_preserve_original_task(self):
-        def submitted(text, provider, attempts):
-            saved = self.saved()
-            self.assertEqual(saved["messages"][-1]["delivery"], "pending")
-            self.assertTrue(
-                text.startswith(f"Crew name: Jack.\nAssignment {saved['id']}; incarnation first; ")
+    def force_unknown_message(self, text="original"):
+        """Bypass deliver to reach a state only a genuine terminal accident used to leave."""
+        with protocol.checkpoint(self.directory) as state:
+            assignment = protocol.active(state, self.crew, self.assignment["id"])
+            message_id = protocol.uuid4().hex
+            assignment["messages"].append(
+                {
+                    "id": message_id,
+                    "text": text,
+                    "kind": "followup",
+                    "question_id": None,
+                    "delivery": "unknown",
+                }
             )
-            self.assertIn(saved["messages"][-1]["id"], text)
-            self.assertEqual(attempts, 1)
+            protocol.notice(
+                assignment,
+                "delivery_unknown",
+                f"Inspect message {message_id} before resolving.",
+                message_id,
+            )
+        return message_id
 
-        with patch.object(Pane, "submit_task", side_effect=submitted):
-            protocol.deliver(self.crew, "original", initial=True)
-            protocol.deliver(self.crew, "followup")
+    def test_persist_before_single_send_and_preserve_original_task(self):
+        first = protocol.deliver(self.crew, "original", initial=True)
+        second = protocol.deliver(self.crew, "followup")
         saved = self.saved()
         self.assertEqual(saved["original_task"], "original")
         self.assertEqual([m["text"] for m in saved["messages"]], ["original", "followup"])
+        self.assertEqual([m["delivery"] for m in saved["messages"]], ["sent", "sent"])
         self.assertEqual(len({m["id"] for m in saved["messages"]}), 2)
+        for message_id, text in ((first, "original"), (second, "followup")):
+            mail = self.mail(message_id)
+            self.assertEqual(mail["state"], "queued")
+            self.assertTrue(
+                mail["text"].startswith(f"Crew name: Jack.\nAssignment {saved['id']}; ")
+            )
+            self.assertIn(text, mail["text"])
 
-    def test_unknown_delivery_is_durable_and_never_retried(self):
-        with patch.object(Pane, "submit_task", side_effect=CaptainError("unconfirmed")) as send:
-            with self.assertRaises(CaptainError):
-                protocol.deliver(self.crew, "original")
-            with self.assertRaisesRegex(CaptainError, "never auto-resend"):
-                protocol.deliver(self.crew, "retry")
-            send.assert_called_once()
-        message = self.saved()["messages"][0]
-        self.assertEqual(message["delivery"], "unknown")
-        self.assertEqual(protocol.poll(self.crew)["status"], "delivery_unknown")
-        protocol.resolve_delivery(self.crew, self.assignment["id"], message["id"], "sent")
+    def test_a_refused_ring_never_loses_the_mail(self):
+        with (
+            patch.object(Pane, "nudge_block", return_value="cooldown"),
+            patch.object(Pane, "nudge") as nudge,
+        ):
+            message_id = protocol.deliver(self.crew, "original", initial=True)
+        nudge.assert_not_called()
         self.assertEqual(self.saved()["messages"][0]["delivery"], "sent")
+        self.assertEqual(self.mail(message_id)["state"], "queued")
 
-    def test_process_exit_during_send_leaves_unknown_delivery(self):
-        with patch.object(Pane, "submit_task", side_effect=KeyboardInterrupt):
-            with self.assertRaises(KeyboardInterrupt):
-                protocol.deliver(self.crew, "original")
-        self.assertEqual(self.saved()["messages"][0]["delivery"], "pending")
+    def test_a_dead_pane_bounces_the_mail_instead_of_losing_it(self):
+        with patch.object(Pane, "nudge", side_effect=CaptainError("pane not found")):
+            message_id = protocol.deliver(self.crew, "original", initial=True)
+        self.assertEqual(self.saved()["messages"][0]["delivery"], "sent")
+        mail = self.mail(message_id)
+        self.assertEqual(mail["state"], "bounced")
+        self.assertIn("pane not found", mail["reason"])
         response = protocol.poll(self.crew)
-        self.assertEqual(response["status"], "delivery_unknown")
-        self.assertEqual(protocol.poll(self.crew), response)
+        self.assertEqual(response["status"], "bounced")
+        self.assertIn(message_id, response["summary"])
+
+    def test_ring_holds_on_a_broken_doorbell_without_bouncing(self):
+        with patch.object(Pane, "nudge", side_effect=AttributeError("no nudge yet")):
+            message_id = protocol.deliver(self.crew, "original", initial=True)
+        self.assertEqual(self.saved()["messages"][0]["delivery"], "sent")
+        self.assertEqual(self.mail(message_id)["state"], "queued")
+
+    def test_poll_drains_held_mail_at_most_once_per_cooldown(self):
+        with (
+            patch.object(Pane, "nudge_block", return_value="cooldown"),
+            patch.object(Pane, "nudge") as nudge,
+        ):
+            protocol.deliver(self.crew, "original", initial=True)
+        nudge.assert_not_called()
+        clock = [1000.0]
+        with (
+            patch.object(protocol.time, "time", side_effect=lambda: clock[0]),
+            patch.object(Pane, "nudge_block", return_value=None),
+            patch.object(Pane, "nudge") as nudge,
+        ):
+            protocol.poll(self.crew)
+            protocol.poll(self.crew)
+            nudge.assert_called_once()
+            clock[0] += protocol.DRAIN_INTERVAL + 1
+            protocol.poll(self.crew)
+            self.assertEqual(nudge.call_count, 2)
+
+    def test_poll_does_not_drain_when_there_is_no_unread_mail(self):
+        with patch.object(Pane, "nudge") as nudge:
+            protocol.poll(self.crew)
+        nudge.assert_not_called()
+
+    def test_an_unknown_message_blocks_new_delivery_until_resolved(self):
+        protocol.deliver(self.crew, "original", initial=True)
+        unknown = self.force_unknown_message("second")
+        with self.assertRaisesRegex(CaptainError, "never auto-resend"):
+            protocol.deliver(self.crew, "third")
+        protocol.resolve_delivery(self.crew, self.assignment["id"], unknown, "cancelled")
+        protocol.deliver(self.crew, "third")
+
+    def test_a_process_crash_during_the_ring_still_leaves_the_message_sent_and_mailed(self):
+        with patch.object(Pane, "nudge", side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                protocol.deliver(self.crew, "original", initial=True)
+        message = self.saved()["messages"][0]
+        self.assertEqual(message["delivery"], "sent")
+        self.assertEqual(self.mail(message["id"])["state"], "queued")
 
     def test_one_question_correlated_answer_and_explicit_done(self):
         asked = self.command("ask", question="Which path?")
@@ -108,34 +183,152 @@ class ProtocolTests(unittest.TestCase):
             self.command("ask", question="Another?")
         with self.assertRaisesRegex(CaptainError, "pending question"):
             self.command("done", report="finished")
-        with patch.object(Pane, "submit_task") as send:
-            with self.assertRaises(CaptainError):
-                protocol.deliver(self.crew, "wrong", question_id="old")
-            send.assert_not_called()
-            protocol.deliver(self.crew, "src", question_id=asked["question_id"])
+        with self.assertRaises(CaptainError):
+            protocol.deliver(self.crew, "wrong", question_id="old")
+        protocol.deliver(self.crew, "src", question_id=asked["question_id"])
         self.command("done", report="src/a.py changed; test passed; nothing left")
         self.assertEqual(self.saved()["state"], "done")
         first = protocol.poll(self.crew)
         self.assertEqual(first["status"], "asked")
         second = protocol.poll(self.crew, first["delivery_id"])
         self.assertEqual(second["status"], "done")
-        self.assertEqual(protocol.poll(self.crew), second)
+        with self.assertRaisesRegex(CaptainError, second["delivery_id"]):
+            protocol.poll(self.crew)
         self.assertIsNone(protocol.poll(self.crew, second["delivery_id"])["delivery_id"])
+        with self.assertRaisesRegex(CaptainError, "dismiss the crew or hand off"):
+            protocol.poll(self.crew)
+
+    def attempt(self):
+        try:
+            return protocol.poll(self.crew)
+        except CaptainError as error:
+            return error
 
     def test_native_finish_is_idle_and_offsets_wait_for_ack(self):
         self.event({"hook_event_name": "Stop"})
         with ThreadPoolExecutor(max_workers=2) as pool:
-            left, right = list(pool.map(lambda _: protocol.poll(self.crew), range(2)))
-        self.assertEqual(left, right)
+            outcomes = list(pool.map(lambda _: self.attempt(), range(2)))
+        notified = [outcome for outcome in outcomes if isinstance(outcome, dict)]
+        refused = [outcome for outcome in outcomes if isinstance(outcome, CaptainError)]
+        self.assertEqual(len(notified), 1)
+        self.assertEqual(len(refused), 1)
+        (left,) = notified
         self.assertEqual(left["status"], "idle")
+        self.assertIn(left["delivery_id"], str(refused[0]))
         self.assertEqual(self.saved()["state"], "working")
         self.assertEqual(self.saved()["offset"], 0)
         with self.assertRaises(CaptainError):
             protocol.poll(self.crew, "wrong")
-        self.assertEqual(protocol.poll(self.crew), left)
         protocol.poll(self.crew, left["delivery_id"])
         self.assertEqual(self.saved()["offset"], self.crew.events.stat().st_size)
         self.assertIsNone(protocol.poll(self.crew, left["delivery_id"])["delivery_id"])
+
+    def test_native_working_is_silent_and_idle_notifies_once_per_message(self):
+        self.event({"hook_event_name": "SessionStart"})
+        self.assertEqual(protocol.poll(self.crew)["status"], "working")
+        self.event({"hook_event_name": "Stop"})
+        first = protocol.poll(self.crew)
+        self.assertEqual(first["status"], "idle")
+        protocol.poll(self.crew, first["delivery_id"])
+        self.event({"hook_event_name": "Stop"})
+        self.assertIsNone(protocol.poll(self.crew)["delivery_id"])
+        protocol.deliver(self.crew, "followup")
+        self.event({"hook_event_name": "Stop"})
+        self.assertEqual(protocol.poll(self.crew)["status"], "idle")
+
+    def test_wait_holds_through_quiet_idle_and_refuses_a_finished_assignment(self):
+        self.event({"hook_event_name": "Stop"})
+        idle = protocol.wait(self.crew, 0)
+        self.assertEqual(idle["status"], "idle")
+        protocol.poll(self.crew, idle["delivery_id"])
+        self.event({"hook_event_name": "Stop"})
+        self.assertEqual(protocol.wait(self.crew, 0)["status"], "timeout")
+        self.command("done", report="src/a.py changed; checks pass; nothing left")
+        report = protocol.wait(self.crew, 0)
+        self.assertEqual(report["status"], "done")
+        self.assertEqual(protocol.wait(self.crew, 0, report["delivery_id"])["status"], "timeout")
+        with self.assertRaisesRegex(CaptainError, "dismiss the crew or hand off"):
+            protocol.wait(self.crew, 0)
+
+    def test_claude_is_never_pane_read_but_codex_and_pi_modals_keep_notifying(self):
+        with patch.object(Pane, "agent_status", side_effect=AssertionError("pane read")):
+            self.crew.record["provider"] = "claude"
+            with patch.object(Pane, "choice_modal", side_effect=AssertionError("pane read")):
+                self.assertEqual(protocol.poll(self.crew)["status"], "working")
+            for provider in ("codex", "pi"):
+                with self.subTest(provider=provider):
+                    self.crew.record["provider"] = provider
+                    # A modal cleared and raised again is news twice; codex signals nothing else.
+                    for _ in range(2):
+                        with patch.object(Pane, "choice_modal", return_value=True):
+                            blocked = protocol.poll(self.crew)
+                        self.assertEqual(blocked["status"], "awaiting_approval")
+                        protocol.poll(self.crew, blocked["delivery_id"])
+                        with patch.object(Pane, "choice_modal", return_value=False):
+                            self.assertIsNone(protocol.poll(self.crew)["delivery_id"])
+
+    def test_a_wait_loop_reads_the_pane_once_a_half_minute_but_starts_at_once(self):
+        self.crew.record["provider"] = "codex"
+        elapsed = 0.0
+
+        def advance(seconds):
+            nonlocal elapsed
+            elapsed += seconds
+
+        with (
+            patch.object(protocol.time, "monotonic", side_effect=lambda: elapsed),
+            patch.object(protocol.time, "sleep", side_effect=advance),
+            patch.object(Pane, "choice_modal", return_value=False) as modal,
+        ):
+            self.assertEqual(protocol.wait(self.crew, 0)["status"], "timeout")
+            self.assertEqual(modal.call_count, 1)
+            self.assertEqual(protocol.wait(self.crew, 70)["status"], "timeout")
+            self.assertEqual(modal.call_count, 4)
+        self.assertGreaterEqual(elapsed, 70)
+
+    def test_resolving_an_uncertain_delivery_retires_its_queued_notice(self):
+        message = self.force_unknown_message()
+        protocol.resolve_delivery(self.crew, self.assignment["id"], message, "cancelled")
+        self.assertEqual(protocol.wait(self.crew, 0)["status"], "timeout")
+        self.assertEqual(self.saved()["notices"], [])
+        self.assertEqual(self.saved()["ack_seq"], 0)
+        # The retired notice must not keep the assignment from being handed off either.
+        self.command("done", report="cancelled; nothing changed; nothing left")
+        report = protocol.poll(self.crew)
+        self.assertEqual(report["status"], "done")
+        protocol.poll(self.crew, report["delivery_id"])
+        protocol.begin(self.crew, self.project, "next", handoff=self.assignment["id"])
+
+    def test_retiring_a_notice_keeps_acknowledged_and_pending_indexes_aligned(self):
+        self.command("ask", question="Which path?")
+        first = protocol.poll(self.crew)
+        self.assertEqual(first["status"], "asked")
+        protocol.poll(self.crew, first["delivery_id"])
+        self.force_unknown_message("src")
+        unknown = protocol.poll(self.crew)
+        self.assertEqual(unknown["status"], "delivery_unknown")
+        message = self.saved()["messages"][0]["id"]
+        protocol.resolve_delivery(self.crew, self.assignment["id"], message, "sent")
+        saved = self.saved()
+        self.assertEqual([entry["status"] for entry in saved["notices"]], ["asked"])
+        self.assertEqual(saved["ack_seq"], 1)
+        self.assertEqual(saved["pending"]["seq"], 1)
+
+    def test_a_second_approval_event_is_not_swallowed_by_the_first(self):
+        self.event({"hook_event_name": "PermissionRequest"})
+        first = protocol.poll(self.crew)
+        self.assertEqual(first["status"], "awaiting_approval")
+        protocol.poll(self.crew, first["delivery_id"])
+        self.event({"hook_event_name": "PermissionRequest"})
+        second = protocol.poll(self.crew)
+        self.assertEqual(second["status"], "awaiting_approval")
+        self.assertNotEqual(first["delivery_id"], second["delivery_id"])
+
+    def test_identical_text_is_refused_until_a_different_message_is_sent(self):
+        protocol.deliver(self.crew, "original", initial=True)
+        with self.assertRaisesRegex(CaptainError, self.saved()["messages"][0]["id"]):
+            protocol.deliver(self.crew, "original")
+        protocol.deliver(self.crew, "second")
 
     def test_stale_assignment_incarnation_and_foreign_actor_are_refused(self):
         for assignment, incarnation in (("old", "first"), (self.assignment["id"], "old")):
@@ -196,6 +389,20 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(response["status"], "timeout")
         self.assertIsNone(response["delivery_id"])
 
+    def test_unread_mail_is_oldest_first_and_mark_read_writes_the_receipt(self):
+        first = protocol.deliver(self.crew, "original", initial=True)
+        second = protocol.deliver(self.crew, "followup")
+        self.assertEqual([m["id"] for m in protocol.unread(self.crew)], [first, second])
+        protocol.mark_read(self.crew, [first])
+        self.assertEqual([m["id"] for m in protocol.unread(self.crew)], [second])
+        read = self.mail(first)
+        self.assertEqual(read["state"], "read")
+        self.assertIsNotNone(read["read_at"])
+        # A bounced message is not resurrected by a later mark_read.
+        protocol.bounce(self.crew, second, "pane not found")
+        protocol.mark_read(self.crew, [second])
+        self.assertEqual(self.mail(second)["state"], "bounced")
+
     def run_cli(self, *arguments):
         with (
             patch.object(cli, "current_pane", return_value=self.pane),
@@ -203,6 +410,36 @@ class ProtocolTests(unittest.TestCase):
         ):
             code = cli.main(["--session", self.current.meta["id"], *arguments])
         return code, output.getvalue()
+
+    def test_cli_inbox_prints_queued_mail_oldest_first_and_marks_it_read(self):
+        with patch.dict(
+            os.environ,
+            {
+                "CAPTAIN_ROLE": "crew",
+                "CAPTAIN_CREW": "jack",
+                "CAPTAIN_INCARNATION": "first",
+                "CAPTAIN_ASSIGNMENT": self.assignment["id"],
+            },
+        ):
+            code, output = self.run_cli("inbox", "Jack")
+        self.assertEqual(code, 0)
+        self.assertEqual(output.strip(), "No mail.")
+        protocol.deliver(self.crew, "original", initial=True)
+        protocol.deliver(self.crew, "followup")
+        with patch.dict(
+            os.environ,
+            {"CAPTAIN_ROLE": "crew", "CAPTAIN_CREW": "jack", "CAPTAIN_INCARNATION": "first"},
+        ):
+            code, output = self.run_cli("inbox", "Jack")
+        self.assertEqual(code, 0)
+        self.assertIn("original", output)
+        self.assertIn("followup", output)
+        self.assertLess(output.index("original"), output.index("followup"))
+        self.assertEqual(protocol.unread(self.crew), [])
+        with patch.dict(os.environ, {"CAPTAIN_ROLE": "crew", "CAPTAIN_CREW": "will"}):
+            with contextlib.redirect_stderr(io.StringIO()) as error:
+                self.assertEqual(self.run_cli("inbox", "Jack")[0], 1)
+        self.assertIn("only on its own assignment", error.getvalue())
 
     def test_launch_assignment_defaults_and_explicit_replacement(self):
         with patch.dict(
@@ -217,10 +454,7 @@ class ProtocolTests(unittest.TestCase):
             self.assertEqual(self.run_cli("check", "Jack", "read")[0], 0)
             code, output = self.run_cli("ask", "Jack", "Which file?")
             self.assertEqual(code, 0)
-            with patch.object(Pane, "submit_task"):
-                protocol.deliver(
-                    self.crew, "src/a.py", question_id=json.loads(output)["question_id"]
-                )
+            protocol.deliver(self.crew, "src/a.py", question_id=json.loads(output)["question_id"])
             self.assertEqual(self.run_cli("done", "Jack", "--report", "Finished")[0], 0)
             event = protocol.poll(self.crew)
             while event["delivery_id"]:
@@ -288,15 +522,13 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(code, 0)
         event = json.loads(output)
         self.assertEqual(event["status"], "asked")
-        self.assertEqual(
-            json.loads(self.run_cli("wait", "Jack", "--json", "--timeout", "0")[1]), event
+        code, repeated = self.run_cli("wait", "Jack", "--json", "--timeout", "0")
+        self.assertEqual(code, 1)
+        self.assertIn(event["delivery_id"], json.loads(repeated)["summary"])
+        code, _ = self.run_cli(
+            "answer", "Jack", question, "src/a.py", "--assignment", self.assignment["id"]
         )
-        with patch.object(Pane, "submit_task") as send:
-            code, _ = self.run_cli(
-                "answer", "Jack", question, "src/a.py", "--assignment", self.assignment["id"]
-            )
         self.assertEqual(code, 0)
-        send.assert_called_once()
         self.run_cli("wait", "Jack", "--json", "--ack", event["delivery_id"], "--timeout", "0")
         code, _ = self.run_cli(
             "done",
@@ -377,21 +609,117 @@ class ProtocolTests(unittest.TestCase):
                 agents.switch_model(args, self.pane, self.project)
         send.assert_not_called()
 
-    def test_late_send_result_cannot_complete_a_newer_unknown_answer(self):
-        first_question = self.command("ask", question="First?")["question_id"]
+    def test_dismiss_releases_an_assignment_with_no_delivered_message(self):
+        self.crew.record.update(pane="w1:p2", assignment_id=self.assignment["id"])
+        memory.write_json(self.current.meta_path, self.current.meta)
+        args = SimpleNamespace(session=self.current.meta["id"], name="Jack")
+        with patch.object(agents.runtime, "herdr", return_value={}):
+            agents.dismiss_crew(args, self.pane, self.project)
+        self.assertEqual(self.saved()["state"], "done")
+        replacement = Crew(
+            "will",
+            {"name": "Will", "agent": "will", "incarnation_id": "second"},
+            memory.read_session(self.project, self.current.meta["id"], self.pane),
+        )
+        protocol.begin(replacement, self.project, "replacement", ["src"], ["edit"])
 
-        def delayed_send(*args, **kwargs):
-            first = self.saved()["messages"][-1]["id"]
-            protocol.resolve_delivery(self.crew, self.assignment["id"], first, "sent")
-            second_question = self.command("ask", question="Second?")["question_id"]
-            with patch.object(Pane, "submit_task", side_effect=CaptainError("unknown second send")):
-                with self.assertRaises(CaptainError):
-                    protocol.deliver(self.crew, "second answer", question_id=second_question)
+    def test_dismiss_releases_an_assignment_with_only_cancelled_messages(self):
+        self.crew.record.update(pane="w1:p2", assignment_id=self.assignment["id"])
+        memory.write_json(self.current.meta_path, self.current.meta)
+        message = self.force_unknown_message()
+        protocol.resolve_delivery(self.crew, self.assignment["id"], message, "cancelled")
+        with patch.object(agents.runtime, "herdr", return_value={}):
+            agents.dismiss_crew(
+                SimpleNamespace(session=self.current.meta["id"], name="Jack"),
+                self.pane,
+                self.project,
+            )
+        self.assertEqual(self.saved()["state"], "done")
 
-        with patch.object(Pane, "submit_task", side_effect=delayed_send):
-            first = protocol.deliver(self.crew, "first answer", question_id=first_question)
-        protocol.record_delivery(self.crew, self.assignment["id"], first, "unknown")
-        assignment = self.saved()
-        self.assertEqual([m["delivery"] for m in assignment["messages"]], ["sent", "unknown"])
-        self.assertEqual(assignment["question"]["text"], "Second?")
-        self.assertEqual(assignment["state"], "asked")
+    def test_dismiss_missing_pane_retires_record_and_releases_paths(self):
+        self.crew.record.update(pane="w1:p2", assignment_id=self.assignment["id"])
+        memory.write_json(self.current.meta_path, self.current.meta)
+        args = SimpleNamespace(session=self.current.meta["id"], name="Jack")
+        with patch.object(
+            agents.runtime, "herdr", side_effect=CaptainError('Herdr: {"code": "pane_not_found"}')
+        ) as close:
+            agents.dismiss_crew(args, self.pane, self.project)
+        close.assert_called_once_with("pane", "close", "w1:p2")
+        current = memory.read_session(self.project, self.current.meta["id"], self.pane)
+        self.assertEqual(current.meta["crew"]["jack"]["status"], "dismissed")
+        self.assertEqual(self.saved()["state"], "done")
+        self.assertFalse(Crew.name_reserved(current, "jack"))
+        replacement = Crew(
+            "will", {"name": "Will", "agent": "will", "incarnation_id": "second"}, current
+        )
+        protocol.begin(replacement, self.project, "replacement", ["src"], ["edit"])
+
+    def test_dismiss_other_close_failure_preserves_record_and_assignment(self):
+        self.crew.record.update(pane="w1:p2", assignment_id=self.assignment["id"])
+        memory.write_json(self.current.meta_path, self.current.meta)
+        before = self.saved()
+        args = SimpleNamespace(session=self.current.meta["id"], name="Jack")
+        with (
+            patch.object(agents.runtime, "herdr", side_effect=CaptainError("permission_denied")),
+            self.assertRaisesRegex(CaptainError, "Could not dismiss Jack: permission_denied"),
+        ):
+            agents.dismiss_crew(args, self.pane, self.project)
+        current = memory.read_session(self.project, self.current.meta["id"], self.pane)
+        self.assertEqual(current.meta["crew"]["jack"], self.crew.record)
+        self.assertEqual(self.saved(), before)
+
+    def test_dismiss_refuses_an_assignment_with_a_sent_message(self):
+        self.crew.record.update(pane="w1:p2", assignment_id=self.assignment["id"])
+        memory.write_json(self.current.meta_path, self.current.meta)
+        protocol.deliver(self.crew, "original", initial=True)
+        with patch.object(agents.runtime, "herdr") as send:
+            with self.assertRaisesRegex(CaptainError, "received a message"):
+                agents.dismiss_crew(
+                    SimpleNamespace(session=self.current.meta["id"], name="Jack"),
+                    self.pane,
+                    self.project,
+                )
+        send.assert_not_called()
+
+    def test_failed_launch_preserves_a_retryable_launcher(self):
+        args = cli.parser().parse_args(
+            [
+                "--session",
+                self.current.meta["id"],
+                "crew",
+                "will",
+                "--agent",
+                "codex",
+                "--task",
+                "build",
+                "--placement",
+                "pane",
+                "--direction",
+                "vertical",
+                "--split-pane",
+                "w1:p1",
+            ]
+        )
+
+        def herdr(*call, **kwargs):
+            if call[:2] == ("pane", "split"):
+                return {"pane": {"pane_id": "w1:p2", "tab_id": "w1:t1"}}
+            if call[:2] == ("pane", "run"):
+                self.fail("launcher was typed into an unsettled shell")
+            return {}
+
+        with (
+            patch.object(agents.runtime, "herdr", side_effect=herdr),
+            patch.object(agents, "executable", return_value="/bin/codex"),
+            patch.object(agents, "shell_ready_for_input", return_value=False) as ready,
+            self.assertRaisesRegex(CaptainError, "launcher .* preserved.*retried") as error,
+        ):
+            agents.create_crew(args, self.pane, self.project)
+        ready.assert_called_once_with("w1:p2")
+        launcher = self.directory / "crew-will.sh"
+        self.assertTrue(launcher.exists())
+        self.assertNotIn("rm -f", launcher.read_text(encoding="utf-8"))
+        crew_agent = memory.agent_name(self.current.meta["id"], "will")
+        self.assertIn(f"/bin/sh {launcher}", str(error.exception))
+        self.assertIn(f"herdr agent rename w1:p2 {crew_agent}", str(error.exception))
+        self.assertIn(f"herdr agent get {crew_agent}", str(error.exception))

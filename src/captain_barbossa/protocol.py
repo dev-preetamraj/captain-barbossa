@@ -8,9 +8,17 @@ from pathlib import Path
 from uuid import uuid4
 
 from .memory import lock, read_json, write_json
-from .runtime import CaptainError, check_text
+from .runtime import HERDR_ERRORS, CaptainError, check_text
 
 ACTIONS = ("read", "search", "edit", "test", "build", "format", "commit", "version", "delete")
+# Native "working" is a wake, not news: it fires at recruit and at every crew turn end.
+NOTIFIED = {"done": "idle", "idle": "idle", "blocked": "awaiting_approval"}
+APPROVAL_SUMMARY = "Inspect native approval prompt; approval is not granted by this event."
+# Claude reports approvals through its PermissionRequest hook; these two have no such event.
+MODAL_PROVIDERS = ("codex", "pi")
+MODAL_INTERVAL = 30
+# No daemon drains held mail; the wait loop already polls, so it retries the doorbell instead.
+DRAIN_INTERVAL = 30
 
 
 @contextmanager
@@ -39,6 +47,27 @@ def overlaps(left, right):
     return a.is_relative_to(b) or b.is_relative_to(a)
 
 
+def retire_notices(assignment):
+    """Drop notices for deliveries since resolved; they shift, so acknowledged counts shift too.
+
+    A delivery_unknown notice describes an uncertain send. Once the captain has inspected
+    and resolved it, waking anyone for it again is noise, and leaving it queued forever
+    blocks handoff and dismissal, which both require every notice acknowledged.
+    """
+    settled = {
+        m["id"] for m in assignment["messages"] if m["delivery"] not in ("pending", "unknown")
+    }
+    pending, kept, acked = assignment["pending"], [], assignment["ack_seq"]
+    for index, entry in enumerate(assignment["notices"]):
+        if entry.get("message_id") in settled:
+            acked -= index < assignment["ack_seq"]
+            if pending:
+                pending["seq"] -= index < pending["seq"]
+        else:
+            kept.append(entry)
+    assignment["notices"], assignment["ack_seq"] = kept, acked
+
+
 def active(state, crew, assignment_id=None, incarnation=None):
     key = state["active"].get(crew.crew_id)
     assignment = state["assignments"].get(key)
@@ -50,6 +79,8 @@ def active(state, crew, assignment_id=None, incarnation=None):
         raise CaptainError("Stale assignment ID.")
     if incarnation is not None and incarnation != assignment["incarnation_id"]:
         raise CaptainError("Stale crew incarnation.")
+    # Every protocol path reads the assignment here, so stale notices are retired once.
+    retire_notices(assignment)
     return assignment
 
 
@@ -103,8 +134,11 @@ def begin(crew, project, task, paths=(), actions=(), handoff=None):
     return assignment
 
 
-def notice(assignment, status, summary):
-    assignment["notices"].append({"status": status, "summary": summary[:1600]})
+def notice(assignment, status, summary, message_id=None):
+    entry = {"status": status, "summary": summary[:1600]}
+    if message_id:
+        entry["message_id"] = message_id
+    assignment["notices"].append(entry)
 
 
 def validate_actor(crew, args):
@@ -164,6 +198,105 @@ def change(crew, args, project):
         return {"assignment_id": assignment_id, "status": "done"}
 
 
+def mail_dir(directory, crew_id):
+    return directory / "mail" / crew_id
+
+
+def enqueue(crew, text, kind, assignment_id, message_id=None):
+    """Write a durable mail record; the crew's own `inbox` read is what proves delivery."""
+    message = {
+        "id": message_id or uuid4().hex,
+        "assignment_id": assignment_id,
+        "incarnation_id": crew.record.get("incarnation_id"),
+        "kind": kind,
+        "text": text,
+        "queued_at": time.time(),
+        "state": "queued",
+        "read_at": None,
+    }
+    directory = mail_dir(crew.session.directory, crew.crew_id)
+    with lock(crew.session.directory / "protocol.lock"):
+        directory.mkdir(parents=True, exist_ok=True)
+        write_json(directory / f"{message['id']}.json", message)
+    return message["id"]
+
+
+def unread(crew):
+    """Queued mail for this crew, oldest first."""
+    directory = mail_dir(crew.session.directory, crew.crew_id)
+    if not directory.exists():
+        return []
+    messages = (read_json(path) for path in directory.glob("*.json"))
+    return sorted((m for m in messages if m["state"] == "queued"), key=lambda m: m["queued_at"])
+
+
+def mark_read(crew, ids):
+    """The crew's own read writes the receipt; a bounced message is never resurrected."""
+    directory = mail_dir(crew.session.directory, crew.crew_id)
+    with lock(crew.session.directory / "protocol.lock"):
+        for message_id in ids:
+            path = directory / f"{message_id}.json"
+            message = read_json(path)
+            if message["state"] == "queued":
+                message["state"] = "read"
+                message["read_at"] = time.time()
+                write_json(path, message)
+
+
+def bounce(crew, message_id, reason):
+    """Undeliverable mail is reported, never parked; the next wait names it."""
+    directory = crew.session.directory
+    with lock(directory / "protocol.lock"):
+        path = mail_dir(directory, crew.crew_id) / f"{message_id}.json"
+        message = read_json(path)
+        message["state"] = "bounced"
+        message["reason"] = reason
+        write_json(path, message)
+    with checkpoint(directory) as state:
+        assignment = state["assignments"].get(state["active"].get(crew.crew_id))
+        # No message_id here: retire_notices reads that key against assignment["messages"]
+        # delivery state, unrelated to mail, and would drop this the moment the send settles.
+        if assignment:
+            notice(
+                assignment,
+                "bounced",
+                f"Mail to {crew.display_name} bounced ({message_id}): {reason}",
+            )
+
+
+def ring(crew, message_id):
+    """Best-effort doorbell: a held gate or a broken doorbell waits for the next drain.
+
+    Only a confirmed herdr failure means the crew is unreachable and bounces the mail;
+    a missing or misbehaving nudge is the harness, not the crew, so it holds instead.
+    Mail is already durable, so no outcome here can lose the message.
+    """
+    try:
+        gate = crew.pane.nudge_block(crew)
+        if gate is None:
+            crew.pane.nudge(crew)
+    except HERDR_ERRORS as exc:
+        bounce(crew, message_id, str(exc))
+    except Exception:
+        pass
+
+
+def drain_stamp(crew):
+    return mail_dir(crew.session.directory, crew.crew_id) / ".drain"
+
+
+def drain(crew):
+    """Retry a held doorbell for unread mail; rate-limited so a polling loop never hammers it."""
+    messages = unread(crew)
+    if not messages:
+        return
+    stamp = drain_stamp(crew)
+    if stamp.exists() and time.time() - read_json(stamp) < DRAIN_INTERVAL:
+        return
+    write_json(stamp, time.time())
+    ring(crew, messages[0]["id"])
+
+
 def deliver(crew, text, *, assignment_id=None, question_id=None, initial=False):
     check_text(text, "message")
     with checkpoint(crew.session.directory) as state:
@@ -172,6 +305,14 @@ def deliver(crew, text, *, assignment_id=None, question_id=None, initial=False):
             raise CaptainError("Assignment is done; use assign with an explicit handoff.")
         if any(message["delivery"] in ("pending", "unknown") for message in assignment["messages"]):
             raise CaptainError("Delivery is unknown; inspect and resolve it, never auto-resend.")
+        # A cancelled message was never received, so re-delivering its text is not a resend.
+        last = next(
+            (m for m in reversed(assignment["messages"]) if m["delivery"] != "cancelled"), None
+        )
+        if last and last["text"] == text:
+            raise CaptainError(
+                f"Message {last['id']} already carried this exact text; never auto-resend."
+            )
         question = assignment["question"]
         if question and question_id != question["id"]:
             raise CaptainError("Use answer with the pending question ID.")
@@ -182,9 +323,10 @@ def deliver(crew, text, *, assignment_id=None, question_id=None, initial=False):
             "text": text,
             "kind": "assignment" if initial else "answer" if question_id else "followup",
             "question_id": question_id,
-            "delivery": "pending",
+            "delivery": "sent",
         }
         assignment["messages"].append(message)
+        mark_sent(assignment, message)
         assignment_id = assignment["id"]
         prompt = (
             f"Crew name: {assignment['crew']}.\n"
@@ -193,31 +335,18 @@ def deliver(crew, text, *, assignment_id=None, question_id=None, initial=False):
             f"Owned paths: {', '.join(assignment['paths']) or '(none)'}. "
             f"Allowed actions: {', '.join(assignment['actions'])}.\n{text}"
         )
-    try:
-        crew.pane.submit_task(prompt, crew.record.get("provider"), attempts=1)
-    except Exception:
-        record_delivery(crew, assignment_id, message["id"], "unknown")
-        raise
-    record_delivery(crew, assignment_id, message["id"], "sent")
+    enqueue(crew, prompt, message["kind"], assignment_id, message["id"])
+    ring(crew, message["id"])
     return message["id"]
 
 
-def record_delivery(crew, assignment_id, message_id, outcome):
-    """A late send result cannot overwrite a resolution, another send, or a new assignment."""
-    with checkpoint(crew.session.directory) as state:
-        assignment = state["assignments"][assignment_id]
-        message = next(m for m in assignment["messages"] if m["id"] == message_id)
-        if message["delivery"] != "pending":
-            return
-        message["delivery"] = outcome
-        question = assignment["question"]
-        if outcome == "unknown":
-            notice(
-                assignment, "delivery_unknown", f"Inspect message {message_id} before resolving."
-            )
-        elif question and question["id"] == message["question_id"]:
-            assignment["question"] = None
-            assignment["state"] = "working"
+def mark_sent(assignment, message):
+    """A delivered message re-arms the single native idle notification it may produce."""
+    assignment["idle_seen"] = False
+    question = assignment["question"]
+    if question and question["id"] == message["question_id"]:
+        assignment["question"] = None
+        assignment["state"] = "working"
 
 
 def resolve_delivery(crew, assignment_id, message_id, outcome):
@@ -231,13 +360,11 @@ def resolve_delivery(crew, assignment_id, message_id, outcome):
             raise CaptainError("No uncertain delivery with that message ID.")
         if outcome == "sent":
             message["delivery"] = "sent"
-            question = assignment["question"]
-            if question and question["id"] == message["question_id"]:
-                assignment["question"] = None
-                assignment["state"] = "working"
+            mark_sent(assignment, message)
         else:
             # Keep the failed message; cancellation permits an explicit next action, not a retry.
             message["delivery"] = "cancelled"
+        retire_notices(assignment)
 
 
 def native_events(path, offset):
@@ -272,12 +399,13 @@ def result(crew, assignment, status, summary="", delivery_id=None):
     }
 
 
-def poll(crew, ack=None):
+def poll(crew, ack=None, modal=True):
     from .crew import event_status
 
+    drain(crew)
     with checkpoint(crew.session.directory) as state:
         assignment = active(state, crew)
-        pending = assignment["pending"]
+        pending, acked = assignment["pending"], False
         if ack:
             if pending and ack == pending["result"]["delivery_id"]:
                 assignment["ack_seq"] = pending["seq"]
@@ -285,11 +413,17 @@ def poll(crew, ack=None):
                 assignment["native_status"] = pending["native_status"]
                 assignment["pending"] = None
                 assignment["last_ack"] = ack
-                pending = None
+                pending, acked = None, True
             elif ack != assignment["last_ack"]:
                 raise CaptainError("Unknown delivery acknowledgement.")
         if pending:
-            return pending["result"]
+            # It was returned once already; repeating it is what spins a captain's wait loop.
+            notification = pending["result"]
+            raise CaptainError(
+                f"Acknowledge delivery {notification['delivery_id']} "
+                f"with wait --ack before waiting again; it reported "
+                f"{notification['status']}: {notification['summary']}"
+            )
         seq, offset = assignment["ack_seq"], assignment["offset"]
         native_status = assignment["native_status"]
         if seq < len(assignment["notices"]):
@@ -307,37 +441,47 @@ def poll(crew, ack=None):
                 return result(crew, assignment, "working")
             native_status = status
         elif assignment["state"] == "done":
-            return result(crew, assignment, "idle")
+            if acked:
+                return result(crew, assignment, "idle")
+            raise CaptainError(
+                "Assignment is done and fully acknowledged; dismiss the crew or hand off."
+            )
         else:
             events, offset = native_events(crew.events, offset)
-            meaningful = [(event_status(e), e) for e in events if event_status(e)]
-            if meaningful:
-                status, event = meaningful[-1]
-                status = {"done": "idle", "blocked": "awaiting_approval"}.get(status, status)
+            notified = [(NOTIFIED[s], e) for e in events if (s := event_status(e)) in NOTIFIED]
+            if notified:
+                status, event = notified[-1]
                 summary = str(event.get("message") or event.get("last-assistant-message") or "")
                 if status == "awaiting_approval":
-                    summary = (
-                        "Inspect native approval prompt; approval is not granted by this event."
-                    )
-            elif not crew.record.get("pane") and crew.record.get("status") == "needs_attention":
-                status, summary = (
-                    "error",
-                    "Crew startup failed; inspect before explicit done/handoff.",
-                )
+                    summary = APPROVAL_SUMMARY
+                elif assignment.get("idle_seen"):
+                    assignment["offset"] = offset
+                    return result(crew, assignment, "working")
+                else:
+                    # One idle per delivered message; every later crew turn also ends idle.
+                    assignment["idle_seen"] = True
             else:
-                status = crew.pane.agent_status()
-                if crew.pane.choice_modal():
-                    status = "blocked"
-                status = {"done": "idle", "blocked": "awaiting_approval"}.get(status, status)
-                summary = "Native activity only; explicit done is required."
-            if (
-                status not in ("idle", "working", "awaiting_approval", "error")
-                or status == native_status
-            ):
-                # No notification was created; only ignored/duplicate native input advances.
-                assignment["offset"] = offset
-                return result(crew, assignment, "working")
-            native_status = status
+                # Live state rather than a consumed event, so native_status is its only dedupe.
+                if not crew.record.get("pane") and crew.record.get("status") == "needs_attention":
+                    status, summary = (
+                        "error",
+                        "Crew startup failed; inspect before explicit done/handoff.",
+                    )
+                elif (
+                    modal
+                    and crew.record.get("provider") in MODAL_PROVIDERS
+                    and crew.pane.choice_modal()
+                ):
+                    status, summary = "awaiting_approval", APPROVAL_SUMMARY
+                else:
+                    status = None
+                if status is None or status == native_status:
+                    assignment["offset"] = offset
+                    if status is None and modal:
+                        # The screen is clear, so the next modal is news again.
+                        assignment["native_status"] = None
+                    return result(crew, assignment, "working")
+                native_status = status
         response = result(crew, assignment, status, summary, uuid4().hex)
         assignment["pending"] = {
             "result": response,
@@ -349,11 +493,17 @@ def poll(crew, ack=None):
 
 
 def wait(crew, timeout, ack=None):
+    """Poll on native signals; the one pane read a hookless provider needs is throttled."""
     deadline = time.monotonic() + timeout
+    looked = None
     while True:
-        response = poll(crew, ack)
+        now = time.monotonic()
+        modal = looked is None or now - looked >= MODAL_INTERVAL
+        if modal:
+            looked = now
+        response = poll(crew, ack, modal)
         ack = None
-        if response["delivery_id"] or response["status"] == "idle":
+        if response["delivery_id"]:
             return response
         remaining = deadline - time.monotonic()
         if remaining <= 0:

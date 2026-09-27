@@ -31,8 +31,18 @@ ROOT = tempfile.mkdtemp(prefix="captain-tests-")
 HOME = os.path.join(ROOT, "home")
 MEMORY_ROOT = os.path.join(ROOT, "memory")
 # Everything a live captain session exports into its crew. The roots overrule
-# CAPTAIN_MEMORY_ROOT; the other two would let a test read the live session.
-INHERITED = ("CAPTAIN_STATE_ROOT", "CAPTAIN_TEMP_ROOT", "CAPTAIN_SESSION", "CAPTAIN_PROJECT")
+# CAPTAIN_MEMORY_ROOT; the rest would let a test read the live session, and an inherited
+# CAPTAIN_INCARNATION/ASSIGNMENT becomes a CLI default that fails as stale.
+INHERITED = (
+    "CAPTAIN_STATE_ROOT",
+    "CAPTAIN_TEMP_ROOT",
+    "CAPTAIN_SESSION",
+    "CAPTAIN_PROJECT",
+    "CAPTAIN_ROLE",
+    "CAPTAIN_CREW",
+    "CAPTAIN_INCARNATION",
+    "CAPTAIN_ASSIGNMENT",
+)
 
 os.makedirs(HOME)
 for name in INHERITED:

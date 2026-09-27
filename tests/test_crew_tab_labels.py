@@ -9,6 +9,7 @@ from unittest.mock import patch
 from captain_barbossa import agents, cli, memory, protocol, runtime
 from captain_barbossa import pane as panes
 from captain_barbossa.crew import Crew
+from captain_barbossa.pane import Pane
 
 
 class CrewTabLabelTests(unittest.TestCase):
@@ -29,6 +30,10 @@ class CrewTabLabelTests(unittest.TestCase):
             )
         )
         self.enterContext(patch.object(panes, "READY_POLLS", 1))
+        # These fakes don't model a realistic agent status for the mail doorbell; give
+        # delivery a clean ring by default (test_submit.py covers nudge_block/nudge directly).
+        self.enterContext(patch.object(Pane, "nudge_block", return_value=None))
+        self.enterContext(patch.object(Pane, "nudge"))
         self.pane = {"workspace_id": "w1", "tab_id": "w1:t1", "pane_id": "w1:p1"}
         self.directory, self.meta = memory.session(self.project, self.pane, create=True)
         self.enterContext(contextlib.redirect_stdout(io.StringIO()))
@@ -66,7 +71,11 @@ class CrewTabLabelTests(unittest.TestCase):
                 runtime,
                 "herdr",
                 side_effect=lambda *call, **_: (
-                    "❯" if call[:2] == ("agent", "read") else created_jack
+                    "❯"
+                    if call[:2] == ("agent", "read")
+                    else "~/project $ "
+                    if call[:2] == ("pane", "read")
+                    else created_jack
                 ),
             ),
             patch.object(agents, "executable", return_value="/bin/claude"),
@@ -80,6 +89,8 @@ class CrewTabLabelTests(unittest.TestCase):
             herdr_calls.append(call)
             if call[:2] == ("agent", "read"):
                 return "❯"
+            if call[:2] == ("pane", "read"):
+                return "~/project $ "
             if call[:2] == ("tab", "rename"):
                 return {}
             return created_will
