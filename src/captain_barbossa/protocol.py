@@ -192,6 +192,8 @@ def change(crew, args, project):
             raise CaptainError("Answer the pending question before done.")
         if any(message["delivery"] in ("pending", "unknown") for message in assignment["messages"]):
             raise CaptainError("Resolve uncertain prompt delivery before done.")
+        if unread(crew):
+            raise CaptainError("Unread mail is waiting; run inbox before done.")
         assignment["report"] = args.report
         assignment["state"] = "done"
         notice(assignment, "done", args.report)
@@ -503,7 +505,7 @@ def wait(crew, timeout, ack=None):
             looked = now
         response = poll(crew, ack, modal)
         ack = None
-        if response["delivery_id"]:
+        if response["delivery_id"] or response["status"] == "idle":
             return response
         remaining = deadline - time.monotonic()
         if remaining <= 0:

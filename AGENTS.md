@@ -28,6 +28,8 @@ src/captain_barbossa/
   layout.py       declared tab shapes: slot order, split target, even ratios
   crew.py         crew identities, roster queries, native lifecycle events
   pane.py         native agent terminal interaction and pane parsing
+  protocol.py     assignment state, crew mail (enqueue/unread/mark_read/bounce), wait polling
+  inspection.py   bounded local file, state and Git reads for `inspect`
   memory.py       session/project dirs, locks, atomic JSON, graph memory, hook events, Graphify
   models.py       provider-neutral model tiers and free-text matching
   runtime.py      herdr subprocess wrapper, JSON validation, current pane discovery
@@ -62,6 +64,10 @@ Key facts:
   Codex `notify`), which append JSON lines to `sessions/<id>/events/<crew>.jsonl`.
   `wait` tails that file from a `.cursor` offset; pane reading is only a fallback for
   when no event has arrived. Filter Codex's title-generation turn.
+- `assign`/`tell`/`answer` write mail (`sessions/<id>/mail/<crew>/<id>.json`) instead
+  of typing into the pane; a content-free doorbell nudges the crew to read it with
+  `captain inbox NAME`, which writes the read receipt. `done` refuses while mail is
+  unread, and dismissing a crew with unread mail bounces it with a reason.
 - Settings layer bottom to top: `defaults.toml` (package data, the only place a default
   is written), `~/.captain/settings.toml`, the project's `.captain/settings.toml`, then
   CLI flags. Read a value with `config.lookup/text/flag/number` when the command needs

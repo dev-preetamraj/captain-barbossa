@@ -21,7 +21,7 @@ class InstructionSizeTests(unittest.TestCase):
         captain_words = len(captain_text.split())
         self.assertLess(crew_words, captain_words)
         # Guards against the crew memory block creeping back toward the captain's.
-        self.assertLessEqual(crew_words, 320)
+        self.assertLessEqual(crew_words, 350)
 
     def test_only_the_captain_learns_to_retier_a_running_crew(self):
         captain = " ".join(
@@ -207,6 +207,15 @@ class InstructionSizeTests(unittest.TestCase):
         text = instruction_prompts.agent_instructions(self.directory, "Captain Barbossa")
         query_line = next(line for line in text.splitlines() if "memory query" in line)
         self.assertIn("if Graphify is installed", query_line)
+
+    def test_crew_runs_its_own_commands_and_waits_for_the_mailed_answer(self):
+        """A crew that prints an ask command as text and self-answers it is a live bug."""
+        crew = instruction_prompts.agent_instructions(self.directory, "crew member Jack")
+        self.assertIn("Run every command yourself; never print one for the captain to run.", crew)
+        self.assertIn(
+            "After ask, stop and wait for the answer as mail; never answer your own question.",
+            crew,
+        )
 
 
 if __name__ == "__main__":

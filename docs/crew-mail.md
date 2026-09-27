@@ -1,6 +1,6 @@
 # Crew mail: move the message off the keystroke
 
-Status: design, not yet built. Supersedes nothing; it changes how `assign`, `tell`
+Status: shipped in 0.22.0. Supersedes nothing; it changes how `assign`, `tell`
 and `answer` reach a crew, and leaves the assignment protocol in
 [crew-lifecycle.md](crew-lifecycle.md) intact.
 
