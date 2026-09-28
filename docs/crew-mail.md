@@ -54,7 +54,9 @@ almost nothing else: they run an Electron main process with a renderer drain loo
 we have no daemon, so our crew drain their own mail with a CLI command at the top
 of a turn, and the only long-lived process is the `wait` the captain already runs.
 That `wait` is also what retries a held ring, so arming one after recruiting is
-required, not advisory: a crew nobody is waiting on can sit on unread mail indefinitely.
+required, not advisory: a crew nobody is waiting on is never rung, and a Codex or pi
+crew can then sit on unread mail indefinitely. A Claude crew cannot: its own `Stop`
+hook keeps the turn from ending, and reading its mail is what releases it.
 
 ## The mail
 
@@ -112,6 +114,18 @@ submitting a human's unsubmitted text is what this design exists to prevent. The
 other gates need no escalation - an approval prompt already raises
 `awaiting_approval`, and a busy agent is just working.
 
+The ring is still only a request, so on Claude crew the turn itself is held open.
+Their `Stop` hook no longer just records that the turn ended: while the crew has
+unread mail, or while its active assignment is unfinished and no question is
+pending, it returns a blocking stop decision, and the crew stays active instead of
+ending a turn on a message it never read. Reading mail and finishing with `done`
+stop being wording in the instructions that a crew can drift past. This is the
+fallback for a crew that stops without reporting: `done` itself already refuses
+while mail is unread, so a turn that ends in `done` surfaces the mail first and
+the block never fires. A crew awaiting an answer to `ask` may stop, having
+nothing to do until the captain replies. This is Claude-only - Codex's `notify`
+and pi cannot block - and the hook fails open, so no crew is ever wedged by it.
+
 ## Signals count only after they are asked for
 
 Every notification carries the `queued_at` of the message that prompted it, and a
@@ -142,7 +156,10 @@ goes to the captain's own notification stream.
 - **Their retry-by-typing and draft fusing.** Retrying a *doorbell* is safe;
   retyping a task is not, and typing after a user's draft to fuse with it is a
   trade only their transport forces.
-- **A drain loop as a resident process.** No daemon is a project rule.
+- **A drain loop as a resident process.** No daemon is a project rule. The known
+  cost stands, and the `Stop` hook does not pay it: `drain` runs only inside
+  `poll`/`wait`, so a ring held when a wait returns stays invisible until the next
+  wait begins, and there is no resident router.
 
 ## Seam
 

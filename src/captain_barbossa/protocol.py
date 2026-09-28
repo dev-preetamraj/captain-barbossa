@@ -183,7 +183,7 @@ def mail_dir(directory, crew_id):
 
 
 def enqueue(crew, text, kind, assignment_id, message_id=None):
-    """Write a durable mail record; the crew's own `inbox` read is what proves delivery."""
+    """Write a durable mail record; caller must already hold protocol.lock (deliver's checkpoint)."""
     message = {
         "id": message_id or uuid4().hex,
         "assignment_id": assignment_id,
@@ -195,19 +195,22 @@ def enqueue(crew, text, kind, assignment_id, message_id=None):
         "read_at": None,
     }
     directory = mail_dir(crew.session.directory, crew.crew_id)
-    with lock(crew.session.directory / "protocol.lock"):
-        directory.mkdir(parents=True, exist_ok=True)
-        write_json(directory / f"{message['id']}.json", message)
+    directory.mkdir(parents=True, exist_ok=True)
+    write_json(directory / f"{message['id']}.json", message)
     return message["id"]
 
 
-def unread(crew):
-    """Queued mail for this crew, oldest first."""
-    directory = mail_dir(crew.session.directory, crew.crew_id)
+def queued(session_directory, crew_id):
+    """Queued mail, oldest first; the Stop hook reads it without a crew object."""
+    directory = mail_dir(session_directory, crew_id)
     if not directory.exists():
         return []
     messages = (read_json(path) for path in directory.glob("*.json"))
     return sorted((m for m in messages if m["state"] == "queued"), key=lambda m: m["queued_at"])
+
+
+def unread(crew):
+    return queued(crew.session.directory, crew.crew_id)
 
 
 def mark_read(crew, ids):
@@ -353,8 +356,6 @@ def deliver(crew, text, *, assignment_id=None, question_id=None, initial=False):
             "question_id": question_id,
             "delivery": "sent",
         }
-        assignment["messages"].append(message)
-        mark_sent(assignment, message)
         assignment_id = assignment["id"]
         prompt = (
             f"Crew name: {assignment['crew']}.\n"
@@ -363,7 +364,9 @@ def deliver(crew, text, *, assignment_id=None, question_id=None, initial=False):
             f"Owned paths: {', '.join(assignment['paths']) or '(none)'}. "
             f"Allowed actions: {', '.join(assignment['actions'])}.\n{text}"
         )
-    enqueue(crew, prompt, message["kind"], assignment_id, message["id"])
+        enqueue(crew, prompt, message["kind"], assignment_id, message["id"])
+        assignment["messages"].append(message)
+        mark_sent(assignment, message)
     ring(crew, message["id"])
     return message["id"]
 
@@ -454,6 +457,7 @@ def poll(crew, ack=None, modal=True):
                 summary = str(event.get("message") or event.get("last-assistant-message") or "")
                 if status == "awaiting_approval":
                     summary = APPROVAL_SUMMARY
+                    native_status = status
                 elif assignment.get("idle_seen"):
                     assignment["offset"] = offset
                     return result(crew, assignment, "working")
