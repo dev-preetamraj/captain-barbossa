@@ -20,7 +20,14 @@ from .agents import (
 )
 from .crew import Crew
 from .layout import HERDR_DIRECTIONS
-from .memory import PRUNE_DAYS, REPO_RELATIONS, RULEBOOK_FILES, memory, project_root
+from .memory import (
+    PRUNE_DAYS,
+    REPO_RELATIONS,
+    RULEBOOK_FILES,
+    memory,
+    project_root,
+    read_session,
+)
 from .models import PROVIDERS, TIER_NAMES
 from .onboarding import bootstrap
 from .prompts import PLACEMENTS
@@ -253,6 +260,26 @@ def print_inbox(args, pane, project):
     protocol.mark_read(crew, [message["id"] for message in messages])
 
 
+def pump_mail(args, pane, project):
+    """Retry held doorbells for every live crew, so captain activity drains mail outside a wait.
+
+    Never fails the captain's command, and crew never ring each other.
+    """
+    if os.environ.get("CAPTAIN_ROLE") == "crew":
+        return
+    try:
+        crews = Crew.members(read_session(project, args.session, pane))
+    except Exception:
+        return
+    for crew in crews:
+        if crew.is_dismissed:
+            continue
+        try:
+            protocol.drain(crew)
+        except Exception:
+            pass
+
+
 def main(argv=None):
     args = parser().parse_args(argv)
     try:
@@ -276,6 +303,7 @@ def main(argv=None):
             return 0
         pane = current_pane()
         project = project_root()
+        pump_mail(args, pane, project)
         if args.command == "crew":
             create_crew(args, pane, project)
         elif args.command == "wait":
