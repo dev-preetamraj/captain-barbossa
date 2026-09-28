@@ -32,6 +32,7 @@ from .models import PROVIDERS, TIER_NAMES
 from .onboarding import bootstrap
 from .prompts import PLACEMENTS
 from .runtime import HERDR_ERRORS, CaptainError, current_pane
+from .update_check import upgrade
 
 
 def parser():
@@ -133,6 +134,7 @@ def parser():
     focus = commands.add_parser("focus", help="focus an existing crew's pane and tab")
     focus.add_argument("name", help="crew name or ID (case-insensitive)")
     commands.add_parser("session", help="print the current session id")
+    commands.add_parser("update", help="upgrade the installed captain-barbossa tool")
     start = commands.add_parser("init", help="write a commented .captain/settings.toml template")
     start.add_argument(
         "--global",
@@ -292,6 +294,8 @@ def main(argv=None):
         if args.command == "session":
             print_session(args)
             return 0
+        if args.command == "update":
+            return upgrade()
         if args.command == "inspect":
             inspection.run(args, project_root())
             return 0

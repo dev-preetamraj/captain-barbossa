@@ -3,7 +3,7 @@
 - **`captain: command not found`** — run `uv tool update-shell` and restart
   the terminal.
 - **Installed from Git before the PyPI release** — switch the install over
-  once with `uv tool install --force captain-barbossa`; `uv tool upgrade`
+  once with `uv tool install --force captain-barbossa`; `captain update`
   then picks up each published release.
 - **"Launch captain from an interactive Herdr terminal."** — `captain` with
   no subcommand needs a TTY; run it directly in a Herdr pane, not through a

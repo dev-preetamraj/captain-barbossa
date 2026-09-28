@@ -38,7 +38,7 @@ src/captain_barbossa/
   prompts.py      keyboard selectors for agent and placement choices
   onboarding.py   bootstrap Herdr when captain runs outside a workspace
   pi_captain.py   pi delivery bridge, shipped inside the wheel
-  update_check.py startup PyPI update check
+  update_check.py startup PyPI update check and `captain update`
 tests/            unittest suite; Herdr and model sessions are mocked, a real PTY is used
 docs/             plan.md is current scope; settings, placement, dashboard, memory,
                   crew-lifecycle and troubleshooting are the user guides
@@ -85,7 +85,7 @@ Key facts:
 
 - The package is on PyPI as `captain-barbossa`. Every push to `main` must bump
   `version` in `pyproject.toml` (semver); users update with
-  `uv tool upgrade captain-barbossa`, so an unbumped push is invisible.
+  `captain update` (`uv tool upgrade captain-barbossa`), so an unbumped push is invisible.
 - Run the full gate before pushing:
   `uv run --locked pre-commit run --all-files --hook-stage pre-push`.
 - Keep changes to the requested scope. Add a focused regression test for changed
