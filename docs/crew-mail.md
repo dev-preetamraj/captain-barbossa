@@ -156,10 +156,13 @@ goes to the captain's own notification stream.
 - **Their retry-by-typing and draft fusing.** Retrying a *doorbell* is safe;
   retyping a task is not, and typing after a user's draft to fuse with it is a
   trade only their transport forces.
-- **A drain loop as a resident process.** No daemon is a project rule. The known
-  cost stands, and the `Stop` hook does not pay it: `drain` runs only inside
-  `poll`/`wait`, so a ring held when a wait returns stays invisible until the next
-  wait begins, and there is no resident router.
+- **A drain loop as a resident process.** No daemon is a project rule, and this
+  is still not one: `pump_mail` (`cli.py`) now retries every live crew's held
+  doorbell before any captain-side command runs, reusing the same `.drain` stamp
+  rate limits, so a ring held when a wait returns no longer waits on the next
+  wait to begin. That pumps on activity, not on a clock - a captain that runs no
+  command at all still pumps nothing - so the gap is narrowed, not closed, and
+  there is still no resident router.
 
 ## Seam
 
