@@ -13,6 +13,11 @@
   sign-in. Inspect the pane in Herdr; the task is not retried automatically
   past one resend. Send it by hand with
   `herdr agent prompt <agent-name> '<task>'`.
+- **A Claude Code crew will not end its turn** — its `Stop` hook blocks while
+  the crew has unread mail, or an unfinished assignment with no pending
+  question. Read the mail with `captain inbox <name>` in that pane, finish with
+  `captain done <name> --report '...'`, or raise a question with `captain ask`;
+  any of the three releases it.
 - **Codex crew blocked on approval is invisible to `captain wait <crew>
   --timeout 0`** — pane fallback starts after 6 seconds; use a non-zero
   timeout.

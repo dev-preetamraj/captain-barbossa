@@ -92,6 +92,24 @@ class ProtocolTests(unittest.TestCase):
             )
             self.assertIn(text, mail["text"])
 
+    def test_a_failed_enqueue_leaves_no_sent_message_and_allows_retry(self):
+        real_write_json = protocol.write_json
+        mail_directory = protocol.mail_dir(self.directory, self.crew.crew_id)
+
+        def flaky(path, data):
+            if path.is_relative_to(mail_directory):
+                raise OSError("disk full")
+            real_write_json(path, data)
+
+        with patch.object(protocol, "write_json", side_effect=flaky):
+            with self.assertRaises(OSError):
+                protocol.deliver(self.crew, "original", initial=True)
+        self.assertEqual(self.saved()["messages"], [])
+        self.assertEqual(protocol.unread(self.crew), [])
+        message_id = protocol.deliver(self.crew, "original", initial=True)
+        self.assertEqual(self.mail(message_id)["state"], "queued")
+        self.assertEqual([m["text"] for m in self.saved()["messages"]], ["original"])
+
     def test_a_refused_ring_never_loses_the_mail(self):
         with (
             patch.object(Pane, "nudge_block", return_value="cooldown"),
@@ -400,6 +418,21 @@ class ProtocolTests(unittest.TestCase):
         second = protocol.poll(self.crew)
         self.assertEqual(second["status"], "awaiting_approval")
         self.assertNotEqual(first["delivery_id"], second["delivery_id"])
+
+    def test_an_event_reported_approval_is_not_repeated_by_the_live_modal_check(self):
+        self.crew.record["provider"] = "codex"
+        self.event({"hook_event_name": "PermissionRequest"})
+        first = protocol.poll(self.crew)
+        self.assertEqual(first["status"], "awaiting_approval")
+        with patch.object(Pane, "choice_modal", return_value=True):
+            protocol.poll(self.crew, first["delivery_id"])
+            # Same still-open prompt the event already reported; must not notify twice.
+            self.assertIsNone(protocol.poll(self.crew)["delivery_id"])
+        with patch.object(Pane, "choice_modal", return_value=False):
+            self.assertIsNone(protocol.poll(self.crew)["delivery_id"])
+        with patch.object(Pane, "choice_modal", return_value=True):
+            second = protocol.poll(self.crew)
+        self.assertEqual(second["status"], "awaiting_approval")
 
     def test_identical_text_is_refused_until_a_different_message_is_sent(self):
         protocol.deliver(self.crew, "original", initial=True)

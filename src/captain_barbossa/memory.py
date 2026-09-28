@@ -202,6 +202,24 @@ def write_json(path, data):
     write_text(path, json.dumps(data, ensure_ascii=False, indent=2) + "\n")
 
 
+def stop_reason(events_path):
+    """Why this crew may not end its turn yet, or None. A crew awaiting an answer to ask may
+    stop; instruction wording cannot enforce either rule, only the Stop hook can."""
+    from .protocol import queued  # protocol imports this module, so import it on use
+
+    directory = events_path.parent.parent
+    state = read_json(directory / "protocol.json")
+    stem = events_path.name.removesuffix(".jsonl")
+    crew_id = next(c for c in state["active"] if stem == c or stem.startswith(f"{c}-"))
+    assignment = state["assignments"].get(state["active"][crew_id])
+    name = assignment["crew"] if assignment else crew_id
+    if queued(directory, crew_id):
+        return f"Unread mail is waiting; read it with `captain inbox {name}`."
+    if assignment and assignment["state"] != "done" and not assignment["question"]:
+        return f"Your assignment is unfinished; finish with `captain done {name} --report '...'`."
+    return None
+
+
 def append_event():
     """Native hooks supply JSON on stdin (Claude) or as the last argument (Codex)."""
     event = json.loads(sys.argv[2]) if len(sys.argv) > 2 else json.load(sys.stdin)
@@ -213,6 +231,16 @@ def append_event():
         fcntl.flock(file, fcntl.LOCK_EX)
         file.write(json.dumps(event, ensure_ascii=False) + "\n")
         file.flush()
+    # Only Claude sends hook_event_name, so Codex notify and pi are untouched. stop_hook_active
+    # means a block already fired; blocking again would loop the crew.
+    if event.get("hook_event_name") != "Stop" or event.get("stop_hook_active"):
+        return
+    try:
+        reason = stop_reason(Path(sys.argv[1]))
+    except (CaptainError, OSError, ValueError, KeyError, StopIteration):
+        return  # a hook that cannot read state must never block the crew
+    if reason:
+        print(json.dumps({"decision": "block", "reason": reason}))
 
 
 def read_events(path, offset):

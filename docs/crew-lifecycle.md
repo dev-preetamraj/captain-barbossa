@@ -87,7 +87,11 @@ in the crew's pane: the fixed sentence `read your mail with captain inbox
 <name>`, which carries no task text. `captain inbox NAME` prints that crew's
 queued mail oldest first and writes the read receipt, which is what proves
 delivery and moves that message from `sent` to `read` on its own assignment;
-`done` refuses while mail is unread. See
+`done` refuses while mail is unread. For Claude Code crew that reading is also
+enforced by the CLI's own `Stop` hook, which blocks the end of a turn while mail
+is unread, or while the active assignment is unfinished with no question pending;
+a crew waiting on an answer to `ask` may still stop. Codex and pi cannot block, so
+for them reading mail and finishing with `done` remain instructions. See
 [crew-mail.md](crew-mail.md) for the doorbell's gates and bounce handling.
 
 ## Waiting for crew to finish

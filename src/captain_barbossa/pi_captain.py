@@ -16,7 +16,7 @@ import { setTimeout as delay } from "node:timers/promises";
 const LIMIT = 2000;
 const FLOOR = 60;
 const STATUSES = new Set(["timeout", "working", "idle", "asked", "awaiting_approval",
-  "done", "delivery_unknown", "error"]);
+  "done", "error"]);
 
 export default function (pi) {
   const pending = new Map();
@@ -138,7 +138,7 @@ export default function (pi) {
               if (!["idle", "working"].includes(event.status)) await deliver(event);
               const ack = await wait(0, event.delivery_id);
               if (ack.status === "error") throw new Error(`Acknowledgement failed: ${ack.summary}`);
-            } else if (event.status === "error" || event.status === "delivery_unknown") {
+            } else if (event.status === "error") {
               throw new Error(event.summary);
             }
             // Even a CLI that returns unchanged state immediately cannot busy-poll.

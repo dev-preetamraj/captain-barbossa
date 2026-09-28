@@ -63,7 +63,10 @@ Key facts:
 - Crew state is signalled by the native CLI's own hooks (Claude `--settings` hooks,
   Codex `notify`), which append JSON lines to `sessions/<id>/events/<crew>.jsonl`.
   `wait` tails that file from a `.cursor` offset; pane reading is only a fallback for
-  when no event has arrived. Filter Codex's title-generation turn.
+  when no event has arrived. Filter Codex's title-generation turn. Claude's `Stop` hook
+  also blocks: while the crew has unread mail, or an unfinished assignment with no
+  pending question, it returns a blocking stop decision so the crew stays active. A
+  crew awaiting an answer may stop. Codex and pi cannot block; the hook fails open.
 - `assign`/`tell`/`answer` write mail (`sessions/<id>/mail/<crew>/<id>.json`) instead
   of typing into the pane; a content-free doorbell nudges the crew to read it with
   `captain inbox NAME`, which writes the read receipt. `done` refuses while mail is
