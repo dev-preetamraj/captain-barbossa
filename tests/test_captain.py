@@ -703,6 +703,16 @@ class CaptainFlowTests(unittest.TestCase):
         self.assertNotIn("append_event", " ".join(args))
         self.assertEqual(args[2:], models.native_model_args("pi", "opus"))
 
+    def test_native_args_for_grok_append_instructions_and_ban_subagents(self):
+        args = instruction_prompts.native_args(
+            "grok", "instructions", "grok-4.6", events="/tmp/events"
+        )
+        self.assertEqual(args[:3], ["--append-system-prompt", "instructions", "--no-subagents"])
+        # Grok takes no hook flag, so wait falls back to Herdr's own status and the pane.
+        self.assertNotIn("append_event", " ".join(args))
+        self.assertNotIn("--settings", args)
+        self.assertEqual(args[3:], models.native_model_args("grok", "grok-4.6"))
+
     def test_captain_requires_an_agent_selection(self):
         for provider in ("claude", "codex"):
             with (

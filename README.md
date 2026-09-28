@@ -3,7 +3,7 @@
 [![CI](https://github.com/dev-preetamraj/captain-barbossa/actions/workflows/ci.yml/badge.svg)](https://github.com/dev-preetamraj/captain-barbossa/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/captain-barbossa)](https://pypi.org/project/captain-barbossa/)
 
-Captain Barbossa launches a native agent CLI (Claude Code, Codex, or pi) as a
+Captain Barbossa launches a native agent CLI (Claude Code, Codex, pi, Grok) as a
 **captain** inside a [Herdr](https://herdr.dev) workspace. The captain recruits
 further native agents as **crew** in new Herdr panes or tabs, so a team of
 native agent sessions can work on the same checkout at once. There is no
@@ -17,7 +17,7 @@ graph memory stored outside the repo and a curated repo scope committed with it.
 - macOS or Linux, Python 3.11+
 - [uv](https://docs.astral.sh/uv/getting-started/installation/)
 - [Herdr](https://herdr.dev/docs/cli-reference/), as your terminal workspace
-- Claude Code, Codex, and/or pi, installed and already signed in
+- Claude Code, Codex, pi and/or Grok, installed and already signed in
 
 ## Install
 
@@ -71,14 +71,15 @@ for what persists.
 Launch `captain` from an interactive terminal inside a Herdr workspace:
 
 ```sh
-captain                         # asks: Claude Code, Codex, or pi?
+captain                         # asks: Claude Code, Codex, pi, Grok?
 captain --agent claude          # Claude Code in this pane
 captain --agent codex           # Codex in this pane
 captain --agent pi              # pi in this pane
+captain --agent grok            # Grok in this pane
 captain --prompt "Inspect this project"
 ```
 
-`--agent claude|codex|pi` selects the native CLI, `--prompt TEXT` supplies its
+`--agent claude|codex|pi|grok` selects the native CLI, `--prompt TEXT` supplies its
 first task, `--session ID` resumes Captain state, and `--no-dashboard` skips an
 enabled dashboard for this launch.
 
@@ -135,11 +136,11 @@ for slot order, split ratios, dismissal behavior, and validation.
 
 `--model` accepts a provider-neutral tier, model ID, or alias:
 
-| Tier     | Claude Code       | Codex                |
-|----------|-------------------|-----------------------|
-| `cheap`  | claude-haiku-4-5  | gpt-5.6-luna          |
-| `mid`    | claude-sonnet-5   | gpt-5.6-sol           |
-| `strong` | claude-opus-5     | gpt-6-astra           |
+| Tier     | Claude Code      | Codex                | Grok                |
+|----------|------------------|----------------------|---------------------|
+| `cheap`  | claude-haiku-4-5  | gpt-5.6-luna         | grok-4.7-build-fast  |
+| `mid`    | claude-sonnet-5   | gpt-5.6-sol          | grok-4.6             |
+| `strong` | claude-opus-5     | gpt-6-astra          | grok-4.7             |
 
 **`cheap` is the default**: omitting `--model` recruits a `cheap` crew rather
 than falling through to whatever the native CLI is configured to use, so
@@ -157,8 +158,8 @@ up front.
 Free text also works and is matched to the closest model the chosen CLI
 offers (exact IDs and aliases first, then prefixes, substrings, and close
 spellings): Claude Code additionally offers `claude-fable-5-1` (fable);
-Codex additionally offers `gpt-5.6-terra` (terra) and `gpt-5.5`. Ambiguous
-or unknown text reports the options and creates nothing.
+Codex additionally offers `gpt-5.6-terra` (terra) and `gpt-5.5`; Grok additionally
+offers `grok-4.5`. Ambiguous or unknown text reports the options and creates nothing.
 
 ```sh
 captain crew --task "Debug the failure" --model strong
@@ -405,7 +406,7 @@ Read the affected pane before retrying or approving anything.
 
 | Command | Purpose |
 |---|---|
-| `captain [--agent claude\|codex\|pi] [--prompt TEXT] [--no-dashboard]` | Start a captain in this pane |
+| `captain [--agent claude\|codex\|pi\|grok] [--prompt TEXT] [--no-dashboard]` | Start a captain in this pane |
 | `captain crew [NAME] --task TEXT [--owns PATH] [--allow ACTION] [--handoff ID] [--agent ...] [--placement pane\|tab] [--direction ...] [--split-pane ...] [--model ...]` | Recruit crew |
 | `captain wait NAME [--timeout SECONDS] [--json] [--ack DELIVERY_ID]` | Read and acknowledge a crew notification |
 | `captain model NAME cheap\|mid\|strong\|<model>` | Switch a running crew's model |

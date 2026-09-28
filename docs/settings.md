@@ -99,7 +99,7 @@ dashboard prints `captain: no dashboard pane: ...` but does not stop the captain
 | --- | --- |
 | A tier value in `[models.<provider>]` that matches no known model | Kept literally and passed to that CLI as written, so a model newer than this release still works. |
 | `[captain] model` that matches no known model | The launch fails, naming the options: `No claude model matches 'gigantic'. Tiers: cheap, mid, strong. Options: claude-haiku-4-5, claude-sonnet-5, claude-opus-5, claude-fable-5-1.` |
-| `[captain] agent` outside `claude`, `codex`, `pi` | The launch fails naming the three, rather than trying to run it. |
+| `[captain] agent` outside `claude`, `codex`, `pi`, `grok` | The launch fails naming them, rather than trying to run it. |
 | A value of the wrong type (`model = 123`, `enabled = "true"`, `interval = "5"`) | Ignored, and the setting falls back to the shipped default. A malformed `[placement]` shape is the one exception and fails loudly. Nothing is coerced across types: a string is never read as a boolean or a number. The one latitude is an int where a float is wanted, so `interval = 5` works. |
 | An unknown table or key | Ignored. |
 

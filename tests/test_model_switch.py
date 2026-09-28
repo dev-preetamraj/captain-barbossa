@@ -191,6 +191,39 @@ class SwitchModelTests(unittest.TestCase):
                 self.switch(self.reader([footer]), "gpt-5.5")
         self.assertIn("did not confirm", str(error.exception))
 
+    def grok_composer(self):
+        """Grok's boxed, empty composer, the only shape a switch may type into."""
+        return "\n".join(
+            [
+                "╭" + "─" * 46 + "╮",
+                "│ ❯" + " " * 44 + "│",
+                "╰" + "─" * 22 + " Grok 4.6 (high) ─────╯",
+            ]
+        )
+
+    def test_grok_switch_sends_the_exact_id_and_takes_its_switched_to_line(self):
+        agent_name = self.crew("grok", "grok-4.6")
+        herdr = self.switch(
+            self.reader(["thinking…", "Switched to Grok 4.7"], composer=self.grok_composer()),
+            "strong",
+        )
+        calls = [call.args for call in herdr.call_args_list]
+        self.assertIn(("agent", "prompt", agent_name, "/model grok-4.7"), calls)
+        self.assertEqual([call for call in calls if call[1] == "send-keys"], [])
+        self.assertIn("Jack switched to grok-4.7.", self.output.getvalue())
+        record = memory.read_json(self.directory / "session.json")["crew"]["jack"]
+        self.assertEqual(record["model"], "grok-4.7")
+
+    def test_a_grok_draft_in_the_box_never_receives_model_input(self):
+        self.crew("grok", "grok-4.6")
+        drafted = self.grok_composer().replace("│ ❯ ", "│ ❯ user draft ")
+        api = self.reader([], composer=drafted)
+        with patch.object(runtime, "herdr", side_effect=api) as calls:
+            args = cli.parser().parse_args(["--session", self.meta["id"], "model", "Jack", "cheap"])
+            with self.assertRaisesRegex(CaptainError, "empty composer"):
+                agents.switch_model(args, self.pane, self.project)
+        self.assertFalse(any(c.args[1] in ("prompt", "send-keys") for c in calls.call_args_list))
+
     def test_an_unknown_crew_name_reports_the_available_crew(self):
         self.crew("claude")
         args = cli.parser().parse_args(["--session", self.meta["id"], "model", "Davy", "mid"])

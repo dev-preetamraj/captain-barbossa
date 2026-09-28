@@ -10,6 +10,7 @@ LABELS = {
     "claude": "Claude Code",
     "codex": "Codex",
     "pi": "Pi",
+    "grok": "Grok",
     "pane": "New pane",
     "tab": "New tab",
     "vertical": "Vertical (side by side)",

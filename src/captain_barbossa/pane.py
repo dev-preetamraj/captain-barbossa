@@ -16,8 +16,9 @@ TAIL_LINES = 40
 TAIL_LIMIT = 1500
 MODEL_INTERVAL = 1
 MODEL_TIMEOUT = 20
-# Each CLI's own line after a switch: "Set model to Sonnet 5 …" / "Model changed to …".
-MODEL_CONFIRMATIONS = ("set model to", "model changed to")
+# Each CLI's own line after a switch: "Set model to Sonnet 5 …" / "Model changed to …" /
+# Grok's "Switched to …".
+MODEL_CONFIRMATIONS = ("set model to", "model changed to", "switched to")
 # pi instead echoes "Model: <id>" at line start; its status bar never carries "model:".
 PI_MODEL_CONFIRMATION = re.compile(r"^\s*Model:\s")
 CODEX_EFFORT_HEADER = "Select Reasoning Level"
@@ -33,6 +34,10 @@ QUEUED_COMPOSER = "Press up to edit queued messages"
 # real transcript content (a bullet, a tree glyph, a spinner).
 PANE_RULE = re.compile(r"^[─\-=━]+$")
 PANE_EMPTY_PROMPT = re.compile(rf"^[{''.join(PROMPT_GLYPHS)}]\s*(Ask Codex to do anything)?$")
+# Grok boxes its composer, so the prompt row is never the pane's last line: the box's
+# bottom border is, carrying the model label ("╰── Grok 4.6 (high) ─╯").
+GROK_COMPOSER_END = re.compile(r"^╰─+.*╯$")
+GROK_COMPOSER_ROW = re.compile(rf"^│\s*[{''.join(PROMPT_GLYPHS)}]\s*(.*?)\s*│$")
 PANE_STATUS_BAR_PREFIXES = ("•", "⏺", "└", "│", "✻", "✳", "?", "…", *PROMPT_GLYPHS, "⎿")
 # Codex draws rate-limit and approval choices as a numbered list closed by a confirm
 # line and keeps reporting the pane idle while one is showing. Enter would accept the
@@ -190,6 +195,12 @@ class Pane:
         while lines and not lines[-1]:
             lines.pop()
         if modal_start(lines) is not None:
+            return None, styled
+        if provider == "grok":
+            # A wrapped draft leaves no prompt row above the border, so it reads unreadable.
+            row = GROK_COMPOSER_ROW.fullmatch(lines[-2]) if len(lines) >= 2 else None
+            if row and GROK_COMPOSER_END.fullmatch(lines[-1]):
+                return row.group(1), styled
             return None, styled
         if provider == "pi":
             # Markdown rules are draft text; extra native rulers make the boundary ambiguous.

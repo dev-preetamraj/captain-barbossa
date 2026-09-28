@@ -279,6 +279,51 @@ class SubmitTaskTests(unittest.TestCase):
                     [("agent", "prompt", "builder", TASK)] if accepted else [],
                 )
 
+    def test_captured_grok_box_reads_its_prompt_row_and_fails_closed_otherwise(self):
+        """Grok boxes its composer, so the pane's last line is the border, never the row."""
+        top = "╭" + "─" * 46 + "╮"
+        bottom = "╰" + "─" * 22 + " Grok 4.6 (high) ─────╯"
+        empty = "│ ❯" + " " * 44 + "│"
+        for rows, provider, accepted in (
+            ([empty], "grok", True),
+            (["│ ❯ Important user draft" + " " * 23 + "│"], "grok", False),
+            # A wrapped draft leaves no prompt row above the border.
+            (
+                [
+                    "│ ❯ a long draft that" + " " * 26 + "│",
+                    "│ wrapped onto a second row" + " " * 20 + "│",
+                ],
+                "grok",
+                False,
+            ),
+            ([empty], "claude", False),
+        ):
+            with self.subTest(rows=rows, provider=provider):
+                screen = "\n".join(
+                    ["  ⎇ main ~/code/projects/captain-barbossa", top, *rows, bottom, ""]
+                )
+                sent = False
+
+                def api(*call, **kwargs):
+                    nonlocal sent
+                    if call[:2] == ("agent", "read"):
+                        return screen
+                    if call[:2] == ("agent", "prompt"):
+                        sent = True
+                    return {"agent": {"agent_status": "working" if sent else "idle"}}
+
+                with patch.object(runtime, "herdr", side_effect=api) as calls:
+                    self.assertEqual(Pane("builder").draft_pending(provider), not accepted)
+                    if accepted:
+                        Pane("builder").submit_task(TASK, provider)
+                    else:
+                        with self.assertRaisesRegex(CaptainError, "no task was sent"):
+                            Pane("builder").submit_task(TASK, provider)
+                self.assertEqual(
+                    [c.args for c in calls.call_args_list if c.args[1] in ("prompt", "send-keys")],
+                    [("agent", "prompt", "builder", TASK)] if accepted else [],
+                )
+
     def test_claude_auto_mode_placeholder_is_an_empty_composer(self):
         """Auto mode has its own footer; reading its placeholder as a draft sent no task."""
         rule = "─" * 78

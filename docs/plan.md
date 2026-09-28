@@ -2,7 +2,7 @@
 
 The current implementation follows the native Herdr crew flow in [README.md](../README.md), with local inspection available without Herdr.
 
-- Run `captain` inside a Herdr workspace. Ask for Claude Code, Codex, or pi, rename its tab to **Captain Barbossa**, and replace the launcher with the selected native CLI.
+- Run `captain` inside a Herdr workspace. Ask for Claude Code, Codex, pi or Grok, rename its tab to **Captain Barbossa**, and replace the launcher with the selected native CLI.
 - Recruit crew into deterministic declared tab shapes: `[placement] captain_tab` for the captain's tab and `crew_tab` for later tabs. Crew fill columns breadth first; explicit pane, tab, split, and direction flags override the grid for one recruit. See [placement.md](placement.md).
 - Read optional project and global `.captain/settings.toml` files one key at a time, with project settings above global settings above shipped defaults, and CLI flags above all three. `captain init [--global]` writes the commented template. See [settings.md](settings.md).
 - Use Herdr to create the selected topology and run a short session-local launcher there, then wait for the native agent to be ready before submitting its task.

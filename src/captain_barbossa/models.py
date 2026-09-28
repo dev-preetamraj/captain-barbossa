@@ -22,10 +22,21 @@ MODELS = {
         ("gpt-5.5", ()),
         ("gpt-6-astra", ("astra",)),
     ),
+    # Aliases are the labels Grok shows and echoes when it confirms a switch ("Grok 4.6").
+    "grok": (
+        ("grok-4.5", ("grok 4.5",)),
+        ("grok-4.7-build-fast", ("grok 4.7 build fast",)),
+        ("grok-4.6", ("grok 4.6",)),
+        ("grok-4.7", ("grok 4.7",)),
+    ),
 }
+
 # pi is absent above on purpose: it is provider-agnostic, so its catalog is whatever
 # the user has authenticated locally and is discovered by pi_models() instead.
-PROVIDERS = ("claude", "codex", "pi")
+PROVIDERS = ("claude", "codex", "pi", "grok")
+# No hook or notify mechanism, so crew state comes from Herdr's own agent status and the
+# pane, and a switch or a mail doorbell has to read the composer to know it is safe.
+HOOKLESS = ("pi", "grok")
 # Provider-neutral tiers: the captain picks one from the task, each CLI resolves its own.
 # defaults.toml is the one source for these, so settings can layer over the same values.
 TIERS = {provider: dict(tiers) for provider, tiers in config.defaults()["models"].items()}

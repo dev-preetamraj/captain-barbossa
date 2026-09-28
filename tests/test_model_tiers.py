@@ -131,6 +131,15 @@ class ModelTierTests(unittest.TestCase):
             self.assertIn(tier, message)
         self.assertIn("gpt-6-astra", message)
 
+    def test_grok_tiers_and_labels_resolve_without_prefix_confusion(self):
+        self.assertEqual(models.resolve_model("grok", "cheap"), "grok-4.7-build-fast")
+        self.assertEqual(models.resolve_model("grok", "mid"), "grok-4.6")
+        self.assertEqual(models.resolve_model("grok", " STRONG "), "grok-4.7")
+        # The exact id wins over the longer build-fast id it is a prefix of.
+        self.assertEqual(models.resolve_model("grok", "grok-4.7"), "grok-4.7")
+        # Grok labels a model "Grok 4.6", the form its own switch confirmation echoes.
+        self.assertEqual(models.model_names("grok", "grok-4.6"), ("grok-4.6", "grok 4.6"))
+
     def test_model_names_returns_the_id_with_its_aliases(self):
         self.assertEqual(
             models.model_names("claude", "claude-sonnet-5"), ("claude-sonnet-5", "sonnet")

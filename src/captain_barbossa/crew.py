@@ -4,6 +4,7 @@ import time
 from dataclasses import dataclass
 
 from .memory import Session, read_cursor, read_events, read_json, read_session, write_json
+from .models import HOOKLESS
 from .pane import INTERRUPT_MARKER, PANE_EMPTY_PROMPT, Pane, modal_start
 from .runtime import HERDR_ERRORS, CaptainError
 
@@ -167,7 +168,7 @@ class Crew:
 
     def status(self, timeout):
         """Tail hooks; use pane detection only while no native event has arrived."""
-        if self.record.get("provider") == "pi":
+        if self.record.get("provider") in HOOKLESS:
             return self.pi_status(timeout), None
         events = self.events
         deadline = time.monotonic() + timeout

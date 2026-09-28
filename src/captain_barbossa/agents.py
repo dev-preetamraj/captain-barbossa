@@ -26,7 +26,7 @@ from .memory import (
     truncate_label,
     write_json,
 )
-from .models import PROVIDERS, model_names, resolve_model
+from .models import HOOKLESS, PROVIDERS, model_names, resolve_model
 from .pane import MODEL_TIMEOUT, PROMPT_TIMEOUT, shell_ready_for_input
 from .pi_captain import captain_extension
 from .placement import Placement
@@ -441,8 +441,8 @@ def switch_model(args, pane, project):
                     "Model switch delivery is unknown; inspect the pane before retrying."
                 )
             runtime.herdr("agent", "send-keys", crew_agent, "enter")
-    elif provider == "pi":
-        # An exact pi model ID selects straight away, with no picker and no draft state.
+    elif provider in HOOKLESS:
+        # An exact model ID selects straight away, with no picker and no draft state.
         runtime.herdr("agent", "prompt", crew_agent, f"/model {model}")
     else:
         runtime.herdr("agent", "prompt", crew_agent, "/model")

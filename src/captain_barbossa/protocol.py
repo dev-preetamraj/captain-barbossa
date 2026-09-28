@@ -8,6 +8,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from .memory import lock, read_json, write_json
+from .models import HOOKLESS
 from .pane import DRAFT_GATE
 from .runtime import HERDR_ERRORS, CaptainError, check_text
 
@@ -15,8 +16,8 @@ ACTIONS = ("read", "search", "edit", "test", "build", "format", "commit", "versi
 # Native "working" is a wake, not news: it fires at recruit and at every crew turn end.
 NOTIFIED = {"done": "idle", "idle": "idle", "blocked": "awaiting_approval"}
 APPROVAL_SUMMARY = "Inspect native approval prompt; approval is not granted by this event."
-# Claude reports approvals through its PermissionRequest hook; these two have no such event.
-MODAL_PROVIDERS = ("codex", "pi")
+# Claude reports approvals through its PermissionRequest hook; these have no such event.
+MODAL_PROVIDERS = ("codex", *HOOKLESS)
 MODAL_INTERVAL = 30
 # No daemon drains held mail; the wait loop already polls, so it retries the doorbell instead.
 DRAIN_INTERVAL = 30

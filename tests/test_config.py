@@ -47,7 +47,7 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(shipped, config.defaults())
         self.assertEqual(shipped["captain"]["model"], "")
         self.assertIs(shipped["dashboard"]["enabled"], False)
-        self.assertEqual(set(shipped["models"]), {"claude", "codex"})
+        self.assertEqual(set(shipped["models"]), {"claude", "codex", "grok"})
         for tiers in shipped["models"].values():
             self.assertEqual(set(tiers), set(models.TIER_NAMES))
         # models reads its table from the file, so the two cannot drift apart.

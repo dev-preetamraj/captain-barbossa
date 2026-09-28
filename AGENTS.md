@@ -7,7 +7,7 @@ commit style are in [CONTRIBUTING.md](CONTRIBUTING.md); user-facing behavior is 
 ## What this is
 
 Captain Barbossa is a small Python CLI (`captain`) that runs inside a Herdr
-workspace. It launches a native agent CLI (Claude Code, Codex, or pi) as the **captain**,
+workspace. It launches a native agent CLI (Claude Code, Codex, pi, grok) as the **captain**,
 and the captain recruits further native agents as **crew** in new Herdr panes or
 tabs. Crew get one-word Pirates of the Caribbean names. All coordination happens
 through generated role instructions and a small graph memory stored outside the

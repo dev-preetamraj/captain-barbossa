@@ -1,5 +1,5 @@
 [captain]
-# Which CLI the captain launches: claude, codex, or pi.
+# Which CLI the captain launches: claude, codex, pi, grok.
 # Empty asks at launch; setting it skips the question. --agent still wins.
 agent = ""
 # The captain's own model: a tier (cheap|mid|strong), a model ID, or an alias.
@@ -52,3 +52,8 @@ strong = "claude-opus-5"
 cheap = "gpt-5.6-luna"
 mid = "gpt-5.6-sol"
 strong = "gpt-6-astra"
+
+[models.grok]
+cheap = "grok-4.7-build-fast"
+mid = "grok-4.6"
+strong = "grok-4.7"

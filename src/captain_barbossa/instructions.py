@@ -98,7 +98,7 @@ not raise. Auto searches crew tabs for the best split (current tab first) or ope
 a new tab when geometry doesn't allow a split; the command lists every workspace
 pane by tab when --split-pane is missing.
 Run:
-  CAPTAIN crew --agent codex|claude --task 'assignment' --placement pane|tab
+  CAPTAIN crew --agent codex|claude|pi|grok --task 'assignment' --placement pane|tab
     [--direction vertical|horizontal|auto --split-pane <pane-id>|auto]
     --model cheap|mid|strong|<model>
 Keep crew prompts short: a few lines with goal, hard constraints, and expected report.
@@ -202,6 +202,10 @@ def native_args(provider, instructions, model=None, events=None):
     elif provider == "pi":
         # pi has no hook/notify mechanism, so crew state falls back to pane reading.
         flags = ["--append-system-prompt", instructions]
+    elif provider == "grok":
+        # Grok uses Claude-compatible hooks but no --settings flag and we avoid
+        # writing user config; pane-fallback wait like pi.
+        flags = ["--append-system-prompt", instructions, "--no-subagents"]
     else:
         flags = ["-c", "developer_instructions=" + json.dumps(instructions, ensure_ascii=False)]
         if hook:
