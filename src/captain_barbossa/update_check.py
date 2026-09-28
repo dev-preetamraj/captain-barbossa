@@ -1,4 +1,4 @@
-"""Startup PyPI update check for captain-barbossa."""
+"""Startup PyPI update check and `captain update`."""
 
 import json
 import subprocess
@@ -7,9 +7,11 @@ import urllib.request
 import questionary
 
 from . import __version__
+from .runtime import CaptainError
 
 PYPI_URL = "https://pypi.org/pypi/captain-barbossa/json"
 TIMEOUT = 2
+UPGRADE_COMMAND = ["uv", "tool", "upgrade", "captain-barbossa"]
 
 
 def _latest_version():
@@ -28,18 +30,28 @@ def _is_newer(latest, installed):
         return False
 
 
+def upgrade():
+    """Upgrade the installed tool. Returns uv's exit code."""
+    try:
+        return subprocess.run(UPGRADE_COMMAND).returncode
+    except FileNotFoundError as exc:
+        raise CaptainError("uv is not installed or is missing from PATH.") from exc
+
+
 def check_for_update():
     """Prompt to upgrade if a newer release exists on PyPI; never raises."""
     latest = _latest_version()
     if not latest or not _is_newer(latest, __version__):
         return
     try:
-        upgrade = questionary.confirm(
-            f"captain-barbossa {latest} is available (installed {__version__}). "
-            "Run 'uv tool upgrade captain-barbossa' now?",
+        confirmed = questionary.confirm(
+            f"captain-barbossa {latest} is available (installed {__version__}). Update now?",
             default=False,
         ).ask()
     except (KeyboardInterrupt, EOFError):
         return
-    if upgrade:
-        subprocess.run(["uv", "tool", "upgrade", "captain-barbossa"])
+    if confirmed:
+        try:
+            upgrade()
+        except CaptainError:
+            return

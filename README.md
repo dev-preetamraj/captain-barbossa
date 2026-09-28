@@ -31,11 +31,11 @@ restart the terminal.
 ## Upgrade
 
 ```sh
-uv tool upgrade captain-barbossa
+captain update
 ```
 
-Running captains keep the old code until restarted with
-`captain --session <session-id>`.
+This runs `uv tool upgrade captain-barbossa`. Running captains keep the old
+code until restarted with `captain --session <session-id>`.
 
 ## Quickstart
 
@@ -421,6 +421,7 @@ Read the affected pane before retrying or approving anything.
 | `captain dashboard [--interval SECONDS] [--refresh-prices]` | Refresh a crew token-usage table; optionally refresh prices |
 | `captain focus NAME` | Focus crew's pane and tab |
 | `captain session` | Print the current session id |
+| `captain update` | Upgrade the installed tool |
 | `captain init [--global]` | Write a commented `.captain/settings.toml` template |
 | `captain dismiss NAME` | Close and retire crew |
 | `captain memory add SUBJECT RELATION TARGET [--scope session\|project\|repo] [--because WHY] [--supersede]` | Save a memory relationship |
