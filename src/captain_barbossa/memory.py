@@ -205,6 +205,7 @@ def write_json(path, data):
 def stop_reason(events_path):
     """Why this crew may not end its turn yet, or None. A crew awaiting an answer to ask may
     stop; instruction wording cannot enforce either rule, only the Stop hook can."""
+    from .instructions import captain_command
     from .protocol import queued  # protocol imports this module, so import it on use
 
     directory = events_path.parent.parent
@@ -214,7 +215,10 @@ def stop_reason(events_path):
     assignment = state["assignments"].get(state["active"][crew_id])
     name = assignment["crew"] if assignment else crew_id
     if queued(directory, crew_id):
-        return f"Unread mail is waiting; read it with `captain inbox {name}`."
+        return (
+            f"Unread mail is waiting; read it with "
+            f"`{captain_command(directory.name)} inbox {name}`."
+        )
     if assignment and assignment["state"] != "done" and not assignment["question"]:
         return f"Your assignment is unfinished; finish with `captain done {name} --report '...'`."
     return None

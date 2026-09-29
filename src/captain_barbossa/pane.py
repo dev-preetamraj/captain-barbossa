@@ -262,7 +262,7 @@ class Pane:
         return agent.get("agent_status")
 
     def nudge_block(self, crew):
-        """Return the live pane gate holding a harmless mail nudge, if any."""
+        """Return the live pane gate holding a mail nudge, if any."""
         status = self.agent_status()
         if status is None:
             raise CaptainError(f"{self.agent_name} is not registered.")
@@ -274,13 +274,20 @@ class Pane:
             return DRAFT_GATE
         return None
 
-    def nudge(self, crew):
-        """Ring an idle crew without putting task content on the terminal."""
+    def nudge(self, crew, text=None):
+        """Ring an idle crew. A first ring may carry the mail body as a trusted prompt."""
+        from .instructions import captain_command
+
+        inbox = (
+            f"read your mail with `{captain_command(crew.session.directory.name)} "
+            f"inbox {crew.crew_id}`"
+        )
+        body = f"{text}\n{inbox}" if text else inbox
         runtime.herdr(
             "agent",
             "prompt",
             self.agent_name,
-            f"read your mail with `captain inbox {crew.crew_id}`",
+            f" {body}" if body.startswith("-") else body,
         )
 
     def settled_status(self, timeout, provider=None):

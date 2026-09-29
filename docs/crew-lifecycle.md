@@ -81,13 +81,14 @@ an answered question, and no unread mail.
 Reassignment requires `done`, acknowledgement of prior notifications, and the
 exact handoff ID. Stale assignment, incarnation, and question IDs are refused.
 
-`assign`, `tell`, and `answer` reach a crew as mail, not a typed message.
-Each writes the message to a durable file, then rings a content-free doorbell
-in the crew's pane: the fixed sentence `read your mail with captain inbox
-<name>`, which carries no task text. `captain inbox NAME` prints that crew's
-queued mail oldest first and writes the read receipt, which is what proves
-delivery and moves that message from `sent` to `read` on its own assignment;
-`done` refuses while mail is unread. For Claude Code crew that reading is also
+`assign`, `tell`, and `answer` reach a crew as mail.
+Each writes the message to a durable file, then rings the pane. The first ring
+for that message is a Herdr agent prompt carrying the mail body plus one line
+to run `captain inbox NAME`. A later ring after that first one landed is the
+inbox line alone. `captain inbox NAME` prints that crew's queued mail oldest
+first and writes the read receipt, which is what proves delivery and moves that
+message from `sent` to `read` on its own assignment. `done` refuses while mail
+is unread. For Claude Code crew that reading is also
 enforced by the CLI's own `Stop` hook, which blocks the end of a turn while mail
 is unread, or while the active assignment is unfinished with no question pending;
 a crew waiting on an answer to `ask` may still stop. Codex and pi cannot block, so
