@@ -34,9 +34,13 @@ CREW_MEMORY = """Read the team's committed decisions and conventions at startup:
 """
 
 
+def captain_command(session_id):
+    return shlex.join([sys.executable, "-m", "captain_barbossa", "--session", session_id])
+
+
 def agent_instructions(directory, role, provider=None):
     is_crew = role.startswith("crew member ")
-    command = shlex.join([sys.executable, "-m", "captain_barbossa", "--session", directory.name])
+    command = captain_command(directory.name)
     name = shlex.quote(role.removeprefix("crew member "))
     memory_block = CREW_MEMORY.format(command=command) if is_crew else CAPTAIN_MEMORY
     wait_guidance = """Run every

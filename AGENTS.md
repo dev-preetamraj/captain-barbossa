@@ -67,10 +67,11 @@ Key facts:
   also blocks: while the crew has unread mail, or an unfinished assignment with no
   pending question, it returns a blocking stop decision so the crew stays active. A
   crew awaiting an answer may stop. Codex and pi cannot block; the hook fails open.
-- `assign`/`tell`/`answer` write mail (`sessions/<id>/mail/<crew>/<id>.json`) instead
-  of typing into the pane; a content-free doorbell nudges the crew to read it with
-  `captain inbox NAME`, which writes the read receipt. `done` refuses while mail is
-  unread, and dismissing a crew with unread mail bounces it with a reason.
+- `assign`/`tell`/`answer` write mail (`sessions/<id>/mail/<crew>/<id>.json`).
+  The first ring prompts that body as a trusted Herdr agent prompt plus a line
+  to run `captain inbox NAME`, which writes the read receipt; a landed retry
+  is content-free. `done` refuses while mail is unread, and dismissing a crew
+  with unread mail bounces it with a reason.
 - Settings layer bottom to top: `defaults.toml` (package data, the only place a default
   is written), `~/.captain/settings.toml`, the project's `.captain/settings.toml`, then
   CLI flags. Read a value with `config.lookup/text/flag/number` when the command needs

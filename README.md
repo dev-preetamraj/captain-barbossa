@@ -212,10 +212,11 @@ owned paths with repeated `--owns PATH` and grants with repeated `--allow ACTION
 Use `ask`/`answer` for a question, `done --report` for completion, and
 `assign --handoff` to reuse a finished assignment's crew. Dismissed crew are refused.
 
-`assign`, `tell`, and `answer` no longer type the message into the crew's
-pane. Each writes a durable mail file, then rings a content-free doorbell in
-the pane telling the crew to run `captain inbox NAME`; that read is what
-proves delivery and writes the receipt. `done` refuses while mail is unread.
+`assign`, `tell`, and `answer` write a durable mail file. The first ring
+prompts the assignment as a Herdr agent prompt plus a line to run
+`captain inbox NAME`; a later ring after that landed is the inbox line
+alone. The inbox read proves delivery and writes the receipt. `done`
+refuses while mail is unread.
 Newly launched crew may omit `--assignment` on `ask`, `done`, and `check`: their
 launch-bound `CAPTAIN_ASSIGNMENT` is validated against crew identity, incarnation,
 and the active assignment. Missing or stale context fails; captain calls and

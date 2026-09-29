@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 from captain_barbossa import pane as panes
 from captain_barbossa import runtime
+from captain_barbossa.instructions import captain_command
 from captain_barbossa.pane import Pane
 from captain_barbossa.runtime import CaptainError
 
@@ -504,7 +505,13 @@ class SubmitTaskTests(unittest.TestCase):
 
 class NudgeTests(unittest.TestCase):
     def setUp(self):
-        self.crew = SimpleNamespace(crew_id="elizabeth-2", record={"provider": "codex"})
+        self.session_id = "session-id"
+        self.crew = SimpleNamespace(
+            crew_id="elizabeth-2",
+            record={"provider": "codex"},
+            session=SimpleNamespace(directory=SimpleNamespace(name=self.session_id)),
+        )
+        self.inbox = f"read your mail with `{captain_command(self.session_id)} inbox elizabeth-2`"
 
     def api(self, status, screen="› Ask Codex to do anything"):
         def call(*args, **kwargs):
@@ -539,10 +546,19 @@ class NudgeTests(unittest.TestCase):
             self.assertIsNone(pane.nudge_block(self.crew))
             pane.nudge(self.crew)
         prompts = [c.args for c in calls.call_args_list if c.args[:2] == ("agent", "prompt")]
-        self.assertEqual(
-            prompts,
-            [("agent", "prompt", "builder", "read your mail with `captain inbox elizabeth-2`")],
-        )
+        self.assertEqual(prompts, [("agent", "prompt", "builder", self.inbox)])
+
+    def test_a_first_ring_prompts_the_mail_body_and_an_inbox_line(self):
+        with patch.object(runtime, "herdr", side_effect=self.api("idle")) as calls:
+            Pane("builder").nudge(self.crew, "do the thing")
+        prompts = [c.args for c in calls.call_args_list if c.args[:2] == ("agent", "prompt")]
+        self.assertEqual(prompts, [("agent", "prompt", "builder", f"do the thing\n{self.inbox}")])
+
+    def test_a_leading_dash_on_the_mail_body_gets_a_leading_space(self):
+        with patch.object(runtime, "herdr", side_effect=self.api("idle")) as calls:
+            Pane("builder").nudge(self.crew, "-x flagged")
+        prompts = [c.args for c in calls.call_args_list if c.args[:2] == ("agent", "prompt")]
+        self.assertEqual(prompts, [("agent", "prompt", "builder", f" -x flagged\n{self.inbox}")])
 
     def test_an_unregistered_agent_raises_for_the_bounce_path(self):
         with patch.object(runtime, "herdr", side_effect=self.api(None)):

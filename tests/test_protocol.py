@@ -144,7 +144,7 @@ class ProtocolTests(unittest.TestCase):
             patch.object(Pane, "nudge_block", return_value="cooldown"),
             patch.object(Pane, "nudge") as nudge,
         ):
-            protocol.deliver(self.crew, "original", initial=True)
+            message_id = protocol.deliver(self.crew, "original", initial=True)
             nudge.assert_not_called()
         with (
             patch.object(protocol.time, "time", side_effect=lambda: clock[0]),
@@ -156,7 +156,7 @@ class ProtocolTests(unittest.TestCase):
             clock[0] += protocol.DRAIN_INTERVAL + 1
             protocol.poll(self.crew)
             protocol.poll(self.crew)
-            nudge.assert_called_once()
+            nudge.assert_called_once_with(self.crew, self.mail(message_id)["text"])
 
     def test_a_landed_ring_is_not_repeated_by_the_next_poll(self):
         """The delivery ring already landed, so a wait a second later must not nudge again."""
@@ -166,18 +166,20 @@ class ProtocolTests(unittest.TestCase):
             patch.object(Pane, "nudge") as nudge,
         ):
             message_id = protocol.deliver(self.crew, "original", initial=True)
-            nudge.assert_called_once()
+            body = self.mail(message_id)["text"]
+            nudge.assert_called_once_with(self.crew, body)
             self.assertEqual(
                 memory.read_json(protocol.drain_stamp(self.crew)),
                 {"id": message_id, "at": 1000.0, "landed": True, "gate": None},
             )
             clock[0] += protocol.DRAIN_INTERVAL + 1
             protocol.poll(self.crew)
-            nudge.assert_called_once()
+            nudge.assert_called_once_with(self.crew, body)
             # Still unread much later: ring again, so a pane that died after the nudge bounces.
             clock[0] += protocol.DRAIN_LANDED_INTERVAL
             protocol.poll(self.crew)
             self.assertEqual(nudge.call_count, 2)
+            nudge.assert_called_with(self.crew, None)
 
     def held_drain(self, clock):
         """One poll under a frozen clock with the user's draft on the composer.

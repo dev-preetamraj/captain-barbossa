@@ -12,6 +12,7 @@ from unittest.mock import patch
 
 from captain_barbossa import memory, protocol
 from captain_barbossa.crew import Crew
+from captain_barbossa.instructions import captain_command
 from tests import home_isolation  # noqa: F401
 
 
@@ -87,7 +88,8 @@ class StopHookTests(unittest.TestCase):
         protocol.enqueue(self.crew, "do the thing", "assign", self.assignment["id"])
         decision = self.decision({"hook_event_name": "Stop"})
         self.assertEqual(decision["decision"], "block")
-        self.assertIn("captain inbox Jack", decision["reason"])
+        command = captain_command(self.current.directory.name)
+        self.assertIn(f"{command} inbox Jack", decision["reason"])
         self.assertEqual(len(self.logged()), 1)
 
     def test_an_unfinished_assignment_blocks_the_stop(self):

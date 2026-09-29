@@ -24,8 +24,10 @@ was inferred from a TUI instead of being proven**.
 
 ## The change
 
-The message becomes a file the crew reads. The terminal write becomes a doorbell
-that carries no content and can be repeated safely.
+The message becomes a file the crew reads. The first ring for that file is a
+Herdr agent prompt carrying the mail body plus one line to run `captain inbox
+NAME`, so Codex auto-approval sees a user request. A later ring after that
+message already landed types only the inbox line and can be repeated safely.
 
 ```
 captain assign/tell/answer ──▶ mail/<crew>/<id>.json ──▶ (doorbell) ──▶ crew pane
@@ -40,10 +42,11 @@ Three consequences, all of which remove a class of bug rather than patch it:
    receipt, which carries the message from `sent` to the terminal `read` on the
    assignment the mail names. `sent` stops meaning "the pane looked right after
    we typed"; `read` means the crew has it.
-2. **The doorbell is idempotent.** Re-ringing costs nothing, so a failed or
-   uncertain ring is retried, not escalated at once. `pending` and `unknown`
-   deliveries, the `cancelled` state and the `resolve` command that cleared them
-   are gone with the keystroke transport; a delivery is `sent` then `read`.
+2. **A landed retry is idempotent.** The 600s re-ring types only the inbox line,
+   so a failed or uncertain later ring is retried, not escalated at once.
+   `pending` and `unknown` deliveries, the `cancelled` state and the `resolve`
+   command that cleared them are gone with the keystroke transport; a delivery
+   is `sent` then `read`.
 3. **A blocked composer delays a nudge instead of losing a message.** The mail is
    already durable before the pane is touched.
 
@@ -85,8 +88,14 @@ the crew reading it that can half-succeed.
 
 ## The doorbell
 
-`pane.nudge(crew)` types one fixed sentence: *read your mail with `captain inbox
-<name>`*. It carries no task text, so a mangled ring is harmless.
+`pane.nudge(crew, text=None)` types a Herdr agent prompt. The first ring for a
+message passes the unread mail body plus one closing line: *read your mail with
+`captain inbox <name>`*. Codex treats that prompt as a user request, which is
+what auto-approval needs; `captain inbox` stdout is tool output. A ring after
+that same message already landed passes `text=None` and types only the inbox
+line. A first ring held behind a gate still carries the body once the gate
+clears. Mail files and inbox receipts stay; `done` still refuses unread mail.
+Delivery is the crew's own inbox read.
 
 It fires only when all of these hold. Their drain applies the same shape
 (`docs/message-queue.md` §2, `workerWake.ts`); the values are ours:
@@ -153,9 +162,10 @@ goes to the captain's own notification stream.
 - **`fleet.json`.** `captain status` plus the dashboard already answer it.
 - **FIPA-style acts, conversations, broadcast, a hop cap.** One captain, disjoint
   file ownership, no crew-to-crew mail. A hop cap guards a loop we cannot form.
-- **Their retry-by-typing and draft fusing.** Retrying a *doorbell* is safe;
-  retyping a task is not, and typing after a user's draft to fuse with it is a
-  trade only their transport forces.
+- **Their retry-by-typing and draft fusing.** The 600s retry is the inbox line
+  alone; typing the assignment again is the failure this design exists to
+  prevent, and typing after a user's draft to fuse with it is a trade only
+  their transport forces.
 - **A drain loop as a resident process.** No daemon is a project rule, and this
   is still not one: `pump_mail` (`cli.py`) now retries every live crew's held
   doorbell before any captain-side command runs, reusing the same `.drain` stamp
@@ -174,6 +184,7 @@ protocol.unread(crew) -> [message]                                # queued, olde
 protocol.mark_read(crew, ids) -> None                             # receipt: read_at, sent -> read
 protocol.bounce(crew, message_id, reason) -> None                 # notification
 pane.nudge_block(crew) -> str | None                              # which gate holds, or None
+pane.nudge(crew, text=None) -> None                               # body on first ring; inbox line after
 ```
 
 `deliver` keeps its signature and becomes `enqueue` plus a best-effort ring, so

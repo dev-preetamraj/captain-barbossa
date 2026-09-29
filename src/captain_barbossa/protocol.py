@@ -266,10 +266,14 @@ def ring(crew, message_id):
     """
     prior = last_ring(crew)
     landed, unreachable, gate = False, None, None
+    # A landed retry for this id stays content-free so the 600s drain never retypes work.
+    text = None
+    if not (prior and prior["id"] == message_id and prior["landed"]):
+        text = next((m["text"] for m in unread(crew) if m["id"] == message_id), None)
     try:
         gate = crew.pane.nudge_block(crew)
         if gate is None:
-            crew.pane.nudge(crew)
+            crew.pane.nudge(crew, text)
             landed = True
     except HERDR_ERRORS as exc:
         unreachable = str(exc)
