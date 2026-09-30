@@ -78,18 +78,22 @@ def begin(crew, project, task, paths=(), actions=(), handoff=None):
         raise CaptainError("Legacy crew cannot be silently adopted; recruit new crew.")
     with checkpoint(crew.session.directory) as state:
         previous = state["active"].get(crew.crew_id)
-        if handoff and not previous:
-            raise CaptainError("No previous assignment matches this handoff.")
         if previous:
             old = state["assignments"][previous]
-            if old["state"] != "done" or handoff != previous:
+            if not handoff and old["incarnation_id"] != crew.record["incarnation_id"]:
+                # The name was reused after its former incarnation was dismissed; that
+                # incarnation released the name, so a plain recruit starts fresh.
+                previous = None
+            elif old["state"] != "done" or handoff != previous:
                 raise CaptainError(
                     "Reassignment requires done with report and --handoff ASSIGNMENT_ID."
                 )
-            if old["pending"] or old["ack_seq"] != len(old["notices"]):
+            elif old["pending"] or old["ack_seq"] != len(old["notices"]):
                 raise CaptainError(
                     "Acknowledge the previous assignment notifications before handoff."
                 )
+        if handoff and not previous:
+            raise CaptainError("No previous assignment matches this handoff.")
         for other in state["assignments"].values():
             if other["state"] != "done" and any(
                 overlaps(a, b) for a in paths for b in other["paths"]
