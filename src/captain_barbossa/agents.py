@@ -556,9 +556,7 @@ def create_crew(args, pane, project):
         if name is None:
             for index, character in enumerate(cycle(CREW_NAMES)):
                 round_number = index // len(CREW_NAMES) + 1
-                name = f"{character}-{round_number}" if round_number > 1 else character
-                if meta["crew"].get(name, {}).get("incarnation_id"):
-                    continue  # Reusing a protocol identity needs a named, explicit handoff.
+                name = f"{character}-{round_number - 1}" if round_number > 1 else character
                 if not Crew.name_reserved(current, name):
                     break
         display_name = name.capitalize()

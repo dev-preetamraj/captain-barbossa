@@ -27,10 +27,11 @@ captain crew gibbs --task "Review the current changes"
 
 Every crew gets a one-word Pirates of the Caribbean name: Jack, Will,
 Elizabeth, Gibbs, Anamaria, Pintel, Ragetti, Cotton, Marty, Tia, Davy, or Sao,
-assigned in that order and skipping names already in use. Reusing a protocol
-crew's retired name requires `crew NAME --handoff <old-assignment-id>` after
-completion and acknowledgement; automatic selection does not supply that handoff.
-Once every name is taken, numbering starts at Jack-2. Barbossa is
+assigned in that order and skipping names already in use. A dismissed crew's
+name returns to the pool automatically; the next recruit, automatic or named,
+gets it back with a fresh assignment. `crew NAME --handoff <old-assignment-id>`
+is only needed to carry the old assignment forward instead of starting fresh.
+Once every name is taken, numbering starts at Jack-1. Barbossa is
 reserved for the captain. The same name is used everywhere: the crew ID, the
 pane/tab label, and the name in memory, `wait`, `focus`, `model`, and `dismiss`.
 

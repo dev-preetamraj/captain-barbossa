@@ -1894,15 +1894,15 @@ class CaptainFlowTests(unittest.TestCase):
                     )
                 )
             roster = memory.read_json(self.directory / "session.json")["crew"]
-            self.assertEqual(set(roster), set(agents.CREW_NAMES) | {"scout", "jack-2", "will-2"})
+            self.assertEqual(set(roster), set(agents.CREW_NAMES) | {"scout", "jack-1", "will-1"})
             for name, record in self.meta["crew"].items():
                 self.assertEqual(roster[name], record)
             for name in roster.keys() - self.meta["crew"].keys():
                 self.assertEqual(roster[name]["id"], name)
                 self.assertEqual(len(roster[name]["name"].split()), 1)
                 self.assertTrue((self.directory / f"crew-{name}.sh").is_file())
-            self.assertEqual(roster["jack-2"]["name"], "Jack-2")
-            self.assertEqual(roster["will-2"]["name"], "Will-2")
+            self.assertEqual(roster["jack-1"]["name"], "Jack-1")
+            self.assertEqual(roster["will-1"]["name"], "Will-1")
             other, meta = memory.session(self.project, self.pane, create=True)
             args.session = meta["id"]
             with contextlib.redirect_stdout(io.StringIO()) as output:
@@ -2076,6 +2076,134 @@ class CaptainFlowTests(unittest.TestCase):
                     self.project,
                 )
             self.assertEqual(json.loads(output.getvalue())["name"], "Jack")
+
+    def test_dismissing_a_crew_frees_its_name_for_the_next_auto_recruit(self):
+        args = self.args(
+            "crew",
+            "--agent",
+            "codex",
+            "--task",
+            "standby",
+            "--placement",
+            "pane",
+            "--direction",
+            "vertical",
+            "--split-pane",
+            "w1:p1",
+        )
+        created = {"pane": {"pane_id": "w1:p2", "agent": "codex", "agent_status": "idle"}}
+        with (
+            patch.object(runtime, "herdr", side_effect=pane_stub(created)),
+            patch.object(agents, "executable", return_value="/bin/codex"),
+            patch.object(Pane, "wait_for_crew"),
+            patch.object(Pane, "submit_task"),
+        ):
+            for _ in range(3):
+                agents.create_crew(args, self.pane, self.project)
+        roster = memory.read_json(self.directory / "session.json")["crew"]
+        self.assertEqual(set(roster), {"jack", "will", "elizabeth"})
+        crew = Crew("jack", roster["jack"], memory.Session(self.directory, self.meta))
+        unread_messages = protocol.unread(crew)
+        protocol.mark_read(crew, [msg["id"] for msg in unread_messages])
+        protocol.change(
+            crew,
+            self.args(
+                "done",
+                "Jack",
+                "--assignment",
+                roster["jack"]["assignment_id"],
+                "--report",
+                "No files changed; checks passed; finished",
+            ),
+            self.project,
+        )
+        delivery = protocol.poll(crew)
+        protocol.poll(crew, delivery["delivery_id"])
+        with patch.object(runtime, "herdr", return_value={}):
+            agents.dismiss_crew(self.args("dismiss", "Jack"), self.pane, self.project)
+        with (
+            patch.object(runtime, "herdr", side_effect=pane_stub(created)),
+            patch.object(agents, "executable", return_value="/bin/codex"),
+            patch.object(Pane, "wait_for_crew"),
+            patch.object(Pane, "submit_task"),
+            contextlib.redirect_stdout(io.StringIO()) as output,
+        ):
+            agents.create_crew(args, self.pane, self.project)
+        result = json.loads(output.getvalue())
+        self.assertEqual((result["id"], result["name"]), ("jack", "Jack"))
+
+    def test_named_handoff_still_reuses_a_dismissed_name(self):
+        args = self.args(
+            "crew",
+            "--agent",
+            "codex",
+            "--task",
+            "standby",
+            "--placement",
+            "pane",
+            "--direction",
+            "vertical",
+            "--split-pane",
+            "w1:p1",
+        )
+        created = {"pane": {"pane_id": "w1:p2", "agent": "codex", "agent_status": "idle"}}
+        with (
+            patch.object(runtime, "herdr", side_effect=pane_stub(created)),
+            patch.object(agents, "executable", return_value="/bin/codex"),
+            patch.object(Pane, "wait_for_crew"),
+            patch.object(Pane, "submit_task"),
+        ):
+            agents.create_crew(args, self.pane, self.project)
+        roster = memory.read_json(self.directory / "session.json")["crew"]
+        old_assignment_id = roster["jack"]["assignment_id"]
+        crew = Crew("jack", roster["jack"], memory.Session(self.directory, self.meta))
+        unread_messages = protocol.unread(crew)
+        protocol.mark_read(crew, [msg["id"] for msg in unread_messages])
+        protocol.change(
+            crew,
+            self.args(
+                "done",
+                "Jack",
+                "--assignment",
+                old_assignment_id,
+                "--report",
+                "No files changed; checks passed; finished",
+            ),
+            self.project,
+        )
+        delivery = protocol.poll(crew)
+        protocol.poll(crew, delivery["delivery_id"])
+        with patch.object(runtime, "herdr", return_value={}):
+            agents.dismiss_crew(self.args("dismiss", "Jack"), self.pane, self.project)
+        with (
+            patch.object(runtime, "herdr", side_effect=pane_stub(created)),
+            patch.object(agents, "executable", return_value="/bin/codex"),
+            patch.object(Pane, "wait_for_crew"),
+            patch.object(Pane, "submit_task"),
+            contextlib.redirect_stdout(io.StringIO()) as output,
+        ):
+            agents.create_crew(
+                self.args(
+                    "crew",
+                    "jack",
+                    "--agent",
+                    "codex",
+                    "--task",
+                    "again",
+                    "--handoff",
+                    old_assignment_id,
+                    "--placement",
+                    "pane",
+                    "--direction",
+                    "vertical",
+                    "--split-pane",
+                    "w1:p1",
+                ),
+                self.pane,
+                self.project,
+            )
+        result = json.loads(output.getvalue())
+        self.assertEqual((result["id"], result["name"]), ("jack", "Jack"))
 
     def test_non_character_names_are_rejected_before_launch(self):
         for name in ("scout", "barbossa", "../../jack", "", "jack;ls", "jack-123456789012"):
