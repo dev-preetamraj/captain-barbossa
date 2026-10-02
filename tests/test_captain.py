@@ -1758,6 +1758,69 @@ class CaptainFlowTests(unittest.TestCase):
         saved = memory.read_json(self.directory / "session.json")["crew"]["jack"]
         self.assertEqual(saved["status"], "started")
 
+    def test_our_own_ring_echo_does_not_gate_the_next_ring(self):
+        """A composer still showing the ring we typed is ours; anything else still gates."""
+        crew = Crew(
+            "jack",
+            {"name": "Jack", "agent": "c-session-jack", "provider": "codex"},
+            memory.Session(self.directory, self.meta),
+        )
+        echo = panes.inbox_line(crew)
+        for screen, gate in (
+            (f"› {echo}", None),
+            (f"› {echo[:-4]}", panes.DRAFT_GATE),
+            ("› half a sentence", panes.DRAFT_GATE),
+            ("› Ask Codex to do anything", None),
+        ):
+            with self.subTest(screen=screen[:40]):
+
+                def api(*call, screen=screen, **kwargs):
+                    if call[:2] == ("agent", "get"):
+                        return {"agent": {"name": "c-session-jack", "agent_status": "idle"}}
+                    return screen
+
+                with (
+                    patch.object(runtime, "herdr", side_effect=api),
+                    patch.object(Pane, "nudge_block", REAL_NUDGE_BLOCK),
+                ):
+                    self.assertEqual(crew.pane.nudge_block(crew), gate)
+
+    def test_a_done_status_crew_is_as_ringable_as_an_idle_one(self):
+        """Herdr reports a crew that just finished a turn as done, not idle."""
+        args = self.args(
+            "crew",
+            "jack",
+            "--agent",
+            "claude",
+            "--task",
+            "build",
+            "--placement",
+            "pane",
+            "--direction",
+            "vertical",
+            "--split-pane",
+            "w1:p1",
+        )
+        agent_name, api = self.crew_status_api(repeat("done"))
+        with (
+            patch.object(runtime, "herdr", side_effect=api) as calls,
+            patch.object(agents, "executable", return_value="/bin/claude"),
+            patch.object(panes.time, "sleep"),
+            patch.object(panes.time, "monotonic", side_effect=count(0, 2)),
+            patch.object(Pane, "nudge_block", REAL_NUDGE_BLOCK),
+            patch.object(Pane, "nudge", REAL_NUDGE),
+        ):
+            agents.create_crew(args, self.pane, self.project)
+            crew = Crew(
+                "jack",
+                memory.read_json(self.directory / "session.json")["crew"]["jack"],
+                memory.Session(self.directory, self.meta),
+            )
+            self.assertIsNone(crew.pane.nudge_block(crew))
+        sent = [call.args[:2] for call in calls.call_args_list]
+        self.assertEqual(sent.count(("agent", "prompt")), 1)
+        self.assertNotIn(("agent", "send-keys"), sent)
+
     def test_done_or_working_agent_after_prompt_is_confirmed_without_enter(self):
         for status in ("done", "working"):
             with (
@@ -2354,6 +2417,54 @@ class CaptainFlowTests(unittest.TestCase):
             with self.assertRaisesRegex(runtime.CaptainError, "already dismissed"):
                 agents.dismiss_crew(self.args("dismiss", "Jack"), self.pane, self.project)
             api.assert_not_called()
+
+    def test_a_crew_holding_only_unread_mail_dismisses_cleanly(self):
+        """Mail that never reached the crew cannot demand a done report from it."""
+        created = {"pane": {"pane_id": "w1:p2", "agent": "codex", "agent_status": "idle"}}
+        with (
+            patch.object(runtime, "herdr", side_effect=pane_stub(created)),
+            patch.object(agents, "executable", return_value="/bin/codex"),
+            patch.object(Pane, "wait_for_crew"),
+            patch.object(Pane, "submit_task"),
+        ):
+            agents.create_crew(
+                self.args(
+                    "crew",
+                    "jack",
+                    "--agent",
+                    "codex",
+                    "--task",
+                    "standby",
+                    "--placement",
+                    "pane",
+                    "--direction",
+                    "vertical",
+                    "--split-pane",
+                    "w1:p1",
+                ),
+                self.pane,
+                self.project,
+            )
+        record = memory.read_json(self.directory / "session.json")["crew"]["jack"]
+        crew = Crew("jack", record, memory.Session(self.directory, self.meta))
+        self.assertTrue(protocol.unread(crew))
+        with (
+            patch.object(runtime, "herdr", return_value={}),
+            contextlib.redirect_stdout(io.StringIO()) as output,
+        ):
+            agents.dismiss_crew(self.args("dismiss", "Jack"), self.pane, self.project)
+        self.assertIn("Bounced unread mail to Jack", output.getvalue())
+        self.assertIn("Dismissed Jack.", output.getvalue())
+        self.assertEqual(
+            memory.read_json(self.directory / "session.json")["crew"]["jack"]["status"],
+            "dismissed",
+        )
+        # The reservation closes too, or the dismissed crew's owned paths stay locked.
+        assignment = memory.read_json(self.directory / "protocol.json")["assignments"][
+            record["assignment_id"]
+        ]
+        self.assertEqual(assignment["state"], "done")
+        self.assertEqual(assignment["report"], "Dismissed before any message was read.")
 
     def test_dismiss_failures_leave_the_record_and_memory_untouched(self):
         self.meta["crew"] = {

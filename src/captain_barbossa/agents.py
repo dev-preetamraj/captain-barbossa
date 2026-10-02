@@ -461,12 +461,17 @@ def switch_model(args, pane, project):
         print("Claude Code also saved it as the default for new sessions.")
 
 
+def never_read(assignment):
+    """Whether any message ever reached the crew. An enqueue is not a delivery."""
+    return not any(message["delivery"] == "read" for message in assignment["messages"])
+
+
 def dismiss_blocker(crew, assignment):
     """Name the one thing that actually holds the dismissal, not both at once."""
-    if not assignment["messages"]:
-        # A launch that failed before its first delivery: nothing was ever sent, so there is
-        # nothing to report, and no crew process is alive to run done. Refusing here would
-        # reserve the name forever.
+    if never_read(assignment):
+        # A launch that failed before its first delivery, or mail the crew never read:
+        # nothing reached it, so there is nothing to report and no crew process alive to
+        # run done. Refusing here would reserve the name forever.
         return
     if assignment["state"] != "done":
         raise CaptainError(
@@ -494,7 +499,9 @@ def dismiss_crew(args, pane, project):
         if crew.record.get("incarnation_id"):
             with protocol.checkpoint(current.directory) as state:
                 assignment = protocol.active(state, crew)
-                undelivered = not assignment["messages"]
+                # Same question the blocker asks: an assignment nothing reached must not keep
+                # its paths reserved by lingering in "working" after the crew is gone.
+                undelivered = never_read(assignment)
                 dismiss_blocker(crew, assignment)
             # protocol.bounce takes protocol.lock itself; call it outside the checkpoint
             # above, or a crew with mail still queued at dismissal would deadlock here.
@@ -514,7 +521,7 @@ def dismiss_crew(args, pane, project):
             with protocol.checkpoint(current.directory) as state:
                 assignment = protocol.active(state, crew)
                 assignment["state"] = "done"
-                assignment["report"] = "Dismissed before any message was delivered."
+                assignment["report"] = "Dismissed before any message was read."
         (current.directory / f"crew-{crew.crew_id}.sh").unlink(missing_ok=True)
         crew.record["status"] = "dismissed"
         tab_id = crew.record.get("tab")

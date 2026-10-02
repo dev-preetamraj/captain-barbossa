@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 from captain_barbossa import cli, memory, protocol
 from captain_barbossa.crew import Crew
-from captain_barbossa.pane import DRAFT_GATE, Pane
+from captain_barbossa.pane import DRAFT_EXPIRY, DRAFT_GATE, Pane
 from tests import home_isolation  # noqa: F401
 
 
@@ -53,6 +53,9 @@ class DrainPumpTests(unittest.TestCase):
             patch.object(Pane, "nudge_block", return_value=None, create=True)
         )
         self.nudge = self.enterContext(patch.object(Pane, "nudge", create=True))
+        # A reported draft gate makes ring read the composer to age it; these fakes do not
+        # model a screen, and an unpatched read would reach for the real herdr.
+        self.draft = self.enterContext(patch.object(Pane, "draft", return_value="held draft"))
         assignment = protocol.begin(self.crew, self.project, "original", ["src"], ["edit"])
         self.assignment = assignment["id"]
 
@@ -91,6 +94,38 @@ class DrainPumpTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn('"allowed": true', output)
         self.nudge.assert_called_once()
+
+    def test_a_draft_stops_holding_once_it_outlives_the_expiry(self):
+        """One unchanged draft holds mail only up to DRAFT_EXPIRY, and never fuses the body."""
+        self.hold_mail()
+        self.nudge_block.return_value = DRAFT_GATE
+        stamp = protocol.drain_stamp(self.crew)
+        code, _ = self.captain_command()
+        self.assertEqual(code, 0)
+        self.nudge.assert_not_called()  # a draft just seen still holds
+        record = memory.read_json(stamp)
+        self.assertEqual(record["draft"], "held draft")
+        record["at"] = record["draft_since"] = time.time() - DRAFT_EXPIRY - 1
+        memory.write_json(stamp, record)
+        code, _ = self.captain_command()
+        self.assertEqual(code, 0)
+        self.nudge.assert_called_once()
+        # Expired means ringable, not fusable: the inbox line alone, never the mail body.
+        self.assertIsNone(self.nudge.call_args.args[1])
+        self.assertTrue(memory.read_json(stamp)["landed"])
+
+    def test_an_edited_draft_starts_the_expiry_clock_over(self):
+        self.hold_mail()
+        self.nudge_block.return_value = DRAFT_GATE
+        stamp = protocol.drain_stamp(self.crew)
+        record = memory.read_json(stamp)
+        record["at"] = record["draft_since"] = time.time() - DRAFT_EXPIRY - 1
+        record["draft"] = "what the human typed before"
+        memory.write_json(stamp, record)
+        code, _ = self.captain_command()
+        self.assertEqual(code, 0)
+        self.nudge.assert_not_called()
+        self.assertGreater(memory.read_json(stamp)["draft_since"], record["draft_since"])
 
     def test_no_unread_mail_rings_nothing(self):
         code, _ = self.captain_command()
