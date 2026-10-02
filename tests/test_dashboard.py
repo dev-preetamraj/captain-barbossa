@@ -296,6 +296,38 @@ class AccountingTests(DashboardCase):
         self.assertIn("$1.89", after)
         self.assertIn("retired(2): 3.47M tok/$0.65", output.splitlines()[-1])
 
+    def test_total_survives_a_dismissed_name_being_reused(self):
+        """Dismissing Jack frees his name; a new Jack overwrites the roster record, but
+        the first Jack's events file stays on disk and must still count toward TOTAL."""
+        events_dir = self.directory / "events"
+        events_dir.mkdir(exist_ok=True)
+        (events_dir / "jack-inc1.jsonl").write_text("", encoding="utf-8")
+        (events_dir / "jack-inc2.jsonl").write_text("", encoding="utf-8")
+        meta = memory.read_json(self.directory / "session.json")
+        del meta["crew"]["gibbs"]
+        meta["crew"]["jack"] = {
+            "id": "jack",
+            "name": "Jack",
+            "agent": "c-abc-jack2",
+            "provider": "claude",
+            "incarnation_id": "inc2",
+            "status": "working",
+        }
+        memory.write_json(self.directory / "session.json", meta)
+        self.current = memory.Session(self.directory, meta)
+        output = self.render(
+            {
+                "jack-inc1": usage(tokens=130_000, cost=0.07),
+                "jack-inc2": usage(tokens=50_000, cost=0.02),
+                "will": usage(366_000, 0.09, 0.06, 62_000, 200_000, "claude-haiku-4-5"),
+            }
+        )
+        self.assertNotIn("130k", self.line(output, "Jack"))
+        total = self.line(output, "TOTAL ")
+        self.assertIn("546k", total)
+        self.assertIn("$0.18", total)
+        self.assertIn("retired(1): 130k tok/$0.07", output.splitlines()[-1])
+
     def test_footer_survives_with_no_retired_crew(self):
         meta = memory.read_json(self.directory / "session.json")
         del meta["crew"]["gibbs"]

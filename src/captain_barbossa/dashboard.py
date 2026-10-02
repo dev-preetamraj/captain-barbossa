@@ -146,13 +146,27 @@ def _safe_row(crew, name, status):
         return (name, ("-", None), status, None, None, None, None, ("", "", ""))
 
 
-def _retired(crew):
-    """A dismissed crew's cumulative (tokens, cost). It keeps no row and no rate."""
+def _retired(events):
+    """A retired incarnation's cumulative (tokens, cost). It keeps no row and no rate."""
     try:
-        usage = usage_for_events(crew.events) or {}
+        usage = usage_for_events(events) or {}
         return (usage.get("tokens"), usage.get("cost"))
     except Exception:
         return (None, None)
+
+
+def _orphaned(events_dir, claimed):
+    """Retired usage for incarnations no live roster record claims.
+
+    A dismissed crew's name returns to the pool and the next recruit overwrites its
+    roster record (meta["crew"][name]), but the old incarnation's events file stays on
+    disk under its own uuid; count it so TOTAL never shrinks when a name is reused.
+    """
+    try:
+        paths = sorted(events_dir.glob("*.jsonl"))
+    except OSError:
+        return []
+    return [_retired(path) for path in paths if path.stem not in claimed and path.stem != "captain"]
 
 
 def _captain_row(current, agents):
@@ -186,17 +200,19 @@ def _header(current, crew_count):
 def _roster(current, agents):
     """(current rows, dismissed crew's (tokens, cost), current crew count)."""
     live = _crew_status(agents)
-    rows, retired = [], []
+    rows, retired, claimed = [], [], set()
     for crew in Crew.members(current):
+        claimed.add(crew.events.stem)
         try:
             name = crew.display_name
         except Exception:
             name = crew.crew_id
         if crew.is_dismissed:
-            retired.append(_retired(crew))
+            retired.append(_retired(crew.events))
             continue
         status = live.get(crew.record.get("agent")) or crew.record.get("status") or "-"
         rows.append(_safe_row(crew, name, status))
+    retired.extend(_orphaned(current.directory / "events", claimed))
     crew_count = len(rows)
     captain = _captain_row(current, agents)
     if captain:
