@@ -819,18 +819,23 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(current.meta["crew"]["jack"], self.crew.record)
         self.assertEqual(self.saved(), before)
 
-    def test_dismiss_refuses_an_assignment_with_a_sent_message(self):
+    def test_dismiss_releases_an_assignment_whose_mail_was_never_read(self):
+        """Mail the crew never read cannot demand a done report; an enqueue is not a read."""
         self.crew.record.update(pane="w1:p2", assignment_id=self.assignment["id"])
         memory.write_json(self.current.meta_path, self.current.meta)
         protocol.deliver(self.crew, "original", initial=True)
-        with patch.object(agents.runtime, "herdr") as send:
-            with self.assertRaisesRegex(CaptainError, "Jack has no done report"):
-                agents.dismiss_crew(
-                    SimpleNamespace(session=self.current.meta["id"], name="Jack"),
-                    self.pane,
-                    self.project,
-                )
-        send.assert_not_called()
+        args = SimpleNamespace(session=self.current.meta["id"], name="Jack")
+        with patch.object(agents.runtime, "herdr", return_value={}):
+            agents.dismiss_crew(args, self.pane, self.project)
+        saved = self.saved()
+        self.assertEqual(saved["state"], "done")
+        self.assertEqual(saved["report"], "Dismissed before any message was read.")
+        replacement = Crew(
+            "will",
+            {"name": "Will", "agent": "will", "incarnation_id": "second"},
+            memory.read_session(self.project, self.current.meta["id"], self.pane),
+        )
+        protocol.begin(replacement, self.project, "replacement", ["src"], ["edit"])
 
     def test_dismiss_releases_an_assignment_that_never_got_a_message(self):
         """A launch that died before its first delivery: no crew is alive to run done."""
@@ -841,7 +846,7 @@ class ProtocolTests(unittest.TestCase):
             agents.dismiss_crew(args, self.pane, self.project)
         saved = self.saved()
         self.assertEqual(saved["state"], "done")
-        self.assertEqual(saved["report"], "Dismissed before any message was delivered.")
+        self.assertEqual(saved["report"], "Dismissed before any message was read.")
         replacement = Crew(
             "will",
             {"name": "Will", "agent": "will", "incarnation_id": "second"},

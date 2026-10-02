@@ -57,6 +57,21 @@ SHELL_READY_TIMEOUT = 3
 # nudge_block's gate for unsubmitted human text, which protocol escalates rather than
 # typing over.
 DRAFT_GATE = "user draft"
+# How long one unchanged draft may hold mail before the gate stops holding, from
+# munder-difflin's STALE_INPUT_MS (terminalAutomation.ts:50). Without it an occupied or
+# unreadable composer holds mail for the rest of the session; protocol rings content-free
+# once it expires, so an expiry never fuses a body onto a human's half-written sentence.
+DRAFT_EXPIRY = 1800
+
+
+def inbox_line(crew):
+    """The one line every ring ends with. Defined once: nudge types it, and nudge_block has to
+    recognise it on screen to tell our own echo from a human's draft."""
+    from .instructions import captain_command
+
+    return (
+        f"read your mail with `{captain_command(crew.session.directory.name)} inbox {crew.crew_id}`"
+    )
 
 
 def modal_start(lines):
@@ -141,10 +156,15 @@ class Pane:
         except HERDR_ERRORS:
             return True
 
-    def _draft_pending(self, provider=None):
+    def _draft_pending(self, provider=None, echo=None):
         text, styled = self._composer(provider)
         if not text:
             return text is None
+        # A composer still showing the ring we typed is ours, not a draft; otherwise a landed
+        # ring gates the next one. Only an exact match counts, so a wrong guess parks mail
+        # rather than typing over a human.
+        if text == echo:
+            return False
         return not self._dim_suggestion(text, styled)
 
     def _dim_suggestion(self, text, lines):
@@ -268,21 +288,29 @@ class Pane:
             raise CaptainError(f"{self.agent_name} is not registered.")
         if status == "blocked" or modal_start(self.lines()) is not None:
             return "approval prompt"
-        if status != "idle":
+        # Herdr reports a crew that just finished a turn as "done", not "idle"; it is as
+        # ringable as idle, and every other status check here already pairs the two.
+        if status not in ("idle", "done"):
             return "agent not idle"
-        if self._draft_pending(crew.record.get("provider")):
+        if self._draft_pending(crew.record.get("provider"), echo=inbox_line(crew)):
             return DRAFT_GATE
         return None
 
+    def draft(self, provider=None):
+        """What a reported draft gate is holding, for the stamp that ages it out.
+
+        Empty when the screen cannot prove the composer's contents, which still counts as a
+        draft: an unreadable composer that never clears has to expire like any other.
+        """
+        try:
+            text, _ = self._composer(provider)
+        except HERDR_ERRORS:
+            text = None
+        return text or ""
+
     def nudge(self, crew, text=None):
         """Ring an idle crew. A first ring may carry the mail body as a trusted prompt."""
-        from .instructions import captain_command
-
-        inbox = (
-            f"read your mail with `{captain_command(crew.session.directory.name)} "
-            f"inbox {crew.crew_id}`"
-        )
-        body = f"{text}\n{inbox}" if text else inbox
+        body = f"{text}\n{inbox_line(crew)}" if text else inbox_line(crew)
         runtime.herdr(
             "agent",
             "prompt",

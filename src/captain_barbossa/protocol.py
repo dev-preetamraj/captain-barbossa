@@ -9,7 +9,7 @@ from uuid import uuid4
 
 from .memory import lock, read_json, write_json
 from .models import HOOKLESS
-from .pane import DRAFT_GATE
+from .pane import DRAFT_EXPIRY, DRAFT_GATE
 from .runtime import HERDR_ERRORS, CaptainError, check_text
 
 ACTIONS = ("read", "search", "edit", "test", "build", "format", "commit", "version", "delete")
@@ -261,6 +261,17 @@ def bounce(crew, message_id, reason):
             )
 
 
+def stale_draft(prior, draft):
+    """Whether this same draft has already held the doorbell for DRAFT_EXPIRY.
+
+    A hold that never ends is its own failure: before this, one unreadable composer kept a
+    crew's mail for the rest of the session and a human had to clear it by hand.
+    """
+    if not prior or prior.get("draft") != draft or prior.get("draft_since") is None:
+        return False
+    return time.time() - prior["draft_since"] >= DRAFT_EXPIRY
+
+
 def ring(crew, message_id):
     """Best-effort doorbell: a held gate or a broken doorbell waits for the next drain.
 
@@ -269,15 +280,22 @@ def ring(crew, message_id):
     Mail is already durable, so no outcome here can lose the message.
     """
     prior = last_ring(crew)
-    landed, unreachable, gate = False, None, None
+    landed, unreachable, gate, draft = False, None, None, None
     # A landed retry for this id stays content-free so the 600s drain never retypes work.
     text = None
     if not (prior and prior["id"] == message_id and prior["landed"]):
         text = next((m["text"] for m in unread(crew) if m["id"] == message_id), None)
     try:
-        gate = crew.pane.nudge_block(crew)
+        pane = crew.pane
+        gate = pane.nudge_block(crew)
+        if gate == DRAFT_GATE:
+            draft = pane.draft(crew.record.get("provider"))
+            if stale_draft(prior, draft):
+                # An expired draft stops holding, but the body never joins a human's
+                # half-written sentence: ring the inbox line alone, which is a valid ring.
+                gate, text = None, None
         if gate is None:
-            crew.pane.nudge(crew, text)
+            pane.nudge(crew, text)
             landed = True
     except HERDR_ERRORS as exc:
         unreachable = str(exc)
@@ -286,6 +304,11 @@ def ring(crew, message_id):
     # The one record of a ring, so drain can tell a held doorbell from one the crew already got.
     now = time.time()
     record = {"id": message_id, "at": now, "landed": landed, "gate": gate}
+    if draft is not None:
+        # Age the draft itself, not the message: a human who edits their line starts the clock
+        # over, and only an unchanged one expires.
+        carried = prior.get("draft_since") if prior and prior.get("draft") == draft else None
+        record["draft"], record["draft_since"] = draft, carried or now
     if not landed:
         held_over = bool(prior) and prior["id"] == message_id and not prior["landed"]
         record["held_since"] = (prior.get("held_since") or prior["at"]) if held_over else now
