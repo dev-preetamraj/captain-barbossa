@@ -66,7 +66,13 @@ def active(state, crew, assignment_id=None, incarnation=None):
     if assignment["incarnation_id"] != crew.record["incarnation_id"]:
         raise CaptainError("Stale crew incarnation.")
     if assignment_id is not None and assignment_id != key:
-        raise CaptainError("Stale assignment ID.")
+        # Name the live one. A crew's launch-bound CAPTAIN_ASSIGNMENT goes stale the
+        # moment the captain hands off, and a bare refusal left it unable to discover
+        # what replaced it: it could not report, and `ask` was stale too.
+        raise CaptainError(
+            f"Stale assignment ID {assignment_id}; this crew's live assignment is {key}. "
+            f"Retry with --assignment {key}."
+        )
     if incarnation is not None and incarnation != assignment["incarnation_id"]:
         raise CaptainError("Stale crew incarnation.")
     return assignment
@@ -166,10 +172,18 @@ def change(crew, args, project):
         # arrived mid-turn only ever surfaced as "go and run inbox". Deliver it instead.
         deliver_before_done(crew)
     with checkpoint(crew.session.directory) as state:
-        assignment = active(state, crew, assignment_id, incarnation)
+        # `ask` is the crew's only way to reach the captain, so it binds to whatever
+        # assignment is live rather than to the id the crew was launched with. A crew
+        # holding a retired id could otherwise neither finish nor ask why, and the Stop
+        # hook kept re-blocking it for the unfinished assignment it could not escape.
+        # Every other command keeps the explicit id, because a report must not silently
+        # attach itself to an assignment the captain replaced.
+        assignment = active(
+            state, crew, None if args.command == "ask" else assignment_id, incarnation
+        )
         if args.command == "check":
             check_action(assignment, project, args.action, args.path)
-            return {"assignment_id": assignment_id, "allowed": True}
+            return {"assignment_id": assignment["id"], "allowed": True}
         if assignment["state"] == "done":
             raise CaptainError("Assignment is already done.")
         if args.command == "ask":
@@ -180,7 +194,7 @@ def change(crew, args, project):
             assignment["question"] = question
             assignment["state"] = "asked"
             notice(assignment, "asked", f"{question['id']}: {args.question}")
-            return {"assignment_id": assignment_id, "question_id": question["id"]}
+            return {"assignment_id": assignment["id"], "question_id": question["id"]}
         check_text(args.report, "report")
         if assignment["question"]:
             raise CaptainError("Answer the pending question before done.")
@@ -191,7 +205,7 @@ def change(crew, args, project):
         assignment["report"] = args.report
         assignment["state"] = "done"
         notice(assignment, "done", args.report)
-        return {"assignment_id": assignment_id, "status": "done"}
+        return {"assignment_id": assignment["id"], "status": "done"}
 
 
 def deliver_before_done(crew):
@@ -570,33 +584,42 @@ def poll(crew, ack=None, modal=True):
                 status, event = notified[-1]
                 summary = str(event.get("message") or event.get("last-assistant-message") or "")
                 if status == "awaiting_approval":
+                    # One approval reaches us twice: a PermissionRequest hook and a
+                    # permission_prompt Notification, usually in separate polls. Until
+                    # something proves the prompt cleared, the second is the same news.
+                    if native_status == status:
+                        assignment["offset"] = offset
+                        return result(crew, assignment, "working")
                     summary = APPROVAL_SUMMARY
                     native_status = status
                 elif assignment.get("idle_seen"):
                     assignment["offset"] = offset
+                    # A turn that ran proves any approval cleared; the next one is news.
+                    assignment["native_status"] = None
                     return result(crew, assignment, "working")
                 else:
                     # One idle per delivered message; every later crew turn also ends idle.
                     assignment["idle_seen"] = True
+                    native_status = None
             else:
                 # Live state rather than a consumed event, so native_status is its only dedupe.
+                read_pane = modal and crew.record.get("provider") in MODAL_PROVIDERS
                 if not crew.record.get("pane") and crew.record.get("status") == "needs_attention":
                     status, summary = (
                         "error",
                         "Crew startup failed; inspect before explicit done/handoff.",
                     )
-                elif (
-                    modal
-                    and crew.record.get("provider") in MODAL_PROVIDERS
-                    and crew.pane.choice_modal()
-                ):
+                elif read_pane and crew.pane.choice_modal():
                     status, summary = "awaiting_approval", APPROVAL_SUMMARY
                 else:
                     status = None
                 if status is None or status == native_status:
                     assignment["offset"] = offset
-                    if status is None and modal:
-                        # The screen is clear, so the next modal is news again.
+                    if status is None and read_pane:
+                        # A pane we LOOKED at and found clear means the next modal is news.
+                        # Only then: a provider whose approvals arrive as events is never
+                        # looked at here, and clearing on that absence wiped the dedupe on
+                        # every poll, so one approval surfaced once per event reporting it.
                         assignment["native_status"] = None
                     return result(crew, assignment, "working")
                 native_status = status

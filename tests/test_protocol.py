@@ -679,6 +679,14 @@ class ProtocolTests(unittest.TestCase):
                     ("ask", "Jack", "Question?"),
                     ("done", "Jack", "--report", "Finished"),
                 ):
+                    # One deliberate exemption: a merely STALE assignment no longer
+                    # blocks `ask`, because that is the crew's only escalation channel
+                    # and refusing it wedged a handed-off crew that could neither report
+                    # nor ask why. StaleAssignmentTests covers the exempt case. A foreign
+                    # crew, a wrong incarnation and a missing id all still reject `ask`,
+                    # because those are the cases where the actor itself is unproven.
+                    if (key, value, command[0]) == ("CAPTAIN_ASSIGNMENT", "old", "ask"):
+                        continue
                     with contextlib.redirect_stderr(io.StringIO()):
                         self.assertEqual(self.run_cli(*command)[0], 1)
         self.assertEqual(self.saved()["state"], "working")
@@ -1024,3 +1032,104 @@ class BusyRingTests(unittest.TestCase):
 
     def test_a_human_draft_holds_the_ring(self):
         self.assertEqual(self.gate("claude", "idle", draft=True), DRAFT_GATE)
+
+
+class StaleAssignmentTests(unittest.TestCase):
+    """A crew holding a retired assignment id must still be able to reach the captain.
+
+    Observed live: after `assign --handoff`, the crew's launch-bound CAPTAIN_ASSIGNMENT
+    still named the retired assignment, so `done` AND `ask` both raised "Stale assignment
+    ID". It could not report and could not ask why, while the Stop hook kept re-blocking
+    it for the unfinished assignment. It burned eight probe commands and gave up.
+    """
+
+    command = ProtocolTests.command
+
+    def setUp(self):
+        ProtocolTests.setUp(self)
+        self.first = self.assignment["id"]
+        self.command("done", report="first pass done; handing off")
+        pending = protocol.poll(self.crew)  # the done notice; handoff needs it acknowledged
+        protocol.poll(self.crew, pending["delivery_id"])
+        self.second = protocol.begin(
+            self.crew, self.project, "second", ["src"], ["edit"], handoff=self.first
+        )["id"]
+
+    def crew_env(self):
+        """The crew's launch-bound environment, still naming the retired assignment."""
+        return patch.dict(
+            os.environ,
+            {
+                "CAPTAIN_ROLE": "crew",
+                "CAPTAIN_CREW": "jack",
+                "CAPTAIN_INCARNATION": "first",
+                "CAPTAIN_ASSIGNMENT": self.first,
+            },
+        )
+
+    def run_as_crew(self, command, **kwargs):
+        args = SimpleNamespace(command=command, assignment=None, incarnation="first", **kwargs)
+        with self.crew_env():
+            return protocol.change(self.crew, args, self.project)
+
+    def live(self):
+        return memory.read_json(self.directory / "protocol.json")["assignments"][self.second]
+
+    def test_ask_still_reaches_the_captain_on_a_stale_id(self):
+        result = self.run_as_crew("ask", question="Which assignment am I on?")
+        self.assertEqual(result["assignment_id"], self.second)
+        self.assertEqual(self.live()["question"]["text"], "Which assignment am I on?")
+
+    def test_done_names_the_live_assignment_so_the_crew_can_recover(self):
+        with self.assertRaises(CaptainError) as refusal:
+            self.run_as_crew("done", report="33 test files found under tests/")
+        message = str(refusal.exception)
+        self.assertIn(self.first, message)
+        self.assertIn(self.second, message)
+        self.assertIn(f"--assignment {self.second}", message)
+
+    def test_done_against_the_named_live_assignment_succeeds(self):
+        args = SimpleNamespace(
+            command="done",
+            assignment=self.second,
+            incarnation="first",
+            report="33 test files found under tests/",
+        )
+        with self.crew_env():
+            self.assertEqual(protocol.change(self.crew, args, self.project)["status"], "done")
+
+
+class ApprovalDedupeTests(unittest.TestCase):
+    """One approval must wake the captain once, not once per event that reports it.
+
+    Observed live: a single approval surfaced three times, including after it had
+    been granted. Claude reports one approval twice - a PermissionRequest hook and a
+    permission_prompt Notification - and native_status deduped only the pane-read path.
+    """
+
+    def setUp(self):
+        ProtocolTests.setUp(self)
+        self.crew.record["provider"] = "claude"
+
+    event = ProtocolTests.event
+
+    def surfaced(self):
+        """Poll once, acknowledging anything it reports; return the status."""
+        response = protocol.poll(self.crew)
+        if response["delivery_id"]:
+            protocol.poll(self.crew, response["delivery_id"])
+        return response["status"]
+
+    def test_the_two_events_for_one_approval_surface_once(self):
+        self.event({"hook_event_name": "PermissionRequest"})
+        self.assertEqual(self.surfaced(), "awaiting_approval")
+        self.event({"hook_event_name": "Notification", "notification_type": "permission_prompt"})
+        self.assertEqual(self.surfaced(), "working")
+
+    def test_a_turn_that_ran_makes_the_next_approval_news_again(self):
+        self.event({"hook_event_name": "PermissionRequest"})
+        self.assertEqual(self.surfaced(), "awaiting_approval")
+        self.event({"hook_event_name": "Stop"})
+        self.surfaced()
+        self.event({"hook_event_name": "PermissionRequest"})
+        self.assertEqual(self.surfaced(), "awaiting_approval")
