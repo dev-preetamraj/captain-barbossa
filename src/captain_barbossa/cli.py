@@ -5,11 +5,12 @@ import json
 import os
 import sys
 
-from . import __version__, config, inspection, protocol
+from . import __version__, config, do, inspection, protocol
 from .agents import (
     create_crew,
     dismiss_crew,
     focus_crew,
+    interrupt_crew,
     launch,
     protocol_command,
     run_dashboard,
@@ -24,9 +25,11 @@ from .memory import (
     PRUNE_DAYS,
     REPO_RELATIONS,
     RULEBOOK_FILES,
+    mail_context,
     memory,
     project_root,
     read_session,
+    receipt_for,
 )
 from .models import PROVIDERS, TIER_NAMES
 from .onboarding import bootstrap
@@ -54,6 +57,7 @@ def parser():
     )
     commands = root.add_subparsers(dest="command")
     inspection.add_arguments(commands)
+    do.add_arguments(commands)
     crew = commands.add_parser("crew", help="create a native crew after agent and pane/tab choices")
     crew.add_argument(
         "name", nargs="?", help="Pirates character name (automatically assigned when omitted)"
@@ -133,6 +137,11 @@ def parser():
     model.add_argument("model", help=f"tier ({'|'.join(TIER_NAMES)}), model name, or alias")
     focus = commands.add_parser("focus", help="focus an existing crew's pane and tab")
     focus.add_argument("name", help="crew name or ID (case-insensitive)")
+    stop = commands.add_parser(
+        "interrupt", help="stop a crew's current turn, keeping its pane and assignment"
+    )
+    stop.add_argument("name", help="crew name or ID (case-insensitive)")
+    stop.add_argument("--reason", help="why, recorded in session memory")
     commands.add_parser("session", help="print the current session id")
     commands.add_parser("update", help="upgrade the installed captain-barbossa tool")
     start = commands.add_parser("init", help="write a commented .captain/settings.toml template")
@@ -251,15 +260,18 @@ def print_session(args):
 
 
 def print_inbox(args, pane, project):
+    """Mail for a crew with no delivery hook, and a manual re-read for one that has.
+
+    Same renderer as the hook, so the two never show the crew different things.
+    """
     _, crew = Crew.for_args(args, pane, project)
-    messages = protocol.unread(crew)
-    if not messages:
+    body = mail_context(crew.events)
+    if body is None:
         print("No mail.")
         return
-    for message in messages:
-        print(message["text"])
-        print()
-    protocol.mark_read(crew, [message["id"] for message in messages])
+    print(body)
+    sys.stdout.flush()
+    receipt_for(crew.events)
 
 
 def pump_mail(args, pane, project):
@@ -322,6 +334,10 @@ def main(argv=None):
             switch_model(args, pane, project)
         elif args.command == "focus":
             focus_crew(args, pane, project)
+        elif args.command == "interrupt":
+            interrupt_crew(args, pane, project)
+        elif args.command == "do":
+            do.run(args, read_session(project, args.session, pane).directory, project)
         elif args.command == "dashboard":
             run_dashboard(args, pane, project)
         elif args.command == "dismiss":

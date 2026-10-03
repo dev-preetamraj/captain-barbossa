@@ -8,11 +8,13 @@ from pathlib import Path
 from uuid import uuid4
 
 from .memory import lock, read_json, write_json
-from .models import HOOKLESS
+from .models import HOOK_DELIVERED, HOOKLESS
 from .pane import DRAFT_EXPIRY, DRAFT_GATE
 from .runtime import HERDR_ERRORS, CaptainError, check_text
 
 ACTIONS = ("read", "search", "edit", "test", "build", "format", "commit", "version", "delete")
+# Our own ring is still painting for about this long, so a draft seen inside it is ours.
+ECHO_GRACE = 2
 # Native "working" is a wake, not news: it fires at recruit and at every crew turn end.
 NOTIFIED = {"done": "idle", "idle": "idle", "blocked": "awaiting_approval"}
 APPROVAL_SUMMARY = "Inspect native approval prompt; approval is not granted by this event."
@@ -62,7 +64,12 @@ def active(state, crew, assignment_id=None, incarnation=None):
     if assignment["incarnation_id"] != crew.record["incarnation_id"]:
         raise CaptainError("Stale crew incarnation.")
     if assignment_id is not None and assignment_id != key:
-        raise CaptainError("Stale assignment ID.")
+        # Name the live one: a crew whose launch-bound id went stale at handoff has no
+        # other way to discover what replaced it.
+        raise CaptainError(
+            f"Stale assignment ID {assignment_id}; this crew's live assignment is {key}. "
+            f"Retry with --assignment {key}."
+        )
     if incarnation is not None and incarnation != assignment["incarnation_id"]:
         raise CaptainError("Stale crew incarnation.")
     return assignment
@@ -156,11 +163,20 @@ def check_action(assignment, project, action, paths):
 
 def change(crew, args, project):
     assignment_id, incarnation = validate_actor(crew, args)
+    if args.command == "done":
+        # `done` is the crew's last action, so it runs before the Stop hook and a refusal
+        # here pre-empts that delivery. Hand the mail over rather than naming a command.
+        deliver_before_done(crew)
     with checkpoint(crew.session.directory) as state:
-        assignment = active(state, crew, assignment_id, incarnation)
+        # `ask` binds to the live assignment, not the launch-bound id: it is the crew's
+        # only way out, and a stale id used to block it. Everything else keeps the explicit
+        # id, so a report never attaches to an assignment the captain replaced.
+        assignment = active(
+            state, crew, None if args.command == "ask" else assignment_id, incarnation
+        )
         if args.command == "check":
             check_action(assignment, project, args.action, args.path)
-            return {"assignment_id": assignment_id, "allowed": True}
+            return {"assignment_id": assignment["id"], "allowed": True}
         if assignment["state"] == "done":
             raise CaptainError("Assignment is already done.")
         if args.command == "ask":
@@ -171,16 +187,32 @@ def change(crew, args, project):
             assignment["question"] = question
             assignment["state"] = "asked"
             notice(assignment, "asked", f"{question['id']}: {args.question}")
-            return {"assignment_id": assignment_id, "question_id": question["id"]}
+            return {"assignment_id": assignment["id"], "question_id": question["id"]}
         check_text(args.report, "report")
         if assignment["question"]:
             raise CaptainError("Answer the pending question before done.")
         if unread(crew):
-            raise CaptainError("Unread mail is waiting; run inbox before done.")
+            # Raced past deliver_before_done; the retry hands it over.
+            raise CaptainError("Mail arrived while this report was being filed; retry done.")
         assignment["report"] = args.report
         assignment["state"] = "done"
         notice(assignment, "done", args.report)
-        return {"assignment_id": assignment_id, "status": "done"}
+        return {"assignment_id": assignment["id"], "status": "done"}
+
+
+def deliver_before_done(crew):
+    """Hand over mail that arrived mid-turn, as the refusal itself, then refuse.
+
+    Called outside the protocol lock, because the receipt takes it.
+    """
+    messages = unread(crew)
+    if not messages:
+        return
+    body = render(crew.session.directory, messages)
+    receipt(crew.session.directory, crew.crew_id, [message["id"] for message in messages])
+    raise CaptainError(
+        f"{body}\n\nThat mail arrived before this report. Act on it, then run done again."
+    )
 
 
 def mail_dir(directory, crew_id):
@@ -218,11 +250,11 @@ def unread(crew):
     return queued(crew.session.directory, crew.crew_id)
 
 
-def mark_read(crew, ids):
-    """The crew's own read writes the receipt; a bounced message is never resurrected."""
-    directory = mail_dir(crew.session.directory, crew.crew_id)
+def receipt(session_directory, crew_id, ids):
+    """The one writer of `read`, for the crew's own `inbox` and for a delivery hook."""
+    directory = mail_dir(session_directory, crew_id)
     receipts = {}
-    with lock(crew.session.directory / "protocol.lock"):
+    with lock(session_directory / "protocol.lock"):
         for message_id in ids:
             path = directory / f"{message_id}.json"
             message = read_json(path)
@@ -233,13 +265,40 @@ def mark_read(crew, ids):
                 receipts.setdefault(message.get("assignment_id"), []).append(message_id)
     # checkpoint takes protocol.lock too, so mirror the receipt after the mail writes, like bounce.
     if receipts:
-        with checkpoint(crew.session.directory) as state:
+        with checkpoint(session_directory) as state:
             for assignment_id, read_ids in receipts.items():
                 assignment = state["assignments"].get(assignment_id)
                 for message in assignment["messages"] if assignment else ():
                     # A second read finds the mail already off "queued", so nothing to mirror.
                     if message["id"] in read_ids and message["delivery"] == "sent":
                         message["delivery"] = "read"
+
+
+def mark_read(crew, ids):
+    """The crew's own read writes the receipt; a bounced message is never resurrected."""
+    receipt(crew.session.directory, crew.crew_id, ids)
+
+
+def render(session_directory, messages):
+    """The one rendering of mail for a model, shared by the hook, `inbox` and the ring."""
+    if not messages:
+        return None
+    state = read_json(session_directory / "protocol.json")
+    # Queued mail belongs to the crew's one active assignment; the first names it.
+    assignment = state["assignments"].get(messages[0].get("assignment_id"))
+    header = f"{identity(assignment)}\n\n" if assignment else ""
+    bodies = "\n\n".join(message["text"] for message in messages)
+    return f"Mail from the captain:\n\n{header}{bodies}"
+
+
+def identity(assignment):
+    """The crew's standing facts, rendered at read time so a follow-up never re-sends them."""
+    return (
+        f"Crew name: {assignment['crew']}.\n"
+        f"Assignment {assignment['id']}; incarnation {assignment['incarnation_id']}.\n"
+        f"Owned paths: {', '.join(assignment['paths']) or '(none)'}. "
+        f"Allowed actions: {', '.join(assignment['actions'])}."
+    )
 
 
 def bounce(crew, message_id, reason):
@@ -272,6 +331,11 @@ def stale_draft(prior, draft):
     return time.time() - prior["draft_since"] >= DRAFT_EXPIRY
 
 
+def echoing(prior):
+    """Whether a ring landed so recently that the composer may still be painting it."""
+    return bool(prior) and prior.get("landed") and time.time() - prior["at"] < ECHO_GRACE
+
+
 def ring(crew, message_id):
     """Best-effort doorbell: a held gate or a broken doorbell waits for the next drain.
 
@@ -280,16 +344,27 @@ def ring(crew, message_id):
     Mail is already durable, so no outcome here can lose the message.
     """
     prior = last_ring(crew)
+    provider = crew.record.get("provider")
     landed, unreachable, gate, draft = False, None, None, None
-    # A landed retry for this id stays content-free so the 600s drain never retypes work.
+    # A hook-delivered crew gets the bare wake line; its own hook supplies the body. A
+    # landed retry is content-free too, so the 600s drain never retypes work.
     text = None
-    if not (prior and prior["id"] == message_id and prior["landed"]):
-        text = next((m["text"] for m in unread(crew) if m["id"] == message_id), None)
+    if provider not in HOOK_DELIVERED and not (
+        prior and prior["id"] == message_id and prior["landed"]
+    ):
+        # The ring is this crew's only channel, so it carries the rendered body: it may
+        # act straight off the ring without ever running `inbox`.
+        message = next((m for m in unread(crew) if m["id"] == message_id), None)
+        text = render(crew.session.directory, [message] if message else [])
     try:
         pane = crew.pane
         gate = pane.nudge_block(crew)
+        if gate == DRAFT_GATE and echoing(prior):
+            # Our own echo, not a human. Leave the prior stamp alone and let drain retry,
+            # rather than starting a hold clock against a crew that has its doorbell.
+            return
         if gate == DRAFT_GATE:
-            draft = pane.draft(crew.record.get("provider"))
+            draft = pane.draft(provider)
             if stale_draft(prior, draft):
                 # An expired draft stops holding, but the body never joins a human's
                 # half-written sentence: ring the inbox line alone, which is a valid ring.
@@ -389,14 +464,9 @@ def deliver(crew, text, *, assignment_id=None, question_id=None, initial=False):
             "delivery": "sent",
         }
         assignment_id = assignment["id"]
-        prompt = (
-            f"Crew name: {assignment['crew']}.\n"
-            f"Assignment {assignment_id}; incarnation {assignment['incarnation_id']}; "
-            f"message {message['id']}.\n"
-            f"Owned paths: {', '.join(assignment['paths']) or '(none)'}. "
-            f"Allowed actions: {', '.join(assignment['actions'])}.\n{text}"
-        )
-        enqueue(crew, prompt, message["kind"], assignment_id, message["id"])
+        # The body is the captain's text alone; identity() renders the standing facts at
+        # read time, once per delivery, for the hook and for `inbox` alike.
+        enqueue(crew, text, message["kind"], assignment_id, message["id"])
         assignment["messages"].append(message)
         mark_sent(assignment, message)
     ring(crew, message["id"])
@@ -488,33 +558,40 @@ def poll(crew, ack=None, modal=True):
                 status, event = notified[-1]
                 summary = str(event.get("message") or event.get("last-assistant-message") or "")
                 if status == "awaiting_approval":
+                    # One approval arrives twice, as a PermissionRequest hook and a
+                    # permission_prompt Notification, usually in separate polls.
+                    if native_status == status:
+                        assignment["offset"] = offset
+                        return result(crew, assignment, "working")
                     summary = APPROVAL_SUMMARY
                     native_status = status
                 elif assignment.get("idle_seen"):
                     assignment["offset"] = offset
+                    # A turn that ran proves the approval cleared.
+                    assignment["native_status"] = None
                     return result(crew, assignment, "working")
                 else:
                     # One idle per delivered message; every later crew turn also ends idle.
                     assignment["idle_seen"] = True
+                    native_status = None
             else:
                 # Live state rather than a consumed event, so native_status is its only dedupe.
+                read_pane = modal and crew.record.get("provider") in MODAL_PROVIDERS
                 if not crew.record.get("pane") and crew.record.get("status") == "needs_attention":
                     status, summary = (
                         "error",
                         "Crew startup failed; inspect before explicit done/handoff.",
                     )
-                elif (
-                    modal
-                    and crew.record.get("provider") in MODAL_PROVIDERS
-                    and crew.pane.choice_modal()
-                ):
+                elif read_pane and crew.pane.choice_modal():
                     status, summary = "awaiting_approval", APPROVAL_SUMMARY
                 else:
                     status = None
                 if status is None or status == native_status:
                     assignment["offset"] = offset
-                    if status is None and modal:
-                        # The screen is clear, so the next modal is news again.
+                    if status is None and read_pane:
+                        # Only a pane we actually looked at clears the dedupe. Clearing on
+                        # the absence of a read wiped it every poll for event-driven
+                        # providers, which is how one approval surfaced once per event.
                         assignment["native_status"] = None
                     return result(crew, assignment, "working")
                 native_status = status
@@ -529,7 +606,16 @@ def poll(crew, ack=None, modal=True):
 
 
 def wait(crew, timeout, ack=None):
-    """Poll on native signals; the one pane read a hookless provider needs is throttled."""
+    """Poll on native signals; the one pane read a hookless provider needs is throttled.
+
+    A wait that reaches its deadline with nothing to report returns `timeout`, and a
+    captain reading that is a model turn spent to learn nothing. `timeout` therefore
+    exists only for a caller that asked for a bounded look (`--timeout`, including 0 for
+    "report what has already arrived"); the configured default is a full day, long enough
+    that quiet never wakes anyone. This is the no-daemon equivalent of a watcher process:
+    the captain already backgrounds this, so keeping it quiet costs nothing, while
+    returning early costs a whole context.
+    """
     deadline = time.monotonic() + timeout
     looked = None
     while True:

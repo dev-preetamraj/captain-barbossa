@@ -315,6 +315,32 @@ def focus_crew(args, pane, project):
     print(f"Focused {crew.display_name}.")
 
 
+def interrupt_crew(args, pane, project):
+    """Stop a crew's current turn, keeping its pane, conversation and assignment.
+
+    The lifecycle channel beside mail: mail is read at a turn boundary, which is right
+    for a message and wrong for "stop". Escape leaves the session alive, so nothing is
+    torn down and no work is discarded.
+    """
+    current, crew = Crew.for_args(args, pane, project)
+    if crew.is_dismissed:
+        raise CaptainError(f"{crew.display_name} was already dismissed.")
+    try:
+        runtime.herdr("agent", "send-keys", crew.record["agent"], "escape")
+    except CaptainError as exc:
+        raise CaptainError(f"Could not interrupt {crew.display_name}: {exc}") from exc
+    add_memory(current.graph, crew.record["agent"], "interrupted", args.reason or "captain")
+    # It is idle now, so ring whatever the busy turn held rather than making the captain
+    # wait out the drain cooldown for the instruction they interrupted to give.
+    waiting = protocol.unread(crew)
+    if waiting:
+        protocol.ring(crew, waiting[0]["id"])
+    print(
+        f"Interrupted {crew.display_name}."
+        + (f" Rang {len(waiting)} waiting message(s)." if waiting else "")
+    )
+
+
 def status_crew(args, pane, project):
     """Print a table of this session's crew, refreshing status from Herdr best-effort."""
     current = read_session(project, args.session, pane)

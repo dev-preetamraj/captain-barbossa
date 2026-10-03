@@ -64,14 +64,29 @@ Key facts:
   Codex `notify`), which append JSON lines to `sessions/<id>/events/<crew>.jsonl`.
   `wait` tails that file from a `.cursor` offset; pane reading is only a fallback for
   when no event has arrived. Filter Codex's title-generation turn. Claude's `Stop` hook
-  also blocks: while the crew has unread mail, or an unfinished assignment with no
-  pending question, it returns a blocking stop decision so the crew stays active. A
-  crew awaiting an answer may stop. Codex and pi cannot block; the hook fails open.
-- `assign`/`tell`/`answer` write mail (`sessions/<id>/mail/<crew>/<id>.json`).
-  The first ring prompts that body as a trusted Herdr agent prompt plus a line
-  to run `captain inbox NAME`, which writes the read receipt; a landed retry
-  is content-free. `done` refuses while mail is unread, and dismissing a crew
-  with unread mail bounces it with a reason.
+  also blocks on an unfinished assignment with no pending question, so the crew stays
+  active. A crew awaiting an answer may stop. Codex and pi cannot block; it fails open.
+- `assign`/`tell`/`answer` write mail (`sessions/<id>/mail/<crew>/<id>.json`). The body
+  is the captain's text alone: `protocol.render` adds the identity block at read time
+  and `protocol.receipt` is the one writer of `read`.
+- A provider in `models.HOOK_DELIVERED` (claude) is handed its mail by its own hook on
+  `SessionStart`/`UserPromptSubmit`/`Stop` as `additionalContext`, stamped only after
+  the body is flushed. Its doorbell is payload-free (`pane.WAKE_LINE`) and it is never
+  told to fetch mail. Everyone else gets the rendered body on the first ring and writes
+  the receipt by running `captain inbox NAME`, which stays for every provider as a
+  manual re-read; a landed retry is content-free.
+- A busy crew holds the ring, so mail sent mid-turn lands at the turn boundary: the
+  `done` refusal carries the body when the crew reports, the `Stop` hook when it does
+  not. Dismissing a crew with unread mail bounces it with a reason.
+- `captain do` is the write side of `captain inspect`: `commit`, `push`, `branch`, and
+  `run <target>` for a Makefile target in `do.RUNNABLE`. Not built on `inspection`'s
+  hardened Git, which strips the user config, hooks and credentials a write needs;
+  safety is the fixed verb set instead. Amend, reset, rebase, force push, deletion and
+  release stay with the user. Every run appends a `{"type": "quiet", ...}` record to
+  `events/captain.jsonl`, raised if it cannot be written, because work with no pane is
+  reviewable only through that record.
+- The delegation axis is judgment, not file-touching: `make test` writes nothing and
+  needs no crew, while research changes no file and does.
 - Settings layer bottom to top: `defaults.toml` (package data, the only place a default
   is written), `~/.captain/settings.toml`, the project's `.captain/settings.toml`, then
   CLI flags. Read a value with `config.lookup/text/flag/number` when the command needs

@@ -15,6 +15,9 @@ from captain_barbossa.pane import DRAFT_GATE, Pane
 from captain_barbossa.runtime import CaptainError
 from tests import home_isolation  # noqa: F401
 
+# ProtocolTests.setUp stubs nudge_block, so a test of the gate itself restores this.
+REAL_NUDGE_BLOCK = Pane.nudge_block
+
 
 class ProtocolTests(unittest.TestCase):
     def setUp(self):
@@ -55,6 +58,10 @@ class ProtocolTests(unittest.TestCase):
             protocol.mail_dir(session.directory, crew_id) / f"{message_id}.json"
         )
 
+    def rendered(self, message_id):
+        """What a crew without a delivery hook reads off its ring: identity plus body."""
+        return protocol.render(self.current.directory, [self.mail(message_id)])
+
     def saved(self):
         return memory.read_json(self.directory / "protocol.json")["assignments"][
             self.assignment["id"]
@@ -87,10 +94,10 @@ class ProtocolTests(unittest.TestCase):
         for message_id, text in ((first, "original"), (second, "followup")):
             mail = self.mail(message_id)
             self.assertEqual(mail["state"], "queued")
-            self.assertTrue(
-                mail["text"].startswith(f"Crew name: Jack.\nAssignment {saved['id']}; ")
-            )
-            self.assertIn(text, mail["text"])
+            # The body is the captain's text alone; identity renders at read time.
+            self.assertEqual(mail["text"], text)
+        header = protocol.identity(saved)
+        self.assertTrue(header.startswith(f"Crew name: Jack.\nAssignment {saved['id']}; "))
 
     def test_a_failed_enqueue_leaves_no_sent_message_and_allows_retry(self):
         real_write_json = protocol.write_json
@@ -156,7 +163,7 @@ class ProtocolTests(unittest.TestCase):
             clock[0] += protocol.DRAIN_INTERVAL + 1
             protocol.poll(self.crew)
             protocol.poll(self.crew)
-            nudge.assert_called_once_with(self.crew, self.mail(message_id)["text"])
+            nudge.assert_called_once_with(self.crew, self.rendered(message_id))
 
     def test_a_landed_ring_is_not_repeated_by_the_next_poll(self):
         """The delivery ring already landed, so a wait a second later must not nudge again."""
@@ -166,7 +173,7 @@ class ProtocolTests(unittest.TestCase):
             patch.object(Pane, "nudge") as nudge,
         ):
             message_id = protocol.deliver(self.crew, "original", initial=True)
-            body = self.mail(message_id)["text"]
+            body = self.rendered(message_id)
             nudge.assert_called_once_with(self.crew, body)
             self.assertEqual(
                 memory.read_json(protocol.drain_stamp(self.crew)),
@@ -455,12 +462,17 @@ class ProtocolTests(unittest.TestCase):
             with self.assertRaises(CaptainError):
                 self.command("done", report="forged")
 
-    def test_done_refuses_while_answer_mail_is_unread(self):
+    def test_done_hands_over_unread_mail_in_the_refusal_itself(self):
+        """`done` pre-empts Stop delivery, so its refusal carries the body itself."""
         asked = self.command("ask", question="Which path?")
-        message_id = protocol.deliver(self.crew, "src", question_id=asked["question_id"])
-        with self.assertRaisesRegex(CaptainError, "inbox"):
+        protocol.deliver(self.crew, "src", question_id=asked["question_id"])
+        with self.assertRaises(CaptainError) as refusal:
             self.command("done", report="src/a.py changed; tests pass; nothing left")
-        protocol.mark_read(self.crew, [message_id])
+        self.assertIn("src", str(refusal.exception))
+        self.assertIn("Crew name: Jack.", str(refusal.exception))
+        self.assertNotIn("inbox", str(refusal.exception))
+        # The refusal stamped the receipt, so the retry needs no manual read.
+        self.assertEqual(protocol.unread(self.crew), [])
         self.command("done", report="src/a.py changed; tests pass; nothing left")
         self.assertEqual(self.saved()["state"], "done")
 
@@ -664,6 +676,11 @@ class ProtocolTests(unittest.TestCase):
                     ("ask", "Jack", "Question?"),
                     ("done", "Jack", "--report", "Finished"),
                 ):
+                    # One exemption: a merely stale assignment no longer blocks `ask`,
+                    # the crew's only escalation channel (see StaleAssignmentTests). A
+                    # foreign crew, wrong incarnation or missing id still reject it.
+                    if (key, value, command[0]) == ("CAPTAIN_ASSIGNMENT", "old", "ask"):
+                        continue
                     with contextlib.redirect_stderr(io.StringIO()):
                         self.assertEqual(self.run_cli(*command)[0], 1)
         self.assertEqual(self.saved()["state"], "working")
@@ -896,3 +913,250 @@ class ProtocolTests(unittest.TestCase):
         self.assertIn(f"/bin/sh {launcher}", str(error.exception))
         self.assertIn(f"herdr agent rename w1:p2 {crew_agent}", str(error.exception))
         self.assertIn(f"herdr agent get {crew_agent}", str(error.exception))
+
+
+class HookDeliveryTests(unittest.TestCase):
+    """A crew whose own hook delivers its mail: nothing of the body crosses a terminal."""
+
+    def setUp(self):
+        ProtocolTests.setUp(self)
+        self.crew.record["provider"] = "claude"
+
+    def test_the_doorbell_carries_no_payload(self):
+        with patch.object(Pane, "nudge") as nudge:
+            protocol.deliver(self.crew, "original", initial=True)
+            nudge.assert_called_once_with(self.crew, None)
+
+    def test_a_retry_doorbell_is_the_same_call_as_the_first(self):
+        """Nothing to branch on, so a repeat is a no-op rather than a retyped assignment."""
+        clock = [1000.0]
+        with (
+            patch.object(protocol.time, "time", side_effect=lambda: clock[0]),
+            patch.object(Pane, "nudge") as nudge,
+        ):
+            protocol.deliver(self.crew, "original", initial=True)
+            clock[0] += protocol.DRAIN_LANDED_INTERVAL + 1
+            protocol.drain(self.crew)
+            self.assertEqual(nudge.call_args_list, [nudge.call_args_list[0]] * 2)
+
+    def test_the_wake_line_names_no_command_to_run(self):
+        from captain_barbossa.pane import WAKE_LINE, inbox_line
+
+        self.assertEqual(inbox_line(self.crew), WAKE_LINE)
+        self.assertNotIn("inbox", WAKE_LINE)
+
+
+class EchoGraceTests(unittest.TestCase):
+    """A composer read right after our own ring may be showing that ring, not a human."""
+
+    def setUp(self):
+        ProtocolTests.setUp(self)
+
+    def test_a_draft_inside_the_grace_window_starts_no_hold(self):
+        clock = [1000.0]
+        with (
+            patch.object(protocol.time, "time", side_effect=lambda: clock[0]),
+            patch.object(Pane, "nudge_block", return_value=None),
+        ):
+            message_id = protocol.deliver(self.crew, "original", initial=True)
+        landed = memory.read_json(protocol.drain_stamp(self.crew))
+        self.assertTrue(landed["landed"])
+        clock[0] += protocol.ECHO_GRACE - 0.5
+        with (
+            patch.object(protocol.time, "time", side_effect=lambda: clock[0]),
+            patch.object(Pane, "nudge_block", return_value=DRAFT_GATE),
+        ):
+            protocol.ring(self.crew, message_id)
+        # Unchanged: no hold clock was started against a crew that already has its doorbell.
+        self.assertEqual(memory.read_json(protocol.drain_stamp(self.crew)), landed)
+
+    def test_a_draft_past_the_grace_window_does_hold(self):
+        clock = [1000.0]
+        with (
+            patch.object(protocol.time, "time", side_effect=lambda: clock[0]),
+            patch.object(Pane, "nudge_block", return_value=None),
+        ):
+            message_id = protocol.deliver(self.crew, "original", initial=True)
+        clock[0] += protocol.ECHO_GRACE + 1
+        with (
+            patch.object(protocol.time, "time", side_effect=lambda: clock[0]),
+            patch.object(Pane, "nudge_block", return_value=DRAFT_GATE),
+            patch.object(Pane, "draft", return_value="half a sentence"),
+        ):
+            protocol.ring(self.crew, message_id)
+        record = memory.read_json(protocol.drain_stamp(self.crew))
+        self.assertEqual(record["gate"], DRAFT_GATE)
+        self.assertFalse(record["landed"])
+        self.assertEqual(record["draft"], "half a sentence")
+
+
+class BusyRingTests(unittest.TestCase):
+    """A busy crew holds the ring whatever its provider; its mail waits for the boundary."""
+
+    def setUp(self):
+        ProtocolTests.setUp(self)
+        self.enterContext(patch.object(Pane, "nudge_block", REAL_NUDGE_BLOCK))
+
+    def gate(self, provider, status, draft=False):
+        self.crew.record["provider"] = provider
+        with (
+            patch.object(Pane, "agent_status", return_value=status),
+            patch.object(Pane, "lines", return_value=[]),
+            patch.object(Pane, "_draft_pending", return_value=draft),
+        ):
+            return self.crew.pane.nudge_block(self.crew)
+
+    def test_a_busy_crew_holds_the_ring_whatever_its_provider(self):
+        for provider in ("claude", "codex", "pi", "grok"):
+            with self.subTest(provider=provider):
+                self.assertEqual(self.gate(provider, "working"), "agent not idle")
+
+    def test_an_idle_crew_is_rung(self):
+        for provider in ("claude", "codex"):
+            with self.subTest(provider=provider):
+                self.assertIsNone(self.gate(provider, "idle"))
+
+    def test_an_approval_prompt_holds_the_ring(self):
+        self.assertEqual(self.gate("claude", "blocked"), "approval prompt")
+
+    def test_a_human_draft_holds_the_ring(self):
+        self.assertEqual(self.gate("claude", "idle", draft=True), DRAFT_GATE)
+
+
+class StaleAssignmentTests(unittest.TestCase):
+    """A crew holding a retired assignment id must still be able to reach the captain.
+
+    Seen live after `assign --handoff`: `done` and `ask` both refused, so it could
+    neither report nor ask why, and the Stop hook kept re-blocking it.
+    """
+
+    command = ProtocolTests.command
+
+    def setUp(self):
+        ProtocolTests.setUp(self)
+        self.first = self.assignment["id"]
+        self.command("done", report="first pass done; handing off")
+        pending = protocol.poll(self.crew)  # the done notice; handoff needs it acknowledged
+        protocol.poll(self.crew, pending["delivery_id"])
+        self.second = protocol.begin(
+            self.crew, self.project, "second", ["src"], ["edit"], handoff=self.first
+        )["id"]
+
+    def crew_env(self):
+        """The crew's launch-bound environment, still naming the retired assignment."""
+        return patch.dict(
+            os.environ,
+            {
+                "CAPTAIN_ROLE": "crew",
+                "CAPTAIN_CREW": "jack",
+                "CAPTAIN_INCARNATION": "first",
+                "CAPTAIN_ASSIGNMENT": self.first,
+            },
+        )
+
+    def run_as_crew(self, command, **kwargs):
+        args = SimpleNamespace(command=command, assignment=None, incarnation="first", **kwargs)
+        with self.crew_env():
+            return protocol.change(self.crew, args, self.project)
+
+    def live(self):
+        return memory.read_json(self.directory / "protocol.json")["assignments"][self.second]
+
+    def test_ask_still_reaches_the_captain_on_a_stale_id(self):
+        result = self.run_as_crew("ask", question="Which assignment am I on?")
+        self.assertEqual(result["assignment_id"], self.second)
+        self.assertEqual(self.live()["question"]["text"], "Which assignment am I on?")
+
+    def test_done_names_the_live_assignment_so_the_crew_can_recover(self):
+        with self.assertRaises(CaptainError) as refusal:
+            self.run_as_crew("done", report="33 test files found under tests/")
+        message = str(refusal.exception)
+        self.assertIn(self.first, message)
+        self.assertIn(self.second, message)
+        self.assertIn(f"--assignment {self.second}", message)
+
+    def test_done_against_the_named_live_assignment_succeeds(self):
+        args = SimpleNamespace(
+            command="done",
+            assignment=self.second,
+            incarnation="first",
+            report="33 test files found under tests/",
+        )
+        with self.crew_env():
+            self.assertEqual(protocol.change(self.crew, args, self.project)["status"], "done")
+
+
+class ApprovalDedupeTests(unittest.TestCase):
+    """One approval must wake the captain once, not once per event that reports it.
+
+    Seen live three times for one approval, including after it was granted.
+    """
+
+    def setUp(self):
+        ProtocolTests.setUp(self)
+        self.crew.record["provider"] = "claude"
+
+    event = ProtocolTests.event
+
+    def surfaced(self):
+        """Poll once, acknowledging anything it reports; return the status."""
+        response = protocol.poll(self.crew)
+        if response["delivery_id"]:
+            protocol.poll(self.crew, response["delivery_id"])
+        return response["status"]
+
+    def test_the_two_events_for_one_approval_surface_once(self):
+        self.event({"hook_event_name": "PermissionRequest"})
+        self.assertEqual(self.surfaced(), "awaiting_approval")
+        self.event({"hook_event_name": "Notification", "notification_type": "permission_prompt"})
+        self.assertEqual(self.surfaced(), "working")
+
+    def test_a_turn_that_ran_makes_the_next_approval_news_again(self):
+        self.event({"hook_event_name": "PermissionRequest"})
+        self.assertEqual(self.surfaced(), "awaiting_approval")
+        self.event({"hook_event_name": "Stop"})
+        self.surfaced()
+        self.event({"hook_event_name": "PermissionRequest"})
+        self.assertEqual(self.surfaced(), "awaiting_approval")
+
+
+class InterruptTests(unittest.TestCase):
+    """The lifecycle channel: the only thing that reaches a crew mid-turn."""
+
+    def setUp(self):
+        ProtocolTests.setUp(self)
+
+    def interrupt(self, name="Jack", reason=None):
+        args = SimpleNamespace(name=name, session=self.current.meta["id"], reason=reason)
+        return agents.interrupt_crew(args, self.pane, self.project)
+
+    def test_it_sends_escape_and_keeps_the_assignment_open(self):
+        with patch.object(agents.runtime, "herdr") as herdr:
+            self.interrupt()
+        herdr.assert_called_once_with("agent", "send-keys", "jack", "escape")
+        saved = memory.read_json(self.directory / "protocol.json")["assignments"]
+        self.assertEqual(saved[self.assignment["id"]]["state"], "working")
+
+    def test_it_rings_mail_that_the_busy_turn_held(self):
+        """A captain who interrupts is usually interrupting in order to say something."""
+        message_id = protocol.deliver(self.crew, "stop, wrong file", initial=True)
+        with (
+            patch.object(agents.runtime, "herdr"),
+            patch.object(protocol, "ring") as ring,
+        ):
+            self.interrupt()
+        rung_crew, rung_id = ring.call_args.args
+        self.assertEqual((rung_crew.crew_id, rung_id), ("jack", message_id))
+
+    def test_it_records_why(self):
+        with patch.object(agents.runtime, "herdr"):
+            self.interrupt(reason="editing the wrong file")
+        recorded = json.dumps(memory.read_json(self.current.graph))
+        self.assertIn("interrupted", recorded)
+        self.assertIn("editing the wrong file", recorded)
+
+    def test_a_dismissed_crew_cannot_be_interrupted(self):
+        self.crew.record["status"] = "dismissed"
+        memory.write_json(self.current.meta_path, self.current.meta)
+        with self.assertRaisesRegex(CaptainError, "already dismissed"):
+            self.interrupt()

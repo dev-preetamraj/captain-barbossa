@@ -349,7 +349,7 @@ class TunableTests(unittest.TestCase):
 
     def test_the_shipped_defaults_are_the_ones_the_code_used_to_hardcode(self):
         self.assertEqual(config.text("crew", "model"), "cheap")
-        self.assertEqual(config.lookup("crew", "wait_timeout", kind=int), 900)
+        self.assertEqual(config.lookup("crew", "wait_timeout", kind=int), 86400)
         self.assertEqual(config.lookup("dashboard", "interval", kind=float), 2.0)
         self.assertEqual(agents.dashboard_ratio(), 0.8)
 
@@ -442,7 +442,7 @@ class TunableTests(unittest.TestCase):
             interval = true
             ratio = "wide"
         """)
-        self.assertEqual(config.lookup("crew", "wait_timeout", kind=int), 900)
+        self.assertEqual(config.lookup("crew", "wait_timeout", kind=int), 86400)
         self.assertEqual(config.lookup("dashboard", "interval", kind=float), 2.0)
         self.assertEqual(agents.dashboard_ratio(), 0.8)
 

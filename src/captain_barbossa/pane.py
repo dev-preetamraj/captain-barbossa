@@ -64,11 +64,19 @@ DRAFT_GATE = "user draft"
 DRAFT_EXPIRY = 1800
 
 
+# A hook-delivered crew's doorbell: one fixed string, safe to repeat and safe to drop,
+# because its own hook supplies the body. Dropping it delays a turn, it loses nothing.
+WAKE_LINE = "mail from the captain is waiting; keep working"
+
+
 def inbox_line(crew):
     """The one line every ring ends with. Defined once: nudge types it, and nudge_block has to
     recognise it on screen to tell our own echo from a human's draft."""
     from .instructions import captain_command
+    from .models import HOOK_DELIVERED
 
+    if crew.record.get("provider") in HOOK_DELIVERED:
+        return WAKE_LINE
     return (
         f"read your mail with `{captain_command(crew.session.directory.name)} inbox {crew.crew_id}`"
     )
@@ -290,6 +298,10 @@ class Pane:
             return "approval prompt"
         # Herdr reports a crew that just finished a turn as "done", not "idle"; it is as
         # ringable as idle, and every other status check here already pairs the two.
+        # A busy crew holds the ring whatever its provider: a mid-turn pane has no
+        # provable composer, so _draft_pending below would hold it regardless, and
+        # overriding that too means typing into a line that may hold a human's text.
+        # Its mail arrives at the turn boundary, via the `done` refusal or the Stop hook.
         if status not in ("idle", "done"):
             return "agent not idle"
         if self._draft_pending(crew.record.get("provider"), echo=inbox_line(crew)):

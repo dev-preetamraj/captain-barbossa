@@ -214,12 +214,12 @@ class CaptainFlowTests(unittest.TestCase):
 
     def test_instructions_require_captain_to_delegate_user_tasks_to_new_crew(self):
         rule = (
-            "Before any edit, file write, build, test, or debug step, recruit crew and "
-            "assign it; never do it yourself. Direct read/search, bounded CAPTAIN inspect, "
-            "memory reads, answers, and coordination commands are allowed. "
-            "Self-check first: about to edit a file, write output, or run a "
-            "build/test/debug step yourself? Stop, recruit crew instead. Work directly "
-            'only if the user explicitly says "yourself", "no crew", or "do not recruit".'
+            "Delegate every task that needs judgment - code changes, debugging, design, "
+            "planning, research, investigation - to crew; never do that yourself. Never "
+            "delegate a task whose outcome its inputs already determine: a commit, a "
+            "push, a branch, or one of the project's own declared targets is not crew "
+            "work, and recruiting for it costs a pane, a model and a report to run one "
+            "command."
         )
         captain = " ".join(
             instruction_prompts.agent_instructions(self.directory, "Captain Barbossa").split()
@@ -542,8 +542,9 @@ class CaptainFlowTests(unittest.TestCase):
                 submit.assert_not_called()
                 (mail_path,) = (self.directory / "mail" / record["id"]).glob("*.json")
                 mail = json.loads(mail_path.read_text())
-                self.assertTrue(mail["text"].endswith("\nbuild"))
-                self.assertIn(record["assignment_id"], mail["text"])
+                # The stored body is the captain's text alone; identity renders later.
+                self.assertEqual(mail["text"], "build")
+                self.assertNotIn(record["assignment_id"], mail["text"])
 
     def test_instructions_recruit_on_defaults_and_ask_at_most_one_question(self):
         instructions = " ".join(
@@ -679,13 +680,22 @@ class CaptainFlowTests(unittest.TestCase):
                 ),
                 legacy,
             )
+        default_crew = instruction_prompts.agent_instructions(self.directory, "crew member Jack")
+        fetch = "Read your mail at the start of every turn"
         for provider in models.PROVIDERS:
-            self.assertEqual(
-                instruction_prompts.agent_instructions(
-                    self.directory, "crew member Jack", provider
-                ),
-                instruction_prompts.agent_instructions(self.directory, "crew member Jack"),
+            crew = instruction_prompts.agent_instructions(
+                self.directory, "crew member Jack", provider
             )
+            if provider in models.HOOK_DELIVERED:
+                # Its own hook already delivered; dropping that line is the only
+                # permitted difference.
+                self.assertNotIn(fetch, crew)
+                self.assertEqual(
+                    crew.splitlines(),
+                    [line for line in default_crew.splitlines() if fetch not in line],
+                )
+            else:
+                self.assertEqual(crew, default_crew)
 
     def test_native_args_disables_claude_attribution_only(self):
         claude_args = instruction_prompts.native_args("claude", "instructions")
@@ -1251,8 +1261,8 @@ class CaptainFlowTests(unittest.TestCase):
                 self.assertNotIn(("agent", "prompt"), [call.args[:2] for call in calls])
                 (mail_path,) = (self.directory / "mail" / name).glob("*.json")
                 mail = json.loads(mail_path.read_text())
-                self.assertTrue(mail["text"].endswith("\n" + task))
-                self.assertIn(result["assignment_id"], mail["text"])
+                self.assertEqual(mail["text"], task)
+                self.assertNotIn(result["assignment_id"], mail["text"])
                 self.assertEqual(
                     [call.args[:2] for call in calls].count(("agent", "send-keys")),
                     0,
