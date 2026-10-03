@@ -64,11 +64,20 @@ DRAFT_GATE = "user draft"
 DRAFT_EXPIRY = 1800
 
 
+# A hook-delivered crew is handed its mail by its own hook in the turn this wake starts, so
+# its doorbell is one fixed payload-free string: nothing to retype, safe to repeat, and safe
+# to drop, because dropping it delays a turn instead of losing a message.
+WAKE_LINE = "mail from the captain is waiting; keep working"
+
+
 def inbox_line(crew):
     """The one line every ring ends with. Defined once: nudge types it, and nudge_block has to
     recognise it on screen to tell our own echo from a human's draft."""
     from .instructions import captain_command
+    from .models import HOOK_DELIVERED
 
+    if crew.record.get("provider") in HOOK_DELIVERED:
+        return WAKE_LINE
     return (
         f"read your mail with `{captain_command(crew.session.directory.name)} inbox {crew.crew_id}`"
     )
@@ -290,6 +299,14 @@ class Pane:
             return "approval prompt"
         # Herdr reports a crew that just finished a turn as "done", not "idle"; it is as
         # ringable as idle, and every other status check here already pairs the two.
+        #
+        # A busy crew holds the ring even when the doorbell carries no payload. Exempting
+        # hook-delivered crew here was tried and reverted: a mid-turn pane has no provable
+        # composer, so _draft_pending below held every ring as "user draft" anyway, and the
+        # exemption bought nothing but a spurious hold record. Overriding that gate too
+        # would mean typing into a composer that may hold a human's invisible text.
+        # Mail to a busy crew is delivered at its turn boundary instead, by the Stop hook
+        # or by the `done` refusal, both of which hand over the body itself.
         if status not in ("idle", "done"):
             return "agent not idle"
         if self._draft_pending(crew.record.get("provider"), echo=inbox_line(crew)):

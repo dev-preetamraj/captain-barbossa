@@ -24,9 +24,11 @@ from .memory import (
     PRUNE_DAYS,
     REPO_RELATIONS,
     RULEBOOK_FILES,
+    mail_context,
     memory,
     project_root,
     read_session,
+    receipt_for,
 )
 from .models import PROVIDERS, TIER_NAMES
 from .onboarding import bootstrap
@@ -251,15 +253,19 @@ def print_session(args):
 
 
 def print_inbox(args, pane, project):
+    """Mail for a crew whose provider has no delivery hook, and a re-read for one that has.
+
+    The body renders the same way here as in the hook, so a manual read and a delivered
+    one never show the crew two different things.
+    """
     _, crew = Crew.for_args(args, pane, project)
-    messages = protocol.unread(crew)
-    if not messages:
+    body = mail_context(crew.events)
+    if body is None:
         print("No mail.")
         return
-    for message in messages:
-        print(message["text"])
-        print()
-    protocol.mark_read(crew, [message["id"] for message in messages])
+    print(body)
+    sys.stdout.flush()
+    receipt_for(crew.events)
 
 
 def pump_mail(args, pane, project):

@@ -148,7 +148,8 @@ class DashboardWiringTests(LaunchHarness):
         settings = json.loads(argv[argv.index("--settings") + 1])
         events = self.session_dir() / "events" / "captain.jsonl"
         self.assertEqual(
-            set(settings["hooks"]), {"SessionStart", "Stop", "Notification", "PermissionRequest"}
+            set(settings["hooks"]),
+            {"SessionStart", "UserPromptSubmit", "Stop", "Notification", "PermissionRequest"},
         )
         self.assertIn(str(events), json.dumps(settings["hooks"]))
         # append_event creates the file itself, but never its parent directory.

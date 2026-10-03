@@ -9,8 +9,11 @@ model = ""
 [crew]
 # The model new crew are recruited with, when `captain crew` gets no --model.
 model = "cheap"
-# Seconds `captain wait` waits before giving up. --timeout still wins.
-wait_timeout = 900
+# Seconds `captain wait` watches before reporting a bare timeout. A timeout is not news,
+# and a captain woken to read one spent a model turn to learn nothing, so the default is a
+# full day: quiet stays quiet and only a real event returns. --timeout still wins, and 0
+# means "report whatever has already arrived".
+wait_timeout = 86400
 
 [dashboard]
 # Open the crew token-usage pane below the captain at launch.

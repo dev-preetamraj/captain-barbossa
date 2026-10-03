@@ -15,6 +15,10 @@ from captain_barbossa.pane import DRAFT_GATE, Pane
 from captain_barbossa.runtime import CaptainError
 from tests import home_isolation  # noqa: F401
 
+# Captured before any test patches it: ProtocolTests.setUp stubs nudge_block for delivery,
+# so a test of the gate itself has to put the real one back.
+REAL_NUDGE_BLOCK = Pane.nudge_block
+
 
 class ProtocolTests(unittest.TestCase):
     def setUp(self):
@@ -55,6 +59,10 @@ class ProtocolTests(unittest.TestCase):
             protocol.mail_dir(session.directory, crew_id) / f"{message_id}.json"
         )
 
+    def rendered(self, message_id):
+        """What a crew without a delivery hook reads off its ring: identity plus body."""
+        return protocol.render(self.current.directory, [self.mail(message_id)])
+
     def saved(self):
         return memory.read_json(self.directory / "protocol.json")["assignments"][
             self.assignment["id"]
@@ -87,10 +95,11 @@ class ProtocolTests(unittest.TestCase):
         for message_id, text in ((first, "original"), (second, "followup")):
             mail = self.mail(message_id)
             self.assertEqual(mail["state"], "queued")
-            self.assertTrue(
-                mail["text"].startswith(f"Crew name: Jack.\nAssignment {saved['id']}; ")
-            )
-            self.assertIn(text, mail["text"])
+            # The body is the captain's text alone; the standing facts are rendered once
+            # at read time instead of being re-sent with every follow-up.
+            self.assertEqual(mail["text"], text)
+        header = protocol.identity(saved)
+        self.assertTrue(header.startswith(f"Crew name: Jack.\nAssignment {saved['id']}; "))
 
     def test_a_failed_enqueue_leaves_no_sent_message_and_allows_retry(self):
         real_write_json = protocol.write_json
@@ -156,7 +165,7 @@ class ProtocolTests(unittest.TestCase):
             clock[0] += protocol.DRAIN_INTERVAL + 1
             protocol.poll(self.crew)
             protocol.poll(self.crew)
-            nudge.assert_called_once_with(self.crew, self.mail(message_id)["text"])
+            nudge.assert_called_once_with(self.crew, self.rendered(message_id))
 
     def test_a_landed_ring_is_not_repeated_by_the_next_poll(self):
         """The delivery ring already landed, so a wait a second later must not nudge again."""
@@ -166,7 +175,7 @@ class ProtocolTests(unittest.TestCase):
             patch.object(Pane, "nudge") as nudge,
         ):
             message_id = protocol.deliver(self.crew, "original", initial=True)
-            body = self.mail(message_id)["text"]
+            body = self.rendered(message_id)
             nudge.assert_called_once_with(self.crew, body)
             self.assertEqual(
                 memory.read_json(protocol.drain_stamp(self.crew)),
@@ -455,12 +464,18 @@ class ProtocolTests(unittest.TestCase):
             with self.assertRaises(CaptainError):
                 self.command("done", report="forged")
 
-    def test_done_refuses_while_answer_mail_is_unread(self):
+    def test_done_hands_over_unread_mail_in_the_refusal_itself(self):
+        """`done` runs before the Stop hook, so a refusal here pre-empts Stop delivery.
+        It therefore carries the body rather than naming a command to go and run."""
         asked = self.command("ask", question="Which path?")
-        message_id = protocol.deliver(self.crew, "src", question_id=asked["question_id"])
-        with self.assertRaisesRegex(CaptainError, "inbox"):
+        protocol.deliver(self.crew, "src", question_id=asked["question_id"])
+        with self.assertRaises(CaptainError) as refusal:
             self.command("done", report="src/a.py changed; tests pass; nothing left")
-        protocol.mark_read(self.crew, [message_id])
+        self.assertIn("src", str(refusal.exception))
+        self.assertIn("Crew name: Jack.", str(refusal.exception))
+        self.assertNotIn("inbox", str(refusal.exception))
+        # The refusal stamped the receipt, so the retry needs no manual read.
+        self.assertEqual(protocol.unread(self.crew), [])
         self.command("done", report="src/a.py changed; tests pass; nothing left")
         self.assertEqual(self.saved()["state"], "done")
 
@@ -896,3 +911,116 @@ class ProtocolTests(unittest.TestCase):
         self.assertIn(f"/bin/sh {launcher}", str(error.exception))
         self.assertIn(f"herdr agent rename w1:p2 {crew_agent}", str(error.exception))
         self.assertIn(f"herdr agent get {crew_agent}", str(error.exception))
+
+
+class HookDeliveryTests(unittest.TestCase):
+    """A crew whose own hook delivers its mail: nothing of the body crosses a terminal."""
+
+    def setUp(self):
+        ProtocolTests.setUp(self)
+        self.crew.record["provider"] = "claude"
+
+    def test_the_doorbell_carries_no_payload(self):
+        with patch.object(Pane, "nudge") as nudge:
+            protocol.deliver(self.crew, "original", initial=True)
+            nudge.assert_called_once_with(self.crew, None)
+
+    def test_a_retry_doorbell_is_the_same_call_as_the_first(self):
+        """Nothing to branch on, so a repeat is a no-op rather than a retyped assignment."""
+        clock = [1000.0]
+        with (
+            patch.object(protocol.time, "time", side_effect=lambda: clock[0]),
+            patch.object(Pane, "nudge") as nudge,
+        ):
+            protocol.deliver(self.crew, "original", initial=True)
+            clock[0] += protocol.DRAIN_LANDED_INTERVAL + 1
+            protocol.drain(self.crew)
+            self.assertEqual(nudge.call_args_list, [nudge.call_args_list[0]] * 2)
+
+    def test_the_wake_line_names_no_command_to_run(self):
+        from captain_barbossa.pane import WAKE_LINE, inbox_line
+
+        self.assertEqual(inbox_line(self.crew), WAKE_LINE)
+        self.assertNotIn("inbox", WAKE_LINE)
+
+
+class EchoGraceTests(unittest.TestCase):
+    """A composer read right after our own ring may be showing that ring, not a human."""
+
+    def setUp(self):
+        ProtocolTests.setUp(self)
+
+    def test_a_draft_inside_the_grace_window_starts_no_hold(self):
+        clock = [1000.0]
+        with (
+            patch.object(protocol.time, "time", side_effect=lambda: clock[0]),
+            patch.object(Pane, "nudge_block", return_value=None),
+        ):
+            message_id = protocol.deliver(self.crew, "original", initial=True)
+        landed = memory.read_json(protocol.drain_stamp(self.crew))
+        self.assertTrue(landed["landed"])
+        clock[0] += protocol.ECHO_GRACE - 0.5
+        with (
+            patch.object(protocol.time, "time", side_effect=lambda: clock[0]),
+            patch.object(Pane, "nudge_block", return_value=DRAFT_GATE),
+        ):
+            protocol.ring(self.crew, message_id)
+        # Unchanged: no hold clock was started against a crew that already has its doorbell.
+        self.assertEqual(memory.read_json(protocol.drain_stamp(self.crew)), landed)
+
+    def test_a_draft_past_the_grace_window_does_hold(self):
+        clock = [1000.0]
+        with (
+            patch.object(protocol.time, "time", side_effect=lambda: clock[0]),
+            patch.object(Pane, "nudge_block", return_value=None),
+        ):
+            message_id = protocol.deliver(self.crew, "original", initial=True)
+        clock[0] += protocol.ECHO_GRACE + 1
+        with (
+            patch.object(protocol.time, "time", side_effect=lambda: clock[0]),
+            patch.object(Pane, "nudge_block", return_value=DRAFT_GATE),
+            patch.object(Pane, "draft", return_value="half a sentence"),
+        ):
+            protocol.ring(self.crew, message_id)
+        record = memory.read_json(protocol.drain_stamp(self.crew))
+        self.assertEqual(record["gate"], DRAFT_GATE)
+        self.assertFalse(record["landed"])
+        self.assertEqual(record["draft"], "half a sentence")
+
+
+class BusyRingTests(unittest.TestCase):
+    """A busy crew holds the ring, whatever its provider, and gets its mail at the boundary.
+
+    Exempting hook-delivered crew from the busy gate was tried and reverted: a mid-turn
+    pane has no provable composer, so the draft gate held the ring regardless, and lifting
+    that one too would type into a line that may hold a human's invisible text.
+    """
+
+    def setUp(self):
+        ProtocolTests.setUp(self)
+        self.enterContext(patch.object(Pane, "nudge_block", REAL_NUDGE_BLOCK))
+
+    def gate(self, provider, status, draft=False):
+        self.crew.record["provider"] = provider
+        with (
+            patch.object(Pane, "agent_status", return_value=status),
+            patch.object(Pane, "lines", return_value=[]),
+            patch.object(Pane, "_draft_pending", return_value=draft),
+        ):
+            return self.crew.pane.nudge_block(self.crew)
+
+    def test_a_busy_crew_holds_the_ring_whatever_its_provider(self):
+        for provider in ("claude", "codex", "pi", "grok"):
+            with self.subTest(provider=provider):
+                self.assertEqual(self.gate(provider, "working"), "agent not idle")
+
+    def test_an_idle_crew_is_rung(self):
+        for provider in ("claude", "codex"):
+            with self.subTest(provider=provider):
+                self.assertIsNone(self.gate(provider, "idle"))
+
+    def test_an_approval_prompt_holds_the_ring(self):
+        self.assertEqual(self.gate("claude", "blocked"), "approval prompt")
+
+    def test_a_human_draft_holds_the_ring(self):
+        self.assertEqual(self.gate("claude", "idle", draft=True), DRAFT_GATE)

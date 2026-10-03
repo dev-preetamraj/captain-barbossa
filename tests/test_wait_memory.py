@@ -205,7 +205,13 @@ class WaitCrewMemoryTests(unittest.TestCase):
                 )
                 self.assertEqual(
                     set(settings["hooks"]),
-                    {"SessionStart", "Stop", "Notification", "PermissionRequest"},
+                    {
+                        "SessionStart",
+                        "UserPromptSubmit",
+                        "Stop",
+                        "Notification",
+                        "PermissionRequest",
+                    },
                 )
                 for kind, entries in settings["hooks"].items():
                     event = {"hook_event_name": kind, "message": "quotes '\"\n雪"}

@@ -1,9 +1,14 @@
 # Crew mail 2: move delivery off the keystroke
 
-Status: proposed on `feat/hook-delivered-mail`, after 0.27.0. Supersedes the
-transport half of [crew-mail.md](crew-mail.md) (shipped 0.22.0). The mail
-directory, the receipt, the bounce and the assignment protocol in
+Status: phases 1 and 2 implemented on `fix/comms-hook-delivery`, after 0.27.1.
+Supersedes the transport half of [crew-mail.md](crew-mail.md) (shipped 0.22.0).
+The mail directory, the receipt, the bounce and the assignment protocol in
 [crew-lifecycle.md](crew-lifecycle.md) survive unchanged.
+
+See [what shipped](#what-shipped) at the end for the delta against this design,
+including two findings that change it: `Stop` `additionalContext` is real and
+independent of the block, and `initialUserMessage` is `-p`-only, which kills the
+"recruit a Claude crew with no pane write" candidate outright.
 
 ## The problem this solves
 
@@ -298,3 +303,110 @@ stops being a pointer to mail.
    more than a wake.
 
 Phase 3 is the only irreversible step, so it lands last and it lands narrow.
+
+## What shipped
+
+Phases 1 and 2, plus one thing this design did not cover: the captain's own
+idle wake. Phases 3 and 4 are still open.
+
+### Delivery is a hook
+
+`memory.deliver_mail` runs in the crew's own process on `SessionStart`,
+`UserPromptSubmit` and `Stop`, renders the queued mail, and hands it to its own
+model as `hookSpecificOutput.additionalContext`. `UserPromptSubmit` is now
+registered alongside the other four (`instructions.native_args`).
+
+Two corrections to the design above, both from the published hook reference:
+
+- **`Stop` carries `additionalContext` independently of `decision`.** The body
+  does not have to ride the block reason. It ships as context like every other
+  hook, and the block keeps its own job of holding the turn open with a short
+  nag. The two outputs are independent, so the worry in "Phase 1 must prove the
+  hook contract" does not arise.
+- **`initialUserMessage` applies in non-interactive mode (`-p`) only.** Crew run
+  interactively, so it can never start their first turn. The sixth candidate
+  deletion, recruiting a Claude crew with no pane write at all, is not
+  available and should be struck rather than scheduled.
+
+The receipt is stamped by `memory.receipt_for` only after the body is printed
+and flushed, so a hook that dies mid-write re-delivers rather than marking mail
+read that no model saw. At-least-once, as the design asked for.
+
+### One renderer
+
+`protocol.render` is the single rendering of mail for a model, used by the
+delivery hook, by `captain inbox`, and by the ring that is a hookless crew's
+only channel. `protocol.identity` renders the standing facts from state at read
+time. The body stored in `mail/<crew>/<id>.json` is now the captain's text
+alone, so a follow-up no longer re-sends the identity block.
+
+`protocol.receipt` is likewise the one writer of `read`, for a model-run `inbox`
+and a hook alike, so the two cannot record a delivery differently.
+
+### The doorbell carries nothing, for providers that have a hook
+
+`models.HOOK_DELIVERED` is the grading from the table above, as code. A Claude
+crew's ring is `pane.WAKE_LINE`, one fixed string that names no command: it only
+starts a turn, and the hook supplies the content beside it. Codex, pi and grok
+keep the payload-carrying first ring, and it now carries the *rendered* body, so
+a crew that acts straight off the ring still sees its owned paths and actions.
+
+`ECHO_GRACE` (2s) closes the gap this design named: a composer read that soon
+after a ring that landed may be our own echo mid-paint, so a draft verdict
+inside the window is "don't know" and starts no hold clock.
+
+### The captain's idle wake
+
+Not in this design, and the larger of the two costs in practice.
+
+`wait` returned `timeout` at `wait_timeout`, which defaulted to 900s. A captain
+reading that spent a model turn, and a re-arm turn, to learn that nothing had
+happened; with four crew that is tens of turns an hour, each one appending to a
+context that then has to be compacted. pi never had the problem, because its
+`captain_wait` tool already rearms silently.
+
+The default is now 86400. A bounded look is still available on `--timeout`,
+including `0` for "report whatever has already arrived". Quiet stays quiet.
+
+### Still open
+
+- Phase 3's remaining deletions: `ring`'s landed branching and `last_ring`'s
+  `landed` field (still load-bearing for the three providers without a delivery
+  hook), and `HELD_NOTICE_INTERVAL` / `held_notice` / the `noticed` stamp, which
+  want the derived `status` field this design describes.
+- Phase 4: Codex `notify` as a turn-boundary wake.
+- One `captain watch` across the whole roster, so N crew cost one background
+  process instead of N. Not a token cost once `wait` is quiet, so it waits.
+
+### Mid-turn mail, corrected by live testing
+
+This design says a `tell` to a busy crew "waits for `Stop`". Two live runs showed
+that is only half true, and the missing half mattered.
+
+A crew that follows its instructions calls `done` as its last action, so `done`
+runs *before* the Stop hook and its unread-mail refusal pre-empts the boundary
+Stop would have delivered at. That refusal used to name `captain inbox`, which
+is how the removed command kept coming back. It now renders the body and stamps
+the receipt itself, so both boundary vehicles hand the mail over directly:
+
+- the crew calls `done` with mail waiting, and the refusal carries it;
+- the crew stops without reporting, and the `Stop` hook carries it.
+
+Delivering genuinely mid-turn was tried and reverted. Exempting hook-delivered
+crew from `nudge_block`'s busy gate stopped one gate short: a mid-turn pane has
+no provable composer, so `_draft_pending` held every ring as `user draft`
+anyway, recorded in `.drain` as `gate: "user draft", draft: ""`. Lifting that
+gate too would mean typing into a line that may hold a human's invisible text,
+which is the one mistake this whole design exists to prevent.
+
+Turn-boundary delivery is also parity, not a shortfall: munder-difflin's drain
+requires `agent status is idle` (`docs/message-queue.md` section 2) and
+firstmate's steering inbox waits on a busy pane as well
+(`bin/fm-task-inbox-lib.sh`). Neither delivers into a running turn.
+
+What is genuinely missing is an *interrupt*, which is a different primitive from
+mail: "stop what you are doing" is not a message to be read at the next
+boundary. Firstmate separates the two (`bin/fm-control.sh interrupt` against
+`bin/fm-send.sh`). Captain Barbossa has no equivalent, and a captain who wants
+to redirect a crew now has nothing to reach for. That is the next thing to
+build, not lower mail latency.

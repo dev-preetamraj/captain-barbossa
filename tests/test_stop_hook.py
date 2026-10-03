@@ -12,7 +12,6 @@ from unittest.mock import patch
 
 from captain_barbossa import memory, protocol
 from captain_barbossa.crew import Crew
-from captain_barbossa.instructions import captain_command
 from tests import home_isolation  # noqa: F401
 
 
@@ -84,13 +83,64 @@ class StopHookTests(unittest.TestCase):
             self.project,
         )
 
-    def test_unread_mail_blocks_the_stop(self):
-        protocol.enqueue(self.crew, "do the thing", "assign", self.assignment["id"])
+    def mail(self, text="do the thing"):
+        return protocol.enqueue(self.crew, text, "assign", self.assignment["id"])
+
+    def still_queued(self):
+        return [m["id"] for m in protocol.queued(self.current.directory, "jack")]
+
+    def test_stop_delivers_the_mail_itself_and_holds_the_turn_open(self):
+        """Body on additionalContext, block only to keep the turn alive. Mail that arrives
+        mid-turn has no prompt submission left to ride, so Stop is its boundary."""
+        self.mail()
         decision = self.decision({"hook_event_name": "Stop"})
+        body = decision["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("do the thing", body)
+        self.assertIn(self.assignment["id"], body)
         self.assertEqual(decision["decision"], "block")
-        command = captain_command(self.current.directory.name)
-        self.assertIn(f"{command} inbox Jack", decision["reason"])
+        # The reason stays a short nag; the message itself is context, not an error string.
+        self.assertNotIn("do the thing", decision["reason"])
+        # No instruction to go and fetch it: the hook already handed it over.
+        self.assertNotIn("inbox Jack", json.dumps(decision))
+        self.assertEqual(self.still_queued(), [])
         self.assertEqual(len(self.logged()), 1)
+
+    def test_user_prompt_submit_delivers_mail_as_additional_context(self):
+        """An idle crew rung awake acts on its mail in the same turn the wake starts."""
+        self.mail()
+        decision = self.decision({"hook_event_name": "UserPromptSubmit"})
+        output = decision["hookSpecificOutput"]
+        self.assertEqual(output["hookEventName"], "UserPromptSubmit")
+        self.assertIn("do the thing", output["additionalContext"])
+        self.assertIn(self.assignment["id"], output["additionalContext"])
+        self.assertNotIn("decision", decision)
+        self.assertEqual(self.still_queued(), [])
+
+    def test_session_start_delivers_the_launch_assignment(self):
+        self.mail("build the thing")
+        output = self.decision({"hook_event_name": "SessionStart"})["hookSpecificOutput"]
+        self.assertEqual(output["hookEventName"], "SessionStart")
+        self.assertIn("build the thing", output["additionalContext"])
+        self.assertEqual(self.still_queued(), [])
+
+    def test_identity_is_rendered_once_however_many_messages_are_waiting(self):
+        self.mail("first")
+        self.mail("second")
+        body = self.decision({"hook_event_name": "UserPromptSubmit"})["hookSpecificOutput"][
+            "additionalContext"
+        ]
+        self.assertEqual(body.count("Crew name: Jack."), 1)
+        self.assertIn("first", body)
+        self.assertIn("second", body)
+
+    def test_a_receipt_that_fails_leaves_the_mail_queued(self):
+        """Stamped only after the body is flushed, so a lost hook re-delivers rather than
+        marking mail read that no model saw."""
+        self.mail()
+        with patch("captain_barbossa.memory.receipt_for", side_effect=OSError("disk")):
+            printed = self.hook({"hook_event_name": "UserPromptSubmit"})
+        self.assertIn("do the thing", printed)
+        self.assertEqual(len(self.still_queued()), 1)
 
     def test_an_unfinished_assignment_blocks_the_stop(self):
         decision = self.decision({"hook_event_name": "Stop"})
@@ -118,10 +168,11 @@ class StopHookTests(unittest.TestCase):
         with patch.object(Crew, "events", Path(self.current.directory / "events/stranger.jsonl")):
             self.assertIsNone(self.decision({"hook_event_name": "Stop"}))
 
-    def test_a_non_stop_event_only_appends(self):
-        protocol.enqueue(self.crew, "do the thing", "assign", self.assignment["id"])
-        self.assertEqual(self.hook({"hook_event_name": "SessionStart"}), "")
-        self.assertEqual(json.loads(self.logged()[0])["hook_event_name"], "SessionStart")
+    def test_a_non_delivery_event_only_appends(self):
+        self.mail()
+        self.assertEqual(self.hook({"hook_event_name": "Notification"}), "")
+        self.assertEqual(json.loads(self.logged()[0])["hook_event_name"], "Notification")
+        self.assertEqual(len(self.still_queued()), 1)
 
     def test_codex_notify_never_blocks(self):
         with patch("sys.argv", ["hook", str(self.crew.events), json.dumps({"type": "x"})]):
@@ -134,3 +185,32 @@ class StopHookTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class HookRegistrationTests(unittest.TestCase):
+    """A delivery hook that is not registered cannot fire, and nothing else notices.
+
+    Shipped once exactly that way: deliver_mail handled UserPromptSubmit, the event was
+    never registered, and every unit test still passed because they all invoked the hook
+    directly. Only a live crew found it. This pins the two lists together.
+    """
+
+    def registered(self):
+        from captain_barbossa import instructions
+
+        args = instructions.native_args("claude", "instructions", events=Path("/tmp/events.jsonl"))
+        return set(json.loads(args[args.index("--settings") + 1])["hooks"])
+
+    def test_every_delivery_hook_is_registered_with_the_native_cli(self):
+        self.assertTrue(
+            set(memory.DELIVERY_HOOKS) <= self.registered(),
+            f"unregistered delivery hooks: {set(memory.DELIVERY_HOOKS) - self.registered()}",
+        )
+
+    def test_the_lifecycle_hooks_survive_alongside_them(self):
+        self.assertTrue({"Notification", "PermissionRequest"} <= self.registered())
+
+    def test_a_provider_without_settings_registers_nothing(self):
+        from captain_barbossa import instructions
+
+        self.assertNotIn("--settings", instructions.native_args("codex", "instructions"))
