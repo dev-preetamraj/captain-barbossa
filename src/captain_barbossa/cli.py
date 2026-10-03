@@ -260,10 +260,9 @@ def print_session(args):
 
 
 def print_inbox(args, pane, project):
-    """Mail for a crew whose provider has no delivery hook, and a re-read for one that has.
+    """Mail for a crew with no delivery hook, and a manual re-read for one that has.
 
-    The body renders the same way here as in the hook, so a manual read and a delivered
-    one never show the crew two different things.
+    Same renderer as the hook, so the two never show the crew different things.
     """
     _, crew = Crew.for_args(args, pane, project)
     body = mail_context(crew.events)

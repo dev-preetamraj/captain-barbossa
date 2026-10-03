@@ -318,14 +318,9 @@ def focus_crew(args, pane, project):
 def interrupt_crew(args, pane, project):
     """Stop a crew's current turn, keeping its pane, conversation and assignment.
 
-    Mail is a data channel delivered at a turn boundary, which is right: a message is
-    read when the crew next draws breath. "Stop what you are doing" is not that, and
-    routing it through mail makes a lifecycle action into text the crew reasons about
-    at its leisure. This is the separate channel, and the only thing that reaches a
-    crew mid-turn.
-
-    Escape interrupts without ending the session, so the crew keeps its context and its
-    assignment stays open. Nothing is torn down and no work is discarded.
+    The lifecycle channel beside mail: mail is read at a turn boundary, which is right
+    for a message and wrong for "stop". Escape leaves the session alive, so nothing is
+    torn down and no work is discarded.
     """
     current, crew = Crew.for_args(args, pane, project)
     if crew.is_dismissed:
@@ -335,9 +330,8 @@ def interrupt_crew(args, pane, project):
     except CaptainError as exc:
         raise CaptainError(f"Could not interrupt {crew.display_name}: {exc}") from exc
     add_memory(current.graph, crew.record["agent"], "interrupted", args.reason or "captain")
-    # A busy crew held every ring, so mail queued during that turn is still waiting
-    # behind the drain cooldown. It is idle now, so ring it instead of making the captain
-    # wait out an interval for the instruction they interrupted in order to give.
+    # It is idle now, so ring whatever the busy turn held rather than making the captain
+    # wait out the drain cooldown for the instruction they interrupted to give.
     waiting = protocol.unread(crew)
     if waiting:
         protocol.ring(crew, waiting[0]["id"])

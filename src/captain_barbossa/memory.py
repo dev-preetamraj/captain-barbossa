@@ -205,8 +205,7 @@ def write_json(path, data):
 def crew_for_events(events_path):
     """(session directory, crew id, active assignment) for the crew this hook belongs to.
 
-    A hook knows only its own events path, so this is the whole bridge from the crew's
-    process back into protocol state.
+    A hook knows only its own events path; this is the bridge back into protocol state.
     """
     directory = events_path.parent.parent
     state = read_json(directory / "protocol.json")
@@ -218,9 +217,8 @@ def crew_for_events(events_path):
 def mail_context(events_path):
     """This crew's queued mail, rendered for its own model, or None.
 
-    The caller must flush this to the native CLI before stamping the receipt
-    (`receipt_for`), so a dropped hook output re-delivers instead of marking mail read
-    that no model ever saw.
+    Flush this before stamping the receipt (`receipt_for`), or a dropped hook output
+    marks mail read that no model saw.
     """
     from .protocol import queued, render
 
@@ -268,9 +266,7 @@ def append_event():
         return  # a hook that cannot read state must never block or wedge the crew
 
 
-# The crew's own hook hands mail to its own model: the body never crosses a terminal, so no
-# composer state can be a delivery failure. Stop carries it as a block reason, which is the
-# only Stop output proven to reach a model (munder-difflin hive.ts, HIVE.md section 5).
+# The hooks that hand a crew its mail, in its own process.
 DELIVERY_HOOKS = ("SessionStart", "UserPromptSubmit", "Stop")
 
 
@@ -284,14 +280,12 @@ def deliver_mail(events_path, hook):
         return
     payload = {"hookSpecificOutput": {"hookEventName": hook, "additionalContext": body}}
     if hook == "Stop":
-        # The body rides additionalContext like every other hook; the block keeps its own
-        # job of holding the turn open, with a short reason rather than the whole message.
+        # The body rides additionalContext; the block only holds the turn open.
         payload["decision"] = "block"
         payload["reason"] = "Mail from the captain arrived; act on it before finishing."
     print(json.dumps(payload))
     sys.stdout.flush()
-    # Only now: a receipt written before the body is out would mark mail read that the
-    # model never saw. Flushed-then-stamped is at-least-once, and a duplicate is harmless.
+    # Only after the flush: at-least-once, since a duplicate beats a silent loss.
     receipt_for(events_path)
 
 

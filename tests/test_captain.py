@@ -542,8 +542,7 @@ class CaptainFlowTests(unittest.TestCase):
                 submit.assert_not_called()
                 (mail_path,) = (self.directory / "mail" / record["id"]).glob("*.json")
                 mail = json.loads(mail_path.read_text())
-                # The stored body is the captain's text alone. The identity block is
-                # rendered at read time, so a follow-up never re-sends it.
+                # The stored body is the captain's text alone; identity renders later.
                 self.assertEqual(mail["text"], "build")
                 self.assertNotIn(record["assignment_id"], mail["text"])
 
@@ -688,8 +687,8 @@ class CaptainFlowTests(unittest.TestCase):
                 self.directory, "crew member Jack", provider
             )
             if provider in models.HOOK_DELIVERED:
-                # Its own hook hands it the mail, so the fetch line describes a step that
-                # already happened. Dropping that line is the only permitted difference.
+                # Its own hook already delivered; dropping that line is the only
+                # permitted difference.
                 self.assertNotIn(fetch, crew)
                 self.assertEqual(
                     crew.splitlines(),

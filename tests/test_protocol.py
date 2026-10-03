@@ -15,8 +15,7 @@ from captain_barbossa.pane import DRAFT_GATE, Pane
 from captain_barbossa.runtime import CaptainError
 from tests import home_isolation  # noqa: F401
 
-# Captured before any test patches it: ProtocolTests.setUp stubs nudge_block for delivery,
-# so a test of the gate itself has to put the real one back.
+# ProtocolTests.setUp stubs nudge_block, so a test of the gate itself restores this.
 REAL_NUDGE_BLOCK = Pane.nudge_block
 
 
@@ -95,8 +94,7 @@ class ProtocolTests(unittest.TestCase):
         for message_id, text in ((first, "original"), (second, "followup")):
             mail = self.mail(message_id)
             self.assertEqual(mail["state"], "queued")
-            # The body is the captain's text alone; the standing facts are rendered once
-            # at read time instead of being re-sent with every follow-up.
+            # The body is the captain's text alone; identity renders at read time.
             self.assertEqual(mail["text"], text)
         header = protocol.identity(saved)
         self.assertTrue(header.startswith(f"Crew name: Jack.\nAssignment {saved['id']}; "))
@@ -465,8 +463,7 @@ class ProtocolTests(unittest.TestCase):
                 self.command("done", report="forged")
 
     def test_done_hands_over_unread_mail_in_the_refusal_itself(self):
-        """`done` runs before the Stop hook, so a refusal here pre-empts Stop delivery.
-        It therefore carries the body rather than naming a command to go and run."""
+        """`done` pre-empts Stop delivery, so its refusal carries the body itself."""
         asked = self.command("ask", question="Which path?")
         protocol.deliver(self.crew, "src", question_id=asked["question_id"])
         with self.assertRaises(CaptainError) as refusal:
@@ -679,12 +676,9 @@ class ProtocolTests(unittest.TestCase):
                     ("ask", "Jack", "Question?"),
                     ("done", "Jack", "--report", "Finished"),
                 ):
-                    # One deliberate exemption: a merely STALE assignment no longer
-                    # blocks `ask`, because that is the crew's only escalation channel
-                    # and refusing it wedged a handed-off crew that could neither report
-                    # nor ask why. StaleAssignmentTests covers the exempt case. A foreign
-                    # crew, a wrong incarnation and a missing id all still reject `ask`,
-                    # because those are the cases where the actor itself is unproven.
+                    # One exemption: a merely stale assignment no longer blocks `ask`,
+                    # the crew's only escalation channel (see StaleAssignmentTests). A
+                    # foreign crew, wrong incarnation or missing id still reject it.
                     if (key, value, command[0]) == ("CAPTAIN_ASSIGNMENT", "old", "ask"):
                         continue
                     with contextlib.redirect_stderr(io.StringIO()):
@@ -997,12 +991,7 @@ class EchoGraceTests(unittest.TestCase):
 
 
 class BusyRingTests(unittest.TestCase):
-    """A busy crew holds the ring, whatever its provider, and gets its mail at the boundary.
-
-    Exempting hook-delivered crew from the busy gate was tried and reverted: a mid-turn
-    pane has no provable composer, so the draft gate held the ring regardless, and lifting
-    that one too would type into a line that may hold a human's invisible text.
-    """
+    """A busy crew holds the ring whatever its provider; its mail waits for the boundary."""
 
     def setUp(self):
         ProtocolTests.setUp(self)
@@ -1037,10 +1026,8 @@ class BusyRingTests(unittest.TestCase):
 class StaleAssignmentTests(unittest.TestCase):
     """A crew holding a retired assignment id must still be able to reach the captain.
 
-    Observed live: after `assign --handoff`, the crew's launch-bound CAPTAIN_ASSIGNMENT
-    still named the retired assignment, so `done` AND `ask` both raised "Stale assignment
-    ID". It could not report and could not ask why, while the Stop hook kept re-blocking
-    it for the unfinished assignment. It burned eight probe commands and gave up.
+    Seen live after `assign --handoff`: `done` and `ask` both refused, so it could
+    neither report nor ask why, and the Stop hook kept re-blocking it.
     """
 
     command = ProtocolTests.command
@@ -1102,9 +1089,7 @@ class StaleAssignmentTests(unittest.TestCase):
 class ApprovalDedupeTests(unittest.TestCase):
     """One approval must wake the captain once, not once per event that reports it.
 
-    Observed live: a single approval surfaced three times, including after it had
-    been granted. Claude reports one approval twice - a PermissionRequest hook and a
-    permission_prompt Notification - and native_status deduped only the pane-read path.
+    Seen live three times for one approval, including after it was granted.
     """
 
     def setUp(self):
@@ -1153,8 +1138,7 @@ class InterruptTests(unittest.TestCase):
         self.assertEqual(saved[self.assignment["id"]]["state"], "working")
 
     def test_it_rings_mail_that_the_busy_turn_held(self):
-        """The captain interrupted in order to say something; do not make them wait out
-        the drain cooldown for it."""
+        """A captain who interrupts is usually interrupting in order to say something."""
         message_id = protocol.deliver(self.crew, "stop, wrong file", initial=True)
         with (
             patch.object(agents.runtime, "herdr"),

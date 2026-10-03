@@ -149,7 +149,7 @@ class InstructionSizeTests(unittest.TestCase):
             instruction_prompts.agent_instructions(self.directory, "Captain Barbossa").split()
         )
         # The axis is judgment, not file-touching: `make test` writes nothing and needs
-        # no crew, while research changes no file and does.
+        # no crew; research changes no file and does.
         self.assertIn(
             "Delegate every task that needs judgment - code changes, debugging, design, "
             "planning, research, investigation - to crew; never do that yourself.",

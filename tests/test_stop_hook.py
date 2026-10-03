@@ -90,8 +90,7 @@ class StopHookTests(unittest.TestCase):
         return [m["id"] for m in protocol.queued(self.current.directory, "jack")]
 
     def test_stop_delivers_the_mail_itself_and_holds_the_turn_open(self):
-        """Body on additionalContext, block only to keep the turn alive. Mail that arrives
-        mid-turn has no prompt submission left to ride, so Stop is its boundary."""
+        """Body on additionalContext; the block only keeps the turn alive."""
         self.mail()
         decision = self.decision({"hook_event_name": "Stop"})
         body = decision["hookSpecificOutput"]["additionalContext"]
@@ -134,8 +133,7 @@ class StopHookTests(unittest.TestCase):
         self.assertIn("second", body)
 
     def test_a_receipt_that_fails_leaves_the_mail_queued(self):
-        """Stamped only after the body is flushed, so a lost hook re-delivers rather than
-        marking mail read that no model saw."""
+        """Stamped only after the flush, so a lost hook re-delivers rather than loses."""
         self.mail()
         with patch("captain_barbossa.memory.receipt_for", side_effect=OSError("disk")):
             printed = self.hook({"hook_event_name": "UserPromptSubmit"})
@@ -190,9 +188,8 @@ if __name__ == "__main__":
 class HookRegistrationTests(unittest.TestCase):
     """A delivery hook that is not registered cannot fire, and nothing else notices.
 
-    Shipped once exactly that way: deliver_mail handled UserPromptSubmit, the event was
-    never registered, and every unit test still passed because they all invoked the hook
-    directly. Only a live crew found it. This pins the two lists together.
+    Shipped once that way: every unit test invoked the hook directly and passed, and
+    only a live crew found it. This pins the two lists together.
     """
 
     def registered(self):

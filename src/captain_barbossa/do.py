@@ -1,20 +1,12 @@
 """Deterministic work the captain does itself, instead of recruiting a crew for it.
 
-A crew is a pane, a model, a system prompt, a mailed assignment, a report and a
-dismissal. That is the right price for work that needs judgment. It is the wrong price
-for `git commit`, whose outcome the inputs already determine.
+The write-side sibling of `inspection`, deliberately not built on it: that module's
+hardened Git strips user config, hooks and credentials, which is right for reading
+arbitrary paths and useless for writing. Safety here comes from the other side, a fixed
+verb set with no rewriting or discarding flag reachable from any of it.
 
-This is the write-side sibling of `inspection`, and it is deliberately NOT built on it.
-`inspect` reads arbitrary paths on the model's say-so, so it runs Git with no user
-config, no hooks and no credentials. Those same defences make a write useless: a commit
-needs the user's identity, a push needs their credentials, and the project's own
-pre-commit hooks are part of its gate. So `do` runs an ordinary environment and takes
-its safety from the opposite direction: a fixed, enumerated set of operations, with no
-flag that rewrites or discards anything reachable from any of them.
-
-The founding rule of this tool is that the user can watch their crew work. Work that
-happens with no pane keeps that rule only if it is reviewable afterwards, so every run
-here is recorded to the session event log before it is reported.
+Every run is recorded before it is reported, because work with no pane keeps the
+watch-your-crew rule only by being reviewable afterwards.
 """
 
 import json
@@ -26,9 +18,8 @@ from pathlib import Path
 
 from .runtime import CaptainError, check_text
 
-# Target names a project may declare that only build, check or clean. Deliberately not
-# release, publish, deploy, bump or version: those are outward-facing compound acts, and
-# "quiet" plus "compound" plus "outward" is the combination most likely to surprise.
+# Declared targets that only build, check or clean. Not release, publish, deploy, bump
+# or version: outward-facing compound acts stay with the user.
 RUNNABLE = (
     "build",
     "check",
@@ -42,9 +33,9 @@ RUNNABLE = (
     "typecheck",
     "vet",
 )
-# A declared target may legitimately run a whole test suite.
+# A declared target may run a whole test suite.
 TIMEOUT = 900
-# Enough of the tail to diagnose a failure without pasting a build log into the record.
+# Enough tail to diagnose a failure without putting a build log in the record.
 TAIL = 4000
 BRANCH = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]*")
 
@@ -91,7 +82,7 @@ def _spawn(root, command, check=True):
         raise CaptainError(f"{' '.join(command)} exceeded {TIMEOUT}s.") from exc
     output = (done.stdout + done.stderr).strip()
     if check and done.returncode != 0:
-        # Loud: a quiet action that failed silently is strictly worse than a visible one.
+        # A quiet action that failed silently is worse than a visible one.
         raise CaptainError(f"{' '.join(command)} failed ({done.returncode}):\n{output[-TAIL:]}")
     return done.returncode, output
 
@@ -117,8 +108,7 @@ def _targets(root):
 def record(session_directory, action, command, code, output):
     """Append the run to the session event log, so unwatched work stays reviewable.
 
-    Written before the result is reported, and a failure to write it is not swallowed:
-    an action nobody can review afterwards is the thing this surface must not produce.
+    Raised rather than swallowed: an unreviewable action is what this must not produce.
     """
     events = session_directory / "events" / "captain.jsonl"
     events.parent.mkdir(parents=True, exist_ok=True)

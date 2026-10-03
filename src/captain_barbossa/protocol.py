@@ -13,9 +13,7 @@ from .pane import DRAFT_EXPIRY, DRAFT_GATE
 from .runtime import HERDR_ERRORS, CaptainError, check_text
 
 ACTIONS = ("read", "search", "edit", "test", "build", "format", "commit", "version", "delete")
-# A composer read this soon after a ring that landed may be showing our own echo mid-paint,
-# so a draft verdict inside the window is "don't know" and may not start a hold.
-# From munder-difflin's ECHO_GRACE_MS (terminalPool.ts:422).
+# Our own ring is still painting for about this long, so a draft seen inside it is ours.
 ECHO_GRACE = 2
 # Native "working" is a wake, not news: it fires at recruit and at every crew turn end.
 NOTIFIED = {"done": "idle", "idle": "idle", "blocked": "awaiting_approval"}
@@ -66,9 +64,8 @@ def active(state, crew, assignment_id=None, incarnation=None):
     if assignment["incarnation_id"] != crew.record["incarnation_id"]:
         raise CaptainError("Stale crew incarnation.")
     if assignment_id is not None and assignment_id != key:
-        # Name the live one. A crew's launch-bound CAPTAIN_ASSIGNMENT goes stale the
-        # moment the captain hands off, and a bare refusal left it unable to discover
-        # what replaced it: it could not report, and `ask` was stale too.
+        # Name the live one: a crew whose launch-bound id went stale at handoff has no
+        # other way to discover what replaced it.
         raise CaptainError(
             f"Stale assignment ID {assignment_id}; this crew's live assignment is {key}. "
             f"Retry with --assignment {key}."
@@ -167,17 +164,13 @@ def check_action(assignment, project, action, paths):
 def change(crew, args, project):
     assignment_id, incarnation = validate_actor(crew, args)
     if args.command == "done":
-        # `done` is the crew's last action, so it always runs BEFORE the Stop hook: a
-        # refusal here pre-empts Stop delivery every time, which is why a follow-up that
-        # arrived mid-turn only ever surfaced as "go and run inbox". Deliver it instead.
+        # `done` is the crew's last action, so it runs before the Stop hook and a refusal
+        # here pre-empts that delivery. Hand the mail over rather than naming a command.
         deliver_before_done(crew)
     with checkpoint(crew.session.directory) as state:
-        # `ask` is the crew's only way to reach the captain, so it binds to whatever
-        # assignment is live rather than to the id the crew was launched with. A crew
-        # holding a retired id could otherwise neither finish nor ask why, and the Stop
-        # hook kept re-blocking it for the unfinished assignment it could not escape.
-        # Every other command keeps the explicit id, because a report must not silently
-        # attach itself to an assignment the captain replaced.
+        # `ask` binds to the live assignment, not the launch-bound id: it is the crew's
+        # only way out, and a stale id used to block it. Everything else keeps the explicit
+        # id, so a report never attaches to an assignment the captain replaced.
         assignment = active(
             state, crew, None if args.command == "ask" else assignment_id, incarnation
         )
@@ -199,8 +192,7 @@ def change(crew, args, project):
         if assignment["question"]:
             raise CaptainError("Answer the pending question before done.")
         if unread(crew):
-            # Only reachable when mail landed between deliver_before_done and this lock;
-            # that message is delivered by the next attempt rather than named here.
+            # Raced past deliver_before_done; the retry hands it over.
             raise CaptainError("Mail arrived while this report was being filed; retry done.")
         assignment["report"] = args.report
         assignment["state"] = "done"
@@ -210,13 +202,6 @@ def change(crew, args, project):
 
 def deliver_before_done(crew):
     """Hand over mail that arrived mid-turn, as the refusal itself, then refuse.
-
-    The Stop hook cannot cover this case: a crew that follows its instructions calls
-    `done` as its last action, so `done` always runs first and a refusal here pre-empts
-    the boundary Stop would have delivered at. Carrying the body in the refusal keeps the
-    one-channel rule - the crew is never told to go and fetch anything - and stamps the
-    same receipt the hook would have. Stop stays as the backstop for a crew that stops
-    without reporting at all.
 
     Called outside the protocol lock, because the receipt takes it.
     """
@@ -266,8 +251,7 @@ def unread(crew):
 
 
 def receipt(session_directory, crew_id, ids):
-    """Stamp a read receipt on each named message. The one writer of `read`, for the crew's
-    own `inbox` and for a delivery hook alike, so neither can record it differently."""
+    """The one writer of `read`, for the crew's own `inbox` and for a delivery hook."""
     directory = mail_dir(session_directory, crew_id)
     receipts = {}
     with lock(session_directory / "protocol.lock"):
@@ -296,11 +280,7 @@ def mark_read(crew, ids):
 
 
 def render(session_directory, messages):
-    """The one rendering of mail for a model, or None when there is none.
-
-    Used by the delivery hook, by `inbox`, and by the ring that is a hookless crew's only
-    channel, so none of the three can show the crew a different thing.
-    """
+    """The one rendering of mail for a model, shared by the hook, `inbox` and the ring."""
     if not messages:
         return None
     state = read_json(session_directory / "protocol.json")
@@ -312,11 +292,7 @@ def render(session_directory, messages):
 
 
 def identity(assignment):
-    """The crew's standing facts, rendered from state at read time.
-
-    Never stored in a message body: it is the same four lines for every message of an
-    assignment, and pasting it into each one re-sent it on every follow-up.
-    """
+    """The crew's standing facts, rendered at read time so a follow-up never re-sends them."""
     return (
         f"Crew name: {assignment['crew']}.\n"
         f"Assignment {assignment['id']}; incarnation {assignment['incarnation_id']}.\n"
@@ -370,24 +346,22 @@ def ring(crew, message_id):
     prior = last_ring(crew)
     provider = crew.record.get("provider")
     landed, unreachable, gate, draft = False, None, None, None
-    # A hook-delivered crew is handed its mail by its own hook, so every ring to it is the
-    # bare wake line: nothing to retype, nothing to branch on, safe to repeat or to drop.
-    # A landed retry stays content-free too, so the 600s drain never retypes work.
+    # A hook-delivered crew gets the bare wake line; its own hook supplies the body. A
+    # landed retry is content-free too, so the 600s drain never retypes work.
     text = None
     if provider not in HOOK_DELIVERED and not (
         prior and prior["id"] == message_id and prior["landed"]
     ):
-        # The ring is this crew's only delivery channel, so it carries the rendered body,
-        # identity and all: it may act on the ring without ever running `inbox`.
+        # The ring is this crew's only channel, so it carries the rendered body: it may
+        # act straight off the ring without ever running `inbox`.
         message = next((m for m in unread(crew) if m["id"] == message_id), None)
         text = render(crew.session.directory, [message] if message else [])
     try:
         pane = crew.pane
         gate = pane.nudge_block(crew)
         if gate == DRAFT_GATE and echoing(prior):
-            # Our own ring, still painting. A composer read inside the grace window proves
-            # nothing, and a draft invented from it would start a hold clock against a crew
-            # that already has its doorbell. Leave the prior stamp alone and let drain retry.
+            # Our own echo, not a human. Leave the prior stamp alone and let drain retry,
+            # rather than starting a hold clock against a crew that has its doorbell.
             return
         if gate == DRAFT_GATE:
             draft = pane.draft(provider)
@@ -584,9 +558,8 @@ def poll(crew, ack=None, modal=True):
                 status, event = notified[-1]
                 summary = str(event.get("message") or event.get("last-assistant-message") or "")
                 if status == "awaiting_approval":
-                    # One approval reaches us twice: a PermissionRequest hook and a
-                    # permission_prompt Notification, usually in separate polls. Until
-                    # something proves the prompt cleared, the second is the same news.
+                    # One approval arrives twice, as a PermissionRequest hook and a
+                    # permission_prompt Notification, usually in separate polls.
                     if native_status == status:
                         assignment["offset"] = offset
                         return result(crew, assignment, "working")
@@ -594,7 +567,7 @@ def poll(crew, ack=None, modal=True):
                     native_status = status
                 elif assignment.get("idle_seen"):
                     assignment["offset"] = offset
-                    # A turn that ran proves any approval cleared; the next one is news.
+                    # A turn that ran proves the approval cleared.
                     assignment["native_status"] = None
                     return result(crew, assignment, "working")
                 else:
@@ -616,10 +589,9 @@ def poll(crew, ack=None, modal=True):
                 if status is None or status == native_status:
                     assignment["offset"] = offset
                     if status is None and read_pane:
-                        # A pane we LOOKED at and found clear means the next modal is news.
-                        # Only then: a provider whose approvals arrive as events is never
-                        # looked at here, and clearing on that absence wiped the dedupe on
-                        # every poll, so one approval surfaced once per event reporting it.
+                        # Only a pane we actually looked at clears the dedupe. Clearing on
+                        # the absence of a read wiped it every poll for event-driven
+                        # providers, which is how one approval surfaced once per event.
                         assignment["native_status"] = None
                     return result(crew, assignment, "working")
                 native_status = status

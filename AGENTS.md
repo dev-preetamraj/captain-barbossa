@@ -78,6 +78,15 @@ Key facts:
 - A busy crew holds the ring, so mail sent mid-turn lands at the turn boundary: the
   `done` refusal carries the body when the crew reports, the `Stop` hook when it does
   not. Dismissing a crew with unread mail bounces it with a reason.
+- `captain do` is the write side of `captain inspect`: `commit`, `push`, `branch`, and
+  `run <target>` for a Makefile target in `do.RUNNABLE`. Not built on `inspection`'s
+  hardened Git, which strips the user config, hooks and credentials a write needs;
+  safety is the fixed verb set instead. Amend, reset, rebase, force push, deletion and
+  release stay with the user. Every run appends a `{"type": "quiet", ...}` record to
+  `events/captain.jsonl`, raised if it cannot be written, because work with no pane is
+  reviewable only through that record.
+- The delegation axis is judgment, not file-touching: `make test` writes nothing and
+  needs no crew, while research changes no file and does.
 - Settings layer bottom to top: `defaults.toml` (package data, the only place a default
   is written), `~/.captain/settings.toml`, the project's `.captain/settings.toml`, then
   CLI flags. Read a value with `config.lookup/text/flag/number` when the command needs
@@ -115,21 +124,3 @@ Key facts:
 - Releases are tag-driven and use trusted publishing; there are no tokens.
 - Use the Makefile targets where they exist: `make gate`, `make bump VERSION=x.y.z`,
   `make uat`, `make release`.
-
-## Quiet work
-
-- `captain do` is the write-side sibling of `captain inspect`: an enumerated set of
-  deterministic operations the captain runs itself, with no crew. `commit`, `push`,
-  `branch`, and `run <target>` for one of the project's own Makefile targets, limited
-  to `do.RUNNABLE` (build/check/clean/fmt/format/gate/install/lint/test/typecheck/vet).
-- It is deliberately NOT built on `inspection`'s hardened Git. That sandbox strips user
-  config, hooks and credentials, which is right for reading arbitrary paths and useless
-  for writing: a commit needs the user's identity and a push needs their credentials.
-  `do` takes its safety from the opposite side - a fixed verb set with no flag that
-  rewrites or discards reachable from any of them.
-- Every run appends a `{"type": "quiet", ...}` record to `events/captain.jsonl` before
-  it is reported. The founding rule is that the user can watch their crew; work with no
-  pane keeps that rule only by being reviewable afterwards, so the record is not
-  optional and a failure is raised rather than swallowed.
-- The delegation axis is judgment, not file-touching: `make test` writes nothing and
-  needs no crew, while research changes no file and does.

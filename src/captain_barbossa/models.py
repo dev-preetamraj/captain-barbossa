@@ -37,10 +37,8 @@ PROVIDERS = ("claude", "codex", "pi", "grok")
 # No hook or notify mechanism, so crew state comes from Herdr's own agent status and the
 # pane, and a switch or a mail doorbell has to read the composer to know it is safe.
 HOOKLESS = ("pi", "grok")
-# Providers whose own hook can hand mail to their own model. For these the body never
-# crosses a terminal: the doorbell is a bare line that only starts a turn, so no composer
-# state can be a delivery failure. Codex has a turn-boundary notify but no documented way
-# to return context, so it keeps the typed first ring and the model-written receipt.
+# Providers whose own hook can hand mail to their own model, so the body never crosses a
+# terminal. Codex's notify marks a turn boundary but cannot return context, so it stays out.
 HOOK_DELIVERED = ("claude",)
 # Provider-neutral tiers: the captain picks one from the task, each CLI resolves its own.
 # defaults.toml is the one source for these, so settings can layer over the same values.
