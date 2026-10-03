@@ -1133,3 +1133,46 @@ class ApprovalDedupeTests(unittest.TestCase):
         self.surfaced()
         self.event({"hook_event_name": "PermissionRequest"})
         self.assertEqual(self.surfaced(), "awaiting_approval")
+
+
+class InterruptTests(unittest.TestCase):
+    """The lifecycle channel: the only thing that reaches a crew mid-turn."""
+
+    def setUp(self):
+        ProtocolTests.setUp(self)
+
+    def interrupt(self, name="Jack", reason=None):
+        args = SimpleNamespace(name=name, session=self.current.meta["id"], reason=reason)
+        return agents.interrupt_crew(args, self.pane, self.project)
+
+    def test_it_sends_escape_and_keeps_the_assignment_open(self):
+        with patch.object(agents.runtime, "herdr") as herdr:
+            self.interrupt()
+        herdr.assert_called_once_with("agent", "send-keys", "jack", "escape")
+        saved = memory.read_json(self.directory / "protocol.json")["assignments"]
+        self.assertEqual(saved[self.assignment["id"]]["state"], "working")
+
+    def test_it_rings_mail_that_the_busy_turn_held(self):
+        """The captain interrupted in order to say something; do not make them wait out
+        the drain cooldown for it."""
+        message_id = protocol.deliver(self.crew, "stop, wrong file", initial=True)
+        with (
+            patch.object(agents.runtime, "herdr"),
+            patch.object(protocol, "ring") as ring,
+        ):
+            self.interrupt()
+        rung_crew, rung_id = ring.call_args.args
+        self.assertEqual((rung_crew.crew_id, rung_id), ("jack", message_id))
+
+    def test_it_records_why(self):
+        with patch.object(agents.runtime, "herdr"):
+            self.interrupt(reason="editing the wrong file")
+        recorded = json.dumps(memory.read_json(self.current.graph))
+        self.assertIn("interrupted", recorded)
+        self.assertIn("editing the wrong file", recorded)
+
+    def test_a_dismissed_crew_cannot_be_interrupted(self):
+        self.crew.record["status"] = "dismissed"
+        memory.write_json(self.current.meta_path, self.current.meta)
+        with self.assertRaisesRegex(CaptainError, "already dismissed"):
+            self.interrupt()

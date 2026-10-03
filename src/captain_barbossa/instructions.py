@@ -155,6 +155,9 @@ Names are case-insensitive; ask about unknown/ambiguous names. Focus only naviga
 to existing crew's pane/tab: do not recruit or send a task.
 Send a running crew a follow-up prompt; it keeps its pane and conversation:
   CAPTAIN tell 'NAME' 'message' --assignment ID
+Mail reaches a busy crew only at its turn boundary. To stop one now (wrong file,
+wrong approach, runaway), interrupt then tell; it keeps its pane and assignment:
+  CAPTAIN interrupt 'NAME' [--reason 'why']
 See this session's crew and their live status in a table:
   CAPTAIN status [--all]
 Retier a running crew when its model stops fitting the work (a cheap crew that is

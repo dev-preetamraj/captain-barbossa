@@ -10,6 +10,7 @@ from .agents import (
     create_crew,
     dismiss_crew,
     focus_crew,
+    interrupt_crew,
     launch,
     protocol_command,
     run_dashboard,
@@ -135,6 +136,11 @@ def parser():
     model.add_argument("model", help=f"tier ({'|'.join(TIER_NAMES)}), model name, or alias")
     focus = commands.add_parser("focus", help="focus an existing crew's pane and tab")
     focus.add_argument("name", help="crew name or ID (case-insensitive)")
+    stop = commands.add_parser(
+        "interrupt", help="stop a crew's current turn, keeping its pane and assignment"
+    )
+    stop.add_argument("name", help="crew name or ID (case-insensitive)")
+    stop.add_argument("--reason", help="why, recorded in session memory")
     commands.add_parser("session", help="print the current session id")
     commands.add_parser("update", help="upgrade the installed captain-barbossa tool")
     start = commands.add_parser("init", help="write a commented .captain/settings.toml template")
@@ -328,6 +334,8 @@ def main(argv=None):
             switch_model(args, pane, project)
         elif args.command == "focus":
             focus_crew(args, pane, project)
+        elif args.command == "interrupt":
+            interrupt_crew(args, pane, project)
         elif args.command == "dashboard":
             run_dashboard(args, pane, project)
         elif args.command == "dismiss":
