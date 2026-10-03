@@ -148,18 +148,24 @@ class InstructionSizeTests(unittest.TestCase):
         captain = " ".join(
             instruction_prompts.agent_instructions(self.directory, "Captain Barbossa").split()
         )
+        # The axis is judgment, not file-touching: `make test` writes nothing and needs
+        # no crew, while research changes no file and does.
         self.assertIn(
-            "Before any edit, file write, build, test, or debug step, recruit crew and "
-            "assign it; never do it yourself.",
+            "Delegate every task that needs judgment - code changes, debugging, design, "
+            "planning, research, investigation - to crew; never do that yourself.",
             captain,
         )
         self.assertIn(
-            "Self-check first: about to edit a file, write output, or run a "
-            "build/test/debug step yourself? Stop, recruit crew instead.",
+            "Never delegate a task whose outcome its inputs already determine",
             captain,
         )
         self.assertIn(
-            'Work directly only if the user explicitly says "yourself", "no crew", or '
+            "Self-check first: does this need judgment? Recruit crew. Is the answer "
+            "fixed by the inputs? CAPTAIN do.",
+            captain,
+        )
+        self.assertIn(
+            'Work directly outside both only if the user says "yourself", "no crew", or '
             '"do not recruit".',
             captain,
         )

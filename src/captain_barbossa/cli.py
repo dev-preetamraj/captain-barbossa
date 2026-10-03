@@ -5,7 +5,7 @@ import json
 import os
 import sys
 
-from . import __version__, config, inspection, protocol
+from . import __version__, config, do, inspection, protocol
 from .agents import (
     create_crew,
     dismiss_crew,
@@ -57,6 +57,7 @@ def parser():
     )
     commands = root.add_subparsers(dest="command")
     inspection.add_arguments(commands)
+    do.add_arguments(commands)
     crew = commands.add_parser("crew", help="create a native crew after agent and pane/tab choices")
     crew.add_argument(
         "name", nargs="?", help="Pirates character name (automatically assigned when omitted)"
@@ -336,6 +337,8 @@ def main(argv=None):
             focus_crew(args, pane, project)
         elif args.command == "interrupt":
             interrupt_crew(args, pane, project)
+        elif args.command == "do":
+            do.run(args, read_session(project, args.session, pane).directory, project)
         elif args.command == "dashboard":
             run_dashboard(args, pane, project)
         elif args.command == "dismiss":

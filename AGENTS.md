@@ -115,3 +115,21 @@ Key facts:
 - Releases are tag-driven and use trusted publishing; there are no tokens.
 - Use the Makefile targets where they exist: `make gate`, `make bump VERSION=x.y.z`,
   `make uat`, `make release`.
+
+## Quiet work
+
+- `captain do` is the write-side sibling of `captain inspect`: an enumerated set of
+  deterministic operations the captain runs itself, with no crew. `commit`, `push`,
+  `branch`, and `run <target>` for one of the project's own Makefile targets, limited
+  to `do.RUNNABLE` (build/check/clean/fmt/format/gate/install/lint/test/typecheck/vet).
+- It is deliberately NOT built on `inspection`'s hardened Git. That sandbox strips user
+  config, hooks and credentials, which is right for reading arbitrary paths and useless
+  for writing: a commit needs the user's identity and a push needs their credentials.
+  `do` takes its safety from the opposite side - a fixed verb set with no flag that
+  rewrites or discards reachable from any of them.
+- Every run appends a `{"type": "quiet", ...}` record to `events/captain.jsonl` before
+  it is reported. The founding rule is that the user can watch their crew; work with no
+  pane keeps that rule only by being reviewable afterwards, so the record is not
+  optional and a failure is raised rather than swallowed.
+- The delegation axis is judgment, not file-touching: `make test` writes nothing and
+  needs no crew, while research changes no file and does.

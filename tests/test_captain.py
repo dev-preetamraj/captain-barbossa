@@ -214,12 +214,12 @@ class CaptainFlowTests(unittest.TestCase):
 
     def test_instructions_require_captain_to_delegate_user_tasks_to_new_crew(self):
         rule = (
-            "Before any edit, file write, build, test, or debug step, recruit crew and "
-            "assign it; never do it yourself. Direct read/search, bounded CAPTAIN inspect, "
-            "memory reads, answers, and coordination commands are allowed. "
-            "Self-check first: about to edit a file, write output, or run a "
-            "build/test/debug step yourself? Stop, recruit crew instead. Work directly "
-            'only if the user explicitly says "yourself", "no crew", or "do not recruit".'
+            "Delegate every task that needs judgment - code changes, debugging, design, "
+            "planning, research, investigation - to crew; never do that yourself. Never "
+            "delegate a task whose outcome its inputs already determine: a commit, a "
+            "push, a branch, or one of the project's own declared targets is not crew "
+            "work, and recruiting for it costs a pane, a model and a report to run one "
+            "command."
         )
         captain = " ".join(
             instruction_prompts.agent_instructions(self.directory, "Captain Barbossa").split()
