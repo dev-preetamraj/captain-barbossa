@@ -11,7 +11,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from captain_barbossa import config, memory
+from captain_barbossa import config, sessions, store
 
 
 def real_home():
@@ -20,7 +20,7 @@ def real_home():
 
 
 def real_temp_root():
-    """memory.temp_root()'s default, which a live captain session also exports."""
+    """store.temp_root()'s default, which a live captain session also exports."""
     return Path(tempfile.gettempdir()) / f"captain-barbossa-{os.getuid()}"
 
 
@@ -52,16 +52,16 @@ class IsolationTests(unittest.TestCase):
                 )
 
     def test_the_default_memory_roots_are_not_the_real_ones(self):
-        self.assertNotEqual(memory.temp_root(), real_temp_root())
-        self.assertNotEqual(memory.state_root(), real_home() / ".local/state/captain-barbossa")
-        for root in (memory.temp_root(), memory.state_root()):
+        self.assertNotEqual(store.temp_root(), real_temp_root())
+        self.assertNotEqual(store.state_root(), real_home() / ".local/state/captain-barbossa")
+        for root in (store.temp_root(), store.state_root()):
             with self.subTest(root=root):
                 self.assertFalse(root.is_relative_to(real_home()))
 
     def test_a_session_created_with_no_root_set_lands_outside_the_real_roots(self):
         """The end state that matters: a forgetful test must not litter the real root."""
         project = Path(self.enterContext(tempfile.TemporaryDirectory())).resolve()
-        directory, _ = memory.session(
+        directory, _ = sessions.session(
             project, {"workspace_id": "w1", "tab_id": "w1:t1", "pane_id": "w1:p1"}, create=True
         )
         self.assertTrue(directory.is_dir())

@@ -3,31 +3,16 @@
 import contextlib
 import io
 import json
-import os
-import tempfile
 import unittest
-from pathlib import Path
-from unittest.mock import patch
 
-from captain_barbossa import cli, memory
+from captain_barbossa import cli, memory, sessions, store
+from tests.home_isolation import SessionCase
 
 
-class MemoryShowBoundTests(unittest.TestCase):
+class MemoryShowBoundTests(SessionCase):
     def setUp(self):
-        self.root = Path(self.enterContext(tempfile.TemporaryDirectory())).resolve()
-        self.project = self.root / "project"
-        self.project.mkdir()
-        self.enterContext(
-            patch.dict(
-                os.environ,
-                {
-                    "CAPTAIN_MEMORY_ROOT": str(self.root / "state"),
-                    "CAPTAIN_PROJECT": str(self.project),
-                },
-            )
-        )
-        self.pane = {"workspace_id": "w1", "tab_id": "w1:t1", "pane_id": "w1:p1"}
-        self.directory, self.meta = memory.session(self.project, self.pane, create=True)
+        super().setUp()
+        self.directory, self.meta = sessions.session(self.project, self.pane, create=True)
 
     def args(self, *args):
         return cli.parser().parse_args(["--session", self.meta["id"], *args])
@@ -38,7 +23,7 @@ class MemoryShowBoundTests(unittest.TestCase):
         return output.getvalue().splitlines()
 
     def _seed(self, project_count, session_count):
-        project_graph = memory.state_storage(self.project) / "graph.json"
+        project_graph = store.state_storage(self.project) / "graph.json"
         for i in range(project_count):
             memory.add_memory(project_graph, "project", "has", f"p{i}")
         for i in range(session_count):
@@ -128,10 +113,10 @@ class MemoryShowBoundTests(unittest.TestCase):
         self.assertIn(f"{len(out.getvalue().encode('utf-8'))} bytes", warning)
 
     def test_a_label_shared_across_scopes_is_one_node(self):
-        memory.add_memory(memory.state_storage(self.project) / "graph.json", "task", "has", "one")
+        memory.add_memory(store.state_storage(self.project) / "graph.json", "task", "has", "one")
         memory.add_memory(self.directory / "graph.json", "task", "has", "two")
         with memory.memory_snapshot(self.directory) as snapshot:
-            graph = memory.read_json(snapshot / "graph.json")
+            graph = store.read_json(snapshot / "graph.json")
         self.assertEqual(len(graph["nodes"]), 3)
         self.assertEqual(len({node["id"] for node in graph["nodes"]}), 3)
 
@@ -141,7 +126,7 @@ class MemoryShowBoundTests(unittest.TestCase):
         self.assertEqual(lines[1], '[session] ["task", "has", "fact"]')
 
     def test_scope_prefix_on_single_project_fact(self):
-        memory.add_memory(memory.state_storage(self.project) / "graph.json", "task", "has", "fact")
+        memory.add_memory(store.state_storage(self.project) / "graph.json", "task", "has", "fact")
         lines = self.show()
         self.assertEqual(lines[1], '[project] ["task", "has", "fact"]')
 

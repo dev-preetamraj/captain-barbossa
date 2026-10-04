@@ -9,7 +9,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from captain_barbossa import agents, cli, memory, runtime
+from captain_barbossa import agents, cli, memory, runtime, sessions, store
 from captain_barbossa import pane as panes
 
 
@@ -40,7 +40,7 @@ class ChildMemoryRootTests(unittest.TestCase):
             )
         )
         self.enterContext(patch.object(panes, "READY_POLLS", 1))
-        self.directory, self.meta = memory.session(self.project, self.pane, create=True)
+        self.directory, self.meta = sessions.session(self.project, self.pane, create=True)
         self.enterContext(contextlib.redirect_stdout(io.StringIO()))
 
     def args(self, *extra):
@@ -60,8 +60,8 @@ class ChildMemoryRootTests(unittest.TestCase):
         ):
             agents.launch(self.args("--agent", "claude"), self.pane, self.project)
         _, _, env = execute.call_args.args
-        self.assertEqual(env["CAPTAIN_STATE_ROOT"], str(memory.state_root()))
-        self.assertEqual(env["CAPTAIN_TEMP_ROOT"], str(memory.temp_root()))
+        self.assertEqual(env["CAPTAIN_STATE_ROOT"], str(store.state_root()))
+        self.assertEqual(env["CAPTAIN_TEMP_ROOT"], str(store.temp_root()))
         self.assertNotEqual(env["CAPTAIN_STATE_ROOT"], env["CAPTAIN_TEMP_ROOT"])
 
     def test_create_crew_forwards_the_parents_distinct_state_and_temp_roots(self):
@@ -90,8 +90,8 @@ class ChildMemoryRootTests(unittest.TestCase):
         tab_create = next(call for call in api.call_args_list if call.args[:2] == ("tab", "create"))
         state_flag = self.env_flag(tab_create.args, "CAPTAIN_STATE_ROOT")
         temp_flag = self.env_flag(tab_create.args, "CAPTAIN_TEMP_ROOT")
-        self.assertEqual(state_flag, str(memory.state_root()))
-        self.assertEqual(temp_flag, str(memory.temp_root()))
+        self.assertEqual(state_flag, str(store.state_root()))
+        self.assertEqual(temp_flag, str(store.temp_root()))
         self.assertNotEqual(state_flag, temp_flag)
 
     def test_child_env_resolves_project_graph_under_the_parents_state_root_not_temp(self):
@@ -103,7 +103,7 @@ class ChildMemoryRootTests(unittest.TestCase):
         ):
             agents.launch(self.args("--agent", "claude"), self.pane, self.project)
         _, _, parent_env = execute.call_args.args
-        parent_state_storage = memory.state_storage(self.project)
+        parent_state_storage = store.state_storage(self.project)
         memory.add_memory(parent_state_storage / "graph.json", "project", "uses", "Python")
 
         # Simulate the child's own process env: only what launch() actually forwards,
@@ -117,10 +117,10 @@ class ChildMemoryRootTests(unittest.TestCase):
             "HOME": str(self.root / "different-home"),
         }
         with patch.dict(os.environ, child_env, clear=True):
-            child_state_storage = memory.state_storage(self.project)
+            child_state_storage = store.state_storage(self.project)
             self.assertEqual(child_state_storage, parent_state_storage)
-            self.assertNotEqual(child_state_storage, memory.storage(self.project))
-            graph = memory.read_json(child_state_storage / "graph.json")
+            self.assertNotEqual(child_state_storage, store.storage(self.project))
+            graph = store.read_json(child_state_storage / "graph.json")
         self.assertEqual(len(graph["links"]), 1)
 
 

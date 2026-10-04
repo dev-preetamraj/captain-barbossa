@@ -2,41 +2,28 @@ import contextlib
 import io
 import json
 import os
-import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from captain_barbossa import agents, cli, memory, runtime
-from captain_barbossa.memory import Session
+from captain_barbossa import agents, cli, runtime, sessions, store
 from captain_barbossa.pane import Pane
 from captain_barbossa.placement import Placement
 from captain_barbossa.runtime import CaptainError
+from captain_barbossa.sessions import Session
+from tests.home_isolation import HERDR, SessionCase
 
 PANE = {"workspace_id": "w1", "tab_id": "w1:t1", "pane_id": "w1:p1"}
 
 
-class LaunchHarness(unittest.TestCase):
+class LaunchHarness(SessionCase):
     """A captain launch with Herdr, the native CLI and the clock all stubbed out."""
 
     def setUp(self):
-        self.root = Path(self.enterContext(tempfile.TemporaryDirectory())).resolve()
-        self.project = self.root / "project"
-        self.project.mkdir()
-        self.enterContext(
-            patch.dict(
-                os.environ,
-                {
-                    "CAPTAIN_MEMORY_ROOT": str(self.root / "state"),
-                    "CAPTAIN_PROJECT": str(self.project),
-                    "HERDR_WORKSPACE_ID": "w1",
-                    "HERDR_TAB_ID": "w1:t1",
-                    "HERDR_PANE_ID": "w1:p1",
-                },
-            )
-        )
+        super().setUp()
+        self.enterContext(patch.dict(os.environ, HERDR))
         os.environ.pop("CAPTAIN_SESSION", None)
         self.calls = []
         self.splits = 0
@@ -77,7 +64,7 @@ class LaunchHarness(unittest.TestCase):
 
     def session_dir(self):
         _, _, env = self.execs[0]
-        return memory.session(self.project, PANE, env["CAPTAIN_SESSION"]).directory
+        return sessions.session(self.project, PANE, env["CAPTAIN_SESSION"]).directory
 
 
 class DashboardWiringTests(LaunchHarness):
@@ -158,7 +145,7 @@ class DashboardWiringTests(LaunchHarness):
     def test_captain_is_not_added_to_the_crew_roster(self):
         self.launch(["--agent", "claude"])
         _, _, env = self.execs[0]
-        meta = memory.session(self.project, PANE, env["CAPTAIN_SESSION"]).meta
+        meta = sessions.session(self.project, PANE, env["CAPTAIN_SESSION"]).meta
         self.assertEqual(meta["crew"], {})
 
     def test_captain_json_records_the_dashboard_pane(self):
@@ -179,25 +166,12 @@ class DashboardWiringTests(LaunchHarness):
         self.assertIsNone(record["dashboard"])
 
 
-class DashboardCommandTests(unittest.TestCase):
+class DashboardCommandTests(SessionCase):
     def setUp(self):
-        self.root = Path(self.enterContext(tempfile.TemporaryDirectory())).resolve()
-        self.project = self.root / "project"
-        self.project.mkdir()
-        self.enterContext(
-            patch.dict(
-                os.environ,
-                {
-                    "CAPTAIN_MEMORY_ROOT": str(self.root / "state"),
-                    "CAPTAIN_PROJECT": str(self.project),
-                    "HERDR_WORKSPACE_ID": "w1",
-                    "HERDR_TAB_ID": "w1:t1",
-                    "HERDR_PANE_ID": "w1:p1",
-                },
-            )
-        )
+        super().setUp()
+        self.enterContext(patch.dict(os.environ, HERDR))
         os.environ.pop("CAPTAIN_SESSION", None)
-        self.current = memory.session(self.project, PANE, create=True)
+        self.current = sessions.session(self.project, PANE, create=True)
         self.session_id = self.current.meta["id"]
 
     def run_dashboard(self, argv):
@@ -231,7 +205,7 @@ class DashboardCommandTests(unittest.TestCase):
             for path in (directory, *directory.rglob("*"))
         }
         with (
-            patch.object(memory, "private_dir", side_effect=AssertionError("state mutation")),
+            patch.object(store, "private_dir", side_effect=AssertionError("state mutation")),
             patch.object(agents.usage, "_prices") as prices,
         ):
             self.run_dashboard(["dashboard"])

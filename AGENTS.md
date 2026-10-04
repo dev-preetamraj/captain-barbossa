@@ -30,7 +30,10 @@ src/captain_barbossa/
   pane.py         native agent terminal interaction and pane parsing
   protocol.py     assignment state, crew mail (enqueue/unread/mark_read/bounce), wait polling
   inspection.py   bounded local file, state and Git reads for `inspect`
-  memory.py       session/project dirs, locks, atomic JSON, graph memory, hook events, Graphify
+  store.py        state and temp roots, storage dirs, atomic JSON read/write, locks
+  events.py       native CLI hook event stream and mail delivery
+  sessions.py     session dirs, Session, crew naming, live agents, prune
+  memory.py       graph memory in three scopes, repo rulebook, Graphify snapshot
   models.py       provider-neutral model tiers and free-text matching
   runtime.py      herdr subprocess wrapper, JSON validation, current pane discovery
   dashboard.py    plain-text crew token-usage frame and refresh loop
@@ -112,6 +115,17 @@ Key facts:
   exception is `.captain/`: `settings.toml` and the curated `--scope repo` graph
   (`graph.json`) are committed on purpose.
 - Comments are short and only for non-obvious "why"; no banners or restating code.
+- One module owns one subject, named for what it owns, not for its callers. It may
+  be long, never two subjects. Check in order: (1) if another module imports one
+  name from a file and wants nothing else in it, that cluster is its own module;
+  (2) if two things that must be read together sit more than ~400 lines apart, the
+  file is two subjects; (3) if splitting makes the halves import each other's
+  internals, leave it whole. Line count is a prompt for these checks, never a limit.
+- The package stays flat: no subpackages. Moved names get no re-export shim; every
+  caller moves in the same commit.
+- Tests: one file per behaviour, named for what it checks, never for a component or
+  the product. Add to the file whose name already describes it; create
+  `test_<behaviour>.py` only when none does. Each file carries its own `setUp`.
 
 ### Branching and releases
 

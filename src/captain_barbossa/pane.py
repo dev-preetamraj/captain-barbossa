@@ -383,12 +383,8 @@ class Pane:
             and any(INTERRUPT_MARKER in line for line in lines)
         )
 
-    def task_landed(self, provider, timeout=SUBMIT_TIMEOUT):
-        """Observe submission without typing into a potentially changed composer."""
-        return self.settled_status(timeout, provider)
-
-    def submit_task(self, task, provider, attempts=2):
-        """Submit at most once; attempts is retained for compatibility, never for retries.
+    def submit_task(self, task, provider):
+        """Submit at most once; never retry.
 
         Pane observations are not an execution receipt. In particular, idle after sending
         cannot distinguish a dropped prompt from a fast completed task.
@@ -408,7 +404,7 @@ class Pane:
             # herdr has no "--" terminator; a leading space defuses a task that starts with "-".
             guarded = f" {task}" if task.startswith("-") else task
             runtime.herdr("agent", "prompt", self.agent_name, guarded)
-            status = self.task_landed(provider)
+            status = self.settled_status(SUBMIT_TIMEOUT, provider)
         except HERDR_ERRORS as exc:
             raise CaptainError(
                 f"{self.agent_name} delivery outcome is unknown ({exc}); no resend was attempted. "

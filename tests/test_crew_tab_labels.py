@@ -1,41 +1,25 @@
 import contextlib
 import io
 import os
-import tempfile
-import unittest
-from pathlib import Path
 from unittest.mock import patch
 
-from captain_barbossa import agents, cli, memory, protocol, runtime
+from captain_barbossa import agents, cli, protocol, runtime, sessions
 from captain_barbossa import pane as panes
 from captain_barbossa.crew import Crew
 from captain_barbossa.pane import Pane
+from tests.home_isolation import HERDR, SessionCase
 
 
-class CrewTabLabelTests(unittest.TestCase):
+class CrewTabLabelTests(SessionCase):
     def setUp(self):
-        self.root = Path(self.enterContext(tempfile.TemporaryDirectory())).resolve()
-        self.project = self.root / "project"
-        self.project.mkdir()
-        self.enterContext(
-            patch.dict(
-                os.environ,
-                {
-                    "CAPTAIN_MEMORY_ROOT": str(self.root / "state"),
-                    "CAPTAIN_PROJECT": str(self.project),
-                    "HERDR_WORKSPACE_ID": "w1",
-                    "HERDR_TAB_ID": "w1:t1",
-                    "HERDR_PANE_ID": "w1:p1",
-                },
-            )
-        )
+        super().setUp()
+        self.enterContext(patch.dict(os.environ, HERDR))
         self.enterContext(patch.object(panes, "READY_POLLS", 1))
         # These fakes don't model a realistic agent status for the mail doorbell; give
         # delivery a clean ring by default (test_submit.py covers nudge_block/nudge directly).
         self.enterContext(patch.object(Pane, "nudge_block", return_value=None))
         self.enterContext(patch.object(Pane, "nudge"))
-        self.pane = {"workspace_id": "w1", "tab_id": "w1:t1", "pane_id": "w1:p1"}
-        self.directory, self.meta = memory.session(self.project, self.pane, create=True)
+        self.directory, self.meta = sessions.session(self.project, self.pane, create=True)
         self.enterContext(contextlib.redirect_stdout(io.StringIO()))
 
     def args(self, *args):
@@ -117,10 +101,12 @@ class CrewTabLabelTests(unittest.TestCase):
             return {}
 
         args_dismiss = self.args("dismiss", "jack")
-        current = memory.read_session(self.project, self.meta["id"], self.pane)
+        current = sessions.read_session(self.project, self.meta["id"], self.pane)
         crew = Crew.resolve(current, "Jack")
         unread_messages = protocol.unread(crew)
-        protocol.mark_read(crew, [msg["id"] for msg in unread_messages])
+        protocol.receipt(
+            crew.session.directory, crew.crew_id, [msg["id"] for msg in unread_messages]
+        )
         protocol.change(
             crew,
             self.args(

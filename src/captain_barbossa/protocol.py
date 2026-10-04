@@ -7,10 +7,10 @@ from contextlib import contextmanager
 from pathlib import Path
 from uuid import uuid4
 
-from .memory import lock, read_json, write_json
 from .models import HOOK_DELIVERED, HOOKLESS
 from .pane import DRAFT_GATE, HOLD_EXPIRY
-from .runtime import HERDR_ERRORS, CaptainError, check_text
+from .runtime import HERDR_ERRORS, CaptainError, check_text, inside_project
+from .store import lock, read_json, write_json
 
 ACTIONS = ("read", "search", "edit", "test", "build", "format", "commit", "version", "delete")
 # Our own ring is still painting for about this long, so a draft seen inside it is ours.
@@ -48,13 +48,7 @@ def checkpoint(directory):
 
 def owned_paths(project, paths):
     root = Path(project).resolve()
-    result = []
-    for value in paths:
-        path = (root / value).resolve()
-        if not path.is_relative_to(root) or ".git" in path.relative_to(root).parts:
-            raise CaptainError(f"Owned path must stay inside the project, outside .git: {value}")
-        result.append(path.relative_to(root).as_posix())
-    return sorted(set(result))
+    return sorted({inside_project(root, value, "Owned path") for value in paths})
 
 
 def overlaps(left, right):
@@ -278,11 +272,6 @@ def receipt(session_directory, crew_id, ids):
                     # A second read finds the mail already off "queued", so nothing to mirror.
                     if message["id"] in read_ids and message["delivery"] == "sent":
                         message["delivery"] = "read"
-
-
-def mark_read(crew, ids):
-    """The crew's own read writes the receipt; a bounced message is never resurrected."""
-    receipt(crew.session.directory, crew.crew_id, ids)
 
 
 def render(session_directory, messages):

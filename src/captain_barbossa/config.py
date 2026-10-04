@@ -8,8 +8,8 @@ from functools import lru_cache
 from importlib.resources import files
 from pathlib import Path
 
-from .memory import project_root
 from .runtime import HERDR_ERRORS, CaptainError
+from .store import project_root
 
 SETTINGS_PATH = Path(".captain") / "settings.toml"
 

@@ -9,26 +9,15 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from captain_barbossa import cli, instructions, memory
+from captain_barbossa import cli, instructions, memory, sessions, store
 from captain_barbossa.runtime import CaptainError
+from tests.home_isolation import SessionCase
 
 
-class RepoMemoryTests(unittest.TestCase):
+class RepoMemoryTests(SessionCase):
     def setUp(self):
-        self.root = Path(self.enterContext(tempfile.TemporaryDirectory())).resolve()
-        self.project = self.root / "project"
-        self.project.mkdir()
-        self.enterContext(
-            patch.dict(
-                os.environ,
-                {
-                    "CAPTAIN_MEMORY_ROOT": str(self.root / "state"),
-                    "CAPTAIN_PROJECT": str(self.project),
-                },
-            )
-        )
-        self.pane = {"workspace_id": "w1", "tab_id": "w1:t1", "pane_id": "w1:p1"}
-        self.directory, self.meta = memory.session(self.project, self.pane, create=True)
+        super().setUp()
+        self.directory, self.meta = sessions.session(self.project, self.pane, create=True)
         self.repo_graph = self.project / ".captain" / "graph.json"
 
     def run_memory(self, *args):
@@ -100,7 +89,7 @@ class RepoMemoryTests(unittest.TestCase):
         self.assertEqual(
             sorted(path.name for path in (self.project / ".captain").iterdir()), ["graph.json"]
         )
-        self.assertTrue((memory.state_storage(self.project) / "repo-graph.lock").is_file())
+        self.assertTrue((store.state_storage(self.project) / "repo-graph.lock").is_file())
 
     def test_a_value_over_the_field_limit_is_refused_and_writes_nothing(self):
         with self.assertRaises(CaptainError) as caught:
@@ -240,7 +229,7 @@ class RepoMemoryTests(unittest.TestCase):
         # under a teammate whose only action was reading it.
         stale = self.graph()
         stale["nodes"][0]["id"] = "legacy-id"
-        memory.write_json(self.repo_graph, stale)
+        store.write_json(self.repo_graph, stale)
         before = self.repo_graph.read_text(encoding="utf-8")
 
         self.run_memory("show")
@@ -251,7 +240,7 @@ class RepoMemoryTests(unittest.TestCase):
 
     def test_a_malformed_committed_graph_says_what_to_fix(self):
         (self.project / ".captain").mkdir()
-        memory.write_text(self.repo_graph, '{"nodes": "not a list"}')
+        store.write_text(self.repo_graph, '{"nodes": "not a list"}')
         with self.assertRaises(CaptainError) as caught:
             self.run_memory("show")
         self.assertIn("is not a graph", str(caught.exception))
@@ -272,7 +261,7 @@ class RepoMemoryTests(unittest.TestCase):
         self.add_repo("memory", "convention", "three scopes", "durability differs")
         memory.add_memory(self.directory / "graph.json", "Jack", "report", "done")
         memory.add_memory(
-            memory.state_storage(self.project) / "graph.json", "test command", "is", "unittest"
+            store.state_storage(self.project) / "graph.json", "test command", "is", "unittest"
         )
 
         rows = self.run_memory("show", "--scope", "repo")[1:]
@@ -538,7 +527,7 @@ class PureMemoryReadTests(unittest.TestCase):
                 },
             )
         )
-        self.enterContext(patch.object(memory, "_warned_temp_state_root", True))
+        self.enterContext(patch.object(store, "_warned_temp_state_root", True))
 
     def read(self, *args):
         parsed = cli.parser().parse_args(list(args))
@@ -555,12 +544,12 @@ class PureMemoryReadTests(unittest.TestCase):
             patch.object(Path, "cwd", return_value=child),
             patch.object(memory.subprocess, "run", side_effect=AssertionError("Git launched")),
         ):
-            self.assertEqual(memory.project_root(), self.project)
+            self.assertEqual(store.project_root(), self.project)
 
     def test_scoped_paths_need_no_session_and_create_nothing(self):
         for scope, expected in (
             ("repo", self.project / ".captain"),
-            ("project", memory.read_storage(memory.state_root(), self.project)),
+            ("project", store.read_storage(store.state_root(), self.project)),
         ):
             args = cli.parser().parse_args(["memory", "path"])
             args.scope = scope
@@ -578,7 +567,7 @@ class PureMemoryReadTests(unittest.TestCase):
         self.assertEqual(list(self.root.iterdir()), [self.project])
 
     def test_legacy_project_fallback_reads_without_migration_and_durable_wins(self):
-        legacy = memory.read_storage(memory.temp_root(), self.project) / "graph.json"
+        legacy = store.read_storage(store.temp_root(), self.project) / "graph.json"
         legacy.parent.mkdir(parents=True)
         graph = memory.empty_graph()
         graph["nodes"] = [{"id": "legacy-id", "label": "legacy project fact"}]
@@ -592,7 +581,7 @@ class PureMemoryReadTests(unittest.TestCase):
         )
         self.assertEqual(list(legacy.parent.iterdir()), [legacy])
         self.assertFalse((self.root / "state").exists())
-        durable = memory.read_storage(memory.state_root(), self.project) / "graph.json"
+        durable = store.read_storage(store.state_root(), self.project) / "graph.json"
         durable.parent.mkdir(parents=True)
         durable.write_text(json.dumps(memory.empty_graph()))
         self.assertEqual(
@@ -616,7 +605,7 @@ class PureMemoryReadTests(unittest.TestCase):
 
     def test_legacy_show_and_path_leave_bytes_permissions_and_tree_unchanged(self):
         session = "b" * 32
-        directory = memory.read_storage(memory.temp_root(), self.project) / "sessions" / session
+        directory = store.read_storage(store.temp_root(), self.project) / "sessions" / session
         directory.mkdir(parents=True)
         (directory / "session.json").write_text(json.dumps({"project": str(self.project)}))
         graph = memory.empty_graph()

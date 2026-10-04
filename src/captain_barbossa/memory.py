@@ -1,324 +1,31 @@
 """Graph memory in three scopes: session and project outside the checkout,
 repo in the committed .captain/graph.json the team shares."""
 
-import fcntl
 import hashlib
 import json
 import os
 import re
 import shutil
-import stat
 import subprocess
 import sys
 import tempfile
 import time
-import uuid
-from collections import namedtuple
 from contextlib import contextmanager
 from pathlib import Path
 
-from .runtime import HERDR_ERRORS, CaptainError, check_text, executable, herdr
-
-
-def project_root():
-    cwd = Path.cwd().resolve()
-    if os.environ.get("CAPTAIN_PROJECT"):
-        project = Path(os.environ["CAPTAIN_PROJECT"]).resolve()
-        if not cwd.is_relative_to(project):
-            raise CaptainError("This directory is outside the active captain project.")
-        return project
-    for directory in (cwd, *cwd.parents):
-        if (directory / ".git").exists():
-            return directory
-    return cwd
-
-
-def private_dir(path):
-    if path.is_symlink():
-        raise CaptainError(f"Memory directory must not be a symlink: {path}")
-    path.mkdir(mode=0o700, parents=True, exist_ok=True)
-    if path.stat().st_uid != os.getuid():
-        raise CaptainError(f"Memory directory belongs to another user: {path}")
-    path.chmod(0o700)
-    return path
-
-
-def _root(env_var, default):
-    # CAPTAIN_STATE_ROOT/CAPTAIN_TEMP_ROOT let a launched child pin the exact roots its
-    # parent resolved, so a default (no CAPTAIN_MEMORY_ROOT) parent doesn't get collapsed
-    # onto one root when re-resolving XDG_STATE_HOME/tempfile defaults in the child's env.
-    value = os.environ.get(env_var, os.environ.get("CAPTAIN_MEMORY_ROOT", default))
-    return Path(value).expanduser().absolute()
-
-
-def temp_root():
-    """Ephemeral root for session data; the OS may reclaim it between reboots."""
-    return _root(
-        "CAPTAIN_TEMP_ROOT", str(Path(tempfile.gettempdir()) / f"captain-barbossa-{os.getuid()}")
-    )
-
-
-_warned_temp_state_root = False
-
-
-def state_root():
-    """Durable root for project-scope graph.json; survives OS temp cleanup."""
-    xdg = os.environ.get("XDG_STATE_HOME")
-    base = Path(xdg).expanduser() if xdg else Path.home() / ".local" / "state"
-    root = _root("CAPTAIN_STATE_ROOT", str(base / "captain-barbossa"))
-    global _warned_temp_state_root
-    if not _warned_temp_state_root and root.is_relative_to(Path(tempfile.gettempdir())):
-        # A captain launched before the state/temp split exported one root into its
-        # children, so the "durable" graph lands where the OS reclaims it.
-        _warned_temp_state_root = True
-        print(
-            f"captain: durable memory root {root} is inside the OS temp directory; "
-            "restart the captain so project memory outlives temp cleanup.",
-            file=sys.stderr,
-        )
-    return root
-
-
-def rooted_storage(root, project):
-    project = project.resolve()
-    if root.resolve().is_relative_to(project):
-        raise CaptainError("Memory root must be outside the project repository.")
-    private_dir(root)
-    project_id = hashlib.sha256(os.fsencode(project)).hexdigest()
-    return private_dir(root / project_id)
-
-
-def storage(project):
-    return rooted_storage(temp_root(), project)
-
-
-def state_storage(project):
-    return rooted_storage(state_root(), project)
-
-
-def read_storage(root, project):
-    """Resolve an existing storage namespace without mkdir, chmod, locks or migration."""
-    project = project.resolve()
-    if root.resolve().is_relative_to(project):
-        raise CaptainError("Memory root must be outside the project repository.")
-    path = root / hashlib.sha256(os.fsencode(project)).hexdigest()
-    for item in (root, path):
-        if item.is_symlink():
-            raise CaptainError(f"Memory directory must not be a symlink: {item}")
-    return root.resolve() / path.name
-
-
-def read_session(project, session_id, pane=None, *, max_bytes=None):
-    """Open only the selected session's metadata; never initialize or repair state."""
-    if not session_id:
-        raise CaptainError("Start captain first, or pass --session <id>.")
-    if not SESSION_ID.fullmatch(session_id):
-        raise CaptainError("Invalid captain session ID.")
-    base = read_storage(temp_root(), project)
-    directory = base / "sessions" / session_id
-    if directory.resolve() != base.resolve() / "sessions" / session_id:
-        raise CaptainError("Session memory must not be a symlink.")
-    path = directory / "session.json"
-    if path.is_symlink():
-        raise CaptainError("Session metadata must not be a symlink.")
-    if not path.is_file():
-        raise CaptainError("This session does not exist for the current project.")
-    meta = read_json(path, max_bytes=max_bytes)
-    if not isinstance(meta, dict) or meta.get("project") != str(project.resolve()):
-        raise CaptainError("This session belongs to another project.")
-    if pane is not None and meta.get("workspace") != pane["workspace_id"]:
-        raise CaptainError("This session belongs to another Herdr workspace.")
-    return Session(directory, meta)
-
-
-def migrate_project_graph(project):
-    """Copy a pre-split project graph from the temp root into the state root, once."""
-    source = storage(project) / "graph.json"
-    if not source.is_file():
-        return
-    destination = state_storage(project) / "graph.json"
-    if source == destination or destination.exists():
-        return
-    with lock(destination.parent / "graph.lock"):
-        if not destination.exists():
-            shutil.copyfile(source, destination)
-            destination.chmod(0o600)
-
-
-def backfill_terminal_id(directory, pane):
-    """Record the Herdr terminal ID on a captain.json written before it was tracked.
-
-    Without it prune_sessions cannot tell a live pre-fix captain from a dead one.
-    Crew run the same commands, so only the captain's own pane may claim it.
-    """
-    path = directory / "captain.json"
-    terminal_id = pane.get("terminal_id")
-    if not terminal_id or not path.is_file():
-        return
-    try:
-        data = read_json(path)
-    except CaptainError:
-        return
-    if not isinstance(data, dict) or data.get("terminal_id"):
-        return
-    if data.get("pane") == pane["pane_id"]:
-        write_json(path, {**data, "terminal_id": terminal_id})
-
-
-def read_json(path, *, max_bytes=None):
-    try:
-        if max_bytes is not None:
-            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-            with os.fdopen(fd, "rb") as file:
-                if not stat.S_ISREG(os.fstat(file.fileno()).st_mode):
-                    raise CaptainError("Memory read requires a regular file.")
-                data = file.read(max_bytes + 1)
-            if len(data) > max_bytes:
-                raise CaptainError(f"Memory read exceeds {max_bytes} bytes.")
-            return json.loads(data)
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (ValueError, OSError) as exc:
-        raise CaptainError(f"Cannot read memory at {path}: {exc}") from exc
-
-
-def read_cursor(path):
-    """The stored offset into a crew's event log; a missing cursor means read from the start."""
-    return read_json(path) if path.exists() else 0
-
-
-def write_text(path, text):
-    fd, name = tempfile.mkstemp(prefix=".captain-", dir=path.parent)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as file:
-            file.write(text)
-            file.flush()
-            os.fsync(file.fileno())
-        os.replace(name, path)
-    finally:
-        Path(name).unlink(missing_ok=True)
-
-
-def write_json(path, data):
-    write_text(path, json.dumps(data, ensure_ascii=False, indent=2) + "\n")
-
-
-def crew_for_events(events_path):
-    """(session directory, crew id, active assignment) for the crew this hook belongs to.
-
-    A hook knows only its own events path; this is the bridge back into protocol state.
-    """
-    directory = events_path.parent.parent
-    state = read_json(directory / "protocol.json")
-    stem = events_path.name.removesuffix(".jsonl")
-    crew_id = next(c for c in state["active"] if stem == c or stem.startswith(f"{c}-"))
-    return directory, crew_id, state["assignments"].get(state["active"][crew_id])
-
-
-def mail_context(events_path):
-    """This crew's queued mail, rendered for its own model, or None.
-
-    Flush this before stamping the receipt (`receipt_for`), or a dropped hook output
-    marks mail read that no model saw.
-    """
-    from .protocol import queued, render
-
-    directory, crew_id, _ = crew_for_events(events_path)
-    return render(directory, queued(directory, crew_id))
-
-
-def receipt_for(events_path):
-    """Stamp the receipt for whatever mail_context just rendered and flushed."""
-    from .protocol import queued, receipt
-
-    directory, crew_id, _ = crew_for_events(events_path)
-    receipt(directory, crew_id, [message["id"] for message in queued(directory, crew_id)])
-
-
-def stop_reason(events_path):
-    """Why this crew may not end its turn yet, or None. A crew awaiting an answer to ask may
-    stop; instruction wording cannot enforce either rule, only the Stop hook can."""
-    _, crew_id, assignment = crew_for_events(events_path)
-    if assignment and assignment["state"] != "done" and not assignment["question"]:
-        name = assignment["crew"]
-        return f"Your assignment is unfinished; finish with `captain done {name} --report '...'`."
-    return None
-
-
-def append_event():
-    """Native hooks supply JSON on stdin (Claude) or as the last argument (Codex)."""
-    event = json.loads(sys.argv[2]) if len(sys.argv) > 2 else json.load(sys.stdin)
-    if not isinstance(event, dict):
-        return
-    # O_NOFOLLOW rejects a symlink swapped in at this path; append never clobbers existing data.
-    fd = os.open(sys.argv[1], os.O_NOFOLLOW | os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o600)
-    with os.fdopen(fd, "a", encoding="utf-8") as file:
-        fcntl.flock(file, fcntl.LOCK_EX)
-        file.write(json.dumps(event, ensure_ascii=False) + "\n")
-        file.flush()
-    # Only Claude sends hook_event_name, so Codex notify and pi are untouched. stop_hook_active
-    # means a block already fired; blocking again would loop the crew.
-    hook = event.get("hook_event_name")
-    if hook not in DELIVERY_HOOKS or (hook == "Stop" and event.get("stop_hook_active")):
-        return
-    try:
-        deliver_mail(Path(sys.argv[1]), hook)
-    except (CaptainError, OSError, ValueError, KeyError, StopIteration):
-        return  # a hook that cannot read state must never block or wedge the crew
-
-
-# The hooks that hand a crew its mail, in its own process.
-DELIVERY_HOOKS = ("SessionStart", "UserPromptSubmit", "Stop")
-
-
-def deliver_mail(events_path, hook):
-    """Hand this crew its queued mail, then stamp the receipt once the body is flushed."""
-    body = mail_context(events_path)
-    if body is None:
-        reason = stop_reason(events_path) if hook == "Stop" else None
-        if reason:
-            print(json.dumps({"decision": "block", "reason": reason}))
-        return
-    payload = {"hookSpecificOutput": {"hookEventName": hook, "additionalContext": body}}
-    if hook == "Stop":
-        # The body rides additionalContext; the block only holds the turn open.
-        payload["decision"] = "block"
-        payload["reason"] = "Mail from the captain arrived; act on it before finishing."
-    print(json.dumps(payload))
-    sys.stdout.flush()
-    # Only after the flush: at-least-once, since a duplicate beats a silent loss.
-    receipt_for(events_path)
-
-
-def read_events(path, offset):
-    """Read complete JSONL records, retaining an unfinished final line for the next poll."""
-    events = []
-    try:
-        with path.open("rb") as file:
-            file.seek(offset)
-            while line := file.readline():
-                if not line.endswith(b"\n"):
-                    break
-                offset = file.tell()
-                try:
-                    event = json.loads(line)
-                except (ValueError, UnicodeDecodeError):
-                    continue
-                if isinstance(event, dict):
-                    events.append(event)
-    except FileNotFoundError:
-        pass
-    return events, offset
-
-
-@contextmanager
-def lock(path):
-    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    fd = os.open(str(path), os.O_CREAT | os.O_WRONLY, 0o600)
-    os.close(fd)
-    path.chmod(0o600)
-    with path.open("a") as file:
-        fcntl.flock(file, fcntl.LOCK_EX)
-        yield
+from .runtime import CaptainError, check_text, executable
+from .sessions import prune_sessions, read_session, session
+from .store import (
+    lock,
+    private_dir,
+    read_json,
+    read_storage,
+    state_root,
+    state_storage,
+    temp_root,
+    write_json,
+    write_text,
+)
 
 
 def empty_graph():
@@ -536,9 +243,17 @@ def add_repo_memory(project, subject, relation, target, rationale, supersede=Fal
 # Seeding reads only these sections, so `memory init` never depends on a model deciding
 # which prose is a rule. A nested section inherits its parent's scope.
 RULEBOOK_FILES = ("AGENTS.md", "CLAUDE.md")
+
+
 RULEBOOK_SECTIONS = ("rules", "key facts", "conventions")
+
+
 ATX_HEADING = re.compile(r"^(#{1,6})\s+(\S.*?)\s*$")
+
+
 LABEL_HEADING = re.compile(r"^(\S.*?):$")
+
+
 BULLET = re.compile(r"^[-*]\s+(\S.*?)\s*$")
 
 
@@ -598,7 +313,7 @@ def rulebook_bullets(text):
             open_bullet[1] += " " + line.strip()
             continue
         open_bullet = None
-    return [(heading, bullet) for heading, bullet in bullets]
+    return bullets
 
 
 def rulebook_facts(project, source=None):
@@ -681,77 +396,6 @@ def read_repo_graph(project):
     return graph
 
 
-SESSION_ID = re.compile(r"[a-f0-9]{32}")
-
-
-class Session(namedtuple("Session", "directory meta")):
-    """A session directory and its metadata, plus the paths that live under it."""
-
-    @property
-    def graph(self):
-        return self.directory / "graph.json"
-
-    @property
-    def meta_path(self):
-        return self.directory / "session.json"
-
-    def events(self, crew_id):
-        return self.directory / "events" / f"{crew_id}.jsonl"
-
-
-def crew_prefix(session_id):
-    return f"c-{session_id[:8]}-"
-
-
-def agent_name(session_id, name):
-    """The Herdr agent name for a crew; prune_sessions reads live crew back off this prefix."""
-    return f"{crew_prefix(session_id)}{name}"
-
-
-@contextmanager
-def crew_meta(directory):
-    """Hold the crew lock over a read-modify-write of session.json."""
-    with lock(directory / "crew.lock"):
-        meta = read_json(directory / "session.json")
-        yield meta
-        write_json(directory / "session.json", meta)
-
-
-def session(project, pane, session_id=None, create=False):
-    project = project.resolve()
-    if session_id is None:
-        if not create:
-            raise CaptainError("Start captain first, or pass --session <id>.")
-        session_id = uuid.uuid4().hex
-    if not SESSION_ID.fullmatch(session_id):
-        raise CaptainError("Invalid captain session ID.")
-    base = storage(project)
-    directory = private_dir(base / "sessions") / session_id
-    if not create and not (directory / "session.json").is_file():
-        raise CaptainError("This session does not exist for the current project.")
-    private_dir(directory)
-    with lock(directory / "session.lock"):
-        meta_path = directory / "session.json"
-        if meta_path.exists():
-            meta = read_json(meta_path)
-            if meta["project"] != str(project) or meta["workspace"] != pane["workspace_id"]:
-                raise CaptainError("This session belongs to another project or Herdr workspace.")
-        else:
-            meta = {
-                "id": session_id,
-                "project": str(project),
-                "workspace": pane["workspace_id"],
-                "crew": {},
-            }
-            write_json(meta_path, meta)
-        backfill_terminal_id(directory, pane)
-    try:
-        migrate_project_graph(project)
-    except (CaptainError, OSError):
-        pass  # migration is housekeeping; never block a command on it
-    return Session(directory, meta)
-
-
 def project_and_session_graphs(directory):
     """Read the project-scope and session-scope graphs backing `directory` separately.
 
@@ -798,7 +442,11 @@ def memory_snapshot(directory, project=None):
 
 
 SHOW_LIMIT = 25
+
+
 PROJECT_RESERVE = 5
+
+
 REPO_RESERVE = 5
 
 
@@ -858,81 +506,6 @@ def show_memory(directory, show_all, project=None, scope=None):
     print("Memory (subject, relation, object):")
     for row_scope, subject, relation, target in rows:
         print(f"[{row_scope}] " + json.dumps([subject, relation, target], ensure_ascii=False))
-
-
-PRUNE_DAYS = 7
-
-
-def newest_mtime(directory):
-    newest = directory.stat().st_mtime
-    for path in directory.rglob("*"):
-        try:
-            newest = max(newest, path.lstat().st_mtime)
-        except OSError:
-            continue
-    return newest
-
-
-def live_agents():
-    """Terminal IDs and agent names Herdr reports, or None when Herdr cannot be reached."""
-    try:
-        agents = herdr("agent", "list", timeout=10).get("agents") or []
-    except HERDR_ERRORS:
-        return None
-    return (
-        {agent.get("terminal_id") for agent in agents if agent.get("terminal_id")},
-        {agent.get("name") for agent in agents if agent.get("name")},
-    )
-
-
-def session_terminal_id(directory):
-    """The captain's recorded Herdr terminal ID, or None if never recorded.
-
-    Pane IDs are position-in-layout and Herdr recycles them across terminals, so
-    liveness cannot key on the pane; the terminal ID is stable for the process.
-    """
-    path = directory / "captain.json"
-    if not path.is_file():
-        return None
-    try:
-        data = read_json(path)
-    except CaptainError:
-        return None
-    terminal_id = data.get("terminal_id") if isinstance(data, dict) else None
-    return terminal_id if isinstance(terminal_id, str) else None
-
-
-def prune_sessions(project, days=PRUNE_DAYS, current=None):
-    """Remove session directories older than `days` that hold no live Herdr agent.
-
-    Herdr being unreachable makes liveness unknowable, so the cutoff doubles rather
-    than guessing. Returns the directories removed.
-    """
-    sessions = storage(project) / "sessions"
-    if not sessions.is_dir():
-        return []
-    agents = live_agents()
-    cutoff = time.time() - days * 86400 * (2 if agents is None else 1)
-    removed = []
-    for directory in sorted(sessions.iterdir()):
-        if directory.is_symlink() or not directory.is_dir():
-            continue
-        if not SESSION_ID.fullmatch(directory.name) or directory.name == current:
-            continue
-        if newest_mtime(directory) >= cutoff:
-            continue
-        if agents is not None:
-            terminal_ids, names = agents
-            prefix = crew_prefix(directory.name)
-            terminal_id = session_terminal_id(directory)
-            if (terminal_id and terminal_id in terminal_ids) or any(
-                name.startswith(prefix) for name in names
-            ):
-                continue
-        shutil.rmtree(directory, ignore_errors=True)
-        if not directory.exists():
-            removed.append(directory)
-    return removed
 
 
 def memory(args, pane, project):

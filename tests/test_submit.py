@@ -73,7 +73,7 @@ class SubmitTaskTests(unittest.TestCase):
         self.assertNotIn(("agent", "send-keys"), pane.verbs())
         self.assertEqual(pane.verbs().count(("agent", "prompt")), 1)
 
-    def test_delayed_native_state_uses_one_send_with_attempts_one(self):
+    def test_delayed_native_state_uses_one_send(self):
         for provider in ("claude", "codex"):
             with self.subTest(provider=provider):
                 elapsed = 0
@@ -90,7 +90,7 @@ class SubmitTaskTests(unittest.TestCase):
                     patch.object(panes.time, "monotonic", side_effect=lambda: elapsed),
                     patch.object(panes.time, "sleep", side_effect=advance),
                 ):
-                    Pane("builder").submit_task(TASK, provider, attempts=1)
+                    Pane("builder").submit_task(TASK, provider)
                 self.assertGreaterEqual(elapsed, 8)
                 self.assertLess(elapsed, 10)
                 self.assertEqual(pane.verbs().count(("agent", "prompt")), 1)
@@ -104,7 +104,7 @@ class SubmitTaskTests(unittest.TestCase):
             patch.object(panes.time, "monotonic", side_effect=ticks),
         ):
             with self.assertRaisesRegex(CaptainError, "outcome is unknown"):
-                Pane("builder").submit_task(TASK, "codex", attempts=99)
+                Pane("builder").submit_task(TASK, "codex")
         self.assertLess(next(ticks), 25)
         self.assertEqual(pane.verbs().count(("agent", "prompt")), 1)
         self.assertNotIn(("agent", "send-keys"), pane.verbs())
@@ -128,11 +128,11 @@ class SubmitTaskTests(unittest.TestCase):
 
                 with patch.object(runtime, "herdr", side_effect=api):
                     if composer == "› Ask Codex to do anything":
-                        Pane("builder").submit_task(TASK, "codex", attempts=1)
+                        Pane("builder").submit_task(TASK, "codex")
                         self.assertEqual(pane.verbs().count(("agent", "prompt")), 1)
                     else:
                         with self.assertRaisesRegex(CaptainError, "no task was sent"):
-                            Pane("builder").submit_task(TASK, "codex", attempts=1)
+                            Pane("builder").submit_task(TASK, "codex")
                         self.assertNotIn(("agent", "prompt"), pane.verbs())
                     self.assertNotIn(("agent", "send-keys"), pane.verbs())
 
@@ -224,7 +224,7 @@ class SubmitTaskTests(unittest.TestCase):
 
         with patch.object(runtime, "herdr", side_effect=api):
             with self.assertRaisesRegex(CaptainError, "outcome is unknown"):
-                Pane("builder").submit_task(TASK, "claude", attempts=99)
+                Pane("builder").submit_task(TASK, "claude")
         self.assertEqual(pane.verbs().count(("agent", "prompt")), 1)
         self.assertNotIn(("agent", "send-keys"), pane.verbs())
 

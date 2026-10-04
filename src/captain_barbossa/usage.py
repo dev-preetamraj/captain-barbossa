@@ -10,7 +10,8 @@ import urllib.request
 from datetime import datetime
 from pathlib import Path
 
-from . import config, memory, models
+from . import config, models, store
+from .runtime import CaptainError
 
 # Prices change without a new model shipping, so they are fetched rather than tabulated
 # here. LiteLLM carries every id models.MODELS launches.
@@ -306,7 +307,7 @@ def _prices(*, cached_only=True):
     if override:
         # Set in a file, not a shell, so nothing has expanded ~ on the way in.
         return _read_json(Path(override).expanduser())
-    cache = memory.state_root() / "prices.json" if cached_only else _prices_cache()
+    cache = store.state_root() / "prices.json" if cached_only else _prices_cache()
     if cache is None:
         return {}
     extract = _read_json(cache)
@@ -317,8 +318,8 @@ def _prices(*, cached_only=True):
 
 def _prices_cache():
     try:
-        return memory.private_dir(memory.state_root()) / "prices.json"
-    except (memory.CaptainError, OSError):
+        return store.private_dir(store.state_root()) / "prices.json"
+    except (CaptainError, OSError):
         return None
 
 
@@ -357,7 +358,7 @@ def _refresh_prices(cache):
             if name in launchable and isinstance(entry, dict)
         }
         if extract:
-            memory.write_json(cache, extract)
+            store.write_json(cache, extract)
     except Exception:
         # A price refresh must never surface a traceback into the dashboard pane.
         return

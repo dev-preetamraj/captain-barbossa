@@ -11,9 +11,9 @@ import time
 import questionary
 
 from . import runtime
-from .memory import project_root, storage
 from .prompts import STYLE
 from .runtime import HERDR_ERRORS, CaptainError
+from .store import project_root, storage
 
 INSTALL_URL = "https://herdr.dev/install.sh"
 INSTALL_BIN = os.path.expanduser("~/.local/bin")

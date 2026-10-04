@@ -5,39 +5,24 @@ import io
 import os
 import subprocess
 import sys
-import tempfile
 import time
 import unittest
-from pathlib import Path
 from unittest.mock import patch
 
-from captain_barbossa import agents, cli, memory, runtime
+from captain_barbossa import agents, cli, memory, runtime, sessions, store
 from captain_barbossa.runtime import CaptainError
+from tests.home_isolation import HERDR, SessionCase
 
 
 def agent_list(*agents_):
     return {"agents": list(agents_)}
 
 
-class PruneTests(unittest.TestCase):
+class PruneTests(SessionCase):
     def setUp(self):
-        self.root = Path(self.enterContext(tempfile.TemporaryDirectory())).resolve()
-        self.project = self.root / "project"
-        self.project.mkdir()
-        self.enterContext(
-            patch.dict(
-                os.environ,
-                {
-                    "CAPTAIN_MEMORY_ROOT": str(self.root / "state"),
-                    "CAPTAIN_PROJECT": str(self.project),
-                    "HERDR_WORKSPACE_ID": "w1",
-                    "HERDR_TAB_ID": "w1:t1",
-                    "HERDR_PANE_ID": "w1:p1",
-                },
-            )
-        )
-        self.pane = {"workspace_id": "w1", "tab_id": "w1:t1", "pane_id": "w1:p1"}
-        self.sessions = memory.storage(self.project) / "sessions"
+        super().setUp()
+        self.enterContext(patch.dict(os.environ, HERDR))
+        self.sessions = store.storage(self.project) / "sessions"
 
     def make_session(
         self, session_id, age_days, captain_pane=None, crew_pane=None, captain_terminal=None
@@ -51,12 +36,12 @@ class PruneTests(unittest.TestCase):
                 "agent": f"c-{session_id[:8]}-jack",
                 "pane": crew_pane,
             }
-        memory.write_json(directory / "session.json", meta)
+        store.write_json(directory / "session.json", meta)
         if captain_pane:
             captain = {"provider": "claude", "pane": captain_pane}
             if captain_terminal:
                 captain["terminal_id"] = captain_terminal
-            memory.write_json(directory / "captain.json", captain)
+            store.write_json(directory / "captain.json", captain)
         (directory / "crew-jack.sh").write_text("#!/bin/sh\nexec claude\n", encoding="utf-8")
         memory.add_memory(directory / "graph.json", "jack", "report", "done")
         stamp = time.time() - age_days * 86400
@@ -68,10 +53,10 @@ class PruneTests(unittest.TestCase):
         stale = self.make_session("a" * 32, 30)
         recent = self.make_session("b" * 32, 1)
         current = self.make_session("c" * 32, 30)
-        project_graph = memory.state_storage(self.project) / "graph.json"
+        project_graph = store.state_storage(self.project) / "graph.json"
         memory.add_memory(project_graph, "project", "test command", "python -m unittest")
-        with patch.object(memory, "herdr", return_value=agent_list()) as api:
-            removed = memory.prune_sessions(self.project, current="c" * 32)
+        with patch.object(sessions, "herdr", return_value=agent_list()) as api:
+            removed = sessions.prune_sessions(self.project, current="c" * 32)
         api.assert_called_once_with("agent", "list", timeout=10)
         self.assertEqual(removed, [stale])
         self.assertFalse(stale.exists())
@@ -89,13 +74,13 @@ class PruneTests(unittest.TestCase):
             # Built the way create_crew names a crew, so prune cannot drift from it.
             {
                 "pane_id": "w1:p2",
-                "name": memory.agent_name("a" * 32, "jack"),
+                "name": sessions.agent_name("a" * 32, "jack"),
                 "terminal_id": "term_jack",
             },
             {"pane_id": "w1:p4", "agent": "claude", "terminal_id": "term_live"},
         )
-        with patch.object(memory, "herdr", return_value=live):
-            removed = memory.prune_sessions(self.project, days=7)
+        with patch.object(sessions, "herdr", return_value=live):
+            removed = sessions.prune_sessions(self.project, days=7)
         self.assertEqual(removed, [gone])
         self.assertTrue(by_name.is_dir())
         self.assertTrue(by_terminal.is_dir())
@@ -115,8 +100,8 @@ class PruneTests(unittest.TestCase):
         )
         no_terminal_recorded = self.make_session("c" * 32, 30, captain_pane="w1:p4")
         live = agent_list({"pane_id": "w1:p4", "agent": "claude", "terminal_id": "term_new"})
-        with patch.object(memory, "herdr", return_value=live):
-            removed = memory.prune_sessions(self.project, days=7)
+        with patch.object(sessions, "herdr", return_value=live):
+            removed = sessions.prune_sessions(self.project, days=7)
         self.assertEqual(removed, [recycled_a, recycled_b, no_terminal_recorded])
 
     def test_unreachable_herdr_only_prunes_beyond_twice_the_cutoff(self):
@@ -128,10 +113,10 @@ class PruneTests(unittest.TestCase):
             subprocess.TimeoutExpired("herdr", 10),
         ):
             with self.subTest(failure=failure):
-                with patch.object(memory, "herdr", side_effect=failure):
-                    self.assertIsNone(memory.live_agents())
-        with patch.object(memory, "herdr", side_effect=CaptainError("herdr is not installed")):
-            removed = memory.prune_sessions(self.project, days=7)
+                with patch.object(sessions, "herdr", side_effect=failure):
+                    self.assertIsNone(sessions.live_agents())
+        with patch.object(sessions, "herdr", side_effect=CaptainError("herdr is not installed")):
+            removed = sessions.prune_sessions(self.project, days=7)
         self.assertEqual(removed, [old])
         self.assertTrue(young.is_dir())
 
@@ -143,14 +128,14 @@ class PruneTests(unittest.TestCase):
         stamp = time.time() - 90 * 86400
         for path in (stray, loose):
             os.utime(path, (stamp, stamp))
-        with patch.object(memory, "herdr", return_value=agent_list()):
-            self.assertEqual(memory.prune_sessions(self.project), [])
+        with patch.object(sessions, "herdr", return_value=agent_list()):
+            self.assertEqual(sessions.prune_sessions(self.project), [])
         self.assertTrue(stray.is_dir())
         self.assertTrue(loose.is_file())
 
     def test_missing_sessions_directory_prunes_nothing(self):
-        with patch.object(memory, "herdr") as api:
-            self.assertEqual(memory.prune_sessions(self.project), [])
+        with patch.object(sessions, "herdr") as api:
+            self.assertEqual(sessions.prune_sessions(self.project), [])
         api.assert_not_called()
 
     def test_command_reports_what_it_removed_without_an_active_session(self):
@@ -160,7 +145,7 @@ class PruneTests(unittest.TestCase):
         with (
             patch.object(cli, "current_pane", return_value=self.pane),
             patch.object(cli, "project_root", return_value=self.project),
-            patch.object(memory, "herdr", return_value=agent_list()),
+            patch.object(sessions, "herdr", return_value=agent_list()),
             contextlib.redirect_stdout(out),
         ):
             self.assertEqual(cli.main(["memory", "prune"]), 0)
@@ -174,7 +159,7 @@ class PruneTests(unittest.TestCase):
         with (
             patch.object(cli, "current_pane", return_value=self.pane),
             patch.object(cli, "project_root", return_value=self.project),
-            patch.object(memory, "herdr", return_value=agent_list()),
+            patch.object(sessions, "herdr", return_value=agent_list()),
             contextlib.redirect_stdout(out),
         ):
             self.assertEqual(cli.main(["memory", "prune", "--older-than", "5"]), 0)
@@ -188,7 +173,7 @@ class PruneTests(unittest.TestCase):
         args = cli.parser().parse_args(["--agent", "claude"])
         with (
             patch.object(runtime, "herdr"),
-            patch.object(memory, "herdr", return_value=agent_list()),
+            patch.object(sessions, "herdr", return_value=agent_list()),
             patch.object(agents, "executable", return_value="/bin/claude"),
             patch.object(os, "execvpe") as execute,
             patch.object(sys.stdin, "isatty", return_value=True),
@@ -212,22 +197,22 @@ class PruneTests(unittest.TestCase):
 
     def test_backfills_a_missing_captain_terminal_id_from_the_captain_pane(self):
         directory = self.make_session("a" * 32, 30, captain_pane="w1:p1")
-        memory.session(self.project, dict(self.pane, terminal_id="term_live"), "a" * 32)
-        self.assertEqual(memory.session_terminal_id(directory), "term_live")
+        sessions.session(self.project, dict(self.pane, terminal_id="term_live"), "a" * 32)
+        self.assertEqual(sessions.session_terminal_id(directory), "term_live")
 
         stamp = time.time() - 30 * 86400
         for path in (*directory.rglob("*"), directory):
             os.utime(path, (stamp, stamp))
         live = agent_list({"pane_id": "w1:p1", "agent": "claude", "terminal_id": "term_live"})
-        with patch.object(memory, "herdr", return_value=live):
-            self.assertEqual(memory.prune_sessions(self.project, days=7), [])
+        with patch.object(sessions, "herdr", return_value=live):
+            self.assertEqual(sessions.prune_sessions(self.project, days=7), [])
         self.assertTrue(directory.is_dir())
 
     def test_crew_pane_never_claims_the_captain_terminal_id(self):
         directory = self.make_session("a" * 32, 30, captain_pane="w1:p4")
         crew = dict(self.pane, pane_id="w1:p9", terminal_id="term_crew")
-        memory.session(self.project, crew, "a" * 32)
-        self.assertIsNone(memory.session_terminal_id(directory))
+        sessions.session(self.project, crew, "a" * 32)
+        self.assertIsNone(sessions.session_terminal_id(directory))
 
     def test_launch_records_captain_terminal_id(self):
         pane = dict(self.pane, terminal_id="term_captain")
@@ -235,7 +220,7 @@ class PruneTests(unittest.TestCase):
         before = set(self.sessions.iterdir()) if self.sessions.is_dir() else set()
         with (
             patch.object(runtime, "herdr"),
-            patch.object(memory, "herdr", return_value=agent_list()),
+            patch.object(sessions, "herdr", return_value=agent_list()),
             patch.object(agents, "executable", return_value="/bin/claude"),
             patch.object(os, "execvpe"),
             patch.object(sys.stdin, "isatty", return_value=True),
@@ -243,7 +228,7 @@ class PruneTests(unittest.TestCase):
         ):
             agents.launch(args, pane, self.project)
         (new_session,) = set(self.sessions.iterdir()) - before
-        captain = memory.read_json(new_session / "captain.json")
+        captain = store.read_json(new_session / "captain.json")
         self.assertEqual(captain["terminal_id"], "term_captain")
 
 

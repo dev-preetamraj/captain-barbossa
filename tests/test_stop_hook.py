@@ -4,42 +4,29 @@ import contextlib
 import io
 import json
 import os
-import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from captain_barbossa import memory, protocol
+from captain_barbossa import events, protocol, sessions, store
 from captain_barbossa.crew import Crew
-from tests import home_isolation  # noqa: F401
+from tests.home_isolation import SessionCase
 
 
-class StopHookTests(unittest.TestCase):
+class StopHookTests(SessionCase):
     def setUp(self):
-        self.root = Path(self.enterContext(tempfile.TemporaryDirectory())).resolve()
-        self.project = self.root / "project"
-        self.project.mkdir()
+        super().setUp()
         self.enterContext(contextlib.chdir(self.project))
-        self.enterContext(
-            patch.dict(
-                os.environ,
-                {
-                    "CAPTAIN_MEMORY_ROOT": str(self.root / "state"),
-                    "CAPTAIN_PROJECT": str(self.project),
-                    "CAPTAIN_ROLE": "captain",
-                },
-            )
-        )
-        pane = {"workspace_id": "w1", "tab_id": "w1:t1", "pane_id": "w1:p1"}
-        self.current = memory.session(self.project, pane, create=True)
+        self.enterContext(patch.dict(os.environ, {"CAPTAIN_ROLE": "captain"}))
+        self.current = sessions.session(self.project, self.pane, create=True)
         self.crew = Crew(
             "jack",
             {"name": "Jack", "agent": "jack", "provider": "claude", "incarnation_id": "first"},
             self.current,
         )
         self.current.meta["crew"]["jack"] = self.crew.record
-        memory.write_json(self.current.meta_path, self.current.meta)
+        store.write_json(self.current.meta_path, self.current.meta)
         self.assignment = protocol.begin(self.crew, self.project, "original", ["src"], ["edit"])
         self.crew.events.parent.mkdir(parents=True, exist_ok=True)
 
@@ -49,7 +36,7 @@ class StopHookTests(unittest.TestCase):
         with patch("sys.argv", ["hook", str(self.crew.events)]):
             with patch("sys.stdin", io.StringIO(json.dumps(event))):
                 with contextlib.redirect_stdout(out):
-                    memory.append_event()
+                    events.append_event()
         return out.getvalue()
 
     def decision(self, event):
@@ -135,7 +122,7 @@ class StopHookTests(unittest.TestCase):
     def test_a_receipt_that_fails_leaves_the_mail_queued(self):
         """Stamped only after the flush, so a lost hook re-delivers rather than loses."""
         self.mail()
-        with patch("captain_barbossa.memory.receipt_for", side_effect=OSError("disk")):
+        with patch("captain_barbossa.events.receipt_for", side_effect=OSError("disk")):
             printed = self.hook({"hook_event_name": "UserPromptSubmit"})
         self.assertIn("do the thing", printed)
         self.assertEqual(len(self.still_queued()), 1)
@@ -176,7 +163,7 @@ class StopHookTests(unittest.TestCase):
         with patch("sys.argv", ["hook", str(self.crew.events), json.dumps({"type": "x"})]):
             out = io.StringIO()
             with contextlib.redirect_stdout(out):
-                memory.append_event()
+                events.append_event()
         self.assertEqual(out.getvalue(), "")
         self.assertEqual(json.loads(self.logged()[0])["type"], "x")
 
@@ -200,8 +187,8 @@ class HookRegistrationTests(unittest.TestCase):
 
     def test_every_delivery_hook_is_registered_with_the_native_cli(self):
         self.assertTrue(
-            set(memory.DELIVERY_HOOKS) <= self.registered(),
-            f"unregistered delivery hooks: {set(memory.DELIVERY_HOOKS) - self.registered()}",
+            set(events.DELIVERY_HOOKS) <= self.registered(),
+            f"unregistered delivery hooks: {set(events.DELIVERY_HOOKS) - self.registered()}",
         )
 
     def test_the_lifecycle_hooks_survive_alongside_them(self):

@@ -3,17 +3,16 @@ import io
 import json
 import os
 import subprocess
-import tempfile
 import tomllib
 import unittest
 from itertools import count
-from pathlib import Path
 from unittest.mock import patch
 
-from captain_barbossa import agents, cli, memory, runtime
+from captain_barbossa import agents, cli, events, memory, runtime, sessions, store
 from captain_barbossa import instructions as instruction_prompts
 from captain_barbossa import pane as panes
 from captain_barbossa.crew import Crew
+from tests.home_isolation import HERDR, SessionCase
 
 APPROVAL_PANE = "\n".join(
     [
@@ -29,27 +28,13 @@ APPROVAL_PANE = "\n".join(
 )
 
 
-class WaitCrewMemoryTests(unittest.TestCase):
+class WaitCrewMemoryTests(SessionCase):
     """Regression tests for wait_crew's graph memory writes (agents.wait_crew, ~L381)."""
 
     def setUp(self):
-        self.root = Path(self.enterContext(tempfile.TemporaryDirectory())).resolve()
-        self.project = self.root / "project"
-        self.project.mkdir()
-        self.enterContext(
-            patch.dict(
-                os.environ,
-                {
-                    "CAPTAIN_MEMORY_ROOT": str(self.root / "state"),
-                    "CAPTAIN_PROJECT": str(self.project),
-                    "HERDR_WORKSPACE_ID": "w1",
-                    "HERDR_TAB_ID": "w1:t1",
-                    "HERDR_PANE_ID": "w1:p1",
-                },
-            )
-        )
-        self.pane = {"workspace_id": "w1", "tab_id": "w1:t1", "pane_id": "w1:p1"}
-        self.directory, self.meta = memory.session(self.project, self.pane, create=True)
+        super().setUp()
+        self.enterContext(patch.dict(os.environ, HERDR))
+        self.directory, self.meta = sessions.session(self.project, self.pane, create=True)
         self.enterContext(contextlib.redirect_stdout(io.StringIO()))
         agent_name = f"c-{self.meta['id'][:8]}-jack"
         self.meta["crew"] = {
@@ -64,7 +49,7 @@ class WaitCrewMemoryTests(unittest.TestCase):
                 "status": "started",
             }
         }
-        memory.write_json(self.directory / "session.json", self.meta)
+        store.write_json(self.directory / "session.json", self.meta)
         self.agent_name = agent_name
 
     def args(self, *args):
@@ -99,7 +84,7 @@ class WaitCrewMemoryTests(unittest.TestCase):
         path = self.directory / "graph.json"
         if not path.exists():
             return []
-        graph = memory.read_json(path)
+        graph = store.read_json(path)
         labels = {node["id"]: node["label"] for node in graph["nodes"]}
         return [
             labels[link["target"]]
@@ -131,7 +116,7 @@ class WaitCrewMemoryTests(unittest.TestCase):
     def run_pi_wait(self, tail, report=None):
         """A pi wait: pi installs no hooks, so it always reaches the pane-tail fallback."""
         self.meta["crew"]["jack"]["provider"] = "pi"
-        memory.write_json(self.directory / "session.json", self.meta)
+        store.write_json(self.directory / "session.json", self.meta)
 
         def api(*args, **kwargs):
             if args[:2] == ("agent", "get"):
@@ -178,7 +163,7 @@ class WaitCrewMemoryTests(unittest.TestCase):
         self.assertFalse((self.directory / "tail-jack.txt").exists())
 
     def event_path(self):
-        return memory.private_dir(self.directory / "events") / "jack.jsonl"
+        return store.private_dir(self.directory / "events") / "jack.jsonl"
 
     def write_event(self, event):
         with self.event_path().open("a", encoding="utf-8") as file:
@@ -188,7 +173,7 @@ class WaitCrewMemoryTests(unittest.TestCase):
         self.meta["crew"]["jack"]["provider"] = "codex"
         with patch.object(runtime, "herdr", return_value=APPROVAL_PANE):
             crew = Crew(
-                "jack", self.meta["crew"]["jack"], memory.Session(self.directory, self.meta)
+                "jack", self.meta["crew"]["jack"], sessions.Session(self.directory, self.meta)
             )
             self.assertEqual(crew.status(60), ("blocked", None))
 
@@ -271,7 +256,7 @@ class WaitCrewMemoryTests(unittest.TestCase):
                     Crew(
                         "jack",
                         {"agent": self.agent_name},
-                        memory.Session(self.directory, self.meta),
+                        sessions.Session(self.directory, self.meta),
                     ).status(0),
                     (None, None),
                 )
@@ -409,7 +394,7 @@ class WaitCrewMemoryTests(unittest.TestCase):
         ):
             self.assertEqual(
                 Crew(
-                    "jack", {"agent": self.agent_name}, memory.Session(self.directory, self.meta)
+                    "jack", {"agent": self.agent_name}, sessions.Session(self.directory, self.meta)
                 ).status(10),
                 ("done", stop),
             )
@@ -424,7 +409,7 @@ class WaitCrewMemoryTests(unittest.TestCase):
         ):
             self.assertEqual(
                 Crew(
-                    "jack", {"agent": self.agent_name}, memory.Session(self.directory, self.meta)
+                    "jack", {"agent": self.agent_name}, sessions.Session(self.directory, self.meta)
                 ).status(20),
                 (None, None),
             )
@@ -435,7 +420,7 @@ class WaitCrewMemoryTests(unittest.TestCase):
         return Crew(
             "jack",
             {"agent": self.agent_name, "provider": "pi"},
-            memory.Session(self.directory, self.meta),
+            sessions.Session(self.directory, self.meta),
         )
 
     def pi_status(self, crew, statuses, timeout=60):
@@ -477,7 +462,7 @@ class WaitCrewMemoryTests(unittest.TestCase):
 
     def test_pi_wait_reports_a_blocked_pane_from_herdr(self):
         self.meta["crew"]["jack"]["provider"] = "pi"
-        memory.write_json(self.directory / "session.json", self.meta)
+        store.write_json(self.directory / "session.json", self.meta)
         crew = self.pi_crew()
         crew.record["provider"] = "pi"
         with (
@@ -491,7 +476,7 @@ class WaitCrewMemoryTests(unittest.TestCase):
         crew = Crew(
             "jack",
             {"agent": self.agent_name, "provider": "pi"},
-            memory.Session(self.directory, self.meta),
+            sessions.Session(self.directory, self.meta),
         )
         with (
             patch.object(runtime, "herdr", return_value={"agent": {"agent_status": "done"}}),
@@ -501,17 +486,17 @@ class WaitCrewMemoryTests(unittest.TestCase):
             self.assertEqual(crew.status(60), ("done", None))
 
     def test_event_reader_skips_bad_records_and_retries_a_partial_unicode_line(self):
-        events = self.event_path()
-        self.assertEqual(memory.read_events(events, 0), ([], 0))
+        log = self.event_path()
+        self.assertEqual(events.read_events(log, 0), ([], 0))
         prefix = b"invalid\n[]\nnull\n\xff\n"
         event = {"hook_event_name": "Stop", "message": "雪"}
         encoded = (json.dumps(event, ensure_ascii=False) + "\n").encode()
         cut = encoded.index("雪".encode()) + 1
-        events.write_bytes(prefix + encoded[:cut])
-        self.assertEqual(memory.read_events(events, 0), ([], len(prefix)))
-        with events.open("ab") as file:
+        log.write_bytes(prefix + encoded[:cut])
+        self.assertEqual(events.read_events(log, 0), ([], len(prefix)))
+        with log.open("ab") as file:
             file.write(encoded[cut:])
-        self.assertEqual(memory.read_events(events, len(prefix)), ([event], events.stat().st_size))
+        self.assertEqual(events.read_events(log, len(prefix)), ([event], log.stat().st_size))
 
 
 if __name__ == "__main__":

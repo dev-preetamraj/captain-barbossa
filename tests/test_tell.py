@@ -2,37 +2,22 @@ import contextlib
 import io
 import json
 import os
-import tempfile
 import unittest
-from pathlib import Path
 from unittest.mock import patch
 
-from captain_barbossa import agents, cli, memory, runtime
+from captain_barbossa import agents, cli, runtime, sessions, store
 from captain_barbossa import pane as panes
 from captain_barbossa.crew import Crew
+from tests.home_isolation import HERDR, SessionCase
 
 
-class TellCrewTests(unittest.TestCase):
+class TellCrewTests(SessionCase):
     """Regression tests for follow-up prompts (agents.tell_crew)."""
 
     def setUp(self):
-        self.root = Path(self.enterContext(tempfile.TemporaryDirectory())).resolve()
-        self.project = self.root / "project"
-        self.project.mkdir()
-        self.enterContext(
-            patch.dict(
-                os.environ,
-                {
-                    "CAPTAIN_MEMORY_ROOT": str(self.root / "state"),
-                    "CAPTAIN_PROJECT": str(self.project),
-                    "HERDR_WORKSPACE_ID": "w1",
-                    "HERDR_TAB_ID": "w1:t1",
-                    "HERDR_PANE_ID": "w1:p1",
-                },
-            )
-        )
-        self.pane = {"workspace_id": "w1", "tab_id": "w1:t1", "pane_id": "w1:p1"}
-        self.directory, self.meta = memory.session(self.project, self.pane, create=True)
+        super().setUp()
+        self.enterContext(patch.dict(os.environ, HERDR))
+        self.directory, self.meta = sessions.session(self.project, self.pane, create=True)
         self.agent_name = f"c-{self.meta['id'][:8]}-jack"
         self.meta["crew"] = {
             "jack": {
@@ -46,8 +31,8 @@ class TellCrewTests(unittest.TestCase):
                 "status": "started",
             }
         }
-        memory.write_json(self.directory / "session.json", self.meta)
-        self.events = memory.private_dir(self.directory / "events") / "jack.jsonl"
+        store.write_json(self.directory / "session.json", self.meta)
+        self.events = store.private_dir(self.directory / "events") / "jack.jsonl"
         self.events.write_text("", encoding="utf-8")
 
     def args(self, *args):
@@ -82,9 +67,9 @@ class TellCrewTests(unittest.TestCase):
         sent, output = self.tell("jack", "now do the docs")
         self.assertEqual(sent, [(self.agent_name, "now do the docs")])
         self.assertIn("Sent to Jack.", output)
-        meta = memory.read_json(self.directory / "session.json")
+        meta = store.read_json(self.directory / "session.json")
         self.assertEqual(meta["crew"]["jack"]["task"], "now do the docs")
-        graph = memory.read_json(self.directory / "graph.json")
+        graph = store.read_json(self.directory / "graph.json")
         labels = {node["id"]: node["label"] for node in graph["nodes"]}
         assigned = [
             (labels[link["source"]], labels[link["target"]])
@@ -97,19 +82,19 @@ class TellCrewTests(unittest.TestCase):
         self.append_event({"hook_event_name": "Notification", "notification_type": "idle_prompt"})
         self.tell("Jack", "keep going")
         cursor = self.events.with_suffix(".cursor")
-        self.assertEqual(memory.read_json(cursor), self.events.stat().st_size)
+        self.assertEqual(store.read_json(cursor), self.events.stat().st_size)
         with patch.object(runtime, "herdr", side_effect=AssertionError):
             status, _ = Crew(
                 "jack",
                 {"agent": self.agent_name, "task": "keep going"},
-                memory.Session(self.directory, self.meta),
+                sessions.Session(self.directory, self.meta),
             ).status(0)
         self.assertIsNone(status)
 
     def test_dismissed_crew_is_refused(self):
-        meta = memory.read_json(self.directory / "session.json")
+        meta = store.read_json(self.directory / "session.json")
         meta["crew"]["jack"]["status"] = "dismissed"
-        memory.write_json(self.directory / "session.json", meta)
+        store.write_json(self.directory / "session.json", meta)
         with self.assertRaisesRegex(agents.CaptainError, "dismissed"):
             self.tell("Jack", "keep going")
 

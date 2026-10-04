@@ -4,6 +4,7 @@ import json
 import os
 import shutil
 import subprocess
+from pathlib import Path
 
 
 class CaptainError(Exception):
@@ -17,6 +18,14 @@ HERDR_ERRORS = (CaptainError, subprocess.TimeoutExpired, OSError)
 def check_text(value, what):
     if not value.strip() or len(value) > 8000 or "\x00" in value:
         raise CaptainError(f"Provide a {what} of 1–8000 characters, without NUL bytes.")
+
+
+def inside_project(root, value, what):
+    """Resolve value under root and return it project-relative, or refuse to leave."""
+    path = (Path(root) / value).resolve()
+    if not path.is_relative_to(root) or ".git" in path.relative_to(root).parts:
+        raise CaptainError(f"{what} must stay inside the project, outside .git: {value}")
+    return path.relative_to(root).as_posix()
 
 
 def executable(name):

@@ -7,9 +7,10 @@ import time
 
 from . import config, runtime
 from .crew import Crew
-from .memory import Session, read_json
 from .models import MODELS
 from .runtime import HERDR_ERRORS, CaptainError
+from .sessions import Session
+from .store import read_json
 from .usage import RATE_WINDOW, model_for_events, usage_for_events
 
 # Label, base width, right-aligned. A column grows to fit its content; the base keeps
@@ -28,7 +29,6 @@ COLUMNS = (
     ("CUM $", 6, True),
     (f"$/h {RATE_WINDOW // 60}m", 6, True),
 )
-HEADERS = tuple(label for label, _, _ in COLUMNS)
 # Column labels, TOTAL and the annotation under it always render, so H-3 people fit.
 MANDATORY_ROWS = 3
 # Width degradation of the table, applied cumulatively in this order. The footer is its

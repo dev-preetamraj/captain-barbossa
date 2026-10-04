@@ -597,8 +597,8 @@ class PriceSourceTests(unittest.TestCase):
         self.enterContext(patch.dict(os.environ, {"CAPTAIN_STATE_ROOT": str(self.root)}))
         self.enterContext(_dashboard(prices_file=""))
         self.enterContext(patch.object(usage, "_refreshed", False))
-        # A temp state root is exactly what memory.state_root() warns about.
-        self.enterContext(patch.object(usage.memory, "_warned_temp_state_root", True))
+        # A temp state root is exactly what store.state_root() warns about.
+        self.enterContext(patch.object(usage.store, "_warned_temp_state_root", True))
 
     def test_refresh_keeps_only_the_models_we_launch(self):
         published = {
@@ -640,7 +640,7 @@ class PriceSourceTests(unittest.TestCase):
         absent = self.root / "absent"
         with (
             patch.dict(os.environ, {"CAPTAIN_STATE_ROOT": str(absent)}),
-            patch.object(usage.memory, "private_dir", side_effect=AssertionError("mkdir")),
+            patch.object(usage.store, "private_dir", side_effect=AssertionError("mkdir")),
             patch.object(usage, "_start_refresh", side_effect=AssertionError("network")),
         ):
             self.assertEqual(usage._prices(), {})

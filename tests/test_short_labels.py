@@ -9,7 +9,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from captain_barbossa import memory
+from captain_barbossa import memory, store
 
 
 class TruncateLabelTests(unittest.TestCase):
@@ -42,11 +42,11 @@ class ShortLabelTests(unittest.TestCase):
     def setUp(self):
         self.root = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
-        self.directory = memory.private_dir(self.root / "sessions" / ("a" * 32))
+        self.directory = store.private_dir(self.root / "sessions" / ("a" * 32))
         self.path = self.directory / "graph.json"
 
     def labels(self, path=None):
-        graph = memory.read_json(path or self.path)
+        graph = store.read_json(path or self.path)
         return [node["label"] for node in graph["nodes"]]
 
     def test_short_labels_are_stored_verbatim_without_notes(self):
@@ -74,7 +74,7 @@ class ShortLabelTests(unittest.TestCase):
         prefix = "same start " * 40
         memory.add_memory(self.path, "Jack", "report", prefix + "first ending")
         memory.add_memory(self.path, "Jack", "report", prefix + "second ending")
-        graph = memory.read_json(self.path)
+        graph = store.read_json(self.path)
         self.assertEqual(len({node["id"] for node in graph["nodes"]}), 3)
         self.assertEqual(len(graph["links"]), 2)
         self.assertEqual(len(list((self.directory / "notes").iterdir())), 2)
@@ -88,7 +88,7 @@ class ShortLabelTests(unittest.TestCase):
     def test_long_relation_is_capped_and_spilled_like_a_label(self):
         relation = "reported " + "r" * 5000
         memory.add_memory(self.path, "Jack", relation, "done")
-        [link] = memory.read_json(self.path)["links"]
+        [link] = store.read_json(self.path)["links"]
         self.assertEqual(len(link["relation"]), memory.LABEL_LIMIT)
         self.assertEqual(link["key"], link["relation"])
         self.assertTrue(link["relation"].endswith(f"... see notes/{memory.note_name(relation)}"))
@@ -109,7 +109,7 @@ class ShortLabelTests(unittest.TestCase):
         self.assertEqual((subject, relation), ("Jack", "report"))
         self.assertEqual(len(target), memory.LABEL_LIMIT)
         with memory.memory_snapshot(self.directory) as snapshot:
-            graph = memory.read_json(snapshot / "graph.json")
+            graph = store.read_json(snapshot / "graph.json")
         self.assertEqual(set(graph), set(memory.empty_graph()))
         self.assertEqual(sorted(self.labels()), sorted(node["label"] for node in graph["nodes"]))
 
@@ -118,7 +118,7 @@ class GraphMigrationTests(unittest.TestCase):
     def setUp(self):
         self.root = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
-        self.directory = memory.private_dir(self.root / "sessions" / ("a" * 32))
+        self.directory = store.private_dir(self.root / "sessions" / ("a" * 32))
         self.path = self.directory / "graph.json"
 
     def legacy_graph(self, path, labels, relation="has"):
@@ -138,14 +138,14 @@ class GraphMigrationTests(unittest.TestCase):
                 "confidence": 1.0,
             }
         ]
-        memory.write_json(path, graph)
+        store.write_json(path, graph)
         return graph
 
     def test_node_ids_do_not_depend_on_the_graph_path(self):
-        other = memory.private_dir(self.root / "elsewhere") / "graph.json"
+        other = store.private_dir(self.root / "elsewhere") / "graph.json"
         memory.add_memory(self.path, "Jack", "report", "done")
         memory.add_memory(other, "Jack", "report", "done")
-        ids = [{node["id"] for node in memory.read_json(p)["nodes"]} for p in (self.path, other)]
+        ids = [{node["id"] for node in store.read_json(p)["nodes"]} for p in (self.path, other)]
         self.assertEqual(*ids)
         self.assertEqual(ids[0], {memory.node_id("Jack"), memory.node_id("done")})
 
@@ -160,8 +160,8 @@ class GraphMigrationTests(unittest.TestCase):
         self.assertEqual(
             (link["source"], link["target"]), (memory.node_id("Jack"), memory.node_id("done"))
         )
-        self.assertEqual(memory.read_json(self.path), graph)  # rewritten to disk
-        self.assertFalse(memory.migrate_graph(self.path, memory.read_json(self.path)))
+        self.assertEqual(store.read_json(self.path), graph)  # rewritten to disk
+        self.assertFalse(memory.migrate_graph(self.path, store.read_json(self.path)))
 
     def test_legacy_long_label_spills_to_a_note_on_load(self):
         report = "old report " + "o" * 4000
@@ -175,11 +175,11 @@ class GraphMigrationTests(unittest.TestCase):
 
     def test_a_dangling_link_is_skipped_not_fatal(self):
         memory.add_memory(self.path, "Jack", "report", "done")
-        graph = memory.read_json(self.path)
+        graph = store.read_json(self.path)
         graph["links"].append(
             {**graph["links"][0], "source": "missing", "key": "orphan", "relation": "orphan"}
         )
-        memory.write_json(self.path, graph)
+        store.write_json(self.path, graph)
         with contextlib.redirect_stdout(io.StringIO()) as output:
             memory.show_memory(self.directory, show_all=True)
         rows = output.getvalue().splitlines()[1:]

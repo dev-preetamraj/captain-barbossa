@@ -9,9 +9,9 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from captain_barbossa import agents, cli, config, layout, runtime
-from captain_barbossa.memory import Session
 from captain_barbossa.placement import Placement
 from captain_barbossa.runtime import CaptainError
+from captain_barbossa.sessions import Session
 
 
 def pinned(**keys):

@@ -4,7 +4,7 @@ import json
 import shlex
 import sys
 
-from .memory import DELIVERY_HOOKS
+from .events import DELIVERY_HOOKS
 from .models import HOOK_DELIVERED, native_model_args
 
 # Shared memory includes other assignments; only the captain loads it automatically.
@@ -223,7 +223,7 @@ def native_args(provider, instructions, model=None, events=None):
         [
             sys.executable,
             "-c",
-            "from captain_barbossa.memory import append_event; append_event()",
+            "from captain_barbossa.events import append_event; append_event()",
             str(events),
         ]
         if events is not None

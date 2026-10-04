@@ -1,37 +1,23 @@
 import contextlib
 import io
 import os
-import tempfile
 import unittest
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from captain_barbossa import agents, memory, protocol
+from captain_barbossa import agents, protocol, sessions, store
 from captain_barbossa.crew import Crew
 from captain_barbossa.pane import Pane
-from tests import home_isolation  # noqa: F401
+from tests.home_isolation import SessionCase
 
 
-class DismissMailTests(unittest.TestCase):
+class DismissMailTests(SessionCase):
     """Regression: dismiss_crew() must bounce mail a crew never got to read, not drop it."""
 
     def setUp(self):
-        self.root = Path(self.enterContext(tempfile.TemporaryDirectory())).resolve()
-        self.project = self.root / "project"
-        self.project.mkdir()
+        super().setUp()
         self.enterContext(contextlib.chdir(self.project))
-        self.enterContext(
-            patch.dict(
-                os.environ,
-                {
-                    "CAPTAIN_MEMORY_ROOT": str(self.root / "state"),
-                    "CAPTAIN_PROJECT": str(self.project),
-                },
-            )
-        )
-        self.pane = {"workspace_id": "w1", "tab_id": "w1:t1", "pane_id": "w1:p1"}
-        self.current = memory.session(self.project, self.pane, create=True)
+        self.current = sessions.session(self.project, self.pane, create=True)
         self.directory = self.current.directory
         self.crew = Crew(
             "jack",
@@ -45,7 +31,7 @@ class DismissMailTests(unittest.TestCase):
             self.current,
         )
         self.current.meta["crew"]["jack"] = self.crew.record
-        memory.write_json(self.current.meta_path, self.current.meta)
+        store.write_json(self.current.meta_path, self.current.meta)
         self.enterContext(patch.dict(os.environ, {"CAPTAIN_ROLE": "captain"}))
         self.enterContext(patch.object(Pane, "nudge_block", return_value=None, create=True))
         self.enterContext(patch.object(Pane, "nudge", create=True))
@@ -53,7 +39,7 @@ class DismissMailTests(unittest.TestCase):
 
     def mail(self, message_id):
         path = protocol.mail_dir(self.directory, self.crew.crew_id) / f"{message_id}.json"
-        return memory.read_json(path)
+        return store.read_json(path)
 
     def dismiss(self):
         args = SimpleNamespace(session=self.current.meta["id"], name="Jack")

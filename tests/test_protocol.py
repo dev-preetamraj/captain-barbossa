@@ -2,41 +2,28 @@ import contextlib
 import io
 import json
 import os
-import tempfile
 import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from captain_barbossa import agents, cli, memory, protocol
+from captain_barbossa import agents, cli, protocol, sessions, store
 from captain_barbossa.crew import Crew
 from captain_barbossa.pane import DRAFT_GATE, UNREADABLE_EXPIRY, UNREADABLE_GATE, Pane
 from captain_barbossa.runtime import CaptainError
-from tests import home_isolation  # noqa: F401
+from tests.home_isolation import SessionCase
 
 # ProtocolTests.setUp stubs nudge_block, so a test of the gate itself restores this.
 REAL_NUDGE_BLOCK = Pane.nudge_block
 
 
-class ProtocolTests(unittest.TestCase):
+class ProtocolTests(SessionCase):
     def setUp(self):
-        self.root = Path(self.enterContext(tempfile.TemporaryDirectory())).resolve()
-        self.project = self.root / "project"
-        self.project.mkdir()
+        # Not super(): the classes below borrow this setUp with an unbound call.
+        SessionCase.setUp(self)
         self.enterContext(contextlib.chdir(self.project))
-        self.enterContext(
-            patch.dict(
-                os.environ,
-                {
-                    "CAPTAIN_MEMORY_ROOT": str(self.root / "state"),
-                    "CAPTAIN_PROJECT": str(self.project),
-                },
-            )
-        )
-        self.pane = {"workspace_id": "w1", "tab_id": "w1:t1", "pane_id": "w1:p1"}
-        self.current = memory.session(self.project, self.pane, create=True)
+        self.current = sessions.session(self.project, self.pane, create=True)
         self.directory = self.current.directory
         self.crew = Crew(
             "jack",
@@ -44,7 +31,7 @@ class ProtocolTests(unittest.TestCase):
             self.current,
         )
         self.current.meta["crew"]["jack"] = self.crew.record
-        memory.write_json(self.current.meta_path, self.current.meta)
+        store.write_json(self.current.meta_path, self.current.meta)
         self.enterContext(patch.dict(os.environ, {"CAPTAIN_ROLE": "captain"}))
         self.enterContext(patch.object(Pane, "agent_status", return_value=None))
         self.enterContext(patch.object(Pane, "choice_modal", return_value=False))
@@ -55,16 +42,14 @@ class ProtocolTests(unittest.TestCase):
 
     def mail(self, message_id):
         crew_id, session = self.crew.crew_id, self.current
-        return memory.read_json(
-            protocol.mail_dir(session.directory, crew_id) / f"{message_id}.json"
-        )
+        return store.read_json(protocol.mail_dir(session.directory, crew_id) / f"{message_id}.json")
 
     def rendered(self, message_id):
         """What a crew without a delivery hook reads off its ring: identity plus body."""
         return protocol.render(self.current.directory, [self.mail(message_id)])
 
     def saved(self):
-        return memory.read_json(self.directory / "protocol.json")["assignments"][
+        return store.read_json(self.directory / "protocol.json")["assignments"][
             self.assignment["id"]
         ]
 
@@ -177,7 +162,7 @@ class ProtocolTests(unittest.TestCase):
             body = self.rendered(message_id)
             nudge.assert_called_once_with(self.crew, body)
             self.assertEqual(
-                memory.read_json(protocol.drain_stamp(self.crew)),
+                store.read_json(protocol.drain_stamp(self.crew)),
                 {"id": message_id, "at": 1000.0, "landed": True, "gate": None},
             )
             clock[0] += protocol.DRAIN_INTERVAL + 1
@@ -215,7 +200,7 @@ class ProtocolTests(unittest.TestCase):
             patch.object(Pane, "nudge"),
         ):
             message_id = protocol.deliver(self.crew, "original", initial=True)
-        stamp = memory.read_json(protocol.drain_stamp(self.crew))
+        stamp = store.read_json(protocol.drain_stamp(self.crew))
         self.assertEqual(
             (stamp["gate"], stamp["held_since"], stamp["noticed"]), (DRAFT_GATE, 1000.0, False)
         )
@@ -230,7 +215,7 @@ class ProtocolTests(unittest.TestCase):
         summary = self.held_notices()[0]["summary"]
         for part in ("Jack", message_id, DRAFT_GATE, "5 min"):
             self.assertIn(part, summary)
-        self.assertTrue(memory.read_json(protocol.drain_stamp(self.crew))["noticed"])
+        self.assertTrue(store.read_json(protocol.drain_stamp(self.crew))["noticed"])
 
         for _ in range(2):
             clock[0] += protocol.DRAIN_INTERVAL + 1
@@ -253,7 +238,7 @@ class ProtocolTests(unittest.TestCase):
         ):
             protocol.poll(self.crew)
         nudge.assert_called_once()
-        stamp = memory.read_json(protocol.drain_stamp(self.crew))
+        stamp = store.read_json(protocol.drain_stamp(self.crew))
         self.assertTrue(stamp["landed"])
         self.assertNotIn("held_since", stamp)
         self.assertEqual(self.held_notices(), [])
@@ -261,7 +246,7 @@ class ProtocolTests(unittest.TestCase):
         clock[0] += protocol.DRAIN_LANDED_INTERVAL
         self.held_drain(clock)
         self.assertEqual(self.held_notices(), [])
-        self.assertEqual(memory.read_json(protocol.drain_stamp(self.crew))["held_since"], clock[0])
+        self.assertEqual(store.read_json(protocol.drain_stamp(self.crew))["held_since"], clock[0])
 
     def test_a_hold_past_a_float_only_stamp_still_escalates_once(self):
         clock = [1000.0]
@@ -271,7 +256,7 @@ class ProtocolTests(unittest.TestCase):
             patch.object(Pane, "nudge"),
         ):
             protocol.deliver(self.crew, "original", initial=True)
-        memory.write_json(protocol.drain_stamp(self.crew), clock[0])
+        store.write_json(protocol.drain_stamp(self.crew), clock[0])
         clock[0] += protocol.HELD_NOTICE_INTERVAL
         self.held_drain(clock)
         # The bare float carries no message id, so this hold is new: no notice yet.
@@ -286,7 +271,7 @@ class ProtocolTests(unittest.TestCase):
         with patch.object(protocol.time, "time", side_effect=lambda: clock[0]):
             with patch.object(Pane, "nudge"):
                 protocol.deliver(self.crew, "original", initial=True)
-            memory.write_json(stamp, clock[0])
+            store.write_json(stamp, clock[0])
             with patch.object(Pane, "nudge") as nudge:
                 protocol.poll(self.crew)
             nudge.assert_not_called()
@@ -294,7 +279,7 @@ class ProtocolTests(unittest.TestCase):
             with patch.object(Pane, "nudge") as nudge:
                 protocol.poll(self.crew)
             nudge.assert_called_once()
-            self.assertTrue(memory.read_json(stamp)["landed"])
+            self.assertTrue(store.read_json(stamp)["landed"])
 
     def test_poll_does_not_drain_when_there_is_no_unread_mail(self):
         with patch.object(Pane, "nudge") as nudge:
@@ -318,7 +303,7 @@ class ProtocolTests(unittest.TestCase):
         with self.assertRaises(CaptainError):
             protocol.deliver(self.crew, "wrong", question_id="old")
         message_id = protocol.deliver(self.crew, "src", question_id=asked["question_id"])
-        protocol.mark_read(self.crew, [message_id])
+        protocol.receipt(self.crew.session.directory, self.crew.crew_id, [message_id])
         self.command("done", report="src/a.py changed; test passed; nothing left")
         self.assertEqual(self.saved()["state"], "done")
         first = protocol.poll(self.crew)
@@ -532,44 +517,44 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(response["status"], "timeout")
         self.assertIsNone(response["delivery_id"])
 
-    def test_unread_mail_is_oldest_first_and_mark_read_writes_the_receipt(self):
+    def test_unread_mail_is_oldest_first_and_receipt_marks_it_read(self):
         first = protocol.deliver(self.crew, "original", initial=True)
         second = protocol.deliver(self.crew, "followup")
         self.assertEqual([m["id"] for m in protocol.unread(self.crew)], [first, second])
-        protocol.mark_read(self.crew, [first])
+        protocol.receipt(self.crew.session.directory, self.crew.crew_id, [first])
         self.assertEqual([m["id"] for m in protocol.unread(self.crew)], [second])
         read = self.mail(first)
         self.assertEqual(read["state"], "read")
         self.assertIsNotNone(read["read_at"])
-        # A bounced message is not resurrected by a later mark_read.
+        # A bounced message is not resurrected by a later receipt.
         protocol.bounce(self.crew, second, "pane not found")
-        protocol.mark_read(self.crew, [second])
+        protocol.receipt(self.crew.session.directory, self.crew.crew_id, [second])
         self.assertEqual(self.mail(second)["state"], "bounced")
 
     def test_a_read_receipt_advances_the_assignment_message_and_reads_again_change_nothing(self):
         first = protocol.deliver(self.crew, "original", initial=True)
         second = protocol.deliver(self.crew, "followup")
-        protocol.mark_read(self.crew, [first])
+        protocol.receipt(self.crew.session.directory, self.crew.crew_id, [first])
         self.assertEqual([m["delivery"] for m in self.saved()["messages"]], ["read", "sent"])
         before = self.saved()
-        protocol.mark_read(self.crew, [first])
+        protocol.receipt(self.crew.session.directory, self.crew.crew_id, [first])
         self.assertEqual(self.saved(), before)
-        protocol.mark_read(self.crew, [second])
+        protocol.receipt(self.crew.session.directory, self.crew.crew_id, [second])
         self.assertEqual([m["delivery"] for m in self.saved()["messages"]], ["read", "read"])
 
     def test_a_read_receipt_lands_on_the_assignment_the_mail_names(self):
         message_id = protocol.deliver(self.crew, "original", initial=True)
         path = protocol.mail_dir(self.directory, self.crew.crew_id) / f"{message_id}.json"
-        record = memory.read_json(path)
+        record = store.read_json(path)
         record["assignment_id"] = "retired"
-        memory.write_json(path, record)
-        protocol.mark_read(self.crew, [message_id])
+        store.write_json(path, record)
+        protocol.receipt(self.crew.session.directory, self.crew.crew_id, [message_id])
         self.assertEqual(self.mail(message_id)["state"], "read")
         self.assertEqual(self.saved()["messages"][0]["delivery"], "sent")
 
     def test_dismiss_names_the_blocker_that_actually_holds(self):
         self.crew.record.update(pane="w1:p2", assignment_id=self.assignment["id"])
-        memory.write_json(self.current.meta_path, self.current.meta)
+        store.write_json(self.current.meta_path, self.current.meta)
         args = SimpleNamespace(session=self.current.meta["id"], name="Jack")
 
         def refuse(pattern):
@@ -579,7 +564,7 @@ class ProtocolTests(unittest.TestCase):
             send.assert_not_called()
 
         message_id = protocol.deliver(self.crew, "original", initial=True)
-        protocol.mark_read(self.crew, [message_id])
+        protocol.receipt(self.crew.session.directory, self.crew.crew_id, [message_id])
         refuse("Jack has no done report")
         self.command("done", report="src/a.py changed; checks pass; nothing left")
         refuse(r"Jack has 1 unacknowledged notification\(s\)")
@@ -638,7 +623,7 @@ class ProtocolTests(unittest.TestCase):
             message_id = protocol.deliver(
                 self.crew, "src/a.py", question_id=json.loads(output)["question_id"]
             )
-            protocol.mark_read(self.crew, [message_id])
+            protocol.receipt(self.crew.session.directory, self.crew.crew_id, [message_id])
             self.assertEqual(self.run_cli("done", "Jack", "--report", "Finished")[0], 0)
             event = protocol.poll(self.crew)
             while event["delivery_id"]:
@@ -744,7 +729,7 @@ class ProtocolTests(unittest.TestCase):
 
     def test_cli_json_error_is_one_object_and_does_not_adopt_legacy(self):
         del self.current.meta["crew"]["jack"]["incarnation_id"]
-        memory.write_json(self.current.meta_path, self.current.meta)
+        store.write_json(self.current.meta_path, self.current.meta)
         before = (self.directory / "protocol.json").read_bytes()
         code, output = self.run_cli("wait", "Jack", "--json", "--timeout", "0")
         self.assertEqual(code, 1)
@@ -754,7 +739,7 @@ class ProtocolTests(unittest.TestCase):
     def test_cli_scoped_inspection_and_session_need_no_herdr_or_state_writes(self):
         with (
             patch.object(cli, "current_pane", side_effect=AssertionError("Herdr called")),
-            patch.object(memory, "write_json", side_effect=AssertionError("state write")),
+            patch.object(store, "write_text", side_effect=AssertionError("state write")),
             contextlib.redirect_stdout(io.StringIO()) as output,
         ):
             self.assertEqual(cli.main(["--session", self.current.meta["id"], "session"]), 0)
@@ -805,7 +790,7 @@ class ProtocolTests(unittest.TestCase):
 
     def test_dismiss_missing_pane_retires_record_and_releases_paths(self):
         self.crew.record.update(pane="w1:p2", assignment_id=self.assignment["id"])
-        memory.write_json(self.current.meta_path, self.current.meta)
+        store.write_json(self.current.meta_path, self.current.meta)
         self.finish()
         args = SimpleNamespace(session=self.current.meta["id"], name="Jack")
         with patch.object(
@@ -813,7 +798,7 @@ class ProtocolTests(unittest.TestCase):
         ) as close:
             agents.dismiss_crew(args, self.pane, self.project)
         close.assert_called_once_with("pane", "close", "w1:p2")
-        current = memory.read_session(self.project, self.current.meta["id"], self.pane)
+        current = sessions.read_session(self.project, self.current.meta["id"], self.pane)
         self.assertEqual(current.meta["crew"]["jack"]["status"], "dismissed")
         self.assertEqual(self.saved()["state"], "done")
         self.assertFalse(Crew.name_reserved(current, "jack"))
@@ -824,7 +809,7 @@ class ProtocolTests(unittest.TestCase):
 
     def test_dismiss_other_close_failure_preserves_record_and_assignment(self):
         self.crew.record.update(pane="w1:p2", assignment_id=self.assignment["id"])
-        memory.write_json(self.current.meta_path, self.current.meta)
+        store.write_json(self.current.meta_path, self.current.meta)
         self.finish()
         before = self.saved()
         args = SimpleNamespace(session=self.current.meta["id"], name="Jack")
@@ -833,14 +818,14 @@ class ProtocolTests(unittest.TestCase):
             self.assertRaisesRegex(CaptainError, "Could not dismiss Jack: permission_denied"),
         ):
             agents.dismiss_crew(args, self.pane, self.project)
-        current = memory.read_session(self.project, self.current.meta["id"], self.pane)
+        current = sessions.read_session(self.project, self.current.meta["id"], self.pane)
         self.assertEqual(current.meta["crew"]["jack"], self.crew.record)
         self.assertEqual(self.saved(), before)
 
     def test_dismiss_releases_an_assignment_whose_mail_was_never_read(self):
         """Mail the crew never read cannot demand a done report; an enqueue is not a read."""
         self.crew.record.update(pane="w1:p2", assignment_id=self.assignment["id"])
-        memory.write_json(self.current.meta_path, self.current.meta)
+        store.write_json(self.current.meta_path, self.current.meta)
         protocol.deliver(self.crew, "original", initial=True)
         args = SimpleNamespace(session=self.current.meta["id"], name="Jack")
         with patch.object(agents.runtime, "herdr", return_value={}):
@@ -851,14 +836,14 @@ class ProtocolTests(unittest.TestCase):
         replacement = Crew(
             "will",
             {"name": "Will", "agent": "will", "incarnation_id": "second"},
-            memory.read_session(self.project, self.current.meta["id"], self.pane),
+            sessions.read_session(self.project, self.current.meta["id"], self.pane),
         )
         protocol.begin(replacement, self.project, "replacement", ["src"], ["edit"])
 
     def test_dismiss_releases_an_assignment_that_never_got_a_message(self):
         """A launch that died before its first delivery: no crew is alive to run done."""
         self.crew.record.update(pane="w1:p2", assignment_id=self.assignment["id"])
-        memory.write_json(self.current.meta_path, self.current.meta)
+        store.write_json(self.current.meta_path, self.current.meta)
         args = SimpleNamespace(session=self.current.meta["id"], name="Jack")
         with patch.object(agents.runtime, "herdr", return_value={}):
             agents.dismiss_crew(args, self.pane, self.project)
@@ -868,7 +853,7 @@ class ProtocolTests(unittest.TestCase):
         replacement = Crew(
             "will",
             {"name": "Will", "agent": "will", "incarnation_id": "second"},
-            memory.read_session(self.project, self.current.meta["id"], self.pane),
+            sessions.read_session(self.project, self.current.meta["id"], self.pane),
         )
         protocol.begin(replacement, self.project, "replacement", ["src"], ["edit"])
 
@@ -910,7 +895,7 @@ class ProtocolTests(unittest.TestCase):
         launcher = self.directory / "crew-will.sh"
         self.assertTrue(launcher.exists())
         self.assertNotIn("rm -f", launcher.read_text(encoding="utf-8"))
-        crew_agent = memory.agent_name(self.current.meta["id"], "will")
+        crew_agent = sessions.agent_name(self.current.meta["id"], "will")
         self.assertIn(f"/bin/sh {launcher}", str(error.exception))
         self.assertIn(f"herdr agent rename w1:p2 {crew_agent}", str(error.exception))
         self.assertIn(f"herdr agent get {crew_agent}", str(error.exception))
@@ -960,7 +945,7 @@ class EchoGraceTests(unittest.TestCase):
             patch.object(Pane, "nudge_block", return_value=None),
         ):
             message_id = protocol.deliver(self.crew, "original", initial=True)
-        landed = memory.read_json(protocol.drain_stamp(self.crew))
+        landed = store.read_json(protocol.drain_stamp(self.crew))
         self.assertTrue(landed["landed"])
         clock[0] += protocol.ECHO_GRACE - 0.5
         with (
@@ -969,7 +954,7 @@ class EchoGraceTests(unittest.TestCase):
         ):
             protocol.ring(self.crew, message_id)
         # Unchanged: no hold clock was started against a crew that already has its doorbell.
-        self.assertEqual(memory.read_json(protocol.drain_stamp(self.crew)), landed)
+        self.assertEqual(store.read_json(protocol.drain_stamp(self.crew)), landed)
 
     def test_a_draft_past_the_grace_window_does_hold(self):
         clock = [1000.0]
@@ -985,7 +970,7 @@ class EchoGraceTests(unittest.TestCase):
             patch.object(Pane, "draft", return_value="half a sentence"),
         ):
             protocol.ring(self.crew, message_id)
-        record = memory.read_json(protocol.drain_stamp(self.crew))
+        record = store.read_json(protocol.drain_stamp(self.crew))
         self.assertEqual(record["gate"], DRAFT_GATE)
         self.assertFalse(record["landed"])
         self.assertEqual(record["draft"], "half a sentence")
@@ -1056,7 +1041,7 @@ class UnreadableComposerTests(unittest.TestCase):
             patch.object(Pane, "nudge") as nudge,
         ):
             message_id = protocol.deliver(self.crew, "original", initial=True)
-            held = memory.read_json(protocol.drain_stamp(self.crew))
+            held = store.read_json(protocol.drain_stamp(self.crew))
             self.assertEqual(
                 (held["gate"], held["draft_gate"], held["draft"], held["draft_since"]),
                 (UNREADABLE_GATE, UNREADABLE_GATE, None, 1000.0),
@@ -1068,7 +1053,7 @@ class UnreadableComposerTests(unittest.TestCase):
         nudge.assert_called_once()
         # Expired means ringable, not fusable: the inbox line alone, never the mail body.
         self.assertIsNone(nudge.call_args.args[1])
-        self.assertTrue(memory.read_json(protocol.drain_stamp(self.crew))["landed"])
+        self.assertTrue(store.read_json(protocol.drain_stamp(self.crew))["landed"])
 
     def test_a_human_draft_still_holds_past_the_unreadable_expiry(self):
         """The two gates age on their own clocks; a sentence someone is typing keeps its own."""
@@ -1083,7 +1068,7 @@ class UnreadableComposerTests(unittest.TestCase):
             clock[0] += UNREADABLE_EXPIRY + 1
             protocol.ring(self.crew, message_id)
         nudge.assert_not_called()
-        self.assertEqual(memory.read_json(protocol.drain_stamp(self.crew))["gate"], DRAFT_GATE)
+        self.assertEqual(store.read_json(protocol.drain_stamp(self.crew))["gate"], DRAFT_GATE)
 
 
 class StalledCrewTests(unittest.TestCase):
@@ -1117,9 +1102,9 @@ class StalledCrewTests(unittest.TestCase):
     def backdate(self):
         """Age the ring stamp past the drain cooldown, as a polling captain would."""
         stamp = protocol.drain_stamp(self.crew)
-        record = memory.read_json(stamp)
+        record = store.read_json(stamp)
         record["at"] = time.time() - protocol.DRAIN_INTERVAL - 1
-        memory.write_json(stamp, record)
+        store.write_json(stamp, record)
         return stamp
 
     def test_a_delivered_body_with_no_turn_is_reported_once(self):
@@ -1149,7 +1134,7 @@ class StalledCrewTests(unittest.TestCase):
         with patch.object(Pane, "nudge") as nudge:
             protocol.drain(self.crew)
         nudge.assert_called_once()
-        retried = memory.read_json(stamp)
+        retried = store.read_json(stamp)
         self.assertEqual((retried["id"], retried["landed"]), (message_id, True))
 
     def test_a_crew_that_woke_stops_the_retries(self):
@@ -1209,7 +1194,7 @@ class StaleAssignmentTests(unittest.TestCase):
             return protocol.change(self.crew, args, self.project)
 
     def live(self):
-        return memory.read_json(self.directory / "protocol.json")["assignments"][self.second]
+        return store.read_json(self.directory / "protocol.json")["assignments"][self.second]
 
     def test_ask_still_reaches_the_captain_on_a_stale_id(self):
         result = self.run_as_crew("ask", question="Which assignment am I on?")
@@ -1283,7 +1268,7 @@ class InterruptTests(unittest.TestCase):
         with patch.object(agents.runtime, "herdr") as herdr:
             self.interrupt()
         herdr.assert_called_once_with("agent", "send-keys", "jack", "escape")
-        saved = memory.read_json(self.directory / "protocol.json")["assignments"]
+        saved = store.read_json(self.directory / "protocol.json")["assignments"]
         self.assertEqual(saved[self.assignment["id"]]["state"], "working")
 
     def test_it_rings_mail_that_the_busy_turn_held(self):
@@ -1300,12 +1285,12 @@ class InterruptTests(unittest.TestCase):
     def test_it_records_why(self):
         with patch.object(agents.runtime, "herdr"):
             self.interrupt(reason="editing the wrong file")
-        recorded = json.dumps(memory.read_json(self.current.graph))
+        recorded = json.dumps(store.read_json(self.current.graph))
         self.assertIn("interrupted", recorded)
         self.assertIn("editing the wrong file", recorded)
 
     def test_a_dismissed_crew_cannot_be_interrupted(self):
         self.crew.record["status"] = "dismissed"
-        memory.write_json(self.current.meta_path, self.current.meta)
+        store.write_json(self.current.meta_path, self.current.meta)
         with self.assertRaisesRegex(CaptainError, "already dismissed"):
             self.interrupt()

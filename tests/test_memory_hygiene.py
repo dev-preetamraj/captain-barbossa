@@ -11,8 +11,10 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from captain_barbossa import memory
-from captain_barbossa.memory import STALE_QUERY_SECONDS, lock, memory_snapshot, session
+from captain_barbossa import events, memory
+from captain_barbossa.memory import STALE_QUERY_SECONDS, memory_snapshot
+from captain_barbossa.sessions import session
+from captain_barbossa.store import lock
 
 
 class TestLockFilePermissions(unittest.TestCase):
@@ -84,7 +86,7 @@ class TestAppendEventSecureOpen(unittest.TestCase):
             patch.object(memory.sys, "argv", ["captain", argv1, json.dumps(event)]),
             patch.object(memory.sys, "stdin", io.StringIO("")),
         ):
-            memory.append_event()
+            events.append_event()
 
     def test_refuses_a_symlinked_event_log(self):
         target = self.temp_dir / "elsewhere.jsonl"

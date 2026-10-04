@@ -1,35 +1,20 @@
 import contextlib
 import io
 import os
-import tempfile
 import unittest
-from pathlib import Path
 from unittest.mock import patch
 
-from captain_barbossa import agents, cli, memory, runtime
+from captain_barbossa import agents, cli, runtime, sessions, store
+from tests.home_isolation import HERDR, SessionCase
 
 
-class StatusCrewTests(unittest.TestCase):
+class StatusCrewTests(SessionCase):
     """Regression tests for `captain status` (agents.status_crew)."""
 
     def setUp(self):
-        self.root = Path(self.enterContext(tempfile.TemporaryDirectory())).resolve()
-        self.project = self.root / "project"
-        self.project.mkdir()
-        self.enterContext(
-            patch.dict(
-                os.environ,
-                {
-                    "CAPTAIN_MEMORY_ROOT": str(self.root / "state"),
-                    "CAPTAIN_PROJECT": str(self.project),
-                    "HERDR_WORKSPACE_ID": "w1",
-                    "HERDR_TAB_ID": "w1:t1",
-                    "HERDR_PANE_ID": "w1:p1",
-                },
-            )
-        )
-        self.pane = {"workspace_id": "w1", "tab_id": "w1:t1", "pane_id": "w1:p1"}
-        self.directory, self.meta = memory.session(self.project, self.pane, create=True)
+        super().setUp()
+        self.enterContext(patch.dict(os.environ, HERDR))
+        self.directory, self.meta = sessions.session(self.project, self.pane, create=True)
         self.meta["crew"] = {
             "jack": {
                 "id": "jack",
@@ -58,7 +43,7 @@ class StatusCrewTests(unittest.TestCase):
                 "status": "dismissed",
             },
         }
-        memory.write_json(self.directory / "session.json", self.meta)
+        store.write_json(self.directory / "session.json", self.meta)
 
     def args(self, *extra):
         return cli.parser().parse_args(["--session", self.meta["id"], "status", *extra])
@@ -110,7 +95,7 @@ class StatusCrewTests(unittest.TestCase):
 
     def test_no_crew_prints_placeholder(self):
         self.meta["crew"] = {}
-        memory.write_json(self.directory / "session.json", self.meta)
+        store.write_json(self.directory / "session.json", self.meta)
         output = self.status(lambda *a, **k: (_ for _ in ()).throw(AssertionError(a)))
         self.assertEqual(output.strip(), "No crew.")
 

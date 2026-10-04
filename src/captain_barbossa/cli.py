@@ -20,21 +20,15 @@ from .agents import (
     wait_crew,
 )
 from .crew import Crew
+from .events import mail_context, receipt_for
 from .layout import HERDR_DIRECTIONS
-from .memory import (
-    PRUNE_DAYS,
-    REPO_RELATIONS,
-    RULEBOOK_FILES,
-    mail_context,
-    memory,
-    project_root,
-    read_session,
-    receipt_for,
-)
+from .memory import REPO_RELATIONS, RULEBOOK_FILES, memory
 from .models import PROVIDERS, TIER_NAMES
 from .onboarding import bootstrap
 from .prompts import PLACEMENTS
 from .runtime import HERDR_ERRORS, CaptainError, current_pane
+from .sessions import PRUNE_DAYS, read_session
+from .store import project_root
 from .update_check import upgrade
 
 

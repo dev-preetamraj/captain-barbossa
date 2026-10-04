@@ -1,12 +1,12 @@
 import os
 import re
-import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from captain_barbossa import dashboard, memory, runtime
+from captain_barbossa import dashboard, runtime, sessions, store
 from captain_barbossa.usage import RATE_WINDOW
+from tests.home_isolation import HERDR, SessionCase
 
 # A tall, wide pane: individual tests narrow or shorten it on purpose.
 ROOMY = (81, 24)
@@ -28,27 +28,13 @@ def usage(tokens=None, cost=None, rate=None, context=None, limit=None, model=Non
     }
 
 
-class DashboardCase(unittest.TestCase):
+class DashboardCase(SessionCase):
     """A session with a captain pane, two current crew and one dismissed."""
 
     def setUp(self):
-        self.root = Path(self.enterContext(tempfile.TemporaryDirectory())).resolve()
-        self.project = self.root / "project"
-        self.project.mkdir()
-        self.enterContext(
-            patch.dict(
-                os.environ,
-                {
-                    "CAPTAIN_MEMORY_ROOT": str(self.root / "state"),
-                    "CAPTAIN_PROJECT": str(self.project),
-                    "HERDR_WORKSPACE_ID": "w1",
-                    "HERDR_TAB_ID": "w1:t1",
-                    "HERDR_PANE_ID": "w1:p1",
-                },
-            )
-        )
-        pane = {"workspace_id": "w1", "tab_id": "w1:t1", "pane_id": "w1:p1"}
-        self.directory, self.meta = memory.session(self.project, pane, create=True)
+        super().setUp()
+        self.enterContext(patch.dict(os.environ, HERDR))
+        self.directory, self.meta = sessions.session(self.project, self.pane, create=True)
         self.meta["crew"] = {
             "jack": {
                 "id": "jack",
@@ -73,8 +59,8 @@ class DashboardCase(unittest.TestCase):
                 "status": "dismissed",
             },
         }
-        memory.write_json(self.directory / "session.json", self.meta)
-        self.current = memory.Session(self.directory, self.meta)
+        store.write_json(self.directory / "session.json", self.meta)
+        self.current = sessions.Session(self.directory, self.meta)
 
     def render(self, usages=None, agents=(), size=ROOMY, herdr=None):
         """One frame with usage and Herdr stubbed; `usages` maps a crew id to its usage."""
@@ -182,8 +168,8 @@ class DashboardRenderTests(DashboardCase):
 
     def test_no_crew_prints_header_and_placeholder(self):
         self.meta["crew"] = {}
-        memory.write_json(self.directory / "session.json", self.meta)
-        self.current = memory.Session(self.directory, self.meta)
+        store.write_json(self.directory / "session.json", self.meta)
+        self.current = sessions.Session(self.directory, self.meta)
         output = self.render()
         self.assertHeader(output, 0)
         self.assertTrue(output.endswith("No crew."))
@@ -193,7 +179,7 @@ class DashboardRenderTests(DashboardCase):
         self.assertNotIn("Elizabeth", first)
         self.assertHeader(first, 2)
 
-        meta = memory.read_json(self.directory / "session.json")
+        meta = store.read_json(self.directory / "session.json")
         meta["crew"]["elizabeth"] = {
             "id": "elizabeth",
             "name": "Elizabeth",
@@ -201,14 +187,14 @@ class DashboardRenderTests(DashboardCase):
             "provider": "claude",
             "status": "working",
         }
-        memory.write_json(self.directory / "session.json", meta)
+        store.write_json(self.directory / "session.json", meta)
 
         second = self.render()
         self.assertIn("Elizabeth", second)
         self.assertHeader(second, 3)
 
     def test_captain_row_leads_the_table_with_status_matched_by_pane(self):
-        memory.write_json(self.directory / "captain.json", {"provider": "claude", "pane": "w1:p1"})
+        store.write_json(self.directory / "captain.json", {"provider": "claude", "pane": "w1:p1"})
         output = self.render(agents=[{"pane_id": "w1:p1", "agent_status": "blocked"}])
         lines = output.splitlines()
         captain = lines[lines.index(self.line(output, "NAME")) + 1]
@@ -220,7 +206,7 @@ class DashboardRenderTests(DashboardCase):
         self.assertHeader(output, 2)
 
     def test_captain_row_falls_back_to_transcript_model(self):
-        memory.write_json(self.directory / "captain.json", {"provider": "claude", "pane": "w1:p1"})
+        store.write_json(self.directory / "captain.json", {"provider": "claude", "pane": "w1:p1"})
         output = self.render({"captain": usage(tokens=1_500, cost=0.01, model="claude-sonnet-5")})
         self.assertIn("claude/sonnet-5", self.line(output, "CAPTAIN"))
 
@@ -257,7 +243,7 @@ class AccountingTests(DashboardCase):
     """The binding rules from docs/dashboard-layout.md: retired spend, totals, unknowns."""
 
     def frame(self, size=ROOMY):
-        memory.write_json(self.directory / "captain.json", {"provider": "claude", "pane": "w1:p1"})
+        store.write_json(self.directory / "captain.json", {"provider": "claude", "pane": "w1:p1"})
         return self.render(
             {
                 "captain": usage(2_700_000, 2.66, 1.84, 70_000, 1_000_000, "claude-opus-5"),
@@ -283,9 +269,9 @@ class AccountingTests(DashboardCase):
 
     def test_total_never_shrinks_when_a_crew_is_dismissed(self):
         before = self.line(self.frame(), "TOTAL ")
-        meta = memory.read_json(self.directory / "session.json")
+        meta = store.read_json(self.directory / "session.json")
         meta["crew"]["will"]["status"] = "dismissed"
-        memory.write_json(self.directory / "session.json", meta)
+        store.write_json(self.directory / "session.json", meta)
         output = self.frame()
         after = self.line(output, "TOTAL ")
         self.assertNotIn("Will", output)
@@ -303,7 +289,7 @@ class AccountingTests(DashboardCase):
         events_dir.mkdir(exist_ok=True)
         (events_dir / "jack-inc1.jsonl").write_text("", encoding="utf-8")
         (events_dir / "jack-inc2.jsonl").write_text("", encoding="utf-8")
-        meta = memory.read_json(self.directory / "session.json")
+        meta = store.read_json(self.directory / "session.json")
         del meta["crew"]["gibbs"]
         meta["crew"]["jack"] = {
             "id": "jack",
@@ -313,8 +299,8 @@ class AccountingTests(DashboardCase):
             "incarnation_id": "inc2",
             "status": "working",
         }
-        memory.write_json(self.directory / "session.json", meta)
-        self.current = memory.Session(self.directory, meta)
+        store.write_json(self.directory / "session.json", meta)
+        self.current = sessions.Session(self.directory, meta)
         output = self.render(
             {
                 "jack-inc1": usage(tokens=130_000, cost=0.07),
@@ -329,9 +315,9 @@ class AccountingTests(DashboardCase):
         self.assertIn("retired(1): 130k tok/$0.07", output.splitlines()[-1])
 
     def test_footer_survives_with_no_retired_crew(self):
-        meta = memory.read_json(self.directory / "session.json")
+        meta = store.read_json(self.directory / "session.json")
         del meta["crew"]["gibbs"]
-        memory.write_json(self.directory / "session.json", meta)
+        store.write_json(self.directory / "session.json", meta)
         output = self.frame()
         self.assertEqual(
             output.splitlines()[-1], "TOTAL is session-cumulative; USD list est; rounded"
@@ -362,8 +348,8 @@ class FitTests(DashboardCase):
     """Height and width degradation."""
 
     def crowd(self, count):
-        memory.write_json(self.directory / "captain.json", {"provider": "claude", "pane": "w1:p1"})
-        meta = memory.read_json(self.directory / "session.json")
+        store.write_json(self.directory / "captain.json", {"provider": "claude", "pane": "w1:p1"})
+        meta = store.read_json(self.directory / "session.json")
         meta["crew"] = {
             f"c{index}": {
                 "id": f"c{index}",
@@ -375,7 +361,7 @@ class FitTests(DashboardCase):
             }
             for index in range(count)
         }
-        memory.write_json(self.directory / "session.json", meta)
+        store.write_json(self.directory / "session.json", meta)
         each = usage(210_000, 0.13, 0.12, 44_000, 400_000, "gpt-5.6-terra")
         return {"captain": usage(100_000, 1.0, 0.5, 70_000, 1_000_000, "claude-opus-5")} | {
             f"c{index}": each for index in range(count)
@@ -446,14 +432,14 @@ class FitTests(DashboardCase):
 
     def test_the_footer_shortens_before_a_column_is_dropped(self):
         usages = self.crowd(3) | {"gibbs": usage(3_104_000, 0.56)}
-        meta = memory.read_json(self.directory / "session.json")
+        meta = store.read_json(self.directory / "session.json")
         meta["crew"]["gibbs"] = {
             "id": "gibbs",
             "name": "Gibbs",
             "agent": "g",
             "status": "dismissed",
         }
-        memory.write_json(self.directory / "session.json", meta)
+        store.write_json(self.directory / "session.json", meta)
         output = self.render(usages, size=(56, 6))
         self.assertEqual(
             output.splitlines()[-1], "Incl retired(1): 3.10M tok/$0.56; USD est; rounded"
@@ -464,14 +450,14 @@ class FitTests(DashboardCase):
 
     def test_an_annotation_too_long_to_fit_wraps_and_costs_a_roster_row(self):
         usages = self.crowd(3) | {"gibbs": usage(3_104_000, None)}
-        meta = memory.read_json(self.directory / "session.json")
+        meta = store.read_json(self.directory / "session.json")
         meta["crew"]["gibbs"] = {
             "id": "gibbs",
             "name": "Gibbs",
             "agent": "g",
             "status": "dismissed",
         }
-        memory.write_json(self.directory / "session.json", meta)
+        store.write_json(self.directory / "session.json", meta)
         output = self.render(usages, size=(46, 6))
         lines = output.splitlines()
         self.assertEqual(len(lines), 6)

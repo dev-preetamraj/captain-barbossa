@@ -18,9 +18,9 @@ import time
 from pathlib import Path
 
 from . import config, inspection
-from .memory import read_json
 from .models import PROVIDERS, headless_argv, headless_report, resolve_model
-from .runtime import CaptainError, check_text, executable
+from .runtime import CaptainError, check_text, executable, inside_project
+from .store import read_json
 
 # Declared targets that only build, check, clean, or describe the project. Not release,
 # publish, deploy, bump or version: outward-facing compound acts stay with the user, and
@@ -102,13 +102,6 @@ def add_arguments(subparsers):
     )
 
 
-def _inside(root, value):
-    path = (root / value).resolve()
-    if not path.is_relative_to(root) or ".git" in path.relative_to(root).parts:
-        raise CaptainError(f"Path must stay inside the project, outside .git: {value}")
-    return path.relative_to(root).as_posix()
-
-
 def _git(root, *arguments, check=True):
     return _spawn(root, ["git", *arguments], check=check)
 
@@ -187,7 +180,7 @@ def _quiet(args, root, session_directory):
             f"{provider or 'This captain'} has no headless turn to spend, so there is no way "
             "to bound what an unwatched one could do. Recruit crew instead."
         )
-    paths = [_inside(root, value) for value in args.write]
+    paths = [inside_project(root, value, "Path") for value in args.write]
     wanted = args.model or config.text("crew", "model")
     # The prompt leads the task instead of riding a per-provider system-prompt flag: three
     # sentences in front of a one-shot turn behave the same and need no fourth code path.
@@ -261,7 +254,7 @@ def run(args, session_directory, project):
         return
     if action == "commit":
         check_text(args.message, "message")
-        paths = [_inside(root, value) for value in args.path]
+        paths = [inside_project(root, value, "Path") for value in args.path]
         if paths:
             _git(root, "add", "--", *paths)
         code, _ = _git(root, "diff", "--cached", "--quiet", check=False)

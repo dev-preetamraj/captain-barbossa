@@ -6,7 +6,7 @@ Two things outside the checkout would otherwise decide what the tests see:
   developer's own uncommented setting there (a custom [placement] shape, say) turns the
   gate red on a deliberate user choice.
 - a live captain session exports CAPTAIN_STATE_ROOT and CAPTAIN_TEMP_ROOT, and
-  memory._root reads those before CAPTAIN_MEMORY_ROOT. A test that sets only
+  store._root reads those before CAPTAIN_MEMORY_ROOT. A test that sets only
   CAPTAIN_MEMORY_ROOT is then overruled and writes into the real memory root, leaving a
   project directory behind on every run.
 
@@ -26,6 +26,9 @@ import atexit
 import os
 import shutil
 import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import patch
 
 ROOT = tempfile.mkdtemp(prefix="captain-tests-")
 HOME = os.path.join(ROOT, "home")
@@ -50,3 +53,31 @@ for name in INHERITED:
 # USERPROFILE is what Path.home() reads on Windows, HOME everywhere else.
 os.environ.update(HOME=HOME, USERPROFILE=HOME, CAPTAIN_MEMORY_ROOT=MEMORY_ROOT)
 atexit.register(shutil.rmtree, ROOT, ignore_errors=True)
+
+
+# What a captain reads about its own pane from the environment. Only the tests that go
+# through a real launch need them; the rest pass a pane dict in.
+HERDR = {"HERDR_WORKSPACE_ID": "w1", "HERDR_TAB_ID": "w1:t1", "HERDR_PANE_ID": "w1:p1"}
+
+
+class SessionCase(unittest.TestCase):
+    """The session bootstrap: a temp project with its own memory root, plus a pane dict.
+
+    Everything else a test needs -- a chdir, extra environment, crew records, stubbed
+    panes -- stays in that test's own setUp, after super().setUp().
+    """
+
+    def setUp(self):
+        self.root = Path(self.enterContext(tempfile.TemporaryDirectory())).resolve()
+        self.project = self.root / "project"
+        self.project.mkdir()
+        self.enterContext(
+            patch.dict(
+                os.environ,
+                {
+                    "CAPTAIN_MEMORY_ROOT": str(self.root / "state"),
+                    "CAPTAIN_PROJECT": str(self.project),
+                },
+            )
+        )
+        self.pane = {"workspace_id": "w1", "tab_id": "w1:t1", "pane_id": "w1:p1"}

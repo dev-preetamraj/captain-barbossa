@@ -16,7 +16,7 @@ import time
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
 
-from . import memory
+from . import memory, sessions, store
 from .runtime import CaptainError
 
 MAX_BYTES = 64 * 1024
@@ -224,8 +224,8 @@ def _state_root(project, scope, session_id):
     if scope == "repo":
         return memory.repo_graph(project).parent
     if scope == "project":
-        return memory.read_storage(memory.state_root(), project)
-    return memory.read_session(project, session_id, max_bytes=MAX_BYTES).directory
+        return store.read_storage(store.state_root(), project)
+    return sessions.read_session(project, session_id, max_bytes=MAX_BYTES).directory
 
 
 def _git_config(root):
@@ -267,9 +267,9 @@ def _git_config(root):
                 _fail("unsupported-git", "only ordinary format-0 worktrees are supported.")
 
 
-def git_text(root, operation, *, staged=False, text=None):
+def git_text(root, operation, *, staged=False):
     """One hardened Git read for another module, as plain text."""
-    return _git(Path(root), operation, staged, time.monotonic() + TIMEOUT, text)["text"]
+    return _git(Path(root), operation, staged, time.monotonic() + TIMEOUT)["text"]
 
 
 def _git(root, operation, staged, deadline, text=None):

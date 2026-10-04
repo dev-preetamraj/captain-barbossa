@@ -12,7 +12,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from captain_barbossa import inspection, memory
+from captain_barbossa import inspection, store
 from captain_barbossa.runtime import CaptainError
 
 
@@ -31,7 +31,7 @@ class InspectionTests(unittest.TestCase):
                 },
             )
         )
-        self.enterContext(patch.object(memory, "_warned_temp_state_root", True))
+        self.enterContext(patch.object(store, "_warned_temp_state_root", True))
         self.parser = argparse.ArgumentParser()
         self.parser.add_argument("--session")
         inspection.add_arguments(self.parser.add_subparsers(dest="command", required=True))
@@ -98,7 +98,7 @@ class InspectionTests(unittest.TestCase):
             self.inspect("state", "project")
         self.assertFalse((self.root / "state").exists())
         self.assertFalse((self.root / "temp").exists())
-        base = memory.read_storage(memory.state_root(), self.project)
+        base = store.read_storage(store.state_root(), self.project)
         base.mkdir(parents=True)
         (base / "graph.json").write_text("{}")
         self.assertEqual(self.inspect("state", "project", "graph.json")["text"], "{}")
@@ -110,7 +110,7 @@ class InspectionTests(unittest.TestCase):
         with self.assertRaisesRegex(CaptainError, "session"):
             self.inspect("state", "session")
         session = "a" * 32
-        base = memory.read_storage(memory.temp_root(), self.project) / "sessions" / session
+        base = store.read_storage(store.temp_root(), self.project) / "sessions" / session
         base.mkdir(parents=True)
         meta = base / "session.json"
         meta.write_text(json.dumps({"project": str(self.project)}))

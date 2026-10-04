@@ -8,7 +8,6 @@ import shlex
 import shutil
 import subprocess
 import sys
-import tempfile
 import tomllib
 import unittest
 from concurrent.futures import ThreadPoolExecutor
@@ -18,7 +17,7 @@ from unittest.mock import patch
 
 import questionary
 
-from captain_barbossa import agents, cli, config, memory, models, protocol, runtime
+from captain_barbossa import agents, cli, config, memory, models, protocol, runtime, sessions, store
 from captain_barbossa import instructions as instruction_prompts
 from captain_barbossa import pane as panes
 from captain_barbossa.crew import Crew
@@ -27,7 +26,7 @@ from captain_barbossa.runtime import CaptainError
 
 # Imported for its side effect: HOME and the captain memory roots are temp directories
 # for every test in this process. tests/test_isolation.py guards it.
-from tests import home_isolation  # noqa: F401
+from tests.home_isolation import HERDR, SessionCase
 
 # create_crew's shell_ready_for_input polls a raw `pane read`, which needs text; a
 # fixture built to return a dict for every herdr call would otherwise blow up on it.
@@ -51,31 +50,17 @@ def pane_stub(base):
     return api
 
 
-class CaptainFlowTests(unittest.TestCase):
+class CaptainFlowTests(SessionCase):
     def setUp(self):
-        self.root = Path(self.enterContext(tempfile.TemporaryDirectory())).resolve()
-        self.project = self.root / "project"
-        self.project.mkdir()
-        self.enterContext(
-            patch.dict(
-                os.environ,
-                {
-                    "CAPTAIN_MEMORY_ROOT": str(self.root / "state"),
-                    "CAPTAIN_PROJECT": str(self.project),
-                    "HERDR_WORKSPACE_ID": "w1",
-                    "HERDR_TAB_ID": "w1:t1",
-                    "HERDR_PANE_ID": "w1:p1",
-                },
-            )
-        )
+        super().setUp()
+        self.enterContext(patch.dict(os.environ, HERDR))
         self.enterContext(patch.object(panes, "READY_POLLS", 1))
         # nudge_block/nudge read a realistic agent status these ad hoc herdr fakes don't model;
         # a mail doorbell is not what these tests exercise, so give delivery a clean ring by
         # default. test_submit.py covers nudge_block/nudge themselves against real fakes.
         self.enterContext(patch.object(Pane, "nudge_block", return_value=None))
         self.enterContext(patch.object(Pane, "nudge"))
-        self.pane = {"workspace_id": "w1", "tab_id": "w1:t1", "pane_id": "w1:p1"}
-        self.directory, self.meta = memory.session(self.project, self.pane, create=True)
+        self.directory, self.meta = sessions.session(self.project, self.pane, create=True)
         self.enterContext(contextlib.redirect_stdout(io.StringIO()))
 
     def args(self, *args):
@@ -198,7 +183,7 @@ class CaptainFlowTests(unittest.TestCase):
         commands = [tuple(call.args[0][1:3]) for call in run.call_args_list]
         self.assertNotIn(("pane", "close"), commands)
         self.assertNotIn(("agent", "prompt"), commands)
-        saved = memory.read_json(self.directory / "session.json")["crew"]["jack"]
+        saved = store.read_json(self.directory / "session.json")["crew"]["jack"]
         self.assertEqual(saved["status"], "needs_attention")
 
     def test_instructions_delegate_routine_crew_approvals_to_captain(self):
@@ -848,7 +833,7 @@ class CaptainFlowTests(unittest.TestCase):
                 self.assertIn(f"({self.LISTED_PANES})", message)
                 self.assertNotIn("w1:p7", message)
                 self.assertIn("--split-pane <choice>", message)
-                self.assertEqual(memory.read_json(self.directory / "session.json")["crew"], {})
+                self.assertEqual(store.read_json(self.directory / "session.json")["crew"], {})
         for response in ({}, {"tabs": [], "panes": []}, {"tabs": [], "panes": ["x"]}):
             with (
                 self.subTest(response=response),
@@ -898,10 +883,10 @@ class CaptainFlowTests(unittest.TestCase):
         self.assertIn("pane_not_found", str(error.exception))
         self.assertIn("Ask the user which pane to split again", str(error.exception))
         self.assertEqual(calls.call_args_list[-1].args[:2], ("pane", "split"))
-        record = memory.read_json(self.directory / "session.json")["crew"]["jack"]
+        record = store.read_json(self.directory / "session.json")["crew"]["jack"]
         self.assertEqual(record["status"], "needs_attention")
         self.assertNotIn("pane", record)
-        state = memory.read_json(self.directory / "protocol.json")
+        state = store.read_json(self.directory / "protocol.json")
         self.assertIn(record["assignment_id"], state["assignments"])
 
     def test_pane_split_rejects_panes_missing_from_the_workspace(self):
@@ -997,8 +982,8 @@ class CaptainFlowTests(unittest.TestCase):
             self.assertEqual(result["split_pane"], target)
             self.assertEqual(result["tab"], tab)
             self.assertEqual(result["pane"], "w1:p6")
-            memory.write_json(self.directory / "session.json", {**self.meta, "crew": {}})
-            memory.write_json(self.directory / "protocol.json", {"active": {}, "assignments": {}})
+            store.write_json(self.directory / "session.json", {**self.meta, "crew": {}})
+            store.write_json(self.directory / "protocol.json", {"active": {}, "assignments": {}})
 
     def test_default_recruiting_flags_create_a_crew_without_any_selector(self):
         created = {
@@ -1109,8 +1094,8 @@ class CaptainFlowTests(unittest.TestCase):
                 None,
             ),
         ):
-            memory.write_json(self.directory / "session.json", {**self.meta, "crew": roster})
-            memory.write_json(self.directory / "protocol.json", {"active": {}, "assignments": {}})
+            store.write_json(self.directory / "session.json", {**self.meta, "crew": roster})
+            store.write_json(self.directory / "protocol.json", {"active": {}, "assignments": {}})
 
             def api(*call, **_):
                 return self.listing(*call) or created
@@ -1147,10 +1132,10 @@ class CaptainFlowTests(unittest.TestCase):
                 self.assertIsNone(result["split_pane"])
                 self.assertEqual((result["column"], result["row"]), (1, 1))
                 self.assertTrue(result["auto"].startswith("new tab; every slot"))
-            graph = memory.read_json(self.directory / "graph.json")
+            graph = store.read_json(self.directory / "graph.json")
             self.assertIn(f"auto: {result['auto']}", [node["label"] for node in graph["nodes"]])
-            memory.write_json(self.directory / "graph.json", {"nodes": [], "links": []})
-        memory.write_json(self.directory / "session.json", {**self.meta, "crew": {}})
+            store.write_json(self.directory / "graph.json", {"nodes": [], "links": []})
+        store.write_json(self.directory / "session.json", {**self.meta, "crew": {}})
 
     def test_auto_placement_fills_a_crew_tab_before_opening_another(self):
         """The captain tab is full, so the next crew reuses the oldest crew tab with room."""
@@ -1163,13 +1148,13 @@ class CaptainFlowTests(unittest.TestCase):
             },
             "agent": {"name": f"c-{self.meta['id'][:8]}-elizabeth", "agent_status": "working"},
         }
-        meta = memory.read_json(self.directory / "session.json")
+        meta = store.read_json(self.directory / "session.json")
         meta["crew"] = {
             "will": {"pane": "w1:p5", "tab": "w1:t1", "status": "started", "column": 2, "row": 1},
             "gibbs": {"pane": "w1:p7", "tab": "w1:t1", "status": "started", "column": 2, "row": 2},
             "jack": {"pane": "w1:p9", "tab": "w1:t2", "status": "started", "column": 1, "row": 1},
         }
-        memory.write_json(self.directory / "session.json", meta)
+        store.write_json(self.directory / "session.json", meta)
 
         def api(*call, **_):
             return self.listing(*call) or created
@@ -1267,7 +1252,7 @@ class CaptainFlowTests(unittest.TestCase):
                     [call.args[:2] for call in calls].count(("agent", "send-keys")),
                     0,
                 )
-                saved = memory.read_json(self.directory / "session.json")["crew"][name]
+                saved = store.read_json(self.directory / "session.json")["crew"][name]
                 self.assertEqual(saved["task"], task)
                 self.assertEqual(saved["id"], name)
                 self.assertEqual(saved["name"], display_name)
@@ -1283,7 +1268,7 @@ class CaptainFlowTests(unittest.TestCase):
                     )
                 launcher = self.directory / f"crew-{name}.sh"
                 self.assertIn(f"crew member {display_name}", launcher.read_text())
-                graph = memory.read_json(self.directory / "graph.json")
+                graph = store.read_json(self.directory / "graph.json")
                 self.assertIn(display_name, [node["label"] for node in graph["nodes"]])
                 self.assertIn(task, [node["label"] for node in graph["nodes"]])
                 self.assertIn(f"CAPTAIN_CREW_LAUNCHER={launcher}", calls[0].args)
@@ -1361,8 +1346,8 @@ class CaptainFlowTests(unittest.TestCase):
                             models.tiers_for(provider)["cheap"],
                             events=Crew(
                                 name,
-                                memory.read_json(self.directory / "session.json")["crew"][name],
-                                memory.Session(self.directory, self.meta),
+                                store.read_json(self.directory / "session.json")["crew"][name],
+                                sessions.Session(self.directory, self.meta),
                             ).events,
                         ),
                     )
@@ -1426,9 +1411,9 @@ class CaptainFlowTests(unittest.TestCase):
                 launcher = shlex.split((self.directory / f"crew-{name}.sh").read_text())
                 self.assertEqual(launcher[launcher.index(flag) + 1], model)
                 self.assertEqual(launcher.count(flag), 1)
-                saved = memory.read_json(self.directory / "session.json")["crew"][name]
+                saved = store.read_json(self.directory / "session.json")["crew"][name]
                 self.assertEqual(saved["model"], model)
-                graph = memory.read_json(self.directory / "graph.json")
+                graph = store.read_json(self.directory / "graph.json")
                 self.assertIn(model, [node["label"] for node in graph["nodes"]])
 
     def test_crew_without_a_model_recruits_cheap_instead_of_the_native_default(self):
@@ -1502,7 +1487,7 @@ class CaptainFlowTests(unittest.TestCase):
                         agents.create_crew(args, self.pane, self.project)
                 self.assertIn(message, str(error.exception))
                 api.assert_not_called()
-                self.assertEqual(memory.read_json(self.directory / "session.json")["crew"], {})
+                self.assertEqual(store.read_json(self.directory / "session.json")["crew"], {})
 
     def test_startup_failure_preserves_pane_and_prevents_duplicate_retry(self):
         args = self.args(
@@ -1541,7 +1526,7 @@ class CaptainFlowTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(runtime.CaptainError, "already exists"):
                 agents.create_crew(args, self.pane, self.project)
-        saved = memory.read_json(self.directory / "session.json")
+        saved = store.read_json(self.directory / "session.json")
         self.assertEqual(saved["crew"]["jack"]["status"], "needs_attention")
         # A launcher that deleted itself made a failed startup unrecoverable; it now
         # survives, and dismiss_crew is what eventually unlinks crew-<id>.sh.
@@ -1653,7 +1638,7 @@ class CaptainFlowTests(unittest.TestCase):
                 self.assertFalse(
                     any(call.args[:2] == ("pane", "close") for call in calls.call_args_list)
                 )
-                saved = memory.read_json(self.directory / "session.json")["crew"][name]
+                saved = store.read_json(self.directory / "session.json")["crew"][name]
                 self.assertEqual(saved["status"], "needs_attention")
 
     def crew_status_api(self, statuses):
@@ -1700,7 +1685,7 @@ class CaptainFlowTests(unittest.TestCase):
         sent = [call.args[:2] for call in calls.call_args_list]
         self.assertEqual(sent.count(("agent", "prompt")), 1)
         self.assertNotIn(("agent", "send-keys"), sent)
-        saved = memory.read_json(self.directory / "session.json")["crew"]["jack"]
+        saved = store.read_json(self.directory / "session.json")["crew"]["jack"]
         self.assertEqual(saved["status"], "started")
 
     def test_a_settled_idle_composer_delivers_durable_mail_once(self):
@@ -1732,7 +1717,7 @@ class CaptainFlowTests(unittest.TestCase):
         sent = [call.args[:2] for call in calls.call_args_list]
         self.assertEqual(sent.count(("agent", "prompt")), 1)
         self.assertNotIn(("agent", "send-keys"), sent)
-        saved = memory.read_json(self.directory / "session.json")["crew"]["jack"]
+        saved = store.read_json(self.directory / "session.json")["crew"]["jack"]
         self.assertEqual(saved["status"], "started")
 
     def test_a_blocked_agent_at_delivery_time_holds_the_ring_without_typing(self):
@@ -1765,7 +1750,7 @@ class CaptainFlowTests(unittest.TestCase):
         # A held gate never rings; the crew reads its mail once the approval clears.
         self.assertNotIn(("agent", "prompt"), sent)
         self.assertNotIn(("agent", "send-keys"), sent)
-        saved = memory.read_json(self.directory / "session.json")["crew"]["jack"]
+        saved = store.read_json(self.directory / "session.json")["crew"]["jack"]
         self.assertEqual(saved["status"], "started")
 
     def test_our_own_ring_echo_does_not_gate_the_next_ring(self):
@@ -1773,7 +1758,7 @@ class CaptainFlowTests(unittest.TestCase):
         crew = Crew(
             "jack",
             {"name": "Jack", "agent": "c-session-jack", "provider": "codex"},
-            memory.Session(self.directory, self.meta),
+            sessions.Session(self.directory, self.meta),
         )
         echo = panes.inbox_line(crew)
         for screen, gate in (
@@ -1823,8 +1808,8 @@ class CaptainFlowTests(unittest.TestCase):
             agents.create_crew(args, self.pane, self.project)
             crew = Crew(
                 "jack",
-                memory.read_json(self.directory / "session.json")["crew"]["jack"],
-                memory.Session(self.directory, self.meta),
+                store.read_json(self.directory / "session.json")["crew"]["jack"],
+                sessions.Session(self.directory, self.meta),
             )
             self.assertIsNone(crew.pane.nudge_block(crew))
         sent = [call.args[:2] for call in calls.call_args_list]
@@ -1938,7 +1923,7 @@ class CaptainFlowTests(unittest.TestCase):
             "jack": {"status": "needs_attention"},
             "scout": {"status": "started"},
         }
-        memory.write_json(self.directory / "session.json", self.meta)
+        store.write_json(self.directory / "session.json", self.meta)
         args = self.args(
             "crew",
             "--agent",
@@ -1966,7 +1951,7 @@ class CaptainFlowTests(unittest.TestCase):
                         range(len(agents.CREW_NAMES) + 1),
                     )
                 )
-            roster = memory.read_json(self.directory / "session.json")["crew"]
+            roster = store.read_json(self.directory / "session.json")["crew"]
             self.assertEqual(set(roster), set(agents.CREW_NAMES) | {"scout", "jack-1", "will-1"})
             for name, record in self.meta["crew"].items():
                 self.assertEqual(roster[name], record)
@@ -1976,14 +1961,14 @@ class CaptainFlowTests(unittest.TestCase):
                 self.assertTrue((self.directory / f"crew-{name}.sh").is_file())
             self.assertEqual(roster["jack-1"]["name"], "Jack-1")
             self.assertEqual(roster["will-1"]["name"], "Will-1")
-            other, meta = memory.session(self.project, self.pane, create=True)
+            other, meta = sessions.session(self.project, self.pane, create=True)
             args.session = meta["id"]
             with contextlib.redirect_stdout(io.StringIO()) as output:
                 agents.create_crew(args, self.pane, self.project)
             result = json.loads(output.getvalue())
             self.assertEqual(result["id"], "jack")
             self.assertEqual(result["name"], "Jack")
-            self.assertEqual(set(memory.read_json(other / "session.json")["crew"]), {"jack"})
+            self.assertEqual(set(store.read_json(other / "session.json")["crew"]), {"jack"})
 
     def test_one_canonical_name_is_used_by_recruit_dismiss_and_memory(self):
         for name in agents.CREW_NAMES:
@@ -2017,9 +2002,11 @@ class CaptainFlowTests(unittest.TestCase):
         self.assertEqual(record["name"], "Jack")
         self.assertEqual(record["agent"], f"c-{self.meta['id'][:8]}-jack")
         self.assertIn(("pane", "rename", "w1:p2", "Jack"), [c.args for c in api.call_args_list])
-        crew = Crew("jack", record, memory.Session(self.directory, self.meta))
+        crew = Crew("jack", record, sessions.Session(self.directory, self.meta))
         unread_messages = protocol.unread(crew)
-        protocol.mark_read(crew, [msg["id"] for msg in unread_messages])
+        protocol.receipt(
+            crew.session.directory, crew.crew_id, [msg["id"] for msg in unread_messages]
+        )
         protocol.change(
             crew,
             self.args(
@@ -2040,9 +2027,7 @@ class CaptainFlowTests(unittest.TestCase):
         ):
             agents.dismiss_crew(self.args("dismiss", "Jack"), self.pane, self.project)
         self.assertEqual(dismissed.getvalue(), "Dismissed Jack.\n")
-        labels = [
-            node["label"] for node in memory.read_json(self.directory / "graph.json")["nodes"]
-        ]
+        labels = [node["label"] for node in store.read_json(self.directory / "graph.json")["nodes"]]
         self.assertIn("Jack", labels)
         self.assertIn(record["agent"], labels)
         self.assertNotIn("Barbossa", labels)
@@ -2053,7 +2038,7 @@ class CaptainFlowTests(unittest.TestCase):
             "will": {"status": "started"},
             "elizabeth": {"status": "needs_attention"},
         }
-        memory.write_json(self.directory / "session.json", self.meta)
+        store.write_json(self.directory / "session.json", self.meta)
         created = {"pane": {"pane_id": "w1:p2", "agent": "codex", "agent_status": "idle"}}
         with (
             patch.object(runtime, "herdr", side_effect=pane_stub(created)),
@@ -2083,7 +2068,7 @@ class CaptainFlowTests(unittest.TestCase):
             self.assertEqual(
                 (result["id"], result["name"], result["status"]), ("jack", "Jack", "started")
             )
-            roster = memory.read_json(self.directory / "session.json")["crew"]
+            roster = store.read_json(self.directory / "session.json")["crew"]
             self.assertEqual(set(roster), {"jack", "will", "elizabeth"})
             self.assertEqual(roster["jack"]["agent"], result["agent"])
             self.assertEqual(
@@ -2109,10 +2094,12 @@ class CaptainFlowTests(unittest.TestCase):
                     self.project,
                 )
             roster["jack"]["status"] = "dismissed"
-            memory.write_json(self.directory / "session.json", {**self.meta, "crew": roster})
-            crew = Crew("jack", roster["jack"], memory.Session(self.directory, self.meta))
+            store.write_json(self.directory / "session.json", {**self.meta, "crew": roster})
+            crew = Crew("jack", roster["jack"], sessions.Session(self.directory, self.meta))
             unread_messages = protocol.unread(crew)
-            protocol.mark_read(crew, [msg["id"] for msg in unread_messages])
+            protocol.receipt(
+                crew.session.directory, crew.crew_id, [msg["id"] for msg in unread_messages]
+            )
             protocol.change(
                 crew,
                 self.args(
@@ -2173,11 +2160,13 @@ class CaptainFlowTests(unittest.TestCase):
         ):
             for _ in range(3):
                 agents.create_crew(args, self.pane, self.project)
-        roster = memory.read_json(self.directory / "session.json")["crew"]
+        roster = store.read_json(self.directory / "session.json")["crew"]
         self.assertEqual(set(roster), {"jack", "will", "elizabeth"})
-        crew = Crew("jack", roster["jack"], memory.Session(self.directory, self.meta))
+        crew = Crew("jack", roster["jack"], sessions.Session(self.directory, self.meta))
         unread_messages = protocol.unread(crew)
-        protocol.mark_read(crew, [msg["id"] for msg in unread_messages])
+        protocol.receipt(
+            crew.session.directory, crew.crew_id, [msg["id"] for msg in unread_messages]
+        )
         protocol.change(
             crew,
             self.args(
@@ -2227,11 +2216,13 @@ class CaptainFlowTests(unittest.TestCase):
             patch.object(Pane, "submit_task"),
         ):
             agents.create_crew(args, self.pane, self.project)
-        roster = memory.read_json(self.directory / "session.json")["crew"]
+        roster = store.read_json(self.directory / "session.json")["crew"]
         old_assignment_id = roster["jack"]["assignment_id"]
-        crew = Crew("jack", roster["jack"], memory.Session(self.directory, self.meta))
+        crew = Crew("jack", roster["jack"], sessions.Session(self.directory, self.meta))
         unread_messages = protocol.unread(crew)
-        protocol.mark_read(crew, [msg["id"] for msg in unread_messages])
+        protocol.receipt(
+            crew.session.directory, crew.crew_id, [msg["id"] for msg in unread_messages]
+        )
         protocol.change(
             crew,
             self.args(
@@ -2285,7 +2276,7 @@ class CaptainFlowTests(unittest.TestCase):
                 with self.assertRaisesRegex(runtime.CaptainError, "omit NAME"):
                     agents.create_crew(args, self.pane, self.project)
                 api.assert_not_called()
-        self.assertEqual(memory.read_json(self.directory / "session.json")["crew"], {})
+        self.assertEqual(store.read_json(self.directory / "session.json")["crew"], {})
 
     def test_focus_command_resolves_names_and_ids_without_sending_input(self):
         self.meta["crew"] = {
@@ -2307,7 +2298,7 @@ class CaptainFlowTests(unittest.TestCase):
             "jack-2": {"name": "Jack-2", "agent": "c-session-jack-2", "pane": "w1:p4"},
             "scout": {"agent": "c-session-scout", "pane": "w1:p5", "tab": "w1:t1"},
         }
-        memory.write_json(self.directory / "session.json", self.meta)
+        store.write_json(self.directory / "session.json", self.meta)
         live = {"c-session-jack-2": {"agent": {"tab_id": "w1:t3"}}}
         for name, crew_id, tab in (
             ("Jack", "jack", None),
@@ -2335,7 +2326,7 @@ class CaptainFlowTests(unittest.TestCase):
                 expected.append(("agent", "focus", crew["agent"]))
                 self.assertEqual([call.args for call in api.call_args_list], expected)
                 self.assertIn("Focused", output.getvalue())
-        self.assertEqual(memory.read_json(self.directory / "session.json"), self.meta)
+        self.assertEqual(store.read_json(self.directory / "session.json"), self.meta)
         with (
             patch.object(cli, "current_pane", return_value=self.pane),
             patch.object(cli, "project_root", return_value=self.project),
@@ -2355,10 +2346,10 @@ class CaptainFlowTests(unittest.TestCase):
             "jack": {"name": "Jack", "agent": "c-session-jack"},
             "legacy-jack": {"name": "Jack", "agent": "c-session-legacy-jack"},
         }
-        memory.write_json(self.directory / "session.json", self.meta)
-        other, meta = memory.session(self.project, self.pane, create=True)
+        store.write_json(self.directory / "session.json", self.meta)
+        other, meta = sessions.session(self.project, self.pane, create=True)
         meta["crew"] = {"elizabeth": {"name": "Elizabeth", "agent": "c-other-elizabeth"}}
-        memory.write_json(other / "session.json", meta)
+        store.write_json(other / "session.json", meta)
         with patch.object(runtime, "herdr") as api:
             for name, message in (
                 ("Elizabeth", "Available crew"),
@@ -2400,7 +2391,7 @@ class CaptainFlowTests(unittest.TestCase):
                 "status": "started",
             },
         }
-        memory.write_json(self.directory / "session.json", self.meta)
+        store.write_json(self.directory / "session.json", self.meta)
         with (
             patch.object(cli, "current_pane", return_value=self.pane),
             patch.object(cli, "project_root", return_value=self.project),
@@ -2410,11 +2401,11 @@ class CaptainFlowTests(unittest.TestCase):
             self.assertEqual(cli.main(["--session", self.meta["id"], "dismiss", " jAcK "]), 0)
         api.assert_called_once_with("pane", "close", "w1:p2")
         self.assertEqual(output.getvalue(), "Dismissed Jack.\n")
-        saved = memory.read_json(self.directory / "session.json")
+        saved = store.read_json(self.directory / "session.json")
         self.assertEqual(saved["crew"]["jack"]["status"], "dismissed")
         self.assertEqual(saved["crew"]["jack"]["pane"], "w1:p2")
         self.assertEqual(saved["crew"]["will"], self.meta["crew"]["will"])
-        graph = memory.read_json(self.directory / "graph.json")
+        graph = store.read_json(self.directory / "graph.json")
         labels = {node["id"]: node["label"] for node in graph["nodes"]}
         self.assertEqual(
             [
@@ -2455,8 +2446,8 @@ class CaptainFlowTests(unittest.TestCase):
                 self.pane,
                 self.project,
             )
-        record = memory.read_json(self.directory / "session.json")["crew"]["jack"]
-        crew = Crew("jack", record, memory.Session(self.directory, self.meta))
+        record = store.read_json(self.directory / "session.json")["crew"]["jack"]
+        crew = Crew("jack", record, sessions.Session(self.directory, self.meta))
         self.assertTrue(protocol.unread(crew))
         with (
             patch.object(runtime, "herdr", return_value={}),
@@ -2466,11 +2457,11 @@ class CaptainFlowTests(unittest.TestCase):
         self.assertIn("Bounced unread mail to Jack", output.getvalue())
         self.assertIn("Dismissed Jack.", output.getvalue())
         self.assertEqual(
-            memory.read_json(self.directory / "session.json")["crew"]["jack"]["status"],
+            store.read_json(self.directory / "session.json")["crew"]["jack"]["status"],
             "dismissed",
         )
         # The reservation closes too, or the dismissed crew's owned paths stay locked.
-        assignment = memory.read_json(self.directory / "protocol.json")["assignments"][
+        assignment = store.read_json(self.directory / "protocol.json")["assignments"][
             record["assignment_id"]
         ]
         self.assertEqual(assignment["state"], "done")
@@ -2486,7 +2477,7 @@ class CaptainFlowTests(unittest.TestCase):
             },
             "cotton": {"name": "Cotton", "agent": "c-session-cotton"},
         }
-        memory.write_json(self.directory / "session.json", self.meta)
+        store.write_json(self.directory / "session.json", self.meta)
         with patch.object(runtime, "herdr") as api:
             for name, message in (
                 ("Elizabeth", "Available crew"),
@@ -2507,7 +2498,7 @@ class CaptainFlowTests(unittest.TestCase):
             )
             self.assertIn("Could not dismiss Jack: boom", error.getvalue())
             api.assert_called_once_with("pane", "close", "w1:p2")
-        self.assertEqual(memory.read_json(self.directory / "session.json"), self.meta)
+        self.assertEqual(store.read_json(self.directory / "session.json"), self.meta)
         self.assertFalse((self.directory / "graph.json").exists())
 
     def test_dismiss_treats_a_pane_already_gone_as_already_closed(self):
@@ -2515,7 +2506,7 @@ class CaptainFlowTests(unittest.TestCase):
         self.meta["crew"] = {
             "jack": {"name": "Jack", "agent": "c-session-jack", "pane": "w1:p2"},
         }
-        memory.write_json(self.directory / "session.json", self.meta)
+        store.write_json(self.directory / "session.json", self.meta)
         with (
             patch.object(cli, "current_pane", return_value=self.pane),
             patch.object(cli, "project_root", return_value=self.project),
@@ -2529,9 +2520,9 @@ class CaptainFlowTests(unittest.TestCase):
             )
             self.assertEqual(output.getvalue(), "Dismissed Jack.\n")
             api.assert_called_once_with("pane", "close", "w1:p2")
-        roster = memory.read_json(self.directory / "session.json")["crew"]
+        roster = store.read_json(self.directory / "session.json")["crew"]
         self.assertEqual(roster["jack"]["status"], "dismissed")
-        graph = memory.read_json(self.directory / "graph.json")
+        graph = store.read_json(self.directory / "graph.json")
         self.assertIn("c-session-jack", [node["label"] for node in graph["nodes"]])
 
     def test_graph_scopes_projects_sessions_and_parallel_relationships(self):
@@ -2539,19 +2530,19 @@ class CaptainFlowTests(unittest.TestCase):
         memory.add_memory(shared, "project", "uses", "Python")
         memory.add_memory(self.directory / "graph.json", "task", "uses", "secret-session-fact")
         memory.add_memory(shared, "project", "tests_with", "Python")
-        other, _ = memory.session(self.project, self.pane, create=True)
+        other, _ = sessions.session(self.project, self.pane, create=True)
         with memory.memory_snapshot(other) as snapshot:
-            graph = memory.read_json(snapshot / "graph.json")
+            graph = store.read_json(snapshot / "graph.json")
         self.assertEqual(len(graph["links"]), 2)
         self.assertNotIn("secret-session-fact", json.dumps(graph))
         project2 = self.root / "other-project"
         project2.mkdir()
-        isolated, _ = memory.session(project2, self.pane, create=True)
+        isolated, _ = sessions.session(project2, self.pane, create=True)
         with memory.memory_snapshot(isolated) as snapshot:
-            self.assertEqual(memory.read_json(snapshot / "graph.json")["nodes"], [])
+            self.assertEqual(store.read_json(snapshot / "graph.json")["nodes"], [])
         self.assertEqual(list(isolated.glob("query-*")), [])
         with self.assertRaisesRegex(runtime.CaptainError, "another project or Herdr workspace"):
-            memory.session(self.project, dict(self.pane, workspace_id="w2"), self.meta["id"])
+            sessions.session(self.project, dict(self.pane, workspace_id="w2"), self.meta["id"])
 
     def test_memory_show_preserves_relationships_and_offers_raw_json(self):
         with contextlib.redirect_stdout(io.StringIO()) as output:
@@ -2596,7 +2587,7 @@ class CaptainFlowTests(unittest.TestCase):
         note = memory.note_name(facts[3][2])
         self.assertTrue(capped.endswith(f" see notes/{note}"))
         self.assertEqual((self.directory / "notes" / note).read_text(encoding="utf-8"), facts[3][2])
-        stored = memory.read_json(local)
+        stored = store.read_json(local)
         stored_labels = {node["id"]: node["label"] for node in stored["nodes"]}
         self.assertIn(capped, stored_labels.values())
         self.assertLess(len(output.getvalue()), len(raw))
@@ -2635,7 +2626,7 @@ class CaptainFlowTests(unittest.TestCase):
             list(
                 pool.map(lambda i: memory.add_memory(graph_path, "task", "has", str(i)), range(20))
             )
-        self.assertEqual(len(memory.read_json(graph_path)["links"]), 20)
+        self.assertEqual(len(store.read_json(graph_path)["links"]), 20)
         graph_path.write_text("broken json")
         with self.assertRaisesRegex(runtime.CaptainError, "Cannot read memory"):
             memory.add_memory(graph_path, "x", "y", "z")
@@ -2644,9 +2635,9 @@ class CaptainFlowTests(unittest.TestCase):
     def test_memory_rejects_repo_storage_and_invalid_session_paths(self):
         with patch.dict(os.environ, {"CAPTAIN_MEMORY_ROOT": str(self.project / ".memory")}):
             with self.assertRaisesRegex(runtime.CaptainError, "outside the project"):
-                memory.storage(self.project)
+                store.storage(self.project)
         with self.assertRaisesRegex(runtime.CaptainError, "Invalid captain session"):
-            memory.session(self.project, self.pane, "../../elsewhere")
+            sessions.session(self.project, self.pane, "../../elsewhere")
         self.assertEqual(self.directory.stat().st_mode & 0o777, 0o700)
 
     @unittest.skipUnless(shutil.which("graphify"), "Graphify is optional")
@@ -2685,7 +2676,7 @@ class CaptainFlowTests(unittest.TestCase):
                 "status": status,
             }
         }
-        memory.write_json(self.directory / "session.json", self.meta)
+        store.write_json(self.directory / "session.json", self.meta)
         return agent_name
 
     def wait_api(self, statuses, tail="", report=None):
@@ -2726,7 +2717,7 @@ class CaptainFlowTests(unittest.TestCase):
         path = self.directory / "graph.json"
         if not path.exists():
             return []
-        graph = memory.read_json(path)
+        graph = store.read_json(path)
         labels = {node["id"]: node["label"] for node in graph["nodes"]}
         return [
             labels[link["target"]]
@@ -2738,7 +2729,7 @@ class CaptainFlowTests(unittest.TestCase):
         path = self.directory / "graph.json"
         if not path.exists():
             return []
-        graph = memory.read_json(path)
+        graph = store.read_json(path)
         labels = {node["id"]: node["label"] for node in graph["nodes"]}
         return [
             labels[link["target"]]

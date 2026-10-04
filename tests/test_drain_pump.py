@@ -1,39 +1,25 @@
 import contextlib
 import io
 import os
-import tempfile
 import time
 import unittest
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from captain_barbossa import cli, memory, protocol
+from captain_barbossa import cli, protocol, sessions, store
 from captain_barbossa.crew import Crew
 from captain_barbossa.pane import DRAFT_EXPIRY, DRAFT_GATE, Pane
-from tests import home_isolation  # noqa: F401
+from tests.home_isolation import SessionCase
 
 
-class DrainPumpTests(unittest.TestCase):
+class DrainPumpTests(SessionCase):
     """Regression: captain activity retries a doorbell held for an idle crew, outside any wait."""
 
     def setUp(self):
-        self.root = Path(self.enterContext(tempfile.TemporaryDirectory())).resolve()
-        self.project = self.root / "project"
-        self.project.mkdir()
+        super().setUp()
         self.enterContext(contextlib.chdir(self.project))
-        self.enterContext(
-            patch.dict(
-                os.environ,
-                {
-                    "CAPTAIN_MEMORY_ROOT": str(self.root / "state"),
-                    "CAPTAIN_PROJECT": str(self.project),
-                    "CAPTAIN_ROLE": "captain",
-                },
-            )
-        )
-        self.pane = {"workspace_id": "w1", "tab_id": "w1:t1", "pane_id": "w1:p1"}
-        self.current = memory.session(self.project, self.pane, create=True)
+        self.enterContext(patch.dict(os.environ, {"CAPTAIN_ROLE": "captain"}))
+        self.current = sessions.session(self.project, self.pane, create=True)
         self.session_id = self.current.meta["id"]
         self.crew = Crew(
             "jack",
@@ -47,7 +33,7 @@ class DrainPumpTests(unittest.TestCase):
             self.current,
         )
         self.current.meta["crew"]["jack"] = self.crew.record
-        memory.write_json(self.current.meta_path, self.current.meta)
+        store.write_json(self.current.meta_path, self.current.meta)
         self.enterContext(patch.object(cli, "current_pane", return_value=self.pane))
         self.nudge_block = self.enterContext(
             patch.object(Pane, "nudge_block", return_value=None, create=True)
@@ -65,9 +51,9 @@ class DrainPumpTests(unittest.TestCase):
         message_id = protocol.deliver(self.crew, "original", initial=True)
         self.nudge_block.return_value = None
         stamp = protocol.drain_stamp(self.crew)
-        record = memory.read_json(stamp)
+        record = store.read_json(stamp)
         record["at"] = record["held_since"] = time.time() - age
-        memory.write_json(stamp, record)
+        store.write_json(stamp, record)
         self.nudge.reset_mock()
         self.nudge_block.reset_mock()
         return message_id
@@ -103,29 +89,29 @@ class DrainPumpTests(unittest.TestCase):
         code, _ = self.captain_command()
         self.assertEqual(code, 0)
         self.nudge.assert_not_called()  # a draft just seen still holds
-        record = memory.read_json(stamp)
+        record = store.read_json(stamp)
         self.assertEqual(record["draft"], "held draft")
         record["at"] = record["draft_since"] = time.time() - DRAFT_EXPIRY - 1
-        memory.write_json(stamp, record)
+        store.write_json(stamp, record)
         code, _ = self.captain_command()
         self.assertEqual(code, 0)
         self.nudge.assert_called_once()
         # Expired means ringable, not fusable: the inbox line alone, never the mail body.
         self.assertIsNone(self.nudge.call_args.args[1])
-        self.assertTrue(memory.read_json(stamp)["landed"])
+        self.assertTrue(store.read_json(stamp)["landed"])
 
     def test_an_edited_draft_starts_the_expiry_clock_over(self):
         self.hold_mail()
         self.nudge_block.return_value = DRAFT_GATE
         stamp = protocol.drain_stamp(self.crew)
-        record = memory.read_json(stamp)
+        record = store.read_json(stamp)
         record["at"] = record["draft_since"] = time.time() - DRAFT_EXPIRY - 1
         record["draft"] = "what the human typed before"
-        memory.write_json(stamp, record)
+        store.write_json(stamp, record)
         code, _ = self.captain_command()
         self.assertEqual(code, 0)
         self.nudge.assert_not_called()
-        self.assertGreater(memory.read_json(stamp)["draft_since"], record["draft_since"])
+        self.assertGreater(store.read_json(stamp)["draft_since"], record["draft_since"])
 
     def test_no_unread_mail_rings_nothing(self):
         code, _ = self.captain_command()
@@ -153,7 +139,7 @@ class DrainPumpTests(unittest.TestCase):
     def test_dismissed_crew_is_skipped(self):
         self.hold_mail()
         self.crew.record["status"] = "dismissed"
-        memory.write_json(self.current.meta_path, self.current.meta)
+        store.write_json(self.current.meta_path, self.current.meta)
         with patch.object(cli.protocol, "drain") as drain:
             cli.pump_mail(SimpleNamespace(session=self.session_id), self.pane, self.project)
         drain.assert_not_called()

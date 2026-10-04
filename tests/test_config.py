@@ -13,7 +13,7 @@ from unittest.mock import patch
 
 import questionary
 
-from captain_barbossa import agents, cli, config, dashboard, memory, models, runtime
+from captain_barbossa import agents, cli, config, dashboard, models, runtime, sessions, store
 from captain_barbossa.runtime import CaptainError
 
 PANE = {"workspace_id": "w1", "tab_id": "w1:t1", "pane_id": "w1:p1"}
@@ -143,7 +143,7 @@ class SettingsTests(unittest.TestCase):
         """Settings are read by the command, so a bad file is an error, not a traceback."""
         path = self.project / ".captain" / "settings.toml"
         with patch.dict(os.environ, {"CAPTAIN_MEMORY_ROOT": str(self.root / "state")}):
-            current = memory.session(self.project, PANE, create=True)
+            current = sessions.session(self.project, PANE, create=True)
             path.write_text("[captain\nmodel = ", encoding="utf-8")
             config.settings.cache_clear()
             stderr = io.StringIO()
@@ -191,7 +191,7 @@ class LaunchTestCase(unittest.TestCase):
             )
         )
         self.enterContext(patch.object(config, "project_root", return_value=self.project))
-        self.directory, self.meta = memory.session(self.project, self.pane, create=True)
+        self.directory, self.meta = sessions.session(self.project, self.pane, create=True)
         self.enterContext(contextlib.redirect_stdout(io.StringIO()))
         self.enterContext(contextlib.redirect_stderr(io.StringIO()))
         config.settings.cache_clear()
@@ -264,7 +264,7 @@ class DashboardSettingTests(LaunchTestCase):
     def test_the_dashboard_pane_stays_shut_until_it_is_enabled(self):
         self.launch()
         self.board.assert_not_called()
-        self.assertIsNone(memory.read_json(self.directory / "captain.json")["dashboard"])
+        self.assertIsNone(store.read_json(self.directory / "captain.json")["dashboard"])
 
     def test_enabling_it_opens_the_pane_and_records_it(self):
         self.write("""
@@ -273,7 +273,7 @@ class DashboardSettingTests(LaunchTestCase):
         """)
         self.launch()
         self.board.assert_called_once()
-        self.assertEqual(memory.read_json(self.directory / "captain.json")["dashboard"], "w1:p2")
+        self.assertEqual(store.read_json(self.directory / "captain.json")["dashboard"], "w1:p2")
 
     def test_no_dashboard_beats_the_setting(self):
         self.write("""
@@ -403,14 +403,14 @@ class TunableTests(unittest.TestCase):
         """)
         with patch.object(dashboard.time, "sleep", side_effect=AssertionError("slept")):
             with self.assertRaisesRegex(CaptainError, r"\[dashboard\] interval"):
-                dashboard.run(memory.Session(self.root, {"id": "x", "crew": {}}))
+                dashboard.run(sessions.Session(self.root, {"id": "x", "crew": {}}))
         with self.assertRaisesRegex(CaptainError, r"\[dashboard\] ratio"):
             agents.dashboard_ratio()
 
     def test_an_out_of_range_flag_is_refused_the_same_way_as_a_file(self):
         with patch.object(dashboard.time, "sleep", side_effect=AssertionError("slept")):
             with self.assertRaisesRegex(CaptainError, "--interval must be a number above 0"):
-                dashboard.run(memory.Session(self.root, {"id": "x", "crew": {}}), -5)
+                dashboard.run(sessions.Session(self.root, {"id": "x", "crew": {}}), -5)
 
     def test_interval_and_ratio_are_read_where_they_are_used(self):
         self.write("""
@@ -430,7 +430,7 @@ class TunableTests(unittest.TestCase):
             patch.object(dashboard, "render", return_value=""),
             contextlib.redirect_stdout(io.StringIO()),
         ):
-            dashboard.run(memory.Session(self.root, {"id": "x", "crew": {}}))
+            dashboard.run(sessions.Session(self.root, {"id": "x", "crew": {}}))
         self.assertEqual(slept, [10.0])
 
     def test_a_wrong_type_leaves_the_shipped_default_standing(self):
