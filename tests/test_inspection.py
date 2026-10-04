@@ -369,6 +369,30 @@ class InspectionTests(unittest.TestCase):
             ):
                 self.inspect("git", "status")
 
+    def test_skip_dirs_excludes_standard_cache_and_build_directories(self):
+        (self.project / "regular.txt").write_text("keep this")
+        (self.project / "node_modules").mkdir()
+        (self.project / "node_modules" / "junk.txt").write_text("skip this")
+        for skip_dir in inspection.SKIP_DIRS:
+            if skip_dir == "node_modules":
+                continue
+            d = self.project / skip_dir
+            d.mkdir(exist_ok=True)
+            (d / "junk.txt").write_text("skip this")
+
+        result = self.inspect("files")
+        paths = result["paths"]
+        self.assertIn("regular.txt", paths)
+        self.assertNotIn("node_modules/junk.txt", paths)
+        self.assertFalse(any(skip_dir in p for skip_dir in inspection.SKIP_DIRS for p in paths))
+
+        result = self.inspect("search", "skip")
+        self.assertEqual(result["matches"], [])
+
+        result = self.inspect("search", "keep")
+        self.assertEqual(len(result["matches"]), 1)
+        self.assertEqual(result["matches"][0]["path"], "regular.txt")
+
 
 if __name__ == "__main__":
     unittest.main()

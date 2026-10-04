@@ -25,6 +25,21 @@ MAX_RESULTS = 200
 MAX_SCAN_BYTES = 8 * 1024 * 1024
 MAX_PATTERN = 512
 TIMEOUT = 5
+SKIP_DIRS = {
+    ".git",
+    ".venv",
+    "venv",
+    "build",
+    "dist",
+    "__pycache__",
+    ".ruff_cache",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".tox",
+    "target",
+    ".next",
+    "node_modules",
+}
 # /usr/bin/git on macOS is a launcher for the mutable xcode-select toolchain.
 GIT = Path(
     "/Library/Developer/CommandLineTools/usr/bin/git"
@@ -145,7 +160,7 @@ def _walk(root, path, deadline, *, metadata=False):
                     scanned += 1
                     if scanned > MAX_ENTRIES:
                         _fail("limit", f"scan exceeds {MAX_ENTRIES} directory entries.")
-                    if not metadata and entry.name == ".git":
+                    if not metadata and entry.name in SKIP_DIRS:
                         continue
                     try:
                         mode = entry.stat(follow_symlinks=False).st_mode
