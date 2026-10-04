@@ -56,7 +56,10 @@ class DoTests(unittest.TestCase):
     def advance_remote(self):
         """A remote whose main is one commit ahead, so fetch and pull have real work."""
         remote = self.root / "remote.git"
-        git(self.root, "init", "--bare", "remote.git")
+        # The branch name is explicit here too: a bare init takes HEAD from the ambient
+        # init.defaultBranch, and a remote HEAD of master leaves the clone below on an
+        # unborn master, so the commit lands on a branch main never pulls.
+        git(self.root, "init", "--bare", "--initial-branch=main", "remote.git")
         git(self.project, "remote", "add", "origin", str(remote))
         git(self.project, "push", "--set-upstream", "origin", "main")
         other = self.root / "other"
