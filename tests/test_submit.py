@@ -280,6 +280,29 @@ class SubmitTaskTests(unittest.TestCase):
                     [("agent", "prompt", "builder", TASK)] if accepted else [],
                 )
 
+    def test_a_submitted_wake_line_on_the_composer_is_not_a_draft(self):
+        """Seen live: a hook-delivered crew's pane keeps rendering the submitted wake line on
+        its composer row, so every reader that passes no echo called it a human's draft and
+        `model` refused for the rest of the session."""
+        rule = "─" * 78
+        for composer, accepted in (
+            (f"❯ {panes.WAKE_LINE}", True),
+            (f"❯ {panes.WAKE_LINE} and one more thing", False),
+            ("❯ half a sentence", False),
+        ):
+            screen = "\n".join(
+                [
+                    "▎ Ran the gate",
+                    rule,
+                    composer,
+                    rule,
+                    "  ⏸ manual mode on · ? for shortcuts · ← for agents",
+                ]
+            )
+            with self.subTest(composer=composer):
+                with patch.object(runtime, "herdr", return_value=screen):
+                    self.assertEqual(Pane("builder").draft_pending("claude"), not accepted)
+
     def test_captured_grok_box_reads_its_prompt_row_and_fails_closed_otherwise(self):
         """Grok boxes its composer, so the pane's last line is the border, never the row."""
         top = "╭" + "─" * 46 + "╮"

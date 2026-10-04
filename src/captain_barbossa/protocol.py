@@ -452,7 +452,15 @@ def stalled(crew, assignment):
     if not assignment or assignment.get("turn_started"):
         return False
     messages = assignment["messages"]
-    return bool(messages) and all(message["delivery"] == "read" for message in messages)
+    if not messages or any(message["delivery"] != "read" for message in messages):
+        return False
+    # turn_started is written by `poll` alone, while `drain` also runs from every captain
+    # command, so the flag alone called a crew that had long since woken and emptied its
+    # queue stalled, and rang it once a command for the rest of the session. The crew's own
+    # event file is the same proof poll uses; read from the assignment's baseline and not
+    # consumed, so a turn poll has already banked stays visible here.
+    events, _ = native_events(crew.events, assignment.get("offset", 0))
+    return not any(turn_event(event) for event in events)
 
 
 def drain_stamp(crew):

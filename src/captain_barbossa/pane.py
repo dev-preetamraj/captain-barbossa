@@ -262,8 +262,10 @@ class Pane:
             return UNREADABLE_GATE
         # A composer still showing the ring we typed is ours, not a draft; otherwise a landed
         # ring gates the next one. Only an exact match counts, so a wrong guess parks mail
-        # rather than typing over a human.
-        if not text or text == echo:
+        # rather than typing over a human. The wake line is ours whoever asks: a hook-delivered
+        # crew's pane keeps rendering it after submission, and every reader but the ring itself
+        # passes no echo, so without this a landed doorbell gates `model` for the whole session.
+        if not text or text == echo or text == WAKE_LINE:
             return None
         return None if self._dim_suggestion(text, styled) else DRAFT_GATE
 

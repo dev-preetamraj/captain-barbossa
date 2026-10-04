@@ -827,6 +827,16 @@ class StalledCrewTests(unittest.TestCase):
             protocol.drain(self.crew)
         nudge.assert_not_called()
 
+    def test_a_crew_that_woke_outside_a_wait_stops_the_retries(self):
+        """turn_started is poll's flag, but drain also runs from every captain command: on the
+        flag alone a crew that had read all its mail was rung once per command, forever."""
+        self.hand_over(gate=None)
+        self.event({"hook_event_name": "UserPromptSubmit"})
+        self.backdate()
+        with patch.object(Pane, "nudge") as nudge:
+            protocol.drain(self.crew)
+        nudge.assert_not_called()
+
     def test_a_ring_delivered_body_is_no_stall(self):
         """Only a delivery hook stamps a receipt without a turn; a ring carries its own body."""
         self.crew.record["provider"] = "codex"
