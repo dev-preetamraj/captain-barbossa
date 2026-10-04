@@ -2,16 +2,24 @@
 
 import contextlib
 import io
+import json
+import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from captain_barbossa import agents, cli, config, layout, runtime
+import questionary
+
+from captain_barbossa import agents, cli, config, layout, runtime, sessions, store
+from captain_barbossa import pane as panes
+from captain_barbossa.pane import Pane
 from captain_barbossa.placement import Placement
 from captain_barbossa.runtime import CaptainError
 from captain_barbossa.sessions import Session
+from tests.home_isolation import HERDR, SessionCase
 
 
 def pinned(**keys):
@@ -468,6 +476,453 @@ class RecruitLockTests(GridHarness):
         ):
             guard.return_value.__enter__.return_value = self.meta
             agents.create_crew(args, self.pane, Path(root))
+
+
+# create_crew's shell_ready_for_input polls a raw `pane read`, which needs text; a
+# fixture built to return a dict for every herdr call would otherwise blow up on it.
+SETTLED_SHELL_TEXT = "~/project $ "
+
+
+def pane_stub(base):
+    """Wrap a herdr stub so a `pane read` returns settled shell text instead of
+    whatever `base` answers everything else with (a dict, `base` being callable or not)."""
+
+    def api(*call, **kwargs):
+        if call[:2] == ("pane", "read"):
+            return SETTLED_SHELL_TEXT
+        return base(*call, **kwargs) if callable(base) else base
+
+    return api
+
+
+class PaneSplitTests(SessionCase):
+    def setUp(self):
+        super().setUp()
+        self.enterContext(patch.dict(os.environ, HERDR))
+        self.enterContext(patch.object(panes, "READY_POLLS", 1))
+        # nudge_block/nudge read a realistic agent status these ad hoc herdr fakes don't model;
+        # a mail doorbell is not what these tests exercise, so give delivery a clean ring by
+        # default. test_submit.py covers nudge_block/nudge themselves against real fakes.
+        self.enterContext(patch.object(Pane, "nudge_block", return_value=None))
+        self.enterContext(patch.object(Pane, "nudge"))
+        self.directory, self.meta = sessions.session(self.project, self.pane, create=True)
+        self.enterContext(contextlib.redirect_stdout(io.StringIO()))
+
+    def args(self, *args):
+        return cli.parser().parse_args(["--session", self.meta["id"], *args])
+
+    def pane_list(self):
+        return {
+            "panes": [
+                {"pane_id": "w1:p1", "tab_id": "w1:t1", "terminal_title_stripped": "zsh"},
+                {"pane_id": "w1:p5", "tab_id": "w1:t1", "label": "Will", "agent": "claude"},
+                {"pane_id": "w1:p9", "tab_id": "w1:t2", "terminal_title_stripped": "vim"},
+                {"pane_id": "w1:p8", "tab_id": "w1:t3"},
+                {"pane_id": None, "tab_id": "w1:t1"},
+                {"pane_id": "w1:p7", "tab_id": None},
+                "junk",
+            ]
+        }
+
+    def tab_list(self):
+        return {
+            "tabs": [
+                {"tab_id": "w1:t1", "label": "Captain Barbossa", "number": 1},
+                {"tab_id": "w1:t2", "number": 2},
+                {"tab_id": None, "label": "ghost"},
+            ]
+        }
+
+    def listing(self, *call, **_):
+        if call[:2] == ("tab", "list"):
+            return self.tab_list()
+        if call[:2] == ("pane", "list"):
+            return self.pane_list()
+        if call[:2] == ("agent", "read"):
+            return self.EMPTY_COMPOSER
+        return None
+
+    EMPTY_COMPOSER = "› Ask Codex to do anything"
+
+    LISTING_CALLS = (("tab", "list", "--workspace", "w1"), ("pane", "list", "--workspace", "w1"))
+
+    LISTED_PANES = (
+        "auto Auto (next slot in the tab shape); Captain Barbossa: w1:p1 zsh (captain) / w1:p5 Will; "
+        "Tab 2: w1:p9 vim; w1:t3: w1:p8 w1:p8"
+    )
+
+    def test_pane_split_lists_workspace_panes_by_tab_and_requires_a_split_pane(self):
+        for direction in ("vertical", "horizontal"):
+            args = self.args(
+                "crew",
+                "--agent",
+                "codex",
+                "--task",
+                "build",
+                "--placement",
+                "pane",
+                "--direction",
+                direction,
+            )
+            with (
+                self.subTest(direction=direction),
+                patch.object(sys.stdin, "isatty", return_value=False),
+                patch.object(runtime, "herdr", side_effect=self.listing) as api,
+            ):
+                with self.assertRaisesRegex(runtime.CaptainError, "Ask the user") as error:
+                    agents.create_crew(args, self.pane, self.project)
+                self.assertEqual(
+                    [call.args for call in api.call_args_list], list(self.LISTING_CALLS)
+                )
+                message = str(error.exception)
+                self.assertIn("Which pane should be split?", message)
+                self.assertIn(f"({self.LISTED_PANES})", message)
+                self.assertNotIn("w1:p7", message)
+                self.assertIn("--split-pane <choice>", message)
+                self.assertEqual(store.read_json(self.directory / "session.json")["crew"], {})
+        for response in ({}, {"tabs": [], "panes": []}, {"tabs": [], "panes": ["x"]}):
+            with (
+                self.subTest(response=response),
+                patch.object(sys.stdin, "isatty", return_value=False),
+                patch.object(runtime, "herdr", return_value=response),
+            ):
+                with self.assertRaisesRegex(runtime.CaptainError, "no (tab or pane list|panes)"):
+                    agents.create_crew(args, self.pane, self.project)
+
+    def test_split_flags_are_rejected_with_tab_placement_before_any_herdr_call(self):
+        for flags in (("--split-pane", "w1:p1"), ("--direction", "vertical")):
+            args = self.args(
+                "crew", "--agent", "codex", "--task", "build", "--placement", "tab", *flags
+            )
+            with self.subTest(flags=flags), patch.object(runtime, "herdr") as api:
+                with self.assertRaisesRegex(runtime.CaptainError, "apply only to --placement pane"):
+                    agents.create_crew(args, self.pane, self.project)
+                api.assert_not_called()
+
+    def test_pane_split_failure_preserves_a_recoverable_assignment_reservation(self):
+        def api(*call, **_):
+            if call[:2] == ("pane", "split"):
+                raise runtime.CaptainError("pane_not_found")
+            return self.listing(*call)
+
+        args = self.args(
+            "crew",
+            "--agent",
+            "codex",
+            "--task",
+            "build",
+            "--placement",
+            "pane",
+            "--direction",
+            "vertical",
+            "--split-pane",
+            "w1:p9",
+        )
+        with (
+            patch.object(runtime, "herdr", side_effect=api) as calls,
+            patch.object(agents, "executable", return_value="/bin/codex"),
+        ):
+            with self.assertRaisesRegex(
+                runtime.CaptainError, "Could not split pane w1:p9"
+            ) as error:
+                agents.create_crew(args, self.pane, self.project)
+        self.assertIn("pane_not_found", str(error.exception))
+        self.assertIn("Ask the user which pane to split again", str(error.exception))
+        self.assertEqual(calls.call_args_list[-1].args[:2], ("pane", "split"))
+        record = store.read_json(self.directory / "session.json")["crew"]["jack"]
+        self.assertEqual(record["status"], "needs_attention")
+        self.assertNotIn("pane", record)
+        state = store.read_json(self.directory / "protocol.json")
+        self.assertIn(record["assignment_id"], state["assignments"])
+
+    def test_pane_split_rejects_panes_missing_from_the_workspace(self):
+        for bad in ("w1:p7", "w2:p1", "w1:p1 "):
+            args = self.args(
+                "crew",
+                "--agent",
+                "codex",
+                "--task",
+                "build",
+                "--placement",
+                "pane",
+                "--direction",
+                "horizontal",
+                "--split-pane",
+                bad,
+            )
+            with (
+                self.subTest(pane=bad),
+                patch.object(runtime, "herdr", side_effect=self.listing) as api,
+            ):
+                with self.assertRaisesRegex(runtime.CaptainError, "not in this workspace") as error:
+                    agents.create_crew(args, self.pane, self.project)
+                self.assertEqual(
+                    [call.args for call in api.call_args_list], list(self.LISTING_CALLS)
+                )
+                self.assertIn("w1:p1, w1:p5, w1:p9, w1:p8", str(error.exception))
+                self.assertIn("Ask the user again", str(error.exception))
+
+    def test_pane_split_uses_the_chosen_pane_and_direction_in_any_tab(self):
+        def api(*call, **_):
+            return self.listing(*call) or {
+                "pane": {"pane_id": "w1:p6", "agent": "codex", "agent_status": "idle"},
+                "agent": {"name": f"c-{self.meta['id'][:8]}-jack", "agent_status": "working"},
+            }
+
+        for direction, herdr_direction, flags, answers, target, tab in (
+            (
+                "horizontal",
+                "down",
+                ("--split-pane", "w1:p5"),
+                ["codex", "pane", "horizontal"],
+                "w1:p5",
+                "w1:t1",
+            ),
+            ("horizontal", "down", (), ["codex", "pane", "horizontal", "w1:p9"], "w1:p9", "w1:t2"),
+            (
+                "vertical",
+                "right",
+                ("--split-pane", "w1:p8"),
+                ["codex", "pane", "vertical"],
+                "w1:p8",
+                "w1:t3",
+            ),
+            ("vertical", "right", (), ["codex", "pane", "vertical", "w1:p5"], "w1:p5", "w1:t1"),
+        ):
+            args = self.args("crew", "--task", "build", *flags)
+            with (
+                self.subTest(direction=direction, flags=flags),
+                patch.object(runtime, "herdr", side_effect=pane_stub(api)) as calls,
+                patch.object(agents, "executable", return_value="/bin/codex"),
+                patch.object(sys.stdin, "isatty", return_value=True),
+                patch(
+                    "captain_barbossa.prompts.questionary.select",
+                    **{"return_value.unsafe_ask.side_effect": answers},
+                ) as ask,
+                contextlib.redirect_stdout(io.StringIO()) as output,
+            ):
+                agents.create_crew(args, self.pane, self.project)
+            self.assertEqual(
+                [call.args for call in calls.call_args_list[:2]], list(self.LISTING_CALLS)
+            )
+            split = calls.call_args_list[2].args
+            self.assertEqual(split[:2], ("pane", "split"))
+            self.assertEqual(split[split.index("--pane") + 1], target)
+            self.assertEqual(split[split.index("--direction") + 1], herdr_direction)
+            self.assertEqual(ask.call_args_list[2].args[0], "Split direction?")
+            if not flags:
+                self.assertEqual(ask.call_args_list[3].args[0], "Which pane should be split?")
+                rows = [
+                    choice.title if isinstance(choice, questionary.Separator) else choice
+                    for choice in ask.call_args_list[3].kwargs["choices"]
+                ]
+                self.assertIn("Captain Barbossa", rows)
+                self.assertEqual(
+                    [row.title for row in rows if isinstance(row, questionary.Choice)],
+                    ["Auto (next slot in the tab shape)", "zsh (captain)", "Will", "vim", "w1:p8"],
+                )
+                self.assertLess(rows.index("Captain Barbossa"), rows.index("Tab 2"))
+                self.assertLess(rows.index("Tab 2"), rows.index("w1:t3"))
+            result = json.loads(output.getvalue())
+            self.assertEqual(result["direction"], direction)
+            self.assertEqual(result["split_pane"], target)
+            self.assertEqual(result["tab"], tab)
+            self.assertEqual(result["pane"], "w1:p6")
+            store.write_json(self.directory / "session.json", {**self.meta, "crew": {}})
+            store.write_json(self.directory / "protocol.json", {"active": {}, "assignments": {}})
+
+    def test_default_recruiting_flags_create_a_crew_without_any_selector(self):
+        created = {
+            "pane": {
+                "pane_id": "w1:p6",
+                "tab_id": "w1:t1",
+                "agent": "claude",
+                "agent_status": "idle",
+            },
+            "agent": {"name": f"c-{self.meta['id'][:8]}-jack", "agent_status": "working"},
+        }
+
+        def api(*call, **_):
+            return self.listing(*call) or created
+
+        args = self.args(
+            "crew",
+            "--agent",
+            "claude",
+            "--task",
+            "build",
+            "--placement",
+            "pane",
+            "--direction",
+            "auto",
+            "--split-pane",
+            "auto",
+            "--model",
+            "sonnet",
+        )
+        with (
+            patch.object(runtime, "herdr", side_effect=pane_stub(api)),
+            patch.object(agents, "executable", return_value="/bin/claude"),
+            patch.object(sys.stdin, "isatty", return_value=True),
+            patch.object(questionary, "select", side_effect=AssertionError("asked a question")),
+            contextlib.redirect_stdout(io.StringIO()) as output,
+            contextlib.redirect_stderr(io.StringIO()),
+        ):
+            agents.create_crew(args, self.pane, self.project)
+        result = json.loads(output.getvalue())
+        self.assertEqual(result["placement"], "pane")
+        self.assertEqual(result["split_pane"], "w1:p1")
+        self.assertEqual(result["direction"], "vertical")
+        self.assertEqual(result["model"], "claude-sonnet-5")
+
+    def test_auto_placement_takes_a_slot_in_the_shape_and_records_it(self):
+        """The shape decides, so no pane is measured and no layout is fetched."""
+        created = {
+            "pane": {
+                "pane_id": "w1:p6",
+                "tab_id": "w1:t1",
+                "agent": "codex",
+                "agent_status": "idle",
+            },
+            "root_pane": {"pane_id": "w1:p6", "tab_id": "w1:t9"},
+            "tab_id": "w1:t9",
+            "agent": {"name": f"c-{self.meta['id'][:8]}-jack", "agent_status": "working"},
+        }
+        base = ("crew", "--agent", "codex", "--task", "build", "--placement", "pane")
+        for flags, roster, expected, chosen, ratio in (
+            # An empty captain tab: the first crew opens column 2 beside the captain.
+            (("--split-pane", "auto"), {}, ("split", "w1:p1", "right"), "vertical", "0.5000"),
+            # Column 2 taken, so [1, 2] stacks the next crew under it.
+            (
+                ("--split-pane", "auto", "--direction", "auto"),
+                {
+                    "will": {
+                        "pane": "w1:p5",
+                        "tab": "w1:t1",
+                        "status": "started",
+                        "column": 2,
+                        "row": 1,
+                    }
+                },
+                ("split", "w1:p5", "down"),
+                "horizontal",
+                "0.5000",
+            ),
+            # A forced direction keeps the slot but drops the even ratio.
+            (
+                ("--split-pane", "auto", "--direction", "horizontal"),
+                {},
+                ("split", "w1:p1", "down"),
+                "horizontal",
+                None,
+            ),
+            # Both slots of [1, 2] taken: the shape is full and a tab opens.
+            (
+                ("--split-pane", "auto"),
+                {
+                    "will": {
+                        "pane": "w1:p5",
+                        "tab": "w1:t1",
+                        "status": "started",
+                        "column": 2,
+                        "row": 1,
+                    },
+                    "gibbs": {
+                        "pane": "w1:p7",
+                        "tab": "w1:t1",
+                        "status": "started",
+                        "column": 2,
+                        "row": 2,
+                    },
+                },
+                ("tab",),
+                None,
+                None,
+            ),
+        ):
+            store.write_json(self.directory / "session.json", {**self.meta, "crew": roster})
+            store.write_json(self.directory / "protocol.json", {"active": {}, "assignments": {}})
+
+            def api(*call, **_):
+                return self.listing(*call) or created
+
+            with (
+                self.subTest(flags=flags),
+                patch.object(runtime, "herdr", side_effect=pane_stub(api)) as calls,
+                patch.object(agents, "executable", return_value="/bin/codex"),
+                patch.object(sys.stdin, "isatty", return_value=False),
+                contextlib.redirect_stdout(io.StringIO()) as output,
+                contextlib.redirect_stderr(io.StringIO()) as notice,
+            ):
+                agents.create_crew(self.args(*base, *flags), self.pane, self.project)
+            made = [call.args for call in calls.call_args_list]
+            self.assertFalse([call for call in made if call[:2] == ("pane", "layout")])
+            creation = made[0]
+            result = json.loads(output.getvalue())
+            if expected[0] == "split":
+                self.assertEqual(creation[:2], ("pane", "split"))
+                self.assertEqual(creation[creation.index("--pane") + 1], expected[1])
+                self.assertEqual(creation[creation.index("--direction") + 1], expected[2])
+                if ratio is None:
+                    self.assertNotIn("--ratio", creation)
+                else:
+                    self.assertEqual(creation[creation.index("--ratio") + 1], ratio)
+                self.assertEqual(result["placement"], "pane")
+                self.assertEqual(result["split_pane"], expected[1])
+                self.assertEqual(result["direction"], chosen)
+                self.assertEqual((result["column"], result["row"]), (2, 1 + len(roster)))
+                self.assertIn(f"Auto placement: split {expected[1]} {chosen}", notice.getvalue())
+            else:
+                self.assertEqual(creation[:2], ("tab", "create"))
+                self.assertEqual(result["placement"], "tab")
+                self.assertIsNone(result["split_pane"])
+                self.assertEqual((result["column"], result["row"]), (1, 1))
+                self.assertTrue(result["auto"].startswith("new tab; every slot"))
+            graph = store.read_json(self.directory / "graph.json")
+            self.assertIn(f"auto: {result['auto']}", [node["label"] for node in graph["nodes"]])
+            store.write_json(self.directory / "graph.json", {"nodes": [], "links": []})
+        store.write_json(self.directory / "session.json", {**self.meta, "crew": {}})
+
+    def test_auto_placement_fills_a_crew_tab_before_opening_another(self):
+        """The captain tab is full, so the next crew reuses the oldest crew tab with room."""
+        created = {
+            "pane": {
+                "pane_id": "w1:p10",
+                "tab_id": "w1:t2",
+                "agent": "claude",
+                "agent_status": "idle",
+            },
+            "agent": {"name": f"c-{self.meta['id'][:8]}-elizabeth", "agent_status": "working"},
+        }
+        meta = store.read_json(self.directory / "session.json")
+        meta["crew"] = {
+            "will": {"pane": "w1:p5", "tab": "w1:t1", "status": "started", "column": 2, "row": 1},
+            "gibbs": {"pane": "w1:p7", "tab": "w1:t1", "status": "started", "column": 2, "row": 2},
+            "jack": {"pane": "w1:p9", "tab": "w1:t2", "status": "started", "column": 1, "row": 1},
+        }
+        store.write_json(self.directory / "session.json", meta)
+
+        def api(*call, **_):
+            return self.listing(*call) or created
+
+        base = ("crew", "--agent", "claude", "--task", "review code", "--placement", "pane")
+        with (
+            patch.object(runtime, "herdr", side_effect=pane_stub(api)) as calls,
+            patch.object(agents, "executable", return_value="/bin/claude"),
+            patch.object(sys.stdin, "isatty", return_value=False),
+            contextlib.redirect_stdout(io.StringIO()) as output,
+            contextlib.redirect_stderr(io.StringIO()) as notice,
+        ):
+            agents.create_crew(self.args(*base, "--split-pane", "auto"), self.pane, self.project)
+
+        result = json.loads(output.getvalue())
+        self.assertEqual(result["placement"], "pane")
+        self.assertEqual(result["split_pane"], "w1:p9")
+        self.assertEqual(result["tab"], "w1:t2")
+        self.assertEqual((result["column"], result["row"]), (2, 1))
+        self.assertFalse([c.args for c in calls.call_args_list if c.args[:2] == ("pane", "layout")])
+        self.assertIn("Auto placement: split w1:p9", notice.getvalue())
+        self.assertNotIn("new tab", notice.getvalue())
 
 
 if __name__ == "__main__":

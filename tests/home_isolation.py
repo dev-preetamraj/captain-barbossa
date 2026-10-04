@@ -18,7 +18,7 @@ its own roots still sets them, and they win as usual.
 
 It lives here rather than in tests/__init__.py because the gate runs
 `unittest discover -s tests`, which makes tests/ the top-level directory and never
-imports the package. tests/test_captain.py imports it; tests/test_isolation.py fails if
+imports the package. tests/test_startup.py imports it; tests/test_isolation.py fails if
 that import is ever dropped.
 """
 

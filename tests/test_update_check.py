@@ -1,8 +1,11 @@
 import contextlib
+import importlib.metadata
 import io
 import os
+import tomllib
 import unittest
 import urllib.error
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from captain_barbossa import cli
@@ -120,6 +123,19 @@ class UpdateCommandTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("captain-only", err.getvalue())
         run.assert_not_called()
+
+
+class VersionTests(unittest.TestCase):
+    def test_version_flag_reports_the_package_metadata_version(self):
+        expected = importlib.metadata.version("captain-barbossa")
+        with open(Path(__file__).parents[1] / "pyproject.toml", "rb") as handle:
+            self.assertEqual(tomllib.load(handle)["project"]["version"], expected)
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            with self.assertRaises(SystemExit) as exit_info:
+                cli.main(["--version"])
+        self.assertEqual(exit_info.exception.code, 0)
+        self.assertEqual(output.getvalue(), f"captain {expected}\n")
+        self.assertEqual(cli.__version__, expected)
 
 
 if __name__ == "__main__":

@@ -8,8 +8,9 @@ import sys
 from itertools import cycle
 from uuid import uuid4
 
-from . import config, dashboard, instructions, protocol, runtime, usage
+from . import config, instructions, protocol, runtime
 from .crew import Crew
+from .dashboard import dashboard_pane, renest_dashboard, start_dashboard
 from .events import read_events
 from .memory import add_memory, truncate_label
 from .models import HOOKLESS, PROVIDERS, model_names, resolve_model
@@ -41,12 +42,6 @@ CREW_NAMES = (
     "davy",
     "sao",
 )
-
-
-def dashboard_ratio():
-    """Fraction of the captain pane kept when the dashboard splits off below it: the
-    dashboard is a few rows of table, not half a screen."""
-    return config.number("dashboard", "ratio", below=1)
 
 
 def launch(args, pane, project):
@@ -107,95 +102,6 @@ def launch(args, pane, project):
         },
     )
     os.execvpe(binary, command, env)
-
-
-def start_dashboard(current, pane, project):
-    """Split a short pane below the captain and run `captain dashboard` in it."""
-    # Env var, not shell text, so a quote in the session path can't inject commands.
-    launcher = current.directory / "dashboard.sh"
-    launcher.write_text(
-        "#!/bin/sh\nexec "
-        + shlex.join(
-            [sys.executable, "-m", "captain_barbossa", "--session", current.meta["id"], "dashboard"]
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-    launcher.chmod(0o600)
-    split_args = [
-        "--pane",
-        pane["pane_id"],
-        "--direction",
-        "down",
-        "--ratio",
-        str(dashboard_ratio()),
-        "--cwd",
-        str(project),
-        "--no-focus",
-        "--env",
-        f"CAPTAIN_SESSION={current.meta['id']}",
-        "--env",
-        f"CAPTAIN_PROJECT={project.resolve()}",
-        "--env",
-        f"CAPTAIN_STATE_ROOT={state_root()}",
-        "--env",
-        f"CAPTAIN_TEMP_ROOT={temp_root()}",
-        "--env",
-        f"CAPTAIN_DASHBOARD_LAUNCHER={launcher}",
-    ]
-    created = runtime.herdr("pane", "split", *split_args)
-    board = created.get("pane", {}).get("pane_id")
-    if not isinstance(board, str) or not board:
-        raise CaptainError("Herdr split a pane for the dashboard but returned no pane ID.")
-    runtime.herdr("pane", "rename", board, "Dashboard")
-    # A new shell may still be in canonical mode: keep terminal input short.
-    runtime.herdr(
-        "pane", "run", board, '/bin/sh "$CAPTAIN_DASHBOARD_LAUNCHER"', expect_output=False
-    )
-    return board
-
-
-def dashboard_pane(current):
-    """The dashboard's pane id from captain.json, or None when this session has none."""
-    try:
-        record = read_json(current.directory / "captain.json")
-    except CaptainError:
-        return None
-    return record.get("dashboard") if isinstance(record, dict) else None
-
-
-def renest_dashboard(pane, captain_pane):
-    """Re-attach the dashboard directly under the captain pane after a crew split.
-
-    Splitting the captain pane sideways turns it into a row, and the dashboard, its former
-    sibling, ends up under that whole row instead of under the captain. `pane move` is the
-    only Herdr command that reparents, and it is a no-op within one tab, so the dashboard
-    goes out to a scratch tab and straight back. Herdr closes the emptied tab itself.
-    """
-    runtime.herdr("pane", "move", pane, "--new-tab", "--no-focus")
-    runtime.herdr(
-        "pane",
-        "move",
-        pane,
-        "--tab",
-        captain_pane["tab_id"],
-        "--target-pane",
-        captain_pane["pane_id"],
-        "--split",
-        "down",
-        "--ratio",
-        str(dashboard_ratio()),
-        "--no-focus",
-    )
-
-
-def run_dashboard(args, pane, project):
-    """Refresh the crew token-usage table in this pane until interrupted."""
-    current = read_session(project, args.session, pane)
-    if getattr(args, "refresh_prices", False):
-        usage._prices(cached_only=False)
-    # Omitted --interval leaves the cadence to dashboard.run, which reads the setting.
-    dashboard.run(current, args.interval)
 
 
 def tail_note(current, crew, tail):

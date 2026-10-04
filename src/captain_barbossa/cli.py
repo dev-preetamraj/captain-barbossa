@@ -13,7 +13,6 @@ from .agents import (
     interrupt_crew,
     launch,
     protocol_command,
-    run_dashboard,
     status_crew,
     switch_model,
     tell_crew,
@@ -341,7 +340,7 @@ def main(argv=None):
             if args.once:
                 print(dashboard.render(read_session(project, args.session, pane)))
             else:
-                run_dashboard(args, pane, project)
+                dashboard.run_dashboard(args, pane, project)
         elif args.command == "dismiss":
             dismiss_crew(args, pane, project)
         elif args.command == "memory":

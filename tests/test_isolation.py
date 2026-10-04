@@ -1,7 +1,7 @@
 """Guard: the suite must not be able to reach the developer's real HOME or memory roots.
 
 This module deliberately does not import tests/home_isolation.py. Something else has to
-have imported it (tests/test_captain.py does), so these tests fail if that import is
+have imported it (tests/test_startup.py does), so these tests fail if that import is
 ever dropped and the suite starts writing into the real captain memory root again.
 """
 

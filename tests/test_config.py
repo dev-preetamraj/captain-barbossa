@@ -351,7 +351,7 @@ class TunableTests(unittest.TestCase):
         self.assertEqual(config.text("crew", "model"), "cheap")
         self.assertEqual(config.lookup("crew", "wait_timeout", kind=int), 86400)
         self.assertEqual(config.lookup("dashboard", "interval", kind=float), 2.0)
-        self.assertEqual(agents.dashboard_ratio(), 0.8)
+        self.assertEqual(dashboard.dashboard_ratio(), 0.8)
 
     def test_building_the_parser_resolves_no_setting_at_all(self):
         """Defaults belong to the command: a parser that reads them breaks --version."""
@@ -405,7 +405,7 @@ class TunableTests(unittest.TestCase):
             with self.assertRaisesRegex(CaptainError, r"\[dashboard\] interval"):
                 dashboard.run(sessions.Session(self.root, {"id": "x", "crew": {}}))
         with self.assertRaisesRegex(CaptainError, r"\[dashboard\] ratio"):
-            agents.dashboard_ratio()
+            dashboard.dashboard_ratio()
 
     def test_an_out_of_range_flag_is_refused_the_same_way_as_a_file(self):
         with patch.object(dashboard.time, "sleep", side_effect=AssertionError("slept")):
@@ -418,7 +418,7 @@ class TunableTests(unittest.TestCase):
             interval = 10
             ratio = 0.5
         """)
-        self.assertEqual(agents.dashboard_ratio(), 0.5)
+        self.assertEqual(dashboard.dashboard_ratio(), 0.5)
         slept = []
 
         def stop(seconds):
@@ -444,7 +444,7 @@ class TunableTests(unittest.TestCase):
         """)
         self.assertEqual(config.lookup("crew", "wait_timeout", kind=int), 86400)
         self.assertEqual(config.lookup("dashboard", "interval", kind=float), 2.0)
-        self.assertEqual(agents.dashboard_ratio(), 0.8)
+        self.assertEqual(dashboard.dashboard_ratio(), 0.8)
 
 
 class InitTests(unittest.TestCase):

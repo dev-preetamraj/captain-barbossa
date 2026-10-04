@@ -8,7 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from captain_barbossa import agents, cli, runtime, sessions, store
+from captain_barbossa import agents, cli, dashboard, runtime, sessions, store
 from captain_barbossa.pane import Pane
 from captain_barbossa.placement import Placement
 from captain_barbossa.runtime import CaptainError
@@ -177,8 +177,8 @@ class DashboardCommandTests(SessionCase):
     def run_dashboard(self, argv):
         seen = []
         args = cli.parser().parse_args(["--session", self.session_id, *argv])
-        with patch.object(agents.dashboard, "run", lambda *call: seen.append(call)):
-            agents.run_dashboard(args, PANE, self.project)
+        with patch.object(dashboard, "run", lambda *call: seen.append(call)):
+            dashboard.run_dashboard(args, PANE, self.project)
         return seen[0]
 
     def test_resolves_the_session_like_status_does(self):
@@ -206,7 +206,7 @@ class DashboardCommandTests(SessionCase):
         }
         with (
             patch.object(store, "private_dir", side_effect=AssertionError("state mutation")),
-            patch.object(agents.usage, "_prices") as prices,
+            patch.object(dashboard.usage, "_prices") as prices,
         ):
             self.run_dashboard(["dashboard"])
         prices.assert_not_called()
@@ -232,14 +232,14 @@ class RenestTests(unittest.TestCase):
     def test_dashboard_moves_out_and_back_under_the_captain(self):
         calls = []
         with patch.object(runtime, "herdr", lambda *call, **kw: calls.append(call) or {}):
-            agents.renest_dashboard("w1:p2", PANE)
+            dashboard.renest_dashboard("w1:p2", PANE)
         self.assertEqual(calls[0], ("pane", "move", "w1:p2", "--new-tab", "--no-focus"))
         back = calls[1]
         self.assertEqual(back[:3], ("pane", "move", "w1:p2"))
         self.assertEqual(back[back.index("--tab") + 1], "w1:t1")
         self.assertEqual(back[back.index("--target-pane") + 1], "w1:p1")
         self.assertEqual(back[back.index("--split") + 1], "down")
-        self.assertEqual(float(back[back.index("--ratio") + 1]), agents.dashboard_ratio())
+        self.assertEqual(float(back[back.index("--ratio") + 1]), dashboard.dashboard_ratio())
 
 
 class CrewRenestTests(LaunchHarness):

@@ -147,5 +147,43 @@ class ModelTierTests(unittest.TestCase):
         self.assertEqual(models.model_names("codex", "gpt-5.5"), ("gpt-5.5",))
 
 
+class ModelTextTests(unittest.TestCase):
+    def test_text_matches_exact_names_then_prefixes_substrings_and_close_spellings(self):
+        for provider, text, expected in (
+            ("claude", "claude-opus-5", "claude-opus-5"),
+            ("claude", "opus", "claude-opus-5"),
+            ("claude", "Claude Sonnet 5", "claude-sonnet-5"),
+            ("claude", "haiku_4_5", "claude-haiku-4-5"),
+            ("claude", "fable 5.1", "claude-fable-5-1"),
+            ("claude", "sonet", "claude-sonnet-5"),
+            ("codex", "gpt-5.5", "gpt-5.5"),
+            ("codex", "astra", "gpt-6-astra"),
+            ("codex", "gpt-6", "gpt-6-astra"),
+            ("codex", ".6-sol", "gpt-5.6-sol"),
+            ("codex", "terra", "gpt-5.6-terra"),
+        ):
+            with self.subTest(provider=provider, text=text):
+                self.assertEqual(models.resolve_model(provider, text), expected)
+
+    def test_unknown_and_ambiguous_text_list_the_provider_options(self):
+        with self.assertRaisesRegex(CaptainError, "No claude model matches 'gpt-6-astra'"):
+            models.resolve_model("claude", "gpt-6-astra")
+        with self.assertRaisesRegex(CaptainError, "ambiguous for codex: gpt-5.6-luna"):
+            models.resolve_model("codex", "gpt-5.6")
+        for provider in models.MODELS:
+            with self.subTest(provider=provider):
+                with self.assertRaises(CaptainError) as error:
+                    models.resolve_model(provider, "nonexistent-model-name")
+                for model in models.model_ids(provider):
+                    self.assertIn(model, str(error.exception))
+
+    def test_native_flags_follow_the_model_table(self):
+        self.assertEqual(
+            models.native_model_args("claude", "claude-opus-5"), ["--model", "claude-opus-5"]
+        )
+        self.assertEqual(models.native_model_args("codex", "gpt-6-astra"), ["-m", "gpt-6-astra"])
+        self.assertEqual(models.native_model_args("codex", None), [])
+
+
 if __name__ == "__main__":
     unittest.main()

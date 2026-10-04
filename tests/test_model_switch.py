@@ -1,11 +1,14 @@
 import contextlib
 import io
+import json
 import os
+import shlex
 import unittest
 from unittest.mock import patch
 
-from captain_barbossa import agents, cli, models, runtime, sessions, store
+from captain_barbossa import agents, cli, config, models, runtime, sessions, store
 from captain_barbossa import pane as panes
+from captain_barbossa.pane import Pane
 from captain_barbossa.runtime import CaptainError
 from tests.home_isolation import HERDR, SessionCase
 
@@ -253,6 +256,176 @@ class SwitchModelTests(SessionCase):
                             agents.switch_model(args, self.pane, self.project)
                 keys = [c.args for c in calls.call_args_list if c.args[1] == "send-keys"]
                 self.assertEqual(keys, [("agent", "send-keys", agent, "enter")] if succeeds else [])
+
+
+# create_crew's shell_ready_for_input polls a raw `pane read`, which needs text; a
+# fixture built to return a dict for every herdr call would otherwise blow up on it.
+SETTLED_SHELL_TEXT = "~/project $ "
+
+
+def pane_stub(base):
+    """Wrap a herdr stub so a `pane read` returns settled shell text instead of
+    whatever `base` answers everything else with (a dict, `base` being callable or not)."""
+
+    def api(*call, **kwargs):
+        if call[:2] == ("pane", "read"):
+            return SETTLED_SHELL_TEXT
+        return base(*call, **kwargs) if callable(base) else base
+
+    return api
+
+
+class CrewModelTests(SessionCase):
+    def setUp(self):
+        super().setUp()
+        self.enterContext(patch.dict(os.environ, HERDR))
+        self.enterContext(patch.object(panes, "READY_POLLS", 1))
+        # nudge_block/nudge read a realistic agent status these ad hoc herdr fakes don't model;
+        # a mail doorbell is not what these tests exercise, so give delivery a clean ring by
+        # default. test_submit.py covers nudge_block/nudge themselves against real fakes.
+        self.enterContext(patch.object(Pane, "nudge_block", return_value=None))
+        self.enterContext(patch.object(Pane, "nudge"))
+        self.directory, self.meta = sessions.session(self.project, self.pane, create=True)
+        self.enterContext(contextlib.redirect_stdout(io.StringIO()))
+
+    def args(self, *args):
+        return cli.parser().parse_args(["--session", self.meta["id"], *args])
+
+    EMPTY_COMPOSER = "› Ask Codex to do anything"
+
+    def test_crew_model_is_resolved_passed_to_the_native_cli_and_recorded(self):
+        for provider, name, text, model, flag in (
+            ("claude", "jack", "Opus", "claude-opus-5", "--model"),
+            ("codex", "gibbs", "5.6 terra", "gpt-5.6-terra", "-m"),
+            ("pi", "will", "cheap", "ollama/llama3.2:3b", "--model"),
+        ):
+            with self.subTest(provider=provider):
+                args = self.args(
+                    "crew",
+                    name,
+                    "--agent",
+                    provider,
+                    "--task",
+                    "build",
+                    "--placement",
+                    "tab",
+                    "--model",
+                    text,
+                )
+                created = {
+                    "pane": {"pane_id": "w1:p2", "agent": provider, "agent_status": "idle"},
+                    "root_pane": {"pane_id": "w1:p3"},
+                    "tab_id": "w1:t9",
+                    "agent": {"name": f"c-{self.meta['id'][:8]}-{name}", "agent_status": "working"},
+                }
+                with (
+                    patch.object(
+                        runtime,
+                        "herdr",
+                        side_effect=pane_stub(
+                            lambda *call, **_: (
+                                (
+                                    "────────\n\n────────\n/tmp/project\n0.1%/200k"
+                                    if provider == "pi"
+                                    else self.EMPTY_COMPOSER
+                                )
+                                if call[:2] == ("agent", "read")
+                                else created
+                            )
+                        ),
+                    ),
+                    patch.object(agents, "executable", return_value=f"/bin/{provider}"),
+                    patch.object(
+                        models,
+                        "pi_models",
+                        return_value=(("ollama/llama3.2:3b", ()),),
+                    ),
+                    contextlib.redirect_stdout(io.StringIO()) as output,
+                    contextlib.redirect_stderr(io.StringIO()) as errors,
+                ):
+                    agents.create_crew(args, self.pane, self.project)
+                self.assertEqual(json.loads(output.getvalue())["model"], model)
+                self.assertEqual(errors.getvalue(), f"Model: {model} (from {text!r})\n")
+                launcher = shlex.split((self.directory / f"crew-{name}.sh").read_text())
+                self.assertEqual(launcher[launcher.index(flag) + 1], model)
+                self.assertEqual(launcher.count(flag), 1)
+                saved = store.read_json(self.directory / "session.json")["crew"][name]
+                self.assertEqual(saved["model"], model)
+                graph = store.read_json(self.directory / "graph.json")
+                self.assertIn(model, [node["label"] for node in graph["nodes"]])
+
+    def test_crew_without_a_model_recruits_cheap_instead_of_the_native_default(self):
+        args = self.args("crew", "--agent", "claude", "--task", "build", "--placement", "tab")
+        # The parser leaves it unset; create_crew is what reads [crew] model.
+        self.assertIsNone(args.model)
+        created = {
+            "pane": {"pane_id": "w1:p2", "agent": "claude", "agent_status": "idle"},
+            "root_pane": {"pane_id": "w1:p3"},
+            "tab_id": "w1:t9",
+            "agent": {"name": f"c-{self.meta['id'][:8]}-jack", "agent_status": "working"},
+        }
+        with (
+            patch.object(
+                runtime,
+                "herdr",
+                side_effect=pane_stub(
+                    lambda *call, **_: (
+                        self.EMPTY_COMPOSER if call[:2] == ("agent", "read") else created
+                    )
+                ),
+            ),
+            patch.object(agents, "executable", return_value="/bin/claude"),
+            contextlib.redirect_stdout(io.StringIO()) as output,
+            contextlib.redirect_stderr(io.StringIO()) as errors,
+        ):
+            agents.create_crew(args, self.pane, self.project)
+        self.assertEqual(json.loads(output.getvalue())["model"], "claude-haiku-4-5")
+        self.assertEqual(errors.getvalue(), "Model: claude-haiku-4-5 (from 'cheap')\n")
+        launcher = shlex.split((self.directory / "crew-jack.sh").read_text())
+        self.assertEqual(launcher[launcher.index("--model") + 1], "claude-haiku-4-5")
+
+    def test_the_cheap_default_never_silently_reaches_a_mid_or_strong_model(self):
+        """The whole point of the default: an unspecified tier cannot cost mid/strong money."""
+        for provider, cheap in (("claude", "claude-haiku-4-5"), ("codex", "gpt-5.6-luna")):
+            with self.subTest(provider=provider):
+                args = self.args("crew", "--agent", provider, "--task", "commit the fix")
+                self.assertIsNone(args.model)
+                self.assertEqual(
+                    models.resolve_model(provider, config.text("crew", "model")), cheap
+                )
+                tiers = models.tiers_for(provider)
+                self.assertEqual(tiers["cheap"], cheap)
+                self.assertNotIn(cheap, (tiers["mid"], tiers["strong"]))
+
+    def test_unmatched_or_ambiguous_model_lists_options_and_creates_nothing(self):
+        for provider, text, message in (
+            (
+                "claude",
+                "zzz",
+                "No claude model matches 'zzz'. Tiers: cheap, mid, strong. "
+                "Options: claude-haiku-4-5, ",
+            ),
+            ("codex", "gpt-5.6", "ambiguous for codex: gpt-5.6-luna, gpt-5.6-terra, gpt-5.6-sol"),
+            ("codex", " ", "Provide a tier (cheap|mid|strong) or model name. codex models:"),
+        ):
+            with self.subTest(text=text):
+                args = self.args(
+                    "crew",
+                    "--agent",
+                    provider,
+                    "--task",
+                    "build",
+                    "--placement",
+                    "tab",
+                    "--model",
+                    text,
+                )
+                with patch.object(runtime, "herdr") as api:
+                    with self.assertRaises(runtime.CaptainError) as error:
+                        agents.create_crew(args, self.pane, self.project)
+                self.assertIn(message, str(error.exception))
+                api.assert_not_called()
+                self.assertEqual(store.read_json(self.directory / "session.json")["crew"], {})
 
 
 if __name__ == "__main__":

@@ -1,13 +1,23 @@
 """Run the shipped pi extension with Node, without a model or Herdr session."""
 
+import contextlib
+import io
 import json
+import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
+from captain_barbossa import agents, cli, models, runtime, sessions
+from captain_barbossa import instructions as instruction_prompts
+from captain_barbossa import pane as panes
+from captain_barbossa.pane import Pane
 from captain_barbossa.pi_captain import captain_extension
+from tests.home_isolation import HERDR, SessionCase
 
 HARNESS = r"""
 import assert from "node:assert/strict";
@@ -371,3 +381,69 @@ for (const busy of [true, false]) {
 }
 """
         )
+
+
+class PiCaptainLaunchTests(SessionCase):
+    def setUp(self):
+        super().setUp()
+        self.enterContext(patch.dict(os.environ, HERDR))
+        self.enterContext(patch.object(panes, "READY_POLLS", 1))
+        # nudge_block/nudge read a realistic agent status these ad hoc herdr fakes don't model;
+        # a mail doorbell is not what these tests exercise, so give delivery a clean ring by
+        # default. test_submit.py covers nudge_block/nudge themselves against real fakes.
+        self.enterContext(patch.object(Pane, "nudge_block", return_value=None))
+        self.enterContext(patch.object(Pane, "nudge"))
+        self.directory, self.meta = sessions.session(self.project, self.pane, create=True)
+        self.enterContext(contextlib.redirect_stdout(io.StringIO()))
+
+    def args(self, *args):
+        return cli.parser().parse_args(["--session", self.meta["id"], *args])
+
+    def test_pi_captain_loads_private_extension_and_rearming_guidance(self):
+        with (
+            patch.object(runtime, "herdr"),
+            patch.object(agents, "executable", return_value="/bin/pi"),
+            patch.object(os, "execvpe") as execute,
+            patch.object(sys.stdin, "isatty", return_value=True),
+        ):
+            agents.launch(
+                self.args("--agent", "pi", "--prompt", "Inspect"), self.pane, self.project
+            )
+        binary, argv, env = execute.call_args.args
+        self.assertEqual(binary, "/bin/pi")
+        self.assertEqual(argv[-2:], ["--", "Inspect"])
+        extension = Path(argv[argv.index("--extension") + 1])
+        self.assertEqual(extension.parent, self.directory)
+        self.assertEqual(extension.stat().st_mode & 0o777, 0o600)
+        self.assertIn(env["CAPTAIN_SESSION"], extension.read_text())
+        text = argv[argv.index("--append-system-prompt") + 1]
+        self.assertIn("Use the captain_wait tool", text)
+        self.assertIn("rearm after answers", text)
+        self.assertNotIn("Run every\nwait in the background", text)
+        self.assertEqual(list(self.project.iterdir()), [])
+
+    def test_pi_delivery_instructions_do_not_change_other_roles(self):
+        legacy = instruction_prompts.agent_instructions(self.directory, "Captain Barbossa")
+        for provider in ("codex", "claude"):
+            self.assertEqual(
+                instruction_prompts.agent_instructions(
+                    self.directory, "Captain Barbossa", provider
+                ),
+                legacy,
+            )
+        default_crew = instruction_prompts.agent_instructions(self.directory, "crew member Jack")
+        fetch = "Read your mail at the start of every turn"
+        for provider in models.PROVIDERS:
+            crew = instruction_prompts.agent_instructions(
+                self.directory, "crew member Jack", provider
+            )
+            if provider in models.HOOK_DELIVERED:
+                # Its own hook already delivered; dropping that line is the only
+                # permitted difference.
+                self.assertNotIn(fetch, crew)
+                self.assertEqual(
+                    crew.splitlines(),
+                    [line for line in default_crew.splitlines() if fetch not in line],
+                )
+            else:
+                self.assertEqual(crew, default_crew)

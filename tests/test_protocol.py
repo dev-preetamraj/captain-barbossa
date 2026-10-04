@@ -8,7 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from captain_barbossa import agents, cli, protocol, sessions, store
+from captain_barbossa import agents, cli, dashboard, protocol, sessions, store
 from captain_barbossa.crew import Crew
 from captain_barbossa.pane import DRAFT_GATE, UNREADABLE_EXPIRY, UNREADABLE_GATE, Pane
 from captain_barbossa.runtime import CaptainError
@@ -773,10 +773,10 @@ class ProtocolTests(SessionCase):
                 session=self.current.meta["id"], interval=None, refresh_prices=refresh
             )
             with (
-                patch.object(agents.usage, "_prices") as prices,
-                patch.object(agents.dashboard, "run"),
+                patch.object(dashboard.usage, "_prices") as prices,
+                patch.object(dashboard, "run"),
             ):
-                agents.run_dashboard(args, self.pane, self.project)
+                dashboard.run_dashboard(args, self.pane, self.project)
             self.assertEqual(prices.call_count, int(refresh))
             if refresh:
                 prices.assert_called_once_with(cached_only=False)
