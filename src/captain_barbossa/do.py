@@ -19,7 +19,7 @@ from pathlib import Path
 
 from . import config, inspection
 from .memory import read_json
-from .models import native_model_args, resolve_model
+from .models import PROVIDERS, headless_argv, headless_report, resolve_model
 from .runtime import CaptainError, check_text, executable
 
 # Declared targets that only build, check, clean, or describe the project. Not release,
@@ -46,11 +46,9 @@ TAIL = 4000
 # A headless turn reads Git through the task text, which `check_text` caps at 8000.
 DIFF_LIMIT = 6000
 BRANCH = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]*")
-# One headless turn: no window, a structured result, and a denial where a pane would have
-# shown a permission prompt. Pinned against the installed CLI, as CLAUDE_NO_ATTRIBUTION is.
-HEADLESS = {"claude": ("--output-format", "json", "--permission-mode", "dontAsk")}
-READ_TOOLS = ("Read", "Grep", "Glob")
-WRITE_TOOLS = ("Edit", "Write")
+# Every shipped provider has a headless turn and a gate that stops it writing, each in its
+# own shape: models.headless_argv builds the argv, models.headless_report reads the result.
+# A provider without one would need its own list here, and the refusal below is for it.
 QUIET_PROMPT = (
     "You are a one-shot agent for Captain Barbossa: do the task and finish. You cannot ask "
     "questions, open a pane, or run commands. Your final message is the whole report; "
@@ -125,6 +123,7 @@ def _capture(root, command, timeout=TIMEOUT):
             capture_output=True,
             text=True,
             timeout=timeout,
+            stdin=subprocess.DEVNULL,
             env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
         )
     except FileNotFoundError as exc:
@@ -180,14 +179,16 @@ def _quiet(args, root, session_directory):
     if not marker.exists():
         raise CaptainError("No captain in this session to borrow a CLI from; start captain first.")
     provider = read_json(marker).get("provider")
-    if provider not in HEADLESS:
+    if provider not in PROVIDERS:
         raise CaptainError(
-            f"No headless turn is defined for {provider or 'this captain'}; recruit crew instead."
+            f"{provider or 'This captain'} has no headless turn to spend, so there is no way "
+            "to bound what an unwatched one could do. Recruit crew instead."
         )
     paths = [_inside(root, value) for value in args.write]
     wanted = args.model or config.text("crew", "model")
-    model = resolve_model(provider, wanted) if wanted else None
-    task = args.task
+    # The prompt leads the task instead of riding a per-provider system-prompt flag: three
+    # sentences in front of a one-shot turn behave the same and need no fourth code path.
+    task = f"{QUIET_PROMPT}\n\n{args.task}"
     if paths:
         task += "\n\nEdit only these files, and leave the edits unstaged: " + ", ".join(paths)
     if args.diff:
@@ -196,52 +197,22 @@ def _quiet(args, root, session_directory):
         task += f"\n\nThe {args.diff} diff:\n{text[:DIFF_LIMIT]}"
         if len(text) > DIFF_LIMIT:
             task += "\n(diff truncated)"
-    command = [
+    command = headless_argv(
+        provider,
         executable(provider),
-        "-p",
         task,
-        *HEADLESS[provider],
-        "--allowedTools",
-        *READ_TOOLS,
-        *(WRITE_TOOLS if paths else ()),
-        "--append-system-prompt",
-        QUIET_PROMPT,
-        *native_model_args(provider, model),
-    ]
-    if not paths:
+        writable=bool(paths),
         # A read-only turn may also read this session's own state: the event log, mail and
         # assignment records it is asked to triage or check a report against. A writing turn
-        # never gets the directory, so it cannot edit them.
-        command += ["--add-dir", str(session_directory)]
+        # is never handed the directory, so it cannot edit them.
+        add_dir=None if paths else str(session_directory),
+        model=resolve_model(provider, wanted) if wanted else None,
+    )
     done = _capture(root, command, args.timeout or TIMEOUT)
-    payload = _result(done)
-    record(session_directory, "quiet", command, done.returncode, payload["result"])
-    print(payload["result"])
-    return payload
-
-
-def _result(done):
-    """The turn's own JSON, accepted only as a complete success result."""
-    try:
-        payload = json.loads(done.stdout)
-    except ValueError:
-        payload = None
-    if not isinstance(payload, dict):
-        raise CaptainError(
-            f"The headless turn returned no JSON result ({done.returncode}):"
-            f"\n{(done.stderr or done.stdout)[-TAIL:]}"
-        )
-    if not (
-        payload.get("type") == "result"
-        and payload.get("subtype") == "success"
-        and payload.get("is_error") is False
-        and isinstance(payload.get("result"), str)
-    ):
-        raise CaptainError(
-            f"The headless turn did not complete ({payload.get('subtype') or 'no subtype'}):"
-            f"\n{str(payload.get('result') or done.stderr)[-TAIL:]}"
-        )
-    return payload
+    report, note = headless_report(provider, done.stdout)
+    record(session_directory, "quiet", command, done.returncode, report)
+    print(report)
+    return note
 
 
 def _targets(root):
@@ -280,11 +251,9 @@ def run(args, session_directory, project):
     root = Path(project).resolve(strict=True)
     action = args.do_command
     if action == "quiet":
-        payload = _quiet(args, root, session_directory)
-        print(
-            f"({payload.get('num_turns')} turns, ${payload.get('total_cost_usd')})",
-            file=sys.stderr,
-        )
+        note = _quiet(args, root, session_directory)
+        if note:
+            print(note, file=sys.stderr)
         return
     if action == "commit":
         check_text(args.message, "message")

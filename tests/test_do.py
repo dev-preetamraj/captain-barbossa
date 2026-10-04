@@ -11,7 +11,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from captain_barbossa import cli, do
+from captain_barbossa import cli, do, models
 from captain_barbossa.runtime import CaptainError
 from tests import home_isolation  # noqa: F401
 
@@ -273,19 +273,26 @@ class DoTests(unittest.TestCase):
         self.assertEqual((entry["type"], entry["action"]), ("quiet", "quiet"))
         self.assertEqual(entry["output"], "the answer")
 
+    def allowed(self, argv):
+        """The tool names claude is actually allowed, not merely mentioned somewhere."""
+        written = argv.read_text(encoding="utf-8").splitlines()
+        start = written.index("--allowedTools") + 1
+        rest = written[start:]
+        end = next((i for i, word in enumerate(rest) if word.startswith("--")), len(rest))
+        return rest[:end]
+
     def test_quiet_is_read_only_until_write_names_a_file(self):
         argv = self.fake_claude(SUCCESS)
         self.run_quiet()
+        self.assertEqual(self.allowed(argv), ["Read", "Grep", "Glob"])
         written = argv.read_text(encoding="utf-8").splitlines()
+        # Named on the denylist, which is where Write and Edit are allowed to appear.
         self.assertEqual(
-            [tool for tool in ("Read", "Grep", "Glob") if tool in written], ["Read", "Grep", "Glob"]
+            written[written.index("--disallowedTools") + 1 :][:3], ["Bash", "Write", "Edit"]
         )
-        for tool in ("Write", "Edit"):
-            self.assertNotIn(tool, written)
         self.run_quiet(write=["README.md"])
-        written = argv.read_text(encoding="utf-8").splitlines()
-        for tool in ("Write", "Edit"):
-            self.assertIn(tool, written)
+        self.assertEqual(self.allowed(argv), ["Read", "Grep", "Glob", "Edit", "Write"])
+        self.assertNotIn("--disallowedTools", argv.read_text(encoding="utf-8").splitlines())
 
     def test_quiet_refuses_a_write_path_outside_the_project_or_inside_dot_git(self):
         self.fake_claude(SUCCESS)
@@ -305,15 +312,16 @@ class DoTests(unittest.TestCase):
 
     def test_quiet_refuses_output_that_is_not_a_result_document(self):
         self.fake_claude("not a result", status=2)
-        with self.assertRaisesRegex(CaptainError, "no JSON result"):
+        with self.assertRaisesRegex(CaptainError, "did not complete"):
             self.run_quiet()
 
     def test_quiet_needs_a_captain_whose_cli_has_a_headless_turn(self):
         self.fake_claude(SUCCESS)
+        # Every shipped provider has one, so only an unknown CLI can reach the refusal.
         (self.session / "captain.json").write_text(
-            json.dumps({"provider": "codex"}), encoding="utf-8"
+            json.dumps({"provider": "someday"}), encoding="utf-8"
         )
-        with self.assertRaisesRegex(CaptainError, "No headless turn"):
+        with self.assertRaisesRegex(CaptainError, "no headless turn to spend"):
             self.run_quiet()
         (self.session / "captain.json").unlink()
         with self.assertRaisesRegex(CaptainError, "start captain first"):
@@ -355,6 +363,179 @@ class DoTests(unittest.TestCase):
         self.enterContext(mock.patch.dict(os.environ, {"CAPTAIN_ROLE": "crew"}))
         with self.assertRaisesRegex(CaptainError, "captain-only"):
             cli.guard_crew(SimpleNamespace(command="quiet"))
+
+
+class HeadlessProviderTests(unittest.TestCase):
+    """Every provider's argv and result reader, against output captured from the real CLIs.
+
+    Versions: claude 2.1.289, codex-cli 0.158.0, grok 1.0.46, pi 0.87.1. pi is the one
+    success document no provider on the build machine could produce, so its shape comes
+    from pi's own stream with stopReason flipped to the value it uses when a turn ends.
+    """
+
+    CLAUDE = json.dumps(
+        {
+            "type": "result",
+            "subtype": "success",
+            "is_error": False,
+            "result": "pomegranate",
+            "num_turns": 4,
+            "total_cost_usd": 0.3558675,
+        }
+    )
+    GROK = json.dumps(
+        {
+            "text": "pomegranate",
+            "stopReason": "end_turn",
+            "num_turns": 2,
+            "total_cost_usd": 0.01652944,
+        }
+    )
+    GROK_FAILED = json.dumps(
+        {"type": "error", "message": "Couldn't set model 'no-such-model-xyz': unknown model id"}
+    )
+    CODEX = "\n".join(
+        json.dumps(event)
+        for event in (
+            {"type": "thread.started", "thread_id": "01a1"},
+            {"type": "turn.started"},
+            {
+                "type": "item.completed",
+                "item": {"id": "item_0", "type": "agent_message", "text": "I will do that."},
+            },
+            {
+                "type": "item.completed",
+                "item": {"id": "item_1", "type": "agent_message", "text": "pomegranate"},
+            },
+            {"type": "turn.completed", "usage": {"input_tokens": 33772, "output_tokens": 35}},
+        )
+    )
+    CODEX_FAILED = "\n".join(
+        json.dumps(event)
+        for event in (
+            {"type": "turn.started"},
+            {"type": "error", "message": "model is not supported"},
+            {"type": "turn.failed", "error": {"message": "model is not supported"}},
+        )
+    )
+    PI_FAILED = json.dumps(
+        {
+            "type": "turn_end",
+            "message": {
+                "role": "assistant",
+                "content": [],
+                "stopReason": "error",
+                "diagnostics": [
+                    {"type": "provider_transport_failure", "error": {"message": "WebSocket error"}}
+                ],
+            },
+        }
+    )
+    # Captured from a live pi turn: two provider retries that failed, the read tool call,
+    # then the answer. pi relays its provider's own word, and xai finished with "stop".
+    PI = "\n".join(
+        json.dumps(event)
+        for event in (
+            {"type": "turn_end", "message": {"content": [], "stopReason": "error"}},
+            {
+                "type": "turn_end",
+                "message": {
+                    "content": [{"type": "toolCall", "id": "call-c"}],
+                    "stopReason": "toolUse",
+                },
+            },
+            {
+                "type": "turn_end",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "thinking", "thinking": "", "thinkingSignature": "{}"},
+                        {"type": "text", "text": "pomegranate", "textSignature": "x"},
+                    ],
+                    "stopReason": "stop",
+                    "usage": {"totalTokens": 2741, "cost": {"total": 0.0028}},
+                },
+            },
+        )
+    )
+    PI_UNFINISHED = json.dumps(
+        {
+            "type": "turn_end",
+            "message": {"content": [{"type": "toolCall"}], "stopReason": "toolUse"},
+        }
+    )
+
+    def test_every_provider_reads_its_own_success_document(self):
+        for provider, stdout in (
+            ("claude", self.CLAUDE),
+            ("codex", self.CODEX),
+            ("grok", self.GROK),
+            ("pi", self.PI),
+        ):
+            with self.subTest(provider=provider):
+                report, note = models.headless_report(provider, stdout)
+                # Codex narrates before it answers; the answer is the last message.
+                self.assertEqual(report, "pomegranate")
+                self.assertTrue(note.startswith("(") and note.endswith(")"), note)
+
+    def test_an_incomplete_turn_raises_instead_of_reading_as_an_answer(self):
+        for provider, stdout in (
+            ("claude", json.dumps({"type": "result", "subtype": "error_during_execution"})),
+            ("claude", "not a document"),
+            ("codex", self.CODEX_FAILED),
+            ("codex", ""),
+            ("grok", self.GROK_FAILED),
+            ("pi", self.PI_FAILED),
+            # A turn that stopped to call a tool and never came back is not an answer.
+            ("pi", self.PI_UNFINISHED),
+            ("pi", ""),
+        ):
+            with (
+                self.subTest(provider=provider, stdout=stdout[:40]),
+                self.assertRaisesRegex(CaptainError, "did not complete"),
+            ):
+                models.headless_report(provider, stdout)
+
+    def test_a_turn_that_cannot_write_is_never_handed_a_way_to(self):
+        # The write gates, each verified against the live CLI by asking it to create a file:
+        # claude BLOCKED, codex BLOCKED (only with --ignore-user-config), grok BLOCKED.
+        gates = {
+            "claude": ("--disallowedTools", "Bash", "Write", "Edit"),
+            "codex": ("--sandbox", "read-only"),
+            "grok": ("--deny", "Write", "--deny", "Edit"),
+            "pi": ("--tools", "read"),
+        }
+        for provider, expected in gates.items():
+            with self.subTest(provider=provider):
+                argv = models.headless_argv(provider, provider, "task", writable=False)
+                for word in expected:
+                    self.assertIn(word, argv)
+                written = models.headless_argv(provider, provider, "task", writable=True)
+                self.assertNotEqual(argv, written)
+        # A trusted project or approvals_reviewer in the user's own config.toml silently
+        # defeats --sandbox, which a live run proved by writing the file anyway.
+        self.assertIn("--ignore-user-config", models.headless_argv("codex", "codex", "task"))
+
+    def test_the_task_is_the_only_thing_a_caller_puts_in_the_argv(self):
+        for provider in models.PROVIDERS:
+            with self.subTest(provider=provider):
+                argv = models.headless_argv(provider, "/bin/agent", "--not-a-flag", writable=True)
+                self.assertEqual(argv[0], "/bin/agent")
+                # The task travels as one element, never split into options.
+                self.assertEqual(argv.count("--not-a-flag"), 1)
+                self.assertNotIn("--dangerously-skip-permissions", argv)
+                self.assertNotIn("--always-approve", argv)
+
+    def test_only_claude_is_told_about_the_session_directory(self):
+        # The others read the filesystem already; for codex --add-dir grants writes, so it
+        # must never appear.
+        for provider in models.PROVIDERS:
+            with self.subTest(provider=provider):
+                argv = models.headless_argv(provider, provider, "task", add_dir="/tmp/session")
+                self.assertEqual("/tmp/session" in argv, provider == "claude")
+        self.assertNotIn(
+            "--add-dir", models.headless_argv("claude", "claude", "t", writable=True, add_dir="/x")
+        )
 
 
 if __name__ == "__main__":

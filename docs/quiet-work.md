@@ -167,27 +167,26 @@ Two supporting decisions fall out of the same question:
   mail, assignment records or the audit log. One condition, and the widest exposure is
   confined to the narrowest turn.
 
+### Always offload, never "I could just read it"
 
+A live test found the mirror of the defect this document opens with. A fresh captain
+asked "what does placement.py do?" read `placement.py`, `layout.py` and `prompts.py`
+itself: 17 seconds of multi-file reading, all of it permanent in its context, and its
+`events/captain.jsonl` held five `do` records and zero `quiet` records. It never
+considered `quiet` at all.
 
-A pane buys two things: somewhere to approve a native permission prompt, and somewhere
-to steer a running turn. Work needing neither should pay for neither. Modelled on
-`~/code/firstmate/bin/fm-supervision-engine-lib.sh:347-360`: one headless invocation,
-`-p` with the task, `--output-format json`, a structured result, no window.
+The cause was the same shape as the original: a line that blessed the expensive path.
+"Direct read/search, bounded CAPTAIN inspect, memory reads, answers, and coordination
+commands are allowed" reads as a licence to answer any question directly, and the
+do/quiet/crew rule is only consulted when the captain is deciding whether to *delegate*.
+Answering a question does not feel like delegating, so the rule was never reached.
 
-What belongs here, exhaustively:
-
-| Task kind | Example |
-| --- | --- |
-| a question about the code | "which module decides crew placement?" |
-| a short review | "review this diff for the fixed-verb-set property" |
-| a summary | a diff, a log range, a crew report, a doc |
-| classification or triage | "which of these three failures is the real one?" |
-| drafted text | a commit message, a PR body, a changelog line, a crew assignment prompt |
-| a second opinion | "does this plan contradict AGENTS.md?" |
-| one bounded edit | a rename in named files, a docstring, a version string, a doc line |
-
-All seven share the property the rule names: the captain can write the whole instruction
-before the turn starts, and one answer finishes it.
+The fix is not a better classification test, it is removing the choice: **a question that
+needs a file the captain has not read goes to `quiet`, even when the captain could answer
+it by reading.** The captain's context is the scarce resource. A quiet turn spends a
+throwaway one and returns a paragraph; the captain spends its own and keeps three files
+forever. The one-step rule is untouched - this sits above it, because the question never
+had to reach it.
 
 ### Design
 
@@ -201,46 +200,117 @@ result unparseable. The subprocess body is now `do._capture`, returning the
 `CompletedProcess`; `_spawn` is a four-line wrapper over it that combines and checks, so
 no existing call site changed.
 
-```python
-# Headless flags per provider, pinned against the installed CLI the way
-# CLAUDE_NO_ATTRIBUTION is. An unsupported provider recruits a crew instead.
-READ_ONLY = ("Read", "Grep", "Glob")
-WRITE = ("Edit", "Write")
-HEADLESS = {"claude": ("--output-format", "json", "--permission-mode", "dontAsk")}
-QUIET = """You are a one-shot agent for Captain Barbossa: do the task and finish. You
-cannot ask questions, open a pane, or run commands. Your final message is the whole
-report; nobody will read a terminal. Leave every edit unstaged."""
+### Every provider, each with its own gate
+
+A quiet turn that only claude can take is the original defect wearing a different hat: a
+codex, pi or grok captain would get a refusal and recruit a pane. So the per-provider
+knowledge lives in `models.py` as two functions - `headless_argv` builds one provider's
+whole literal argv, `headless_report` reads one provider's own result document - and
+`do.py` keeps the session, the record and the diff and knows none of it.
+
+Forcing one shape on four CLIs would mean using the weakest gate each has. Each gets its
+strongest instead. Every row below was run against the installed CLI, not read from a
+help page; the write gate was tested by telling the turn to create a file and then
+looking for the file.
+
+| | claude 2.1.289 | codex-cli 0.158.0 | grok 1.0.46 | pi 0.87.1 |
+| --- | --- | --- | --- | --- |
+| headless mode | `-p TASK --output-format json` | `exec --json TASK` | `-p TASK --output-format json` | `-p --mode json TASK` |
+| other flags | `--permission-mode dontAsk` | `--ignore-user-config --skip-git-repo-check --ephemeral` | `--trust --permission-mode dontAsk` | `--no-session --no-context-files` |
+| read-only gate | `--allowedTools Read Grep Glob` plus `--disallowedTools Bash Write Edit` | `--sandbox read-only` | `--deny Write --deny Edit --deny Bash` | `--tools read` |
+| write gate | adds `Edit Write` to the allowlist, drops the denylist | `--sandbox workspace-write` | drops the Write/Edit denies, keeps `--deny Bash` | `--tools read,write,edit` |
+| reads the session directory | needs `--add-dir`; its reads are path-checked | nothing needed: the read-only sandbox reads the whole filesystem | nothing needed | nothing needed |
+| result reader | one JSON object: `type=result`, `subtype=success`, `is_error=false`, text in `result` | JSONL: the **last** `agent_message` item, and a `turn.completed` event must exist | one JSON object: `stopReason=end_turn`, text in `text` | JSONL: the last `turn_end`, `stopReason` in `("stop", "end_turn")`, text joined from `message.content` |
+| spend reported | `num_turns`, `total_cost_usd` | output tokens only | `num_turns`, `total_cost_usd` | `usage.cost.total`, `usage.totalTokens` |
+| write blocked, live | yes | yes, **only** with `--ignore-user-config` | yes | yes |
+| success read, live | yes | yes | yes | yes, on the fourth attempt - see below |
+
+Four findings came out of running it rather than reading about it:
+
+1. **`codex exec --sandbox read-only` does not hold on its own.** The first live run
+   created the file anyway. The cause is in the user's `~/.codex/config.toml`:
+   `approvals_reviewer = "auto_review"` and a list of trusted projects. Adding
+   `--ignore-user-config` makes the sandbox hold, and auth still comes from `CODEX_HOME`.
+   A gate a user's own config can silently turn off is not a gate, so that flag is part of
+   the argv, not an option.
+2. **The exit status is not a completeness test.** pi exited 0 with
+   `stopReason: "error"`, empty content and a `provider_transport_failure` diagnostic -
+   four times, for three different providers. So every reader decides from the document
+   and an unrecognised shape is a failure, never an answer.
+3. **Codex narrates before it answers.** Its stream carried `"I'll create the file with
+   the requested contents."` as one `agent_message` and `"DONE"` as the next. The reader
+   takes the last one; taking the first would have reported the opposite of what happened.
+4. **pi does not say `end_turn`.** A successful pi turn ends with `stopReason: "stop"` -
+   pi relays its provider's own word, and the live turn ran on xai. The reader was written
+   against grok's `end_turn`, so it would have raised "did not complete" on *every*
+   successful pi turn: quiet would have been broken for pi in exactly the way this round
+   set out to fix. It accepts both words now and still rejects `error`, `toolUse` and a
+   truncation. This only surfaced because a probe left running in the background finished
+   after the first report had gone out.
+
+**pi took four attempts to verify, and the fourth is why it works.** openai-codex failed
+with a WebSocket error twice and ollama was not running; the xai run outlived a
+five-minute foreground wait and only returned later, in the background. That late result
+carried the `stopReason: "stop"` correction above. pi is now verified the same way as the
+others: the shipped argv read a file outside the cwd, `--tools read` blocked the write
+with no file created, and the reader returned the report and a spend note. One pi event
+stream is worth more than any amount of reasoning about its shape - the reader had been
+wrong in a way no amount of re-reading pi's `--help` would have shown.
+
+**No provider is left out.** All four have a headless mode and a read-only gate, so the
+refusal only fires for a provider that does not exist yet:
+
+```text
+<name> has no headless turn to spend, so there is no way to bound what an unwatched one
+could do. Recruit crew instead.
 ```
 
-Flow, as a new `quiet` action in `do.run`:
+### Design
+
+The quiet prompt leads the task rather than riding a system-prompt flag. claude, pi and
+grok all accept `--append-system-prompt` (grok as an undocumented compat alias) and codex
+wants `-c developer_instructions=...`; for a single-turn agent three sentences at the top
+of the task behave identically and need no fourth code path.
+
+Flow, as a `quiet` action in `do.run`:
 
 1. `provider = read_json(session_directory / "captain.json")["provider"]`, already
    written by `agents.launch`; no new state.
-2. Not in `HEADLESS` -> `CaptainError("No headless turn for <provider>; recruit crew.")`
+2. Not in `models.PROVIDERS` -> the refusal above.
 3. `model = resolve_model(provider, args.model or config.text("crew", "model"))` - the
    same tier resolution and the same `cheap` default a crew gets.
-4. `tools = READ_TOOLS + (WRITE_TOOLS if args.write else ())`, and each `--write` path
-   through the existing `_inside(root, value)`, so `.git` and anything outside the
-   project are refused before the model starts. The named paths are also appended to the
-   task text, because `--allowedTools Edit` is a tool gate and not a path gate.
+4. Each `--write` path through the existing `_inside(root, value)`, so `.git` and anything
+   outside the project are refused before the model starts. The named paths are also
+   appended to the task text, because every provider's write gate is a tool or sandbox
+   gate, not a path gate.
 5. With `--diff`, append `inspection.git_text(root, "diff", staged=...)` to the task,
    truncated to `DIFF_LIMIT` (6000, under `check_text`'s 8000 cap on the task itself).
    This reuses the hardened Git read rather than adding a second one.
-6. `_capture(root, [executable(provider), "-p", task, *HEADLESS[provider],
-   "--allowedTools", *tools, "--append-system-prompt", QUIET,
-   *native_model_args(provider, model)])`, plus `--add-dir <session directory>` when
-   there is no `--write`.
-7. Accept the result only on `type == "result"`, `subtype == "success"`,
-   `is_error is False` - the same completeness test the reference host applies.
-8. `record(session_directory, "quiet", command, code, result_text)`, print
-   `result_text`, print `total_cost_usd` and `num_turns` to stderr.
+6. `_capture(root, headless_argv(provider, executable(provider), task, writable=...,
+   add_dir=..., model=...))`. `_capture` passes `stdin=subprocess.DEVNULL`, because codex
+   reads stdin when it is not a TTY and appends it to the prompt as a `<stdin>` block.
+7. `headless_report(provider, done.stdout)` - the report and a spend note, or a raise.
+8. `record(session_directory, "quiet", command, code, report)`, print the report, print
+   the spend note to stderr.
+
+**Lives in `do.py`**, not a new module, with the provider table in `models.py`. Same
+premise as `do.py`'s docstring (work the captain does itself, recorded), reusing
+`do.record` for the audit line, whose record type is already literally `"quiet"`.
+
+It cannot reuse `do._spawn`, which the build proved: `_spawn` returns
+`(stdout + stderr).strip()`, and anything the CLI writes to stderr would make the result
+unparseable - codex writes a model-refresh error there on every run. The subprocess body
+is `do._capture`, returning the `CompletedProcess`; `_spawn` is a four-line wrapper over
+it that combines and checks, so no existing call site changed.
 
 ### Why an unwatched edit is allowed, and where it stops
 
 `--write` takes explicit paths and nothing else, and a turn with no `--write` gets no
-editing tool at all. With `--write`, be exact about what the bound is: `--allowedTools`
-gates *tools*, not paths, so the named files are a validated instruction, not an
-enforced sandbox. The enforced part is what comes after - the turn leaves its edits
+editing tool at all. With `--write`, be exact about what the bound is: every provider's
+write gate is a tool gate or a sandbox, not a path gate, so the named files are a
+validated instruction rather than an enforced boundary. Codex is the only one with any
+boundary at all - `--sandbox workspace-write` confines it to the workspace - and claude,
+grok and pi could in principle edit any file in the checkout. The enforced part is what comes after - the turn leaves its edits
 **unstaged in the worktree** and its report in `events/captain.jsonl`, so the captain
 reviews it with `inspect git diff` exactly as it reviews a `do commit`. That is the same
 bargain bucket 1 already makes: unwatched is acceptable because it is reviewable. A
@@ -290,8 +360,23 @@ open-ended "find out why this is slow" is crew.
 
 ## Instruction deltas (`src/captain_barbossa/instructions.py`)
 
-Token cost is characters over four. Net as built: **+10 lines, ~+161 tokens** per captain
-session, and the same text reaches crew sessions not at all - this block is captain-only.
+Token cost is characters over four. Net as built: **+10 lines, ~+161 tokens** for the
+first six deltas, then **+3 lines, ~+60 tokens** for the always-offload rule (G) - **+13
+lines, ~+221 tokens** in all, per captain session. None of it reaches crew sessions: this
+block is captain-only. The crew block's own budget (`crew_words <= 350`) is untouched and
+sits at 345, five words of headroom.
+
+**H. Stop naming quiet's own work as crew work.** The tier table's last pull, 2 lines ->
+2 lines, **+9 tokens**. Delta A took out the four names `do` absorbs; these four are what a
+`quiet --write` turn absorbs, so the cheap tier now names work that is simple *and* needs
+watching, which is the only thing a cheap crew is for.
+
+```text
+- cheap. Pick the tier by how complex the assignment is: cheap for mechanical edits
+- (docs, chores, renames, small mechanical changes), mid for a
++ cheap. Pick the tier by how complex the assignment is: cheap for simple work that still
++ needs watching - a focused fix, or following a pattern the codebase already has - mid for a
+```
 
 **A. Stop naming commits as crew work.** `instructions.py:107-108`, 2 lines -> 2 lines,
 **-6 tokens**.
@@ -347,6 +432,21 @@ crew-side `assertNotIn` keeps its teeth.
 `inspect git branches` needs no instruction line: the `inspect` operations are already
 discoverable from `--help` and the captain reaches them without being told each one.
 
+**G. Always offload a question that needs an unread file.** Replaces the line that
+blessed answering directly, 2 lines -> 5 lines, **+60 tokens**. The two licences removed
+are "Direct read/search" and the bare word "answers"; `answer` itself survives under "the
+coordination commands below", where it was already listed.
+
+```text
+- Direct read/search, bounded CAPTAIN inspect, memory reads, answers, and coordination
+- commands are allowed. Self-check first, in this order:
++ Answer from what you have already read. Any question that means opening files you have
++ not read goes to CAPTAIN quiet, whatever you could answer by reading them yourself: the
++ captain's context is the scarce resource, and a quiet turn spends a throwaway one.
++ Bounded CAPTAIN inspect, memory reads, and the coordination commands below are allowed.
++ Self-check first, in this order:
+```
+
 Line 155-157 (`never add a commit step to a crew assignment`) stays as written. It
 encodes the convention that crew commit their own hunks and the captain only picks up
 the user's leftovers; it is about *who commits*, not about *whether to recruit*.
@@ -390,6 +490,11 @@ walk steps over (an ignored file appears in `inspect files` and in neither `ls-f
 looks like an option stays a pattern while an empty, oversized or misplaced `--text` is
 refused.
 
+`tests/test_instruction_size.py` pins delta G in the same shape as the rules beside it:
+the sentence is present, "Direct read/search" and "memory reads, answers, and
+coordination" are gone, the trimmed allowance is present, and the crew block never sees
+"the scarce resource".
+
 `captain dashboard --once` needs no new test: it prints `dashboard.render`, a pure
 function `tests/test_dashboard.py` already covers, from the same session record
 `run_dashboard` builds on its first line.
@@ -428,8 +533,8 @@ function `tests/test_dashboard.py` already covers, from the same session record
 
 ## Skipped
 
-- **Other providers for `quiet`.** `claude` only. `codex exec --json` and grok's
-  equivalent land when someone runs a captain on them and asks.
+- **A system-prompt flag per provider for `quiet`.** Three sentences at the top of the
+  task do the same job for a single-turn agent and cost one code path instead of four.
 - **`gh` anything.** No network reads, no PR creation; needs an auth story first.
 - **Approvals, interruption, mail, `ask`/`done`, name reservation, a protocol assignment
   for `quiet`.** It is a function call, not a crew member.

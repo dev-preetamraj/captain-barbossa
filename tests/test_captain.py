@@ -555,10 +555,10 @@ class CaptainFlowTests(unittest.TestCase):
             "--agent is the CLI you run as",
             "--placement pane --direction auto --split-pane auto",
             "--model cheap.",
-            "Pick the tier by how complex the assignment is: cheap for mechanical edits "
-            "(docs, chores, renames, small mechanical changes), "
-            "mid for a normal feature or a change inside one area, strong for design, "
-            "debugging, or multi-file/long-context work.",
+            "Pick the tier by how complex the assignment is: cheap for simple work that "
+            "still needs watching - a focused fix, or following a pattern the codebase "
+            "already has - mid for a normal feature or a change inside one area, strong "
+            "for design, debugging, or multi-file/long-context work.",
             "Never step up just because a task feels risky or important.",
             "Each agent resolves the tier to its own model; an exact model name still works.",
             "Use every choice the user does state and keep the rest on these defaults.",

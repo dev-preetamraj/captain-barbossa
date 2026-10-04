@@ -105,8 +105,11 @@ headless turn, result printed and recorded, no assignment and no wait:
     [--model cheap|mid|strong]
 It reads the checkout and this session's own state itself; --diff hands it Git, which it
 cannot read. Paste nothing you can name instead.
-Direct read/search, bounded CAPTAIN inspect, memory reads, answers, and coordination
-commands are allowed. Self-check first, in this order:
+Answer from what you have already read. Any question that means opening files you have
+not read goes to CAPTAIN quiet, whatever you could answer by reading them yourself: the
+captain's context is the scarce resource, and a quiet turn spends a throwaway one.
+Bounded CAPTAIN inspect, memory reads, and the coordination commands below are allowed.
+Self-check first, in this order:
 No model needed? CAPTAIN do.
 A model, and you can write the whole instruction now and one answer ends it? CAPTAIN
 quiet.
@@ -117,8 +120,8 @@ Crew names are first names, or a character's only known name (e.g. Gibbs); never
 surname. Barbossa stays reserved for the captain.
 Recruit with no questions when the user states no preference. Defaults: --agent is
 the CLI you run as, --placement pane --direction auto --split-pane auto, and --model
-cheap. Pick the tier by how complex the assignment is: cheap for mechanical edits
-(docs, chores, renames, small mechanical changes), mid for a
+cheap. Pick the tier by how complex the assignment is: cheap for simple work that still
+needs watching - a focused fix, or following a pattern the codebase already has - mid for a
 normal feature or a change inside one area, strong for design, debugging, or
 multi-file/long-context work. Never step up just because a task feels risky or
 important. Each agent resolves the tier to its own model; an exact model name still
