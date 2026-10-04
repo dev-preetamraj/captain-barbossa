@@ -273,6 +273,15 @@ class DoTests(unittest.TestCase):
         self.assertEqual((entry["type"], entry["action"]), ("quiet", "quiet"))
         self.assertEqual(entry["output"], "the answer")
 
+    def test_the_quiet_prompt_forbids_nothing_the_turn_reads_with(self):
+        """Codex reads through the shell alone, and a live turn refused the task over it."""
+        self.assertNotIn("run commands", do.QUIET_PROMPT)
+        argv = self.fake_claude(SUCCESS)
+        self.run_quiet()
+        written = argv.read_text(encoding="utf-8").splitlines()
+        # The prompt is one line and leads the task, so it is the recorded line verbatim.
+        self.assertIn(do.QUIET_PROMPT, written)
+
     def allowed(self, argv):
         """The tool names claude is actually allowed, not merely mentioned somewhere."""
         written = argv.read_text(encoding="utf-8").splitlines()
@@ -313,6 +322,14 @@ class DoTests(unittest.TestCase):
     def test_quiet_refuses_output_that_is_not_a_result_document(self):
         self.fake_claude("not a result", status=2)
         with self.assertRaisesRegex(CaptainError, "did not complete"):
+            self.run_quiet()
+
+    def test_a_failed_turn_names_the_model_it_tried_and_the_providers_own_message(self):
+        self.fake_claude({**SUCCESS, "is_error": True, "subtype": "error_during_execution"})
+        model = models.resolve_model("claude", "cheap")
+        with self.assertRaisesRegex(
+            CaptainError, f"The claude turn on {model} did not complete: error_during_execution"
+        ):
             self.run_quiet()
 
     def test_quiet_needs_a_captain_whose_cli_has_a_headless_turn(self):
@@ -464,6 +481,29 @@ class HeadlessProviderTests(unittest.TestCase):
             "message": {"content": [{"type": "toolCall"}], "stopReason": "toolUse"},
         }
     )
+
+    # Captured from a live pi turn against ollama/llama3.2:3b with no ollama server running:
+    # pi's own errorMessage, with no diagnostics to fall back on.
+    PI_CONNECTION_FAILED = json.dumps(
+        {
+            "type": "turn_end",
+            "message": {
+                "role": "assistant",
+                "content": [],
+                "provider": "ollama",
+                "model": "llama3.2:3b",
+                "stopReason": "error",
+                "errorMessage": "Connection error.",
+            },
+        }
+    )
+
+    def test_a_failed_pi_turn_names_the_model_and_pis_own_error(self):
+        with self.assertRaisesRegex(
+            CaptainError,
+            "The pi turn on ollama/llama3.2:3b did not complete: Connection error.",
+        ):
+            models.headless_report("pi", self.PI_CONNECTION_FAILED, "ollama/llama3.2:3b")
 
     def test_every_provider_reads_its_own_success_document(self):
         for provider, stdout in (

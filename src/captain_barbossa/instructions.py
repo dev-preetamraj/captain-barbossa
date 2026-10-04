@@ -104,11 +104,14 @@ headless turn, result printed and recorded, no assignment and no wait:
   CAPTAIN quiet --task 'instruction' [--diff worktree|staged] [--write PATH...]
     [--model cheap|mid|strong]
 It reads the checkout and this session's own state itself; --diff hands it Git, which it
-cannot read. Paste nothing you can name instead.
+cannot read. Paste nothing you can name instead. If the turn reports no answer, relay
+its own words; never present an answer of your own in their place.
 Answer from what you have already read. Any question that means opening files you have
 not read goes to CAPTAIN quiet, whatever you could answer by reading them yourself: the
 captain's context is the scarce resource, and a quiet turn spends a throwaway one.
-Bounded CAPTAIN inspect, memory reads, and the coordination commands below are allowed.
+Allowed bounded reads: CAPTAIN inspect files|read PATH|search TEXT|state session|project|repo|git
+status|log|current-branch|root|diff [--staged]|branches|ls-files|grep --text TEXT, plus memory
+reads and the coordination commands below.
 Self-check first, in this order:
 No model needed? CAPTAIN do.
 A model, and you can write the whole instruction now and one answer ends it? CAPTAIN

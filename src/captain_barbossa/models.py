@@ -250,11 +250,12 @@ def _lines(stdout):
                 continue
 
 
-def _incomplete(provider, detail):
-    raise CaptainError(f"The {provider} turn did not complete: {detail or 'no result document'}")
+def _incomplete(provider, model, detail):
+    turn = f"The {provider} turn on {model or 'its default model'}"
+    raise CaptainError(f"{turn} did not complete: {detail or 'no result document'}")
 
 
-def headless_report(provider, stdout):
+def headless_report(provider, stdout, model=None):
     """One turn's own text and a cost note, accepted only from a complete success.
 
     Every provider exits 0 on some failed turn - pi does it for every provider error - so
@@ -267,7 +268,7 @@ def headless_report(provider, stdout):
         except ValueError:
             payload = None
         if not isinstance(payload, dict):
-            _incomplete(provider, stdout[-400:])
+            _incomplete(provider, model, stdout[-400:])
         if provider == "claude":
             done = (
                 payload.get("type") == "result"
@@ -280,7 +281,9 @@ def headless_report(provider, stdout):
             done = payload.get("stopReason") == "end_turn" and isinstance(payload.get("text"), str)
             text = payload.get("text")
         if not done or not str(text).strip():
-            _incomplete(provider, str(payload.get("message") or payload.get("subtype") or text))
+            _incomplete(
+                provider, model, str(payload.get("message") or payload.get("subtype") or text)
+            )
         return text, _note(payload.get("num_turns"), payload.get("total_cost_usd"))
     if provider == "codex":
         messages, settled, failure = [], None, None
@@ -293,7 +296,7 @@ def headless_report(provider, stdout):
             elif kind in ("turn.failed", "error"):
                 failure = (event.get("error") or {}).get("message") or event.get("message")
         if settled is None or not messages or not messages[-1].strip():
-            _incomplete(provider, failure)
+            _incomplete(provider, model, failure)
         # Codex narrates before it answers, so the last message is the answer.
         return messages[-1], _note(None, None, settled.get("output_tokens"))
     final = None
@@ -301,19 +304,23 @@ def headless_report(provider, stdout):
         if event.get("type") == "turn_end":
             final = event.get("message") or {}
     if final is None:
-        _incomplete(provider, None)
+        _incomplete(provider, model, None)
     # pi relays its provider's own word: a live xai turn finished with "stop", and the
     # values that must never read as an answer are "error", "toolUse" and a truncation.
     if final.get("stopReason") not in PI_SETTLED:
         diagnostics = final.get("diagnostics") or [{}]
         _incomplete(
-            provider, (diagnostics[-1].get("error") or {}).get("message") or final.get("stopReason")
+            provider,
+            model,
+            final.get("errorMessage")
+            or (diagnostics[-1].get("error") or {}).get("message")
+            or final.get("stopReason"),
         )
     text = "".join(
         block.get("text") or "" for block in final.get("content") or [] if isinstance(block, dict)
     )
     if not text.strip():
-        _incomplete(provider, "the turn ended with no text")
+        _incomplete(provider, model, "the turn ended with no text")
     usage = final.get("usage") or {}
     return text, _note(None, (usage.get("cost") or {}).get("total"), usage.get("totalTokens"))
 

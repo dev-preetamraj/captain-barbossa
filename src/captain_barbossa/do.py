@@ -49,10 +49,13 @@ BRANCH = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]*")
 # Every shipped provider has a headless turn and a gate that stops it writing, each in its
 # own shape: models.headless_argv builds the argv, models.headless_report reads the result.
 # A provider without one would need its own list here, and the refusal below is for it.
+# The prompt below must not restate that gate: a codex turn reads through the shell alone,
+# so telling it not to run commands leaves it nothing to read with and it refuses the task.
 QUIET_PROMPT = (
-    "You are a one-shot agent for Captain Barbossa: do the task and finish. You cannot ask "
-    "questions, open a pane, or run commands. Your final message is the whole report; "
-    "nobody will read a terminal. Leave every edit unstaged."
+    "You are a one-shot agent for Captain Barbossa: do the task and finish. Nobody is "
+    "watching, so there is nobody to ask and no pane to open; read whatever the task needs "
+    "with the tools you have. Your final message is the whole report; nobody will read a "
+    "terminal. Leave every edit unstaged."
 )
 
 
@@ -192,11 +195,12 @@ def _quiet(args, root, session_directory):
     if paths:
         task += "\n\nEdit only these files, and leave the edits unstaged: " + ", ".join(paths)
     if args.diff:
-        # The turn has no shell, so Git state only reaches it inside the task.
+        # Only codex's turn has a shell, and --diff behaves the same on all four.
         text = inspection.git_text(root, "diff", staged=args.diff == "staged")
         task += f"\n\nThe {args.diff} diff:\n{text[:DIFF_LIMIT]}"
         if len(text) > DIFF_LIMIT:
             task += "\n(diff truncated)"
+    model = resolve_model(provider, wanted) if wanted else None
     command = headless_argv(
         provider,
         executable(provider),
@@ -206,10 +210,10 @@ def _quiet(args, root, session_directory):
         # assignment records it is asked to triage or check a report against. A writing turn
         # is never handed the directory, so it cannot edit them.
         add_dir=None if paths else str(session_directory),
-        model=resolve_model(provider, wanted) if wanted else None,
+        model=model,
     )
     done = _capture(root, command, args.timeout or TIMEOUT)
-    report, note = headless_report(provider, done.stdout)
+    report, note = headless_report(provider, done.stdout, model)
     record(session_directory, "quiet", command, done.returncode, report)
     print(report)
     return note

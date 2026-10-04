@@ -173,12 +173,25 @@ class InstructionSizeTests(unittest.TestCase):
         self.assertNotIn("Direct read/search", captain)
         self.assertNotIn("memory reads, answers, and coordination", captain)
         self.assertIn(
-            "Bounded CAPTAIN inspect, memory reads, and the coordination commands below "
-            "are allowed.",
+            "Allowed bounded reads: CAPTAIN inspect files|read PATH|search TEXT|"
+            "state session|project|repo|git status|log|current-branch|root|diff [--staged]|"
+            "branches|ls-files|grep --text TEXT, plus memory reads and the coordination "
+            "commands below.",
             captain,
         )
         crew = instruction_prompts.agent_instructions(self.directory, "crew member Jack")
         self.assertNotIn("the scarce resource", crew)
+
+    def test_a_quiet_turn_that_reports_no_answer_is_relayed_not_replaced(self):
+        """A live captain read a refusal and presented a confident answer of its own."""
+        captain = " ".join(
+            instruction_prompts.agent_instructions(self.directory, "Captain Barbossa").split()
+        )
+        self.assertIn(
+            "If the turn reports no answer, relay its own words; never present an answer "
+            "of your own in their place.",
+            captain,
+        )
 
     def test_captain_self_checks_before_doing_the_task_directly(self):
         captain = " ".join(
