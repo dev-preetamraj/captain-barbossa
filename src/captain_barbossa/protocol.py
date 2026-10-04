@@ -77,6 +77,7 @@ def active(state, crew, assignment_id=None, incarnation=None):
 
 def begin(crew, project, task, paths=(), actions=(), handoff=None):
     check_text(task, "task")
+    inherit_paths, inherit_actions = not paths, not actions
     paths = owned_paths(project, paths)
     actions = sorted(set(actions) | {"read", "search"})
     if set(actions) - set(ACTIONS):
@@ -101,6 +102,12 @@ def begin(crew, project, task, paths=(), actions=(), handoff=None):
                 )
         if handoff and not previous:
             raise CaptainError("No previous assignment matches this handoff.")
+        if handoff:
+            inherited = state["assignments"][handoff]
+            if inherit_paths:
+                paths = inherited["paths"]
+            if inherit_actions:
+                actions = inherited["actions"]
         for other in state["assignments"].values():
             if other["state"] != "done" and any(
                 overlaps(a, b) for a in paths for b in other["paths"]

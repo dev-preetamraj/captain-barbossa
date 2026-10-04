@@ -126,6 +126,49 @@ class CliCommandTests(SessionCase):
             )
             self.assertEqual(os.environ["CAPTAIN_ASSIGNMENT"], self.assignment["id"])
 
+    def test_handoff_inherits_owned_paths_and_actions_unless_named(self):
+        self.finish()
+        self.assertEqual(
+            self.run_cli(
+                "assign", "Jack", "--task", "replacement", "--handoff", self.assignment["id"]
+            )[0],
+            0,
+        )
+        replacement = store.read_json(self.directory / "protocol.json")["active"][self.crew.crew_id]
+        crew_env = {
+            "CAPTAIN_ROLE": "crew",
+            "CAPTAIN_CREW": "jack",
+            "CAPTAIN_INCARNATION": "first",
+            "CAPTAIN_ASSIGNMENT": replacement,
+        }
+        with patch.dict(os.environ, crew_env):
+            self.assertEqual(self.run_cli("check", "Jack", "edit", "src/a.py")[0], 0)
+            with contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(self.run_cli("check", "Jack", "edit", "docs/a.md")[0], 1)
+        self.assertEqual(self.saved()["original_task"], "original")
+
+    def test_handoff_named_owns_and_allow_replace_inherited_ones(self):
+        self.finish()
+        self.assertEqual(
+            self.run_cli(
+                "assign",
+                "Jack",
+                "--task",
+                "replacement",
+                "--handoff",
+                self.assignment["id"],
+                "--owns",
+                "docs",
+                "--allow",
+                "test",
+            )[0],
+            0,
+        )
+        replacement = store.read_json(self.directory / "protocol.json")["active"][self.crew.crew_id]
+        stored = store.read_json(self.directory / "protocol.json")["assignments"][replacement]
+        self.assertEqual(stored["paths"], ["docs"])
+        self.assertEqual(stored["actions"], ["read", "search", "test"])
+
     def test_launch_assignment_rejects_missing_stale_or_foreign_context(self):
         context = {
             "CAPTAIN_ROLE": "crew",
