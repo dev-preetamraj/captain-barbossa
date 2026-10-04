@@ -209,53 +209,14 @@ whole literal argv, `headless_report` reads one provider's own result document -
 `do.py` keeps the session, the record and the diff and knows none of it.
 
 Forcing one shape on four CLIs would mean using the weakest gate each has. Each gets its
-strongest instead. Every row below was run against the installed CLI, not read from a
-help page; the write gate was tested by telling the turn to create a file and then
-looking for the file.
+strongest instead. Each provider linked below was run against its installed CLI, not read from a
+help page, and its page records the result. The write gate was tested by telling the
+turn to create a file and then looking for the file.
 
-| | claude 2.1.289 | codex-cli 0.158.0 | grok 1.0.46 | pi 0.87.1 |
-| --- | --- | --- | --- | --- |
-| headless mode | `-p TASK --output-format json` | `exec --json TASK` | `-p TASK --output-format json` | `-p --mode json TASK` |
-| other flags | `--permission-mode dontAsk` | `--ignore-user-config --skip-git-repo-check --ephemeral` | `--trust --permission-mode dontAsk` | `--no-session --no-context-files` |
-| read-only gate | `--allowedTools Read Grep Glob` plus `--disallowedTools Bash Write Edit` | `--sandbox read-only` | `--deny Write --deny Edit --deny Bash` | `--tools read` |
-| write gate | adds `Edit Write` to the allowlist, drops the denylist | `--sandbox workspace-write` | drops the Write/Edit denies, keeps `--deny Bash` | `--tools read,write,edit` |
-| reads the session directory | needs `--add-dir`; its reads are path-checked | nothing needed: the read-only sandbox reads the whole filesystem | nothing needed | nothing needed |
-| result reader | one JSON object: `type=result`, `subtype=success`, `is_error=false`, text in `result` | JSONL: the **last** `agent_message` item, and a `turn.completed` event must exist | one JSON object: `stopReason=end_turn`, text in `text` | JSONL: the last `turn_end`, `stopReason` in `("stop", "end_turn")`, text joined from `message.content` |
-| spend reported | `num_turns`, `total_cost_usd` | output tokens only | `num_turns`, `total_cost_usd` | `usage.cost.total`, `usage.totalTokens` |
-| write blocked, live | yes | yes, **only** with `--ignore-user-config` | yes | yes |
-| success read, live | yes | yes | yes | yes, on the fourth attempt - see below |
-
-Four findings came out of running it rather than reading about it:
-
-1. **`codex exec --sandbox read-only` does not hold on its own.** The first live run
-   created the file anyway. The cause is in the user's `~/.codex/config.toml`:
-   `approvals_reviewer = "auto_review"` and a list of trusted projects. Adding
-   `--ignore-user-config` makes the sandbox hold, and auth still comes from `CODEX_HOME`.
-   A gate a user's own config can silently turn off is not a gate, so that flag is part of
-   the argv, not an option.
-2. **The exit status is not a completeness test.** pi exited 0 with
-   `stopReason: "error"`, empty content and a `provider_transport_failure` diagnostic -
-   four times, for three different providers. So every reader decides from the document
-   and an unrecognised shape is a failure, never an answer.
-3. **Codex narrates before it answers.** Its stream carried `"I'll create the file with
-   the requested contents."` as one `agent_message` and `"DONE"` as the next. The reader
-   takes the last one; taking the first would have reported the opposite of what happened.
-4. **pi does not say `end_turn`.** A successful pi turn ends with `stopReason: "stop"` -
-   pi relays its provider's own word, and the live turn ran on xai. The reader was written
-   against grok's `end_turn`, so it would have raised "did not complete" on *every*
-   successful pi turn: quiet would have been broken for pi in exactly the way this round
-   set out to fix. It accepts both words now and still rejects `error`, `toolUse` and a
-   truncation. This only surfaced because a probe left running in the background finished
-   after the first report had gone out.
-
-**pi took four attempts to verify, and the fourth is why it works.** openai-codex failed
-with a WebSocket error twice and ollama was not running; the xai run outlived a
-five-minute foreground wait and only returned later, in the background. That late result
-carried the `stopReason: "stop"` correction above. pi is now verified the same way as the
-others: the shipped argv read a file outside the cwd, `--tools read` blocked the write
-with no file created, and the reader returned the report and a spend note. One pi event
-stream is worth more than any amount of reasoning about its shape - the reader had been
-wrong in a way no amount of re-reading pi's `--help` would have shown.
+- [claude](quiet-claude.md)
+- [codex](quiet-codex.md)
+- [grok](quiet-grok.md)
+- [pi](quiet-pi.md)
 
 **No provider is left out.** All four have a headless mode and a read-only gate, so the
 refusal only fires for a provider that does not exist yet:
