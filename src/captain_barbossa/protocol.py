@@ -9,7 +9,7 @@ from uuid import uuid4
 
 from .memory import lock, read_json, write_json
 from .models import HOOK_DELIVERED, HOOKLESS
-from .pane import DRAFT_EXPIRY, DRAFT_GATE
+from .pane import DRAFT_GATE, HOLD_EXPIRY
 from .runtime import HERDR_ERRORS, CaptainError, check_text
 
 ACTIONS = ("read", "search", "edit", "test", "build", "format", "commit", "version", "delete")
@@ -28,6 +28,12 @@ DRAIN_INTERVAL = 30
 DRAIN_LANDED_INTERVAL = 600
 # A draft gate can hold mail all session, so one hold this long is escalated to the captain.
 HELD_NOTICE_INTERVAL = 300
+# A hook-delivered body lands in the crew's context without starting a turn, and the receipt
+# the hook stamps then empties drain's queue, so nothing else ever reports this crew.
+STALLED_SUMMARY = (
+    "Mail was handed over but no turn has ever started and the doorbell is still held; "
+    "read the pane before sending anything else."
+)
 
 
 @contextmanager
@@ -320,15 +326,17 @@ def bounce(crew, message_id, reason):
             )
 
 
-def stale_draft(prior, draft):
-    """Whether this same draft has already held the doorbell for DRAFT_EXPIRY.
+def stale_draft(prior, gate, draft):
+    """Whether this same gate and composer have already held the doorbell past its expiry.
 
     A hold that never ends is its own failure: before this, one unreadable composer kept a
-    crew's mail for the rest of the session and a human had to clear it by hand.
+    crew's mail for the rest of the session and a human had to clear it by hand. Each gate
+    ages on its own clock, so a composer nobody is typing in is not held like a draft.
     """
-    if not prior or prior.get("draft") != draft or prior.get("draft_since") is None:
+    if not prior or prior.get("draft_gate") != gate or prior.get("draft") != draft:
         return False
-    return time.time() - prior["draft_since"] >= DRAFT_EXPIRY
+    since = prior.get("draft_since")
+    return since is not None and time.time() - since >= HOLD_EXPIRY[gate]
 
 
 def echoing(prior):
@@ -345,7 +353,7 @@ def ring(crew, message_id):
     """
     prior = last_ring(crew)
     provider = crew.record.get("provider")
-    landed, unreachable, gate, draft = False, None, None, None
+    landed, unreachable, gate, draft, held = False, None, None, None, None
     # A hook-delivered crew gets the bare wake line; its own hook supplies the body. A
     # landed retry is content-free too, so the 600s drain never retypes work.
     text = None
@@ -363,9 +371,9 @@ def ring(crew, message_id):
             # Our own echo, not a human. Leave the prior stamp alone and let drain retry,
             # rather than starting a hold clock against a crew that has its doorbell.
             return
-        if gate == DRAFT_GATE:
-            draft = pane.draft(provider)
-            if stale_draft(prior, draft):
+        if gate in HOLD_EXPIRY:
+            held, draft = gate, pane.draft(provider)
+            if stale_draft(prior, held, draft):
                 # An expired draft stops holding, but the body never joins a human's
                 # half-written sentence: ring the inbox line alone, which is a valid ring.
                 gate, text = None, None
@@ -379,11 +387,18 @@ def ring(crew, message_id):
     # The one record of a ring, so drain can tell a held doorbell from one the crew already got.
     now = time.time()
     record = {"id": message_id, "at": now, "landed": landed, "gate": gate}
-    if draft is not None:
-        # Age the draft itself, not the message: a human who edits their line starts the clock
-        # over, and only an unchanged one expires.
-        carried = prior.get("draft_since") if prior and prior.get("draft") == draft else None
+    if held is not None:
+        # Age the composer itself, not the message: a human who edits their line starts the
+        # clock over, and only an unchanged one expires. The clock belongs to the gate that
+        # held, so an unreadable composer (the same None every read) ages on its own expiry
+        # instead of borrowing a draft's.
+        carried = (
+            prior.get("draft_since")
+            if prior and prior.get("draft_gate") == held and prior.get("draft") == draft
+            else None
+        )
         record["draft"], record["draft_since"] = draft, carried or now
+        record["draft_gate"] = held
     if not landed:
         held_over = bool(prior) and prior["id"] == message_id and not prior["landed"]
         record["held_since"] = (prior.get("held_since") or prior["at"]) if held_over else now
@@ -414,6 +429,36 @@ def held_notice(crew, message_id, gate, held):
         return assignment is not None
 
 
+def active_assignment(crew):
+    """The crew's live assignment, read without the lock where a stale view is tolerable."""
+    path = crew.session.directory / "protocol.json"
+    if not path.exists():
+        return None
+    state = read_json(path)
+    return state["assignments"].get(state["active"].get(crew.crew_id))
+
+
+def turn_event(event):
+    """Whether a native event proves a turn ran, not merely that a session exists."""
+    return event.get("hook_event_name", event.get("type")) not in (None, "SessionStart")
+
+
+def stalled(crew, assignment):
+    """Whether a hook-delivered body reached the crew without ever starting a turn.
+
+    A delivery hook stamps the receipt as it injects the body, which proves the text is in
+    the crew's context and nothing more: injected context starts no turn. That receipt also
+    empties drain's unread queue, so with the doorbell still held nothing is left to wake
+    the crew and no other signal ever reports it.
+    """
+    if crew.record.get("provider") not in HOOK_DELIVERED:
+        return False
+    if not assignment or assignment.get("turn_started"):
+        return False
+    messages = assignment["messages"]
+    return bool(messages) and all(message["delivery"] == "read" for message in messages)
+
+
 def drain_stamp(crew):
     return mail_dir(crew.session.directory, crew.crew_id) / ".drain"
 
@@ -428,16 +473,24 @@ def last_ring(crew):
 
 
 def drain(crew):
-    """Retry a held doorbell for unread mail; rate-limited so a polling loop never hammers it."""
+    """Retry a held doorbell; rate-limited so a polling loop never hammers it.
+
+    Unread mail is the usual queue, but a hook-delivered body is stamped read before any
+    turn runs, so a stalled crew's held doorbell is retried on liveness instead.
+    """
     messages = unread(crew)
-    if not messages:
-        return
     record = last_ring(crew)
+    if messages:
+        message_id = messages[0]["id"]
+    elif record and not record["landed"] and stalled(crew, active_assignment(crew)):
+        message_id = record["id"]
+    else:
+        return
     if record:
-        landed = record["landed"] and record["id"] == messages[0]["id"]
+        landed = record["landed"] and record["id"] == message_id
         if time.time() - record["at"] < (DRAIN_LANDED_INTERVAL if landed else DRAIN_INTERVAL):
             return
-    ring(crew, messages[0]["id"])
+    ring(crew, message_id)
 
 
 def deliver(crew, text, *, assignment_id=None, question_id=None, initial=False):
@@ -553,6 +606,10 @@ def poll(crew, ack=None, modal=True):
             )
         else:
             events, offset = native_events(crew.events, offset)
+            if any(turn_event(event) for event in events):
+                # Liveness is a started turn, never a delivered body; this is committed
+                # outside the ack dance because it only ever goes one way.
+                assignment["turn_started"] = True
             notified = [(NOTIFIED[s], e) for e in events if (s := event_status(e)) in NOTIFIED]
             if notified:
                 status, event = notified[-1]
@@ -584,6 +641,8 @@ def poll(crew, ack=None, modal=True):
                     )
                 elif read_pane and crew.pane.choice_modal():
                     status, summary = "awaiting_approval", APPROVAL_SUMMARY
+                elif stalled(crew, assignment):
+                    status, summary = "error", STALLED_SUMMARY
                 else:
                     status = None
                 if status is None or status == native_status:

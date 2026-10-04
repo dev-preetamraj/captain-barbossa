@@ -1,5 +1,6 @@
 """Per-agent model tables and text matching for crew launches."""
 
+import json
 from collections import Counter
 from difflib import get_close_matches
 from functools import lru_cache
@@ -34,6 +35,8 @@ MODELS = {
 # pi is absent above on purpose: it is provider-agnostic, so its catalog is whatever
 # the user has authenticated locally and is discovered by pi_models() instead.
 PROVIDERS = ("claude", "codex", "pi", "grok")
+# The stop reasons pi reports for a turn the model actually finished.
+PI_SETTLED = ("stop", "end_turn")
 # No hook or notify mechanism, so crew state comes from Herdr's own agent status and the
 # pane, and a switch or a mail doorbell has to read the composer to know it is safe.
 HOOKLESS = ("pi", "grok")
@@ -180,3 +183,151 @@ def native_model_args(provider, model):
     if not model:
         return []
     return ["-m", model] if provider == "codex" else ["--model", model]
+
+
+def headless_argv(provider, binary, task, *, writable=False, add_dir=None, model=None):
+    """The whole literal argv for one paneless turn, built per provider, never composed.
+
+    Each CLI gets the strongest gate it actually has rather than one forced shape, and
+    every element here is written by this function: nothing a caller passes becomes a flag.
+    """
+    if provider == "claude":
+        argv = [binary, "-p", task, "--output-format", "json", "--permission-mode", "dontAsk"]
+        argv += ["--allowedTools", "Read", "Grep", "Glob"]
+        if writable:
+            argv += ["Edit", "Write"]
+        else:
+            argv += ["--disallowedTools", "Bash", "Write", "Edit"]
+            # Claude path-checks reads against its working directories; the others read the
+            # filesystem already, so this is the one provider that has to be told.
+            argv += ["--add-dir", add_dir] if add_dir else []
+        return argv + native_model_args(provider, model)
+    if provider == "codex":
+        # --ignore-user-config because a trusted project or approvals_reviewer in the user's
+        # own config.toml silently defeats --sandbox; auth still comes from CODEX_HOME. No
+        # --add-dir: for Codex that flag grants writes, and its sandbox already reads freely.
+        return [
+            binary,
+            "exec",
+            "--json",
+            "--ignore-user-config",
+            "--skip-git-repo-check",
+            "--ephemeral",
+            "--sandbox",
+            "workspace-write" if writable else "read-only",
+            *native_model_args(provider, model),
+            task,
+        ]
+    if provider == "grok":
+        argv = [binary, "--trust", "-p", task, "--output-format", "json"]
+        argv += ["--permission-mode", "dontAsk", "--deny", "Bash"]
+        if not writable:
+            argv += ["--deny", "Write", "--deny", "Edit"]
+        return argv + native_model_args(provider, model)
+    # pi silently drops a tool name it does not know, so only names pi documents are used.
+    tools = "read,write,edit" if writable else "read"
+    return [
+        binary,
+        "-p",
+        "--mode",
+        "json",
+        "--no-session",
+        "--no-context-files",
+        "--tools",
+        tools,
+        *native_model_args(provider, model),
+        task,
+    ]
+
+
+def _lines(stdout):
+    for line in stdout.splitlines():
+        line = line.strip()
+        if line.startswith("{"):
+            try:
+                yield json.loads(line)
+            except ValueError:
+                continue
+
+
+def _incomplete(provider, model, detail):
+    turn = f"The {provider} turn on {model or 'its default model'}"
+    raise CaptainError(f"{turn} did not complete: {detail or 'no result document'}")
+
+
+def headless_report(provider, stdout, model=None):
+    """One turn's own text and a cost note, accepted only from a complete success.
+
+    Every provider exits 0 on some failed turn - pi does it for every provider error - so
+    the result document decides and the exit status never does. A shape this does not
+    recognise is a failure, so a half-finished turn can never read as an answer.
+    """
+    if provider in ("claude", "grok"):
+        try:
+            payload = json.loads(stdout)
+        except ValueError:
+            payload = None
+        if not isinstance(payload, dict):
+            _incomplete(provider, model, stdout[-400:])
+        if provider == "claude":
+            done = (
+                payload.get("type") == "result"
+                and payload.get("subtype") == "success"
+                and payload.get("is_error") is False
+                and isinstance(payload.get("result"), str)
+            )
+            text = payload.get("result")
+        else:
+            done = payload.get("stopReason") == "end_turn" and isinstance(payload.get("text"), str)
+            text = payload.get("text")
+        if not done or not str(text).strip():
+            _incomplete(
+                provider, model, str(payload.get("message") or payload.get("subtype") or text)
+            )
+        return text, _note(payload.get("num_turns"), payload.get("total_cost_usd"))
+    if provider == "codex":
+        messages, settled, failure = [], None, None
+        for event in _lines(stdout):
+            kind, item = event.get("type"), event.get("item") or {}
+            if kind == "item.completed" and item.get("type") == "agent_message":
+                messages.append(item.get("text") or "")
+            elif kind == "turn.completed":
+                settled = event.get("usage") or {}
+            elif kind in ("turn.failed", "error"):
+                failure = (event.get("error") or {}).get("message") or event.get("message")
+        if settled is None or not messages or not messages[-1].strip():
+            _incomplete(provider, model, failure)
+        # Codex narrates before it answers, so the last message is the answer.
+        return messages[-1], _note(None, None, settled.get("output_tokens"))
+    final = None
+    for event in _lines(stdout):
+        if event.get("type") == "turn_end":
+            final = event.get("message") or {}
+    if final is None:
+        _incomplete(provider, model, None)
+    # pi relays its provider's own word: a live xai turn finished with "stop", and the
+    # values that must never read as an answer are "error", "toolUse" and a truncation.
+    if final.get("stopReason") not in PI_SETTLED:
+        diagnostics = final.get("diagnostics") or [{}]
+        _incomplete(
+            provider,
+            model,
+            final.get("errorMessage")
+            or (diagnostics[-1].get("error") or {}).get("message")
+            or final.get("stopReason"),
+        )
+    text = "".join(
+        block.get("text") or "" for block in final.get("content") or [] if isinstance(block, dict)
+    )
+    if not text.strip():
+        _incomplete(provider, model, "the turn ended with no text")
+    usage = final.get("usage") or {}
+    return text, _note(None, (usage.get("cost") or {}).get("total"), usage.get("totalTokens"))
+
+
+def _note(turns, cost, tokens=None):
+    """The one line of spend a paneless turn owes the captain, from whatever it reported."""
+    parts = [f"{turns} turns" if turns else None]
+    parts += [f"${cost:.4f}" if isinstance(cost, (int, float)) and cost else None]
+    parts += [f"{tokens} output tokens" if tokens else None]
+    return "(" + ", ".join(part for part in parts if part) + ")" if any(parts) else ""

@@ -40,9 +40,22 @@ class InstructionSizeTests(unittest.TestCase):
         captain = " ".join(
             instruction_prompts.agent_instructions(self.directory, "Captain Barbossa").split()
         )
-        cheap_sentence = captain.split("cheap for mechanical work")[1].split("mid for a")[0]
-        for routine in ("commits", "tests", "lint", "formatting", "docs", "chores"):
-            self.assertIn(routine, cheap_sentence)
+        cheap_sentence = captain.split("cheap for simple work")[1].split("mid for a")[0]
+        self.assertIn("still needs watching", cheap_sentence)
+        # The tier table named each of these in turn, telling the captain how to pick a model
+        # for work that needs no crew at all: the first four belong to CAPTAIN do, the rest to
+        # a quiet --write turn that costs no pane.
+        for elsewhere in (
+            "commits",
+            "tests",
+            "lint",
+            "formatting",
+            "docs",
+            "chores",
+            "renames",
+            "mechanical",
+        ):
+            self.assertNotIn(elsewhere, cheap_sentence)
         self.assertIn("Never step up just because a task feels risky or important.", captain)
         # The old wording made ambiguity a reason to spend more, which drifted every task up.
         self.assertNotIn("Step up a tier when the task is ambiguous", captain)
@@ -144,15 +157,51 @@ class InstructionSizeTests(unittest.TestCase):
         # Token-budgeted: rewording the rule must not buy itself more lines.
         self.assertLessEqual(len(block.splitlines()), 7)
 
+    def test_a_question_needing_unread_files_spends_a_throwaway_context(self):
+        captain = " ".join(
+            instruction_prompts.agent_instructions(self.directory, "Captain Barbossa").split()
+        )
+        self.assertIn(
+            "Answer from what you have already read. Any question that means opening files "
+            "you have not read goes to CAPTAIN quiet, whatever you could answer by reading "
+            "them yourself: the captain's context is the scarce resource, and a quiet turn "
+            "spends a throwaway one.",
+            captain,
+        )
+        # The old line blessed direct reads and direct answers, so a question never reached
+        # the do/quiet/crew rule at all: answering did not feel like delegating.
+        self.assertNotIn("Direct read/search", captain)
+        self.assertNotIn("memory reads, answers, and coordination", captain)
+        self.assertIn(
+            "Allowed bounded reads: CAPTAIN inspect files|read PATH|search TEXT|"
+            "state session|project|repo|git status|log|current-branch|root|diff [--staged]|"
+            "branches|ls-files|grep --text TEXT, plus memory reads and the coordination "
+            "commands below.",
+            captain,
+        )
+        crew = instruction_prompts.agent_instructions(self.directory, "crew member Jack")
+        self.assertNotIn("the scarce resource", crew)
+
+    def test_a_quiet_turn_that_reports_no_answer_is_relayed_not_replaced(self):
+        """A live captain read a refusal and presented a confident answer of its own."""
+        captain = " ".join(
+            instruction_prompts.agent_instructions(self.directory, "Captain Barbossa").split()
+        )
+        self.assertIn(
+            "If the turn reports no answer, relay its own words; never present an answer "
+            "of your own in their place.",
+            captain,
+        )
+
     def test_captain_self_checks_before_doing_the_task_directly(self):
         captain = " ".join(
             instruction_prompts.agent_instructions(self.directory, "Captain Barbossa").split()
         )
-        # The axis is judgment, not file-touching: `make test` writes nothing and needs
-        # no crew; research changes no file and does.
+        # The axis is judgment that needs steering: `make test` writes nothing and needs
+        # no crew; one bounded question changes no file and needs no pane either.
         self.assertIn(
-            "Delegate every task that needs judgment - code changes, debugging, design, "
-            "planning, research, investigation - to crew; never do that yourself.",
+            "Delegate the work that needs judgment and steering - code changes, debugging, "
+            "design, planning, open-ended research - to crew; never do that yourself.",
             captain,
         )
         self.assertIn(
@@ -160,12 +209,13 @@ class InstructionSizeTests(unittest.TestCase):
             captain,
         )
         self.assertIn(
-            "Self-check first: does this need judgment? Recruit crew. Is the answer "
-            "fixed by the inputs? CAPTAIN do.",
+            "Self-check first, in this order: No model needed? CAPTAIN do. A model, and "
+            "you can write the whole instruction now and one answer ends it? CAPTAIN quiet. "
+            "A model, and you will learn the next instruction from what it does? Recruit crew.",
             captain,
         )
         self.assertIn(
-            'Work directly outside both only if the user says "yourself", "no crew", or '
+            'Work outside all three only if the user says "yourself", "no crew", or '
             '"do not recruit".',
             captain,
         )

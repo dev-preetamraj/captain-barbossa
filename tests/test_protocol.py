@@ -3,6 +3,7 @@ import io
 import json
 import os
 import tempfile
+import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -11,7 +12,7 @@ from unittest.mock import patch
 
 from captain_barbossa import agents, cli, memory, protocol
 from captain_barbossa.crew import Crew
-from captain_barbossa.pane import DRAFT_GATE, Pane
+from captain_barbossa.pane import DRAFT_GATE, UNREADABLE_EXPIRY, UNREADABLE_GATE, Pane
 from captain_barbossa.runtime import CaptainError
 from tests import home_isolation  # noqa: F401
 
@@ -997,12 +998,12 @@ class BusyRingTests(unittest.TestCase):
         ProtocolTests.setUp(self)
         self.enterContext(patch.object(Pane, "nudge_block", REAL_NUDGE_BLOCK))
 
-    def gate(self, provider, status, draft=False):
+    def gate(self, provider, status, composer=None):
         self.crew.record["provider"] = provider
         with (
             patch.object(Pane, "agent_status", return_value=status),
             patch.object(Pane, "lines", return_value=[]),
-            patch.object(Pane, "_draft_pending", return_value=draft),
+            patch.object(Pane, "_gate", return_value=composer),
         ):
             return self.crew.pane.nudge_block(self.crew)
 
@@ -1020,7 +1021,155 @@ class BusyRingTests(unittest.TestCase):
         self.assertEqual(self.gate("claude", "blocked"), "approval prompt")
 
     def test_a_human_draft_holds_the_ring(self):
-        self.assertEqual(self.gate("claude", "idle", draft=True), DRAFT_GATE)
+        self.assertEqual(self.gate("claude", "idle", DRAFT_GATE), DRAFT_GATE)
+
+    def test_an_unreadable_composer_is_its_own_gate_not_a_draft(self):
+        """A pane still painting at launch must not read as a human mid-sentence."""
+        self.assertEqual(self.gate("claude", "idle", UNREADABLE_GATE), UNREADABLE_GATE)
+
+
+class UnreadableComposerTests(unittest.TestCase):
+    """Regression: a pane still painting at launch held a crew's whole task as a user draft.
+
+    Seen live: `{"landed": false, "gate": "user draft", "draft": ""}` against a crew that
+    had never drawn a composer we could parse, so its doorbell waited out DRAFT_EXPIRY.
+    """
+
+    def setUp(self):
+        ProtocolTests.setUp(self)
+
+    def test_empty_and_unreadable_are_different_facts(self):
+        for text, gate in ((None, UNREADABLE_GATE), ("", None), ("half a sentence", DRAFT_GATE)):
+            with self.subTest(text=text):
+                with patch.object(Pane, "_composer", return_value=(text, [])):
+                    self.assertEqual(self.crew.pane._gate("claude"), gate)
+                    self.assertEqual(self.crew.pane.draft("claude"), text)
+                    # Still fail-closed: an unreadable composer is never typed into blind.
+                    self.assertEqual(self.crew.pane.draft_pending("claude"), gate is not None)
+
+    def test_an_unreadable_composer_ages_out_on_its_own_expiry(self):
+        clock = [1000.0]
+        with (
+            patch.object(protocol.time, "time", side_effect=lambda: clock[0]),
+            patch.object(Pane, "nudge_block", return_value=UNREADABLE_GATE),
+            patch.object(Pane, "draft", return_value=None),
+            patch.object(Pane, "nudge") as nudge,
+        ):
+            message_id = protocol.deliver(self.crew, "original", initial=True)
+            held = memory.read_json(protocol.drain_stamp(self.crew))
+            self.assertEqual(
+                (held["gate"], held["draft_gate"], held["draft"], held["draft_since"]),
+                (UNREADABLE_GATE, UNREADABLE_GATE, None, 1000.0),
+            )
+            self.assertFalse(held["landed"])
+            nudge.assert_not_called()
+            clock[0] += UNREADABLE_EXPIRY + 1
+            protocol.ring(self.crew, message_id)
+        nudge.assert_called_once()
+        # Expired means ringable, not fusable: the inbox line alone, never the mail body.
+        self.assertIsNone(nudge.call_args.args[1])
+        self.assertTrue(memory.read_json(protocol.drain_stamp(self.crew))["landed"])
+
+    def test_a_human_draft_still_holds_past_the_unreadable_expiry(self):
+        """The two gates age on their own clocks; a sentence someone is typing keeps its own."""
+        clock = [1000.0]
+        with (
+            patch.object(protocol.time, "time", side_effect=lambda: clock[0]),
+            patch.object(Pane, "nudge_block", return_value=DRAFT_GATE),
+            patch.object(Pane, "draft", return_value="half a sentence"),
+            patch.object(Pane, "nudge") as nudge,
+        ):
+            message_id = protocol.deliver(self.crew, "original", initial=True)
+            clock[0] += UNREADABLE_EXPIRY + 1
+            protocol.ring(self.crew, message_id)
+        nudge.assert_not_called()
+        self.assertEqual(memory.read_json(protocol.drain_stamp(self.crew))["gate"], DRAFT_GATE)
+
+
+class StalledCrewTests(unittest.TestCase):
+    """Regression: a hook-delivered crew was handed its task, never woke, and nothing said so.
+
+    Seen live: the receipt the crew's own SessionStart hook stamps emptied drain's unread
+    queue 0.56s after the mail was queued, so the held doorbell was never retried and
+    `wait` reported nothing for the whole session against an idle pane.
+    """
+
+    saved = ProtocolTests.saved
+    event = ProtocolTests.event
+
+    def setUp(self):
+        ProtocolTests.setUp(self)
+        self.crew.record["provider"] = "claude"
+
+    def hand_over(self, gate=UNREADABLE_GATE):
+        """Deliver mail behind a held doorbell, then let the crew's own hook stamp the receipt."""
+        draft = None if gate == UNREADABLE_GATE else "half a sentence"
+        with (
+            patch.object(Pane, "nudge_block", return_value=gate),
+            patch.object(Pane, "draft", return_value=draft),
+        ):
+            message_id = protocol.deliver(self.crew, "original", initial=True)
+        protocol.receipt(self.directory, self.crew.crew_id, [message_id])
+        self.assertEqual(protocol.unread(self.crew), [])
+        self.assertEqual(self.saved()["messages"][0]["delivery"], "read")
+        return message_id
+
+    def backdate(self):
+        """Age the ring stamp past the drain cooldown, as a polling captain would."""
+        stamp = protocol.drain_stamp(self.crew)
+        record = memory.read_json(stamp)
+        record["at"] = time.time() - protocol.DRAIN_INTERVAL - 1
+        memory.write_json(stamp, record)
+        return stamp
+
+    def test_a_delivered_body_with_no_turn_is_reported_once(self):
+        self.hand_over()
+        stalled = protocol.poll(self.crew)
+        self.assertEqual(stalled["status"], "error")
+        self.assertIn("no turn has ever started", stalled["summary"])
+        protocol.poll(self.crew, stalled["delivery_id"])
+        self.assertIsNone(protocol.poll(self.crew)["delivery_id"])
+
+    def test_a_started_turn_is_what_clears_the_report(self):
+        self.hand_over()
+        self.event({"hook_event_name": "UserPromptSubmit"})
+        self.assertIsNone(protocol.poll(self.crew)["delivery_id"])
+        self.assertTrue(self.saved()["turn_started"])
+
+    def test_a_session_start_alone_is_not_a_started_turn(self):
+        self.hand_over()
+        self.event({"hook_event_name": "SessionStart"})
+        self.assertEqual(protocol.poll(self.crew)["status"], "error")
+        self.assertFalse(self.saved().get("turn_started"))
+
+    def test_a_held_doorbell_is_still_retried_after_the_receipt(self):
+        """Delivery is not liveness: a stamped receipt must not end the retries."""
+        message_id = self.hand_over()
+        stamp = self.backdate()
+        with patch.object(Pane, "nudge") as nudge:
+            protocol.drain(self.crew)
+        nudge.assert_called_once()
+        retried = memory.read_json(stamp)
+        self.assertEqual((retried["id"], retried["landed"]), (message_id, True))
+
+    def test_a_crew_that_woke_stops_the_retries(self):
+        self.hand_over()
+        self.event({"hook_event_name": "UserPromptSubmit"})
+        protocol.poll(self.crew)
+        self.backdate()
+        with patch.object(Pane, "nudge") as nudge:
+            protocol.drain(self.crew)
+        nudge.assert_not_called()
+
+    def test_a_ring_delivered_body_is_no_stall(self):
+        """Only a delivery hook stamps a receipt without a turn; a ring carries its own body."""
+        self.crew.record["provider"] = "codex"
+        self.hand_over(DRAFT_GATE)
+        self.assertIsNone(protocol.poll(self.crew)["delivery_id"])
+        self.backdate()
+        with patch.object(Pane, "nudge") as nudge:
+            protocol.drain(self.crew)
+        nudge.assert_not_called()
 
 
 class StaleAssignmentTests(unittest.TestCase):

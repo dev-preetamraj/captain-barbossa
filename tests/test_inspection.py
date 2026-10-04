@@ -192,6 +192,38 @@ class InspectionTests(unittest.TestCase):
         self.assertIn("+changed", self.inspect("git", "diff", "--staged")["text"])
         self.assertEqual(self.inspect("git", "diff")["text"], "")
 
+    def test_tracked_reads_skip_what_the_worktree_walk_has_to_step_over(self):
+        self.init_git()
+        (self.project / ".gitignore").write_text("ignored/\n")
+        (self.project / "ignored").mkdir()
+        (self.project / "ignored" / "junk").write_text("original\n")
+        tracked = self.inspect("git", "ls-files")["text"].split()
+        self.assertIn("file", tracked)
+        self.assertNotIn("ignored/junk", tracked)
+        # The worktree walk sees what ls-files and grep are asked to leave out.
+        self.assertIn("ignored/junk", self.inspect("files")["paths"])
+        found = self.inspect("git", "grep", "--text", "original")["text"]
+        self.assertEqual(found, "file:1:original\n")
+        self.assertEqual(self.inspect("git", "grep", "--text", "nothing matches")["text"], "")
+
+    def test_a_grep_pattern_is_data_and_never_an_option(self):
+        self.init_git()
+        (self.project / "file").write_text("--no-such-flag here\n")
+        self.git("add", "file")
+        # --text=VALUE is how a caller passes a pattern argparse would read as an option;
+        # past argparse, -e keeps it a pattern rather than a flag for Git.
+        self.assertIn(
+            "--no-such-flag", self.inspect("git", "grep", "--text=--no-such-flag")["text"]
+        )
+        with self.assertRaisesRegex(CaptainError, "invalid-text"):
+            self.inspect("git", "grep", "--text", "")
+        with self.assertRaisesRegex(CaptainError, "invalid-text"):
+            self.inspect("git", "grep", "--text", "x" * (inspection.MAX_PATTERN + 1))
+        with self.assertRaisesRegex(CaptainError, "invalid-text"):
+            self.inspect("git", "grep")
+        with self.assertRaisesRegex(CaptainError, "invalid-option"):
+            self.inspect("git", "status", "--text", "anything")
+
     def test_git_metadata_disappearing_before_stat_or_open_is_tolerated(self):
         self.init_git()
         lock = self.project / ".git/maintenance.lock"
@@ -336,6 +368,30 @@ class InspectionTests(unittest.TestCase):
                 self.assertRaisesRegex(CaptainError, error),
             ):
                 self.inspect("git", "status")
+
+    def test_skip_dirs_excludes_standard_cache_and_build_directories(self):
+        (self.project / "regular.txt").write_text("keep this")
+        (self.project / "node_modules").mkdir()
+        (self.project / "node_modules" / "junk.txt").write_text("skip this")
+        for skip_dir in inspection.SKIP_DIRS:
+            if skip_dir == "node_modules":
+                continue
+            d = self.project / skip_dir
+            d.mkdir(exist_ok=True)
+            (d / "junk.txt").write_text("skip this")
+
+        result = self.inspect("files")
+        paths = result["paths"]
+        self.assertIn("regular.txt", paths)
+        self.assertNotIn("node_modules/junk.txt", paths)
+        self.assertFalse(any(skip_dir in p for skip_dir in inspection.SKIP_DIRS for p in paths))
+
+        result = self.inspect("search", "skip")
+        self.assertEqual(result["matches"], [])
+
+        result = self.inspect("search", "keep")
+        self.assertEqual(len(result["matches"]), 1)
+        self.assertEqual(result["matches"][0]["path"], "regular.txt")
 
 
 if __name__ == "__main__":

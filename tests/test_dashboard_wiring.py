@@ -249,7 +249,7 @@ class DashboardCommandTests(unittest.TestCase):
     def test_interval_and_explicit_price_refresh_are_exposed(self):
         board = cli.parser()._subparsers._group_actions[0].choices["dashboard"]
         flags = {option for action in board._actions for option in action.option_strings}
-        self.assertEqual(flags - {"-h", "--help"}, {"--interval", "--refresh-prices"})
+        self.assertEqual(flags - {"-h", "--help"}, {"--interval", "--refresh-prices", "--once"})
 
 
 class RenestTests(unittest.TestCase):

@@ -214,8 +214,8 @@ class CaptainFlowTests(unittest.TestCase):
 
     def test_instructions_require_captain_to_delegate_user_tasks_to_new_crew(self):
         rule = (
-            "Delegate every task that needs judgment - code changes, debugging, design, "
-            "planning, research, investigation - to crew; never do that yourself. Never "
+            "Delegate the work that needs judgment and steering - code changes, debugging, "
+            "design, planning, open-ended research - to crew; never do that yourself. Never "
             "delegate a task whose outcome its inputs already determine: a commit, a "
             "push, a branch, or one of the project's own declared targets is not crew "
             "work, and recruiting for it costs a pane, a model and a report to run one "
@@ -555,10 +555,10 @@ class CaptainFlowTests(unittest.TestCase):
             "--agent is the CLI you run as",
             "--placement pane --direction auto --split-pane auto",
             "--model cheap.",
-            "Pick the tier by how complex the assignment is: cheap for mechanical work "
-            "(commits, tests, lint, formatting, docs, chores, renames, mechanical edits), "
-            "mid for a normal feature or a change inside one area, strong for design, "
-            "debugging, or multi-file/long-context work.",
+            "Pick the tier by how complex the assignment is: cheap for simple work that "
+            "still needs watching - a focused fix, or following a pattern the codebase "
+            "already has - mid for a normal feature or a change inside one area, strong "
+            "for design, debugging, or multi-file/long-context work.",
             "Never step up just because a task feels risky or important.",
             "Each agent resolves the tier to its own model; an exact model name still works.",
             "Use every choice the user does state and keep the rest on these defaults.",

@@ -57,11 +57,21 @@ SHELL_READY_TIMEOUT = 3
 # nudge_block's gate for unsubmitted human text, which protocol escalates rather than
 # typing over.
 DRAFT_GATE = "user draft"
+# A composer the screen cannot prove the contents of is its own gate, not a draft: a TUI
+# still painting at launch reads exactly like a human mid-sentence, and calling it a draft
+# held one crew's whole task behind DRAFT_EXPIRY.
+UNREADABLE_GATE = "unreadable composer"
 # How long one unchanged draft may hold mail before the gate stops holding, from
-# munder-difflin's STALE_INPUT_MS (terminalAutomation.ts:50). Without it an occupied or
-# unreadable composer holds mail for the rest of the session; protocol rings content-free
-# once it expires, so an expiry never fuses a body onto a human's half-written sentence.
+# munder-difflin's STALE_INPUT_MS (terminalAutomation.ts:50). Without it an occupied
+# composer holds mail for the rest of the session; protocol rings content-free once it
+# expires, so an expiry never fuses a body onto a human's half-written sentence.
 DRAFT_EXPIRY = 1800
+# An unreadable composer only has to outlast the paint; an unrecognised composer shape
+# never resolves at all, so waiting out DRAFT_EXPIRY for it buys nothing. Short enough
+# that the next drain rings, long enough that a launching TUI is not typed over.
+UNREADABLE_EXPIRY = 15
+# Each gate protocol may age out, with how long it holds first.
+HOLD_EXPIRY = {DRAFT_GATE: DRAFT_EXPIRY, UNREADABLE_GATE: UNREADABLE_EXPIRY}
 
 
 # A hook-delivered crew's doorbell: one fixed string, safe to repeat and safe to drop,
@@ -158,22 +168,28 @@ class Pane:
         return tail[-TAIL_LIMIT:] or "empty"
 
     def draft_pending(self, provider=None):
-        """Treat an unreadable composer as potentially holding a user's draft."""
+        """Whether the composer must not be typed into: any gate, including an unreadable one."""
         try:
-            return self._draft_pending(provider)
+            return self._gate(provider) is not None
         except HERDR_ERRORS:
             return True
 
-    def _draft_pending(self, provider=None, echo=None):
+    def _gate(self, provider=None, echo=None):
+        """Which gate holds the composer, or None when it is provably safe to type.
+
+        Empty and unreadable are different facts: an empty composer is no gate at all, and
+        an unreadable one gets its own, which ages out on UNREADABLE_EXPIRY rather than
+        posing as a human's draft for half an hour.
+        """
         text, styled = self._composer(provider)
-        if not text:
-            return text is None
+        if text is None:
+            return UNREADABLE_GATE
         # A composer still showing the ring we typed is ours, not a draft; otherwise a landed
         # ring gates the next one. Only an exact match counts, so a wrong guess parks mail
         # rather than typing over a human.
-        if text == echo:
-            return False
-        return not self._dim_suggestion(text, styled)
+        if not text or text == echo:
+            return None
+        return None if self._dim_suggestion(text, styled) else DRAFT_GATE
 
     def _dim_suggestion(self, text, lines):
         """Whether the composer's plain-text content is really a dim native suggestion.
@@ -299,26 +315,23 @@ class Pane:
         # Herdr reports a crew that just finished a turn as "done", not "idle"; it is as
         # ringable as idle, and every other status check here already pairs the two.
         # A busy crew holds the ring whatever its provider: a mid-turn pane has no
-        # provable composer, so _draft_pending below would hold it regardless, and
+        # provable composer, so _gate below would hold it regardless, and
         # overriding that too means typing into a line that may hold a human's text.
         # Its mail arrives at the turn boundary, via the `done` refusal or the Stop hook.
         if status not in ("idle", "done"):
             return "agent not idle"
-        if self._draft_pending(crew.record.get("provider"), echo=inbox_line(crew)):
-            return DRAFT_GATE
-        return None
+        return self._gate(crew.record.get("provider"), echo=inbox_line(crew))
 
     def draft(self, provider=None):
-        """What a reported draft gate is holding, for the stamp that ages it out.
+        """What a reported gate is holding, for the stamp that ages it out.
 
-        Empty when the screen cannot prove the composer's contents, which still counts as a
-        draft: an unreadable composer that never clears has to expire like any other.
+        None when the screen cannot prove the composer's contents; that is the unreadable
+        gate's own hold, aged on its own expiry, never a draft an editing human owns.
         """
         try:
-            text, _ = self._composer(provider)
+            return self._composer(provider)[0]
         except HERDR_ERRORS:
-            text = None
-        return text or ""
+            return None
 
     def nudge(self, crew, text=None):
         """Ring an idle crew. A first ring may carry the mail body as a trusted prompt."""
