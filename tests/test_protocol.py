@@ -805,6 +805,19 @@ class StalledCrewTests(unittest.TestCase):
         retried = store.read_json(stamp)
         self.assertEqual((retried["id"], retried["landed"]), (message_id, True))
 
+    def test_a_landed_doorbell_that_started_no_turn_is_retried_too(self):
+        """Seen twice on fresh crew: the wake line was typed into a TUI still painting at
+        launch, so the ring read as landed while the composer went back to its placeholder,
+        and the receipt had already emptied the queue that would have retried it."""
+        message_id = self.hand_over(gate=None)
+        self.event({"hook_event_name": "SessionStart"})
+        self.assertTrue(store.read_json(protocol.drain_stamp(self.crew))["landed"])
+        stamp = self.backdate()
+        with patch.object(Pane, "nudge") as nudge:
+            protocol.drain(self.crew)
+        nudge.assert_called_once()
+        self.assertEqual(store.read_json(stamp)["id"], message_id)
+
     def test_a_crew_that_woke_stops_the_retries(self):
         self.hand_over()
         self.event({"hook_event_name": "UserPromptSubmit"})

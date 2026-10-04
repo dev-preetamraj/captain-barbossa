@@ -31,8 +31,8 @@ HELD_NOTICE_INTERVAL = 300
 # A hook-delivered body lands in the crew's context without starting a turn, and the receipt
 # the hook stamps then empties drain's queue, so nothing else ever reports this crew.
 STALLED_SUMMARY = (
-    "Mail was handed over but no turn has ever started and the doorbell is still held; "
-    "read the pane before sending anything else."
+    "Mail was handed over but no turn has ever started; the doorbell is being retried, "
+    "so read the pane before sending anything else."
 )
 
 
@@ -444,8 +444,8 @@ def stalled(crew, assignment):
 
     A delivery hook stamps the receipt as it injects the body, which proves the text is in
     the crew's context and nothing more: injected context starts no turn. That receipt also
-    empties drain's unread queue, so with the doorbell still held nothing is left to wake
-    the crew and no other signal ever reports it.
+    empties drain's unread queue, so this is the only thing left that can tell a crew which
+    never woke from one that is working, whatever its doorbell did.
     """
     if crew.record.get("provider") not in HOOK_DELIVERED:
         return False
@@ -472,18 +472,24 @@ def drain(crew):
     """Retry a held doorbell; rate-limited so a polling loop never hammers it.
 
     Unread mail is the usual queue, but a hook-delivered body is stamped read before any
-    turn runs, so a stalled crew's held doorbell is retried on liveness instead.
+    turn runs, so a stalled crew's doorbell is retried on liveness instead.
     """
     messages = unread(crew)
     record = last_ring(crew)
+    stall = False
     if messages:
         message_id = messages[0]["id"]
-    elif record and not record["landed"] and stalled(crew, active_assignment(crew)):
-        message_id = record["id"]
+    elif record and stalled(crew, active_assignment(crew)):
+        # Landed or held alike: a ring typed into a TUI still painting at launch is
+        # swallowed, and that left a freshly recruited crew holding an unstarted
+        # assignment with nothing but `tell` to save it.
+        message_id, stall = record["id"], True
     else:
         return
     if record:
-        landed = record["landed"] and record["id"] == message_id
+        # A ring that started no turn did not work, so it retries on the ordinary
+        # cooldown; the slow one only exists to bounce a pane that died after the nudge.
+        landed = record["landed"] and record["id"] == message_id and not stall
         if time.time() - record["at"] < (DRAIN_LANDED_INTERVAL if landed else DRAIN_INTERVAL):
             return
     ring(crew, message_id)
