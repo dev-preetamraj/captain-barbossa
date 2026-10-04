@@ -40,9 +40,13 @@ class InstructionSizeTests(unittest.TestCase):
         captain = " ".join(
             instruction_prompts.agent_instructions(self.directory, "Captain Barbossa").split()
         )
-        cheap_sentence = captain.split("cheap for mechanical work")[1].split("mid for a")[0]
-        for routine in ("commits", "tests", "lint", "formatting", "docs", "chores"):
+        cheap_sentence = captain.split("cheap for mechanical edits")[1].split("mid for a")[0]
+        for routine in ("docs", "chores", "renames", "mechanical changes"):
             self.assertIn(routine, cheap_sentence)
+        # The tier table used to name these here, which told the captain how to pick a
+        # model for exactly the work CAPTAIN do exists to absorb without a crew at all.
+        for quiet_work in ("commits", "tests", "lint", "formatting"):
+            self.assertNotIn(quiet_work, cheap_sentence)
         self.assertIn("Never step up just because a task feels risky or important.", captain)
         # The old wording made ambiguity a reason to spend more, which drifted every task up.
         self.assertNotIn("Step up a tier when the task is ambiguous", captain)
@@ -148,11 +152,11 @@ class InstructionSizeTests(unittest.TestCase):
         captain = " ".join(
             instruction_prompts.agent_instructions(self.directory, "Captain Barbossa").split()
         )
-        # The axis is judgment, not file-touching: `make test` writes nothing and needs
-        # no crew; research changes no file and does.
+        # The axis is judgment that needs steering: `make test` writes nothing and needs
+        # no crew; one bounded question changes no file and needs no pane either.
         self.assertIn(
-            "Delegate every task that needs judgment - code changes, debugging, design, "
-            "planning, research, investigation - to crew; never do that yourself.",
+            "Delegate the work that needs judgment and steering - code changes, debugging, "
+            "design, planning, open-ended research - to crew; never do that yourself.",
             captain,
         )
         self.assertIn(
@@ -160,12 +164,13 @@ class InstructionSizeTests(unittest.TestCase):
             captain,
         )
         self.assertIn(
-            "Self-check first: does this need judgment? Recruit crew. Is the answer "
-            "fixed by the inputs? CAPTAIN do.",
+            "Self-check first, in this order: No model needed? CAPTAIN do. A model, and "
+            "you can write the whole instruction now and one answer ends it? CAPTAIN quiet. "
+            "A model, and you will learn the next instruction from what it does? Recruit crew.",
             captain,
         )
         self.assertIn(
-            'Work directly outside both only if the user says "yourself", "no crew", or '
+            'Work outside all three only if the user says "yourself", "no crew", or '
             '"do not recruit".',
             captain,
         )

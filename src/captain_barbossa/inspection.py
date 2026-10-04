@@ -23,6 +23,7 @@ MAX_BYTES = 64 * 1024
 MAX_ENTRIES = 10_000
 MAX_RESULTS = 200
 MAX_SCAN_BYTES = 8 * 1024 * 1024
+MAX_PATTERN = 512
 TIMEOUT = 5
 # /usr/bin/git on macOS is a launcher for the mutable xcode-select toolchain.
 GIT = Path(
@@ -47,8 +48,21 @@ def add_arguments(subparsers):
     state.add_argument("scope", choices=("session", "project", "repo"))
     state.add_argument("path", nargs="?", default=".")
     git = actions.add_parser("git", help="fixed Git queries in an ordinary local checkout")
-    git.add_argument("operation", choices=("status", "log", "current-branch", "root", "diff"))
+    git.add_argument(
+        "operation",
+        choices=(
+            "status",
+            "log",
+            "current-branch",
+            "root",
+            "diff",
+            "branches",
+            "ls-files",
+            "grep",
+        ),
+    )
     git.add_argument("--staged", action="store_true", help="diff the index instead of the worktree")
+    git.add_argument("--text", help="literal, case-sensitive text for git grep")
 
 
 def _fail(code, message):
@@ -238,9 +252,19 @@ def _git_config(root):
                 _fail("unsupported-git", "only ordinary format-0 worktrees are supported.")
 
 
-def _git(root, operation, staged, deadline):
+def git_text(root, operation, *, staged=False, text=None):
+    """One hardened Git read for another module, as plain text."""
+    return _git(Path(root), operation, staged, time.monotonic() + TIMEOUT, text)["text"]
+
+
+def _git(root, operation, staged, deadline, text=None):
     if staged and operation != "diff":
         _fail("invalid-option", "--staged applies only to git diff.")
+    if operation == "grep":
+        if not text or len(text.encode("utf-8")) > MAX_PATTERN:
+            _fail("invalid-text", f"git grep needs literal text of 1 to {MAX_PATTERN} bytes.")
+    elif text is not None:
+        _fail("invalid-option", "--text applies only to git grep.")
     if (root / ".git").is_symlink() or not (root / ".git").is_dir():
         _fail("unsupported-git", "an ordinary .git directory at the project root is required.")
     for path in _walk(root, Path(".git"), deadline, metadata=True):
@@ -281,6 +305,21 @@ def _git(root, operation, staged, deadline):
         ],
         "log": ["log", "-20", "--no-show-signature", "--no-decorate", "--format=%H %s", "--"],
         "current-branch": ["branch", "--show-current"],
+        "branches": ["branch", "--list", "--no-color", "--format=%(refname:short)"],
+        # Tracked files only, so .venv, caches and build output stay out of the answer that
+        # `files` and `search` have to walk past.
+        "ls-files": ["ls-files", "--cached", "--"],
+        "grep": [
+            "grep",
+            "--fixed-strings",
+            "--line-number",
+            "--no-color",
+            "-I",
+            # -e keeps a pattern that starts with a dash a pattern.
+            "-e",
+            text or "",
+            "--",
+        ],
         "root": ["rev-parse", "--show-toplevel"],
         "diff": [
             "diff",
@@ -329,7 +368,8 @@ def _git(root, operation, staged, deadline):
                             _fail("limit", "Git output exceeds 65536 bytes.")
                         output[key.fileobj].extend(chunk)
             process.wait(timeout=max(0.001, deadline - time.monotonic()))
-            if process.returncode:
+            # git grep reports "nothing matched" as status 1, which is an answer, not a fault.
+            if process.returncode and not (operation == "grep" and process.returncode == 1):
                 _fail("git-failed", f"Git exited with status {process.returncode}.")
         finally:
             if process.poll() is None:
@@ -348,7 +388,7 @@ def run(args, project):
         root = Path(project).resolve(strict=True)
         command = args.inspection_command
         if command == "git":
-            result = _git(root, args.operation, args.staged, deadline)
+            result = _git(root, args.operation, args.staged, deadline, args.text)
         else:
             if command == "state":
                 if os.environ.get("CAPTAIN_ROLE") == "crew" and args.scope != "repo":

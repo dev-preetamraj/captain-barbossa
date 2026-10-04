@@ -5,7 +5,7 @@ import json
 import os
 import sys
 
-from . import __version__, config, do, inspection, protocol
+from . import __version__, config, dashboard, do, inspection, protocol
 from .agents import (
     create_crew,
     dismiss_crew,
@@ -166,6 +166,11 @@ def parser():
         type=float,
         metavar="SECONDS",
         help="seconds between refreshes ([dashboard] interval when omitted)",
+    )
+    board.add_argument(
+        "--once",
+        action="store_true",
+        help="print one frame and exit, for a token and cost reading with no pane",
     )
     dismiss = commands.add_parser("dismiss", help="close an existing crew's pane and retire it")
     dismiss.add_argument("name", help="crew name or ID (case-insensitive)")
@@ -336,10 +341,13 @@ def main(argv=None):
             focus_crew(args, pane, project)
         elif args.command == "interrupt":
             interrupt_crew(args, pane, project)
-        elif args.command == "do":
+        elif args.command in ("do", "quiet"):
             do.run(args, read_session(project, args.session, pane).directory, project)
         elif args.command == "dashboard":
-            run_dashboard(args, pane, project)
+            if args.once:
+                print(dashboard.render(read_session(project, args.session, pane)))
+            else:
+                run_dashboard(args, pane, project)
         elif args.command == "dismiss":
             dismiss_crew(args, pane, project)
         elif args.command == "memory":
