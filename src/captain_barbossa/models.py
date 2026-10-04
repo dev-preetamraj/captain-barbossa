@@ -137,6 +137,16 @@ def model_names(provider, model):
     return (model,)
 
 
+def claude_label(model):
+    """How Claude Code's own picker lists a model ID: "claude-haiku-4-5" is "Haiku 4.5".
+
+    Its rows carry display names, and several versions of one family at once, so picking
+    a row needs the version too: an alias alone also matches "Opus 4.7" for opus.
+    """
+    family, _, version = model.removeprefix("claude-").partition("-")
+    return f"{family} {version.replace('-', '.')}".strip()
+
+
 def normalized(text):
     """Free text as a lookup key: casefolded, with spaces and underscores as dashes."""
     return "-".join(text.casefold().split()).replace("_", "-").strip("-")

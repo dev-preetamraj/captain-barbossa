@@ -146,6 +146,14 @@ class ModelTierTests(unittest.TestCase):
         )
         self.assertEqual(models.model_names("codex", "gpt-5.5"), ("gpt-5.5",))
 
+    def test_a_claude_id_labels_the_version_its_picker_lists_not_just_the_family(self):
+        """A picker row is only the model asked for when the version matches: "opus"
+        alone also names an "Opus 4.7" row, and that row once took the keypress."""
+        labels = [models.claude_label(model) for model in models.model_ids("claude")]
+        self.assertEqual(labels, ["haiku 4.5", "sonnet 5", "opus 5", "fable 5.1"])
+        self.assertFalse("opus 4.7".startswith(models.claude_label("claude-opus-5")))
+        self.assertTrue("opus 5.5".startswith(models.claude_label("claude-opus-5")))
+
 
 class ModelTextTests(unittest.TestCase):
     def test_text_matches_exact_names_then_prefixes_substrings_and_close_spellings(self):

@@ -208,9 +208,19 @@ This drives the CLI's own `/model` command through Herdr and verifies the
 result: without the CLI's own confirmation line naming that model, the command
 reports an error without recording a successful switch. Codex keeps the reasoning level it
 already had. A confirmed switch updates the session and memory; the pane, the
-conversation, and the assignment are untouched. Claude Code's inline `/model`
-also saves the model as the default for new sessions, and the command prints
-that as a reminder.
+conversation, and the assignment are untouched. The switch stays inside the
+crew's session: named inline, Claude Code's `/model` would also save the model
+as the user's default for new sessions, so the retier opens its picker instead
+and takes the key that switches this session alone. The picker opens focused on
+the model in use, so focus is moved one keypress at a time, and the key is
+pressed only on a row the pane has just shown as focused and labelled exactly
+the model asked for. A version is part of that label: a request for Opus 5 never
+takes an Opus 5.5 row. Focus that stops moving, or never reaches the row,
+refuses naming the row it stopped on, having selected nothing.
+If Claude Code then asks to confirm the switch, because it re-reads the
+conversation, the confirm is answered only when it names the model asked for.
+A switch whose confirmation says it was saved as the default is refused, since
+that confirm step can persist the default.
 If the installed native picker does not offer the requested model, the switch
 fails; a tier in Captain's catalog does not guarantee native availability.
 

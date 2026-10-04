@@ -13,7 +13,7 @@ from .crew import Crew
 from .dashboard import dashboard_pane, renest_dashboard, start_dashboard
 from .events import read_events
 from .memory import add_memory, truncate_label
-from .models import HOOKLESS, PROVIDERS, model_names, resolve_model
+from .models import HOOKLESS, PROVIDERS, claude_label, model_names, resolve_model
 from .pane import MODEL_TIMEOUT, PROMPT_TIMEOUT, shell_ready_for_input
 from .pi_captain import captain_extension
 from .placement import Placement
@@ -348,26 +348,30 @@ def switch_model(args, pane, project):
         raise CaptainError(
             "Model switch needs a readable empty composer without an approval prompt."
         )
+    baseline = 0
     if provider == "claude":
-        runtime.herdr("agent", "prompt", crew_agent, f"/model {model}")
-        if not crew.pane.model_landed(names, PROMPT_TIMEOUT, provider):
+        # Named inline, /model also saves the model as the user's default for new sessions,
+        # so a retier goes through the picker, whose own key switches this session alone.
+        runtime.herdr("agent", "prompt", crew_agent, "/model")
+        if not crew.pane.claude_picker_open(PROMPT_TIMEOUT):
             # Claude Code can leave a submitted line as an unsent draft in its input box.
             if (
                 crew.pane.agent_status() == "blocked"
                 or crew.pane.choice_modal()
-                or crew.pane.composer(provider) != f"/model {model}"
+                or crew.pane.composer(provider) != "/model"
             ):
                 raise CaptainError(
                     "Model switch delivery is unknown; inspect the pane before retrying."
                 )
             runtime.herdr("agent", "send-keys", crew_agent, "enter")
+        baseline = crew.pane.claude_pick_model(claude_label(model), MODEL_TIMEOUT)
     elif provider in HOOKLESS:
         # An exact model ID selects straight away, with no picker and no draft state.
         runtime.herdr("agent", "prompt", crew_agent, f"/model {model}")
     else:
         runtime.herdr("agent", "prompt", crew_agent, "/model")
         crew.pane.codex_pick_model(model, MODEL_TIMEOUT)
-    if not crew.pane.model_landed(names, MODEL_TIMEOUT, provider):
+    if not crew.pane.model_landed(names, MODEL_TIMEOUT, provider, after=baseline):
         raise CaptainError(
             f"{crew.display_name} did not confirm the switch to {model}. "
             f"Read its pane before retrying: herdr agent read {crew_agent}"
@@ -376,9 +380,6 @@ def switch_model(args, pane, project):
         meta["crew"][crew.crew_id]["model"] = model
     add_memory(current.graph, crew.display_name, "model", model)
     print(f"{crew.display_name} switched to {model}.")
-    if provider == "claude":
-        # Claude Code's inline /model always writes the model to the user's settings.
-        print("Claude Code also saved it as the default for new sessions.")
 
 
 def never_read(assignment):
