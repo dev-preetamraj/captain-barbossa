@@ -9,7 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from captain_barbossa import events, protocol, sessions, store
+from captain_barbossa import cli, events, protocol, sessions, store
 from captain_barbossa.crew import Crew
 from tests.home_isolation import SessionCase
 
@@ -33,10 +33,9 @@ class StopHookTests(SessionCase):
     def hook(self, event):
         """Run the hook exactly as the native CLI does and return what it printed."""
         out = io.StringIO()
-        with patch("sys.argv", ["hook", str(self.crew.events)]):
-            with patch("sys.stdin", io.StringIO(json.dumps(event))):
-                with contextlib.redirect_stdout(out):
-                    events.append_event()
+        with patch("sys.stdin", io.StringIO(json.dumps(event))):
+            with contextlib.redirect_stdout(out):
+                cli.main(["hook", str(self.crew.events)])
         return out.getvalue()
 
     def decision(self, event):
@@ -160,11 +159,22 @@ class StopHookTests(SessionCase):
         self.assertEqual(len(self.still_queued()), 1)
 
     def test_codex_notify_never_blocks(self):
-        with patch("sys.argv", ["hook", str(self.crew.events), json.dumps({"type": "x"})]):
-            out = io.StringIO()
-            with contextlib.redirect_stdout(out):
-                events.append_event()
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli.main(["hook", str(self.crew.events), json.dumps({"type": "x"})])
         self.assertEqual(out.getvalue(), "")
+        self.assertEqual(json.loads(self.logged()[0])["type"], "x")
+
+    def test_hook_entry_skips_the_parser_and_update_check(self):
+        with (
+            patch.object(cli, "parser", side_effect=AssertionError("hook built the parser")),
+            patch(
+                "captain_barbossa.agents.check_for_update",
+                side_effect=AssertionError("update check"),
+            ),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            cli.main(["hook", str(self.crew.events), json.dumps({"type": "x"})])
         self.assertEqual(json.loads(self.logged()[0])["type"], "x")
 
 

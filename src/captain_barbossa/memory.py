@@ -13,6 +13,9 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
+# Sessions launched before 0.30.0 baked `from captain_barbossa.memory import append_event`
+# into their native CLI hook settings; that string outlives the upgrade that moved it.
+from .events import append_event as append_event
 from .runtime import CaptainError, check_text, executable
 from .sessions import prune_sessions, read_session, session
 from .store import (

@@ -5,7 +5,7 @@ import json
 import os
 import sys
 
-from . import __version__, config, dashboard, do, inspection, protocol
+from . import __version__, config, dashboard, do, events, inspection, protocol
 from .agents import (
     create_crew,
     dismiss_crew,
@@ -293,6 +293,11 @@ def pump_mail(args, pane, project):
 
 
 def main(argv=None):
+    argv = sys.argv[1:] if argv is None else argv
+    if argv[:1] == ["hook"]:
+        # Native hooks fire per event: skip the parser, update check and Herdr pane lookup.
+        events.append_event(argv[1:])
+        return 0
     args = parser().parse_args(argv)
     try:
         guard_crew(args)

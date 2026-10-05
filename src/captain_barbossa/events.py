@@ -56,13 +56,19 @@ def stop_reason(events_path):
     return None
 
 
-def append_event():
-    """Native hooks supply JSON on stdin (Claude) or as the last argument (Codex)."""
-    event = json.loads(sys.argv[2]) if len(sys.argv) > 2 else json.load(sys.stdin)
+def append_event(args=None):
+    """Native hooks supply JSON on stdin (Claude) or as the last argument (Codex).
+
+    `args` is the events path then the optional JSON; None reads sys.argv for the
+    pre-0.30 `-c` hook that old sessions still run.
+    """
+    args = sys.argv[1:] if args is None else args
+    events_path = args[0]
+    event = json.loads(args[1]) if len(args) > 1 else json.load(sys.stdin)
     if not isinstance(event, dict):
         return
     # O_NOFOLLOW rejects a symlink swapped in at this path; append never clobbers existing data.
-    fd = os.open(sys.argv[1], os.O_NOFOLLOW | os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o600)
+    fd = os.open(events_path, os.O_NOFOLLOW | os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o600)
     with os.fdopen(fd, "a", encoding="utf-8") as file:
         fcntl.flock(file, fcntl.LOCK_EX)
         file.write(json.dumps(event, ensure_ascii=False) + "\n")
@@ -73,7 +79,7 @@ def append_event():
     if hook not in DELIVERY_HOOKS or (hook == "Stop" and event.get("stop_hook_active")):
         return
     try:
-        deliver_mail(Path(sys.argv[1]), hook)
+        deliver_mail(Path(events_path), hook)
     except (CaptainError, OSError, ValueError, KeyError, StopIteration):
         return  # a hook that cannot read state must never block or wedge the crew
 

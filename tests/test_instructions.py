@@ -438,6 +438,17 @@ class InstructionTests(SessionCase):
         pi_args = instruction_prompts.native_args("pi", "instructions")
         self.assertNotIn("--settings", pi_args)
 
+    def test_native_hook_runs_the_module_entry_point_not_an_internal_path(self):
+        hook = [sys.executable, "-m", "captain_barbossa", "hook", "/tmp/events"]
+        codex_args = instruction_prompts.native_args("codex", "instructions", events="/tmp/events")
+        notify = next(arg for arg in codex_args if arg.startswith("notify="))
+        self.assertEqual(json.loads(notify.removeprefix("notify=")), hook)
+        claude_args = instruction_prompts.native_args(
+            "claude", "instructions", events="/tmp/events"
+        )
+        settings = json.loads(claude_args[claude_args.index("--settings") + 1])
+        self.assertEqual(settings["hooks"]["Stop"][0]["hooks"][0]["command"], shlex.join(hook))
+
     def test_native_args_for_pi_pass_instructions_and_skip_hooks(self):
         args = instruction_prompts.native_args("pi", "instructions", "opus", events="/tmp/events")
         self.assertEqual(args[:2], ["--append-system-prompt", "instructions"])

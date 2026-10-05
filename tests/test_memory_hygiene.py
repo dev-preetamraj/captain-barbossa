@@ -1,6 +1,5 @@
 """Tests for memory.py hygiene: lock file permissions and temp dir cleanup."""
 
-import io
 import json
 import os
 import stat
@@ -11,7 +10,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from captain_barbossa import events, memory
+from captain_barbossa import cli, memory
 from captain_barbossa.memory import STALE_QUERY_SECONDS, memory_snapshot
 from captain_barbossa.sessions import session
 from captain_barbossa.store import lock
@@ -82,11 +81,7 @@ class TestAppendEventSecureOpen(unittest.TestCase):
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
     def run_append_event(self, argv1, event):
-        with (
-            patch.object(memory.sys, "argv", ["captain", argv1, json.dumps(event)]),
-            patch.object(memory.sys, "stdin", io.StringIO("")),
-        ):
-            events.append_event()
+        cli.main(["hook", argv1, json.dumps(event)])
 
     def test_refuses_a_symlinked_event_log(self):
         target = self.temp_dir / "elsewhere.jsonl"

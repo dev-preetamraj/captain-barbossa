@@ -220,12 +220,7 @@ CLAUDE_NO_ATTRIBUTION = json.dumps({"attribution": {"commit": "", "pr": "", "ses
 
 def native_args(provider, instructions, model=None, events=None):
     hook = (
-        [
-            sys.executable,
-            "-c",
-            "from captain_barbossa.events import append_event; append_event()",
-            str(events),
-        ]
+        [sys.executable, "-m", "captain_barbossa", "hook", str(events)]
         if events is not None
         else None
     )
