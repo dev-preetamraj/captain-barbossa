@@ -196,7 +196,7 @@ New crew use explicit assignments: `wait` reports activity, questions, approval
 prompts, or completion; native idle alone does not mean the assignment is done.
 Notifications repeat until acknowledged with `--ack`; `--json` returns a stable
 envelope with status, delivery ID, crew, assignment ID, and summary.
-`--timeout SECONDS` overrides the 900-second default. It follows native
+`--timeout SECONDS` overrides the 86400-second default. It follows native
 lifecycle events, with pane-tail fallbacks documented in
 [crew-lifecycle.md](https://github.com/dev-preetamraj/captain-barbossa/blob/main/docs/crew-lifecycle.md).
 

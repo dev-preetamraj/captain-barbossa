@@ -126,7 +126,7 @@ too. `wait --ack ID` on the final `done` notification returns one `idle` status
 instead of the next notification. Waiting again once the assignment is done and
 every notification is acknowledged fails: dismiss the crew or hand off. Timeouts
 have no delivery ID and do not imply completion. `--timeout 0` polls once; the
-default is 900 seconds. Neither waiting nor timing out retries a terminal prompt.
+default is 86400 seconds. Neither waiting nor timing out retries a terminal prompt.
 Mail is durable before the pane is touched, so a delivery is never uncertain: it
 is either queued for the crew to read, or `bounced` with its reason.
 
@@ -135,7 +135,7 @@ into the protocol. Recruit new crew to use acknowledged notifications.
 
 The final status and the crew's own report are printed and recorded in memory,
 falling back to the crew's last message or the tail of its pane when it
-reported nothing. A crew still working when the timeout (900s by default)
+reported nothing. A crew still working when the timeout (86400s by default)
 expires records nothing and reports an error; wait again, or read its pane
 directly with `herdr agent read <name>`.
 
