@@ -22,7 +22,7 @@ from .crew import Crew
 from .events import mail_context, receipt_for
 from .layout import HERDR_DIRECTIONS
 from .memory import REPO_RELATIONS, RULEBOOK_FILES, memory
-from .models import PROVIDERS, TIER_NAMES
+from .models import PROVIDERS, TIER_NAMES, models_for, tiers_for
 from .onboarding import bootstrap
 from .prompts import PLACEMENTS
 from .runtime import HERDR_ERRORS, CaptainError, current_pane
@@ -128,6 +128,12 @@ def parser():
     model = commands.add_parser("model", help="switch a running crew to another model")
     model.add_argument("name", help="crew name or ID (case-insensitive)")
     model.add_argument("model", help=f"tier ({'|'.join(TIER_NAMES)}), model name, or alias")
+    models_cmd = commands.add_parser(
+        "models", help="list valid model IDs, aliases, and tier resolutions per agent CLI"
+    )
+    models_cmd.add_argument(
+        "--agent", choices=PROVIDERS, help="show only this provider (shows all when omitted)"
+    )
     focus = commands.add_parser("focus", help="focus an existing crew's pane and tab")
     focus.add_argument("name", help="crew name or ID (case-insensitive)")
     stop = commands.add_parser(
@@ -137,7 +143,9 @@ def parser():
     stop.add_argument("--reason", help="why, recorded in session memory")
     commands.add_parser("session", help="print the current session id")
     commands.add_parser("update", help="upgrade the installed captain-barbossa tool")
-    start = commands.add_parser("init", help="write a commented .captain/settings.toml template")
+    start = commands.add_parser(
+        "init", help="write .captain/settings.toml, or top up an existing one"
+    )
     start.add_argument(
         "--global",
         dest="home",
@@ -272,6 +280,23 @@ def print_inbox(args, pane, project):
     receipt_for(crew.events)
 
 
+def print_models(args):
+    """Valid model IDs, aliases, and tier resolutions, per agent CLI (`pi` is per-install)."""
+    for provider in (args.agent,) if args.agent else PROVIDERS:
+        print(f"{provider}:")
+        try:
+            entries = models_for(provider)
+            tiers = tiers_for(provider)
+        except CaptainError as exc:
+            print(f"  {exc}")
+            continue
+        listed = ", ".join(
+            f"{model} ({', '.join(aliases)})" if aliases else model for model, aliases in entries
+        )
+        print(f"  models: {listed}")
+        print(f"  tiers: {' '.join(f'{name}={tiers[name]}' for name in TIER_NAMES)}")
+
+
 def pump_mail(args, pane, project):
     """Retry held doorbells for every live crew, so captain activity drains mail outside a wait.
 
@@ -319,6 +344,9 @@ def main(argv=None):
             return 0
         if args.command == "memory" and args.memory_command in ("show", "path"):
             memory(args, None, project_root())
+            return 0
+        if args.command == "models":
+            print_models(args)
             return 0
         pane = current_pane()
         project = project_root()

@@ -12,7 +12,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from captain_barbossa import agents, cli, dashboard, protocol, sessions, store
+from captain_barbossa import agents, cli, dashboard, models, protocol, sessions, store
 from captain_barbossa.crew import Crew
 from captain_barbossa.pane import Pane
 from captain_barbossa.runtime import CaptainError
@@ -282,6 +282,33 @@ class CliCommandTests(SessionCase):
             self.assertEqual(
                 cli.parser().parse_args(["memory", "path", "--scope", scope]).scope, scope
             )
+
+    def test_models_command_lists_one_providers_ids_aliases_and_tiers_with_no_pane(self):
+        with (
+            patch.object(cli, "current_pane", side_effect=AssertionError("Herdr called")),
+            contextlib.redirect_stdout(io.StringIO()) as output,
+        ):
+            self.assertEqual(cli.main(["models", "--agent", "claude"]), 0)
+        text = output.getvalue()
+        self.assertIn("claude-sonnet-5-5 (sonnet)", text)
+        self.assertIn(
+            "tiers: cheap=claude-haiku-5-5 mid=claude-sonnet-5-5 strong=claude-opus-5-5", text
+        )
+
+    def test_models_command_with_no_agent_lists_every_provider_and_tolerates_pi_failure(self):
+        with (
+            patch.object(cli, "current_pane", side_effect=AssertionError("Herdr called")),
+            patch.object(
+                models, "pi_models", side_effect=CaptainError("pi --list-models failed: boom")
+            ),
+            contextlib.redirect_stdout(io.StringIO()) as output,
+        ):
+            self.assertEqual(cli.main(["models"]), 0)
+        text = output.getvalue()
+        for header in ("claude:", "codex:", "pi:", "grok:"):
+            self.assertIn(header, text)
+        self.assertIn("pi --list-models failed", text)
+        self.assertIn("gpt-6-astra (astra)", text)
 
     def test_status_read_does_not_create_state_or_call_native_done_completion(self):
         before = {p: p.read_bytes() for p in self.directory.rglob("*") if p.is_file()}

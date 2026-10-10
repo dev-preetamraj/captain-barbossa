@@ -28,7 +28,7 @@ def _stamp(moment):
     return moment.isoformat().replace("+00:00", "Z")
 
 
-def _turn(model="claude-opus-5", call=None, when=None, hour=0, **counts):
+def _turn(model="claude-opus-5-5", call=None, when=None, hour=0, **counts):
     write = counts.get("cache_write", 0)
     message = {
         "model": model,
@@ -51,18 +51,18 @@ def _turn(model="claude-opus-5", call=None, when=None, hour=0, **counts):
     return record
 
 
-# The LiteLLM extract for every id models.MODELS launches, read 2026-09-20. Tests point
+# The LiteLLM extract for every id models.MODELS launches, read 2026-10-10. Tests point
 # prices_file at this so none of them touches the state root or the network.
 PRICES = {
-    "claude-haiku-4-5": {
-        "input_cost_per_token": 1e-06,
-        "output_cost_per_token": 5e-06,
-        "cache_read_input_token_cost": 1e-07,
-        "cache_creation_input_token_cost": 1.25e-06,
-        "cache_creation_input_token_cost_above_1hr": 2e-06,
-        "max_input_tokens": 200000,
+    "claude-haiku-5-5": {
+        "input_cost_per_token": 1e-07,
+        "output_cost_per_token": 5e-07,
+        "cache_read_input_token_cost": 1e-08,
+        "cache_creation_input_token_cost": 1.25e-07,
+        "cache_creation_input_token_cost_above_1hr": 2e-07,
+        "max_input_tokens": 1000000,
     },
-    "claude-sonnet-5": {
+    "claude-sonnet-5-5": {
         "input_cost_per_token": 2e-06,
         "output_cost_per_token": 1e-05,
         "cache_read_input_token_cost": 2e-07,
@@ -70,7 +70,7 @@ PRICES = {
         "cache_creation_input_token_cost_above_1hr": 4e-06,
         "max_input_tokens": 1000000,
     },
-    "claude-opus-5": {
+    "claude-opus-5-5": {
         "input_cost_per_token": 5e-06,
         "output_cost_per_token": 2.5e-05,
         "cache_read_input_token_cost": 5e-07,
@@ -197,7 +197,7 @@ class UsageTests(LimitTestCase):
                 # what Claude Code's own used_percentage counts.
                 "context": 1542,
                 "limit": 1_000_000,
-                "model": "claude-opus-5",
+                "model": "claude-opus-5-5",
                 "rate": None,
             },
         )
@@ -293,7 +293,7 @@ class UsageTests(LimitTestCase):
 
     def test_limit_comes_from_the_table_for_a_known_model(self):
         self.point_at_transcript()
-        _jsonl(self.transcript, [_turn(model="claude-opus-5", input=83_000)])
+        _jsonl(self.transcript, [_turn(model="claude-opus-5-5", input=83_000)])
         self.assertEqual(usage_for_events(self.events)["limit"], 1_000_000)
 
     def test_limit_is_none_for_a_model_the_table_does_not_cover(self):
@@ -309,7 +309,7 @@ class UsageTests(LimitTestCase):
         )
         result = usage_for_events(self.events)
         self.assertEqual(result["context"], 105)
-        self.assertEqual(result["model"], "claude-opus-5")
+        self.assertEqual(result["model"], "claude-opus-5-5")
 
     def test_no_transcript_path_returns_none(self):
         _jsonl(self.events, [{"hook_event_name": "Stop", "last_assistant_message": ""}])
@@ -406,19 +406,20 @@ class ContextLimitTests(LimitTestCase):
                 self.assertIn(model, usage.CONTEXT_WINDOWS)
 
     def test_documented_windows(self):
-        # LiteLLM max_input_tokens, which matches platform.claude.com "Models overview",
-        # Context window row, read 2026-09-20.
-        self.assertEqual(context_limit("claude-opus-5"), 1_000_000)
-        self.assertEqual(context_limit("claude-sonnet-5"), 1_000_000)
+        # LiteLLM max_input_tokens, read 2026-10-10: haiku-5-5 from
+        # https://platform.claude.com/docs/en/models/haiku-5-5/overview, the rest from
+        # https://platform.claude.com/docs/en/about-claude/pricing.
+        self.assertEqual(context_limit("claude-opus-5-5"), 1_000_000)
+        self.assertEqual(context_limit("claude-sonnet-5-5"), 1_000_000)
         self.assertEqual(context_limit("claude-fable-5-1"), 1_000_000)
-        self.assertEqual(context_limit("claude-haiku-4-5"), 200_000)
+        self.assertEqual(context_limit("claude-haiku-5-5"), 1_000_000)
 
     def test_a_live_opus_5_reading_renders_the_percentage_claude_reports(self):
-        # `claude /context` in an opus-5 session prints "229.7k/1m tokens (23%)".
-        self.assertEqual(round(229_700 / context_limit("claude-opus-5") * 100), 23)
+        # `claude /context` in an opus-5.5 session prints "229.7k/1m tokens (23%)".
+        self.assertEqual(round(229_700 / context_limit("claude-opus-5-5") * 100), 23)
 
     def test_dated_id_resolves_through_its_alias(self):
-        self.assertEqual(context_limit("claude-haiku-4-5-20251001"), 200_000)
+        self.assertEqual(context_limit("claude-haiku-5-5-20251001"), 1_000_000)
 
     def test_unknown_model_gets_no_limit(self):
         # gpt-5.6-terra is priced and has max_input_tokens 922000, but that is the API
@@ -432,19 +433,19 @@ class ContextLimitTests(LimitTestCase):
         # a stable fact and must not depend on the network the way COST does.
         self.pin(prices_file=str(self.root / "absent.json"))
         with patch.object(usage.urllib.request, "urlopen", side_effect=AssertionError("fetched")):
-            self.assertEqual(context_limit("claude-opus-5"), 1_000_000)
-            self.assertEqual(context_limit("claude-haiku-4-5-20251001"), 200_000)
+            self.assertEqual(context_limit("claude-opus-5-5"), 1_000_000)
+            self.assertEqual(context_limit("claude-haiku-5-5-20251001"), 1_000_000)
             self.assertIsNone(context_limit("gpt-5.6-terra"))
 
     def test_litellm_wins_over_the_bundled_window_when_the_cache_is_warm(self):
         self.prices.write_text(
-            json.dumps({"claude-opus-5": {"max_input_tokens": 2_000_000}}), encoding="utf-8"
+            json.dumps({"claude-opus-5-5": {"max_input_tokens": 2_000_000}}), encoding="utf-8"
         )
-        self.assertEqual(context_limit("claude-opus-5"), 2_000_000)
+        self.assertEqual(context_limit("claude-opus-5-5"), 2_000_000)
 
     def test_configured_limit_wins_over_the_table(self):
         self.pin(prices_file=str(self.prices), context_limit=500_000)
-        self.assertEqual(context_limit("claude-opus-5"), 500_000)
+        self.assertEqual(context_limit("claude-opus-5-5"), 500_000)
         self.assertEqual(context_limit("some-other-model"), 500_000)
 
     def test_an_unusable_limit_falls_back_to_the_table(self):
@@ -452,7 +453,7 @@ class ContextLimitTests(LimitTestCase):
         for value in (0, "", "225000", "lots", 2.5, True, None):
             with self.subTest(value=value):
                 self.pin(prices_file=str(self.prices), context_limit=value)
-                self.assertEqual(context_limit("claude-opus-5"), 1_000_000)
+                self.assertEqual(context_limit("claude-opus-5-5"), 1_000_000)
 
 
 def _codex_counts(total, cached=0, output=0):
@@ -602,7 +603,7 @@ class PriceSourceTests(unittest.TestCase):
 
     def test_refresh_keeps_only_the_models_we_launch(self):
         published = {
-            "claude-opus-5": {**PRICES["claude-opus-5"], "litellm_provider": "anthropic"},
+            "claude-opus-5-5": {**PRICES["claude-opus-5-5"], "litellm_provider": "anthropic"},
             "some-other-vendor/model": {"input_cost_per_token": 1.0},
         }
         with patch.object(usage.urllib.request, "urlopen") as urlopen:
@@ -611,8 +612,8 @@ class PriceSourceTests(unittest.TestCase):
             ).encode()
             usage._refresh_prices(self.root / "prices.json")
         cached = json.loads((self.root / "prices.json").read_text(encoding="utf-8"))
-        self.assertEqual(list(cached), ["claude-opus-5"])
-        self.assertEqual(cached["claude-opus-5"], PRICES["claude-opus-5"])
+        self.assertEqual(list(cached), ["claude-opus-5-5"])
+        self.assertEqual(cached["claude-opus-5-5"], PRICES["claude-opus-5-5"])
 
     def test_a_failed_refresh_leaves_no_cache_and_raises_nothing(self):
         with patch.object(usage.urllib.request, "urlopen", side_effect=OSError("offline")):
@@ -623,7 +624,7 @@ class PriceSourceTests(unittest.TestCase):
         cache = usage._prices_cache()
         cache.write_text(json.dumps(PRICES), encoding="utf-8")
         with patch.object(usage, "_start_refresh") as refresh:
-            self.assertEqual(usage._prices()["claude-opus-5"]["max_input_tokens"], 1_000_000)
+            self.assertEqual(usage._prices()["claude-opus-5-5"]["max_input_tokens"], 1_000_000)
         refresh.assert_not_called()
 
     def test_a_stale_cache_is_still_used_while_the_refresh_runs_in_a_thread(self):
@@ -631,7 +632,7 @@ class PriceSourceTests(unittest.TestCase):
         cache.write_text(json.dumps(PRICES), encoding="utf-8")
         os.utime(cache, (0, 0))
         with patch.object(usage.threading, "Thread") as thread:
-            self.assertIn("claude-opus-5", usage._prices(cached_only=False))
+            self.assertIn("claude-opus-5-5", usage._prices(cached_only=False))
         thread.assert_called_once()
         self.assertTrue(thread.call_args.kwargs["daemon"])
         thread.return_value.start.assert_called_once()
@@ -644,7 +645,7 @@ class PriceSourceTests(unittest.TestCase):
             patch.object(usage, "_start_refresh", side_effect=AssertionError("network")),
         ):
             self.assertEqual(usage._prices(), {})
-            self.assertEqual(context_limit("claude-opus-5"), 1_000_000)
+            self.assertEqual(context_limit("claude-opus-5-5"), 1_000_000)
         self.assertFalse(absent.exists())
         cache = self.root / "prices.json"
         cache.write_text(json.dumps(PRICES))

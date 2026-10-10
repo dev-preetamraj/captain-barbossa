@@ -11,16 +11,20 @@ from .runtime import CaptainError
 # Cheapest to strongest per agent CLI; aliases are the short names people say.
 MODELS = {
     "claude": (
-        ("claude-haiku-4-5", ("haiku",)),
-        ("claude-sonnet-5", ("sonnet",)),
-        ("claude-opus-5", ("opus",)),
+        ("claude-haiku-5-5", ("haiku",)),
+        ("claude-sonnet-5-5", ("sonnet",)),
+        ("claude-opus-5-5", ("opus",)),
         ("claude-fable-5-1", ("fable",)),
     ),
+    # Three codex generations now share the luna/sol names; the bare alias goes to
+    # the current generation's model only, so it never collides with an older one.
     "codex": (
-        ("gpt-5.6-luna", ("luna",)),
+        ("gpt-5.6-luna", ()),
         ("gpt-5.6-terra", ("terra",)),
-        ("gpt-5.6-sol", ("sol",)),
-        ("gpt-5.5", ()),
+        ("gpt-5.6-sol", ()),
+        ("gpt-6-luna", ("luna",)),
+        ("gpt-6-sol", ()),
+        ("gpt-6.1-sol", ("sol",)),
         ("gpt-6-astra", ("astra",)),
     ),
     # Aliases are the labels Grok shows and echoes when it confirms a switch ("Grok 4.6").
@@ -171,15 +175,17 @@ def resolve_model(provider, text):
         return tiers[wanted]
     if wanted in names:
         return names[wanted]
-    for match in (
-        [name for name in names if name.startswith(wanted)],
-        [name for name in names if wanted in name],
-        get_close_matches(wanted, list(names), n=3, cutoff=0.6),
+    for match, fuzzy in (
+        ([name for name in names if name.startswith(wanted)], False),
+        ([name for name in names if wanted in name], False),
+        (get_close_matches(wanted, list(names), n=3, cutoff=0.6), True),
     ):
         found = list(dict.fromkeys(names[name] for name in match))
         if len(found) == 1:
             return found[0]
-        if len(found) > 1:
+        # A real prefix/substring match naming several models is genuinely ambiguous;
+        # several merely-similar spellings are not a match at all, just a bad guess.
+        if len(found) > 1 and not fuzzy:
             raise CaptainError(
                 f"Model '{text}' is ambiguous for {provider}: {', '.join(found)}. Ask the user which."
             )

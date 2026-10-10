@@ -57,9 +57,9 @@ class SettingsTests(unittest.TestCase):
         shipped = config.defaults()["models"]["claude"]
         self.assertEqual(models.tiers_for("claude")["cheap"], shipped["cheap"])
         self.write(self.home, '[models.claude]\ncheap = "sonnet"\n')
-        self.assertEqual(models.tiers_for("claude")["cheap"], "claude-sonnet-5")
+        self.assertEqual(models.tiers_for("claude")["cheap"], "claude-sonnet-5-5")
         self.write(self.project, '[models.claude]\ncheap = "opus"\n')
-        self.assertEqual(models.tiers_for("claude")["cheap"], "claude-opus-5")
+        self.assertEqual(models.tiers_for("claude")["cheap"], "claude-opus-5-5")
         # The two keys neither file sets still come from the shipped defaults.
         self.assertEqual(
             {tier: models.tiers_for("claude")[tier] for tier in ("mid", "strong")},
@@ -76,7 +76,7 @@ class SettingsTests(unittest.TestCase):
         )
         self.assertEqual(
             models.tiers_for("claude"),
-            {**models.TIERS["claude"], "cheap": "claude-sonnet-5"},
+            {**models.TIERS["claude"], "cheap": "claude-sonnet-5-5"},
         )
         self.assertEqual(models.tiers_for("codex"), models.TIERS["codex"])
 
@@ -103,7 +103,7 @@ class SettingsTests(unittest.TestCase):
             models.tiers_for("claude"),
             {
                 "cheap": "claude-fable-5-1",  # project wins
-                "mid": "claude-opus-5",  # only home sets it
+                "mid": "claude-opus-5-5",  # only home sets it
                 "strong": models.TIERS["claude"]["strong"],  # neither file sets it
             },
         )
@@ -123,13 +123,13 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(
             models.tiers_for("claude"),
             {
-                "cheap": "claude-opus-5",
+                "cheap": "claude-opus-5-5",
                 "mid": "claude-haiku-4-5",
                 "strong": "some-future-model",
             },
         )
         # resolve_model reads tiers_for, so the overrides reach it without recursing.
-        self.assertEqual(models.resolve_model("claude", "cheap"), "claude-opus-5")
+        self.assertEqual(models.resolve_model("claude", "cheap"), "claude-opus-5-5")
         self.assertEqual(models.resolve_model("claude", "strong"), "some-future-model")
 
     def test_malformed_settings_raise_an_error_naming_the_file(self):
@@ -228,7 +228,7 @@ class CaptainModelTests(LaunchTestCase):
             model = "strong"
         """)
         command = self.launch()
-        self.assertEqual(command[-2:], ["--model", "claude-opus-5"])
+        self.assertEqual(command[-2:], ["--model", "claude-opus-5-5"])
         self.write("""
             [captain]
             model = "terra"
@@ -477,14 +477,56 @@ class InitTests(unittest.TestCase):
         for provider, tiers in models.TIERS.items():
             self.assertEqual(models.tiers_for(provider), tiers)
 
-    def test_a_second_init_leaves_the_existing_file_alone(self):
+    def test_a_second_init_on_a_full_template_adds_nothing(self):
         path = self.project / ".captain" / "settings.toml"
         self.run_init()
-        edited = '[captain]\nmodel = "opus"\n'
+        written = path.read_text(encoding="utf-8")
+        self.assertIn("leaving them alone", self.run_init())
+        self.assertEqual(path.read_text(encoding="utf-8"), written)
+
+    def test_init_tops_up_an_old_file_without_altering_a_line_of_it(self):
+        """A file written before a setting existed grows it, commented, at the end only."""
+        path = self.project / ".captain" / "settings.toml"
+        path.parent.mkdir()
+        edited = textwrap.dedent("""\
+            # my notes
+            [captain]
+            model = "opus"
+
+            [dashboard]
+            enabled = true
+        """)
         path.write_text(edited, encoding="utf-8")
-        self.assertIn(str(path), self.run_init())
-        self.assertEqual(path.read_text(encoding="utf-8"), edited)
+        printed = self.run_init()
+        topped = path.read_text(encoding="utf-8")
+        # Byte-identical except for the block that follows it.
+        self.assertTrue(topped.startswith(edited))
+        appended = topped[len(edited) :]
+        self.assertIn("[models.grok]", printed)
+        self.assertIn("# [models.grok]", appended)
+        # Nothing appended is live, so the user's own settings are still the only ones set.
+        self.assertEqual(
+            [line for line in appended.splitlines() if line and not line.startswith("#")], []
+        )
         self.assertEqual(config.text("captain", "model"), "opus")
+        self.assertIs(config.flag("dashboard", "enabled"), True)
+        # The keys the file already had are not offered again, and a third init finds
+        # nothing left to add.
+        offered = config.declared(appended)
+        self.assertEqual(offered["[captain]"], ["agent"])
+        self.assertNotIn("enabled", offered["[dashboard]"])
+        self.assertIn("leaving them alone", self.run_init())
+        self.assertEqual(path.read_text(encoding="utf-8"), topped)
+
+    def test_a_topped_up_file_documents_the_pi_tiers_without_setting_them(self):
+        """pi tiers are per-install, so the stanza must arrive commented, not live."""
+        path = self.project / ".captain" / "settings.toml"
+        path.parent.mkdir()
+        path.write_text("[captain]\n", encoding="utf-8")
+        self.run_init()
+        body = path.read_text(encoding="utf-8")
+        self.assertIn("# [models.pi]", body)
+        self.assertNotIn("pi", tomllib.loads(body).get("models", {}))
 
     def test_global_init_targets_home_and_leaves_the_project_untouched(self):
         self.assertIn(str(self.home), self.run_init("--global"))

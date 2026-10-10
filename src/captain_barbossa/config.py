@@ -3,6 +3,7 @@
 This module must not import models: models reads its tier table from the defaults here.
 """
 
+import re
 import tomllib
 from functools import lru_cache
 from importlib.resources import files
@@ -12,6 +13,10 @@ from .runtime import HERDR_ERRORS, CaptainError
 from .store import project_root
 
 SETTINGS_PATH = Path(".captain") / "settings.toml"
+# Matched against a line with its leading '#' stripped, so a commented key counts as
+# mentioned. Anchored shapes, not a `[` or `=` anywhere, so prose never reads as TOML.
+SECTION = re.compile(r"^\[[\w.-]+\]$")
+KEY = re.compile(r"^([\w-]+)\s*=")
 
 
 def defaults_text():
@@ -163,12 +168,76 @@ def template():
     return "\n".join(lines).rstrip("\n") + "\n"
 
 
+def declared(text):
+    """Every key a settings file mentions, by section, commented or not.
+
+    A commented key counts: the template ships every one commented out, so a top-up that
+    read only live keys would append the whole file again on the next init.
+    """
+    found, section = {}, ""
+    for line in text.splitlines():
+        bare = line.lstrip("#").strip()
+        if SECTION.match(bare):
+            section = bare
+            found.setdefault(section, [])
+        elif (key := KEY.match(bare)) and key[1] not in found.setdefault(section, []):
+            found[section].append(key[1])
+    return found
+
+
+def topup(existing):
+    """The defaults.toml lines existing never mentions, commented out, headers included.
+
+    A header is commented too because the section may already be live in the file, and
+    TOML refuses a table declared twice; it is the user's call to merge an uncommented
+    key into the section above. Each missing key brings its own explanation down with it.
+    """
+    have = declared(existing)
+    block, heading, pending, section = [], [], [], ""
+    for line in defaults_text().splitlines():
+        bare = line.lstrip("#").strip()
+        if SECTION.match(bare):
+            section, heading, pending = bare, [*pending, f"# {bare}"], []
+        elif not (key := KEY.match(bare)):
+            pending.append(f"# {bare}" if bare else "")
+        elif key[1] in have.get(section, ()):
+            pending = []
+        else:
+            block.extend(heading + pending)
+            block.append(f"# {bare}")
+            heading, pending = [], []
+    while block and not block[0]:
+        block.pop(0)
+    return block
+
+
 def init_settings(args):
-    """Create the project (or, with --global, the home) settings file if it is missing."""
+    """Write the project (or, with --global, the home) settings file, or top it up.
+
+    A file written before a setting existed never grows one, so an existing file gets the
+    sections and keys it never mentioned appended, commented at today's default. Nothing
+    already in it is touched: the old bytes stay byte for byte, the block only follows.
+    """
     path = (Path.home() if args.home else project_root()) / SETTINGS_PATH
-    if path.exists():
-        print(f"Settings already exist, leaving them alone: {path}")
+    if not path.exists():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(template(), encoding="utf-8")
+        print(f"Wrote {path}")
         return
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(template(), encoding="utf-8")
-    print(f"Wrote {path}")
+    existing = path.read_text(encoding="utf-8")
+    missing = topup(existing)
+    if not missing:
+        print(f"Settings mention every setting already, leaving them alone: {path}")
+        return
+    added = [
+        "",
+        "# Appended by `captain init`: settings this file had not heard of, at their",
+        "# defaults and commented out, so they still change nothing until you say so.",
+        *missing,
+    ]
+    tail = "" if existing.endswith("\n") else "\n"
+    path.write_text(existing + tail + "\n".join(added) + "\n", encoding="utf-8")
+    summary = "; ".join(
+        f"{section} {', '.join(keys)}" for section, keys in declared("\n".join(missing)).items()
+    )
+    print(f"Added to {path}: {summary}")

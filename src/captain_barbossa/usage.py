@@ -27,13 +27,15 @@ _THREAD_ID = re.compile(r"[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}")
 # Bundled fallback for the Claude context windows, used only when the price cache is
 # cold; LiteLLM's max_input_tokens wins whenever it is warm. A window is a stable fact
 # that moves only when a model ships, so a fetch must never decide whether CTX renders.
-# Source: Anthropic "Models overview",
-# https://platform.claude.com/docs/en/about-claude/models/overview, "Context window" row,
-# read 2026-09-20. Codex needs no entry; its rollout log states model_context_window.
+# Source: LiteLLM's own model_prices_and_context_window.json (max_input_tokens), read
+# 2026-10-10: haiku-5-5 from https://platform.claude.com/docs/en/models/haiku-5-5/overview
+# (1M, up from haiku-4-5's 200K), sonnet-5-5/opus-5-5/fable-5-1 from
+# https://platform.claude.com/docs/en/about-claude/pricing. Codex needs no entry; its
+# rollout log states model_context_window.
 CONTEXT_WINDOWS = {
-    "claude-haiku-4-5": 200_000,
-    "claude-sonnet-5": 1_000_000,
-    "claude-opus-5": 1_000_000,
+    "claude-haiku-5-5": 1_000_000,
+    "claude-sonnet-5-5": 1_000_000,
+    "claude-opus-5-5": 1_000_000,
     "claude-fable-5-1": 1_000_000,
 }
 
