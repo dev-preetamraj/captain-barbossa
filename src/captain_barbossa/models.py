@@ -1,6 +1,7 @@
 """Per-agent model tables and text matching for crew launches."""
 
 import json
+import re
 from collections import Counter
 from difflib import get_close_matches
 from functools import lru_cache
@@ -51,26 +52,23 @@ HOOK_DELIVERED = ("claude",)
 # defaults.toml is the one source for these, so settings can layer over the same values.
 TIERS = {provider: dict(tiers) for provider, tiers in config.defaults()["models"].items()}
 TIER_NAMES = ("cheap", "mid", "strong")
-
-
-def _size(value):
-    """A pi table size cell ("272K", "16.4K") as a number; 0 when unparseable."""
-    scale = {"K": 1e3, "M": 1e6}.get(value[-1:], 1)
-    try:
-        return float(value.rstrip("KM")) * scale
-    except ValueError:
-        return 0.0
+# pi's catalog carries no price or capability signal (a local 3B model advertises the same
+# columns as a frontier one), so its tiers come from families ranked here: the first of these
+# whose whole shipped tier set pi serves, else Gemini, else [models.pi] must name them.
+PI_FAMILIES = ("claude", "codex", "grok")
+# The one family pi serves that MODELS does not rank: lite is cheap, flash mid, pro strong,
+# newest version, stable over preview. Variants (image, live, customtools) never match.
+GEMINI_TIERS = {"flash-lite": "cheap", "flash": "mid", "pro": "strong"}
+GEMINI_ID = re.compile(r"gemini-(\d+(?:\.\d+)*)-(flash-lite|flash|pro)(-preview)?")
 
 
 @lru_cache(maxsize=1)
 def pi_models():
-    """This pi install's authenticated models, weakest to strongest.
+    """This pi install's authenticated models, in pi's own order; pi_tiers() ranks them.
 
     `pi --list-models` prints a fixed-width table (provider, model, context, max-out,
-    thinking, images) and exposes no pricing, so the ranking uses the capability
-    columns it does give: thinking support, then context, then max output, with pi's
-    own ordering breaking ties. IDs are `provider/model`, the exact form pi's --model
-    and /model accept without opening their picker.
+    thinking, images). IDs are `provider/model`, the exact form pi's --model and /model
+    accept without opening their picker.
     """
     try:
         result = runtime.subprocess.run(
@@ -88,8 +86,7 @@ def pi_models():
         fields = line.split()
         if len(fields) < 5 or fields[0] == "provider":
             continue
-        provider, model, context, max_out, thinking = fields[:5]
-        rows.append(((thinking == "yes", _size(context), _size(max_out)), provider, model))
+        rows.append((fields[0], fields[1]))
     if failure or not rows:
         detail = f": {failure.rstrip('.')}" if failure else ""
         raise CaptainError(
@@ -97,13 +94,30 @@ def pi_models():
             "Run `pi --list-models` yourself to check pi is installed and a provider "
             "is authenticated."
         )
-    rows.sort(key=lambda row: row[0])
-    bare = Counter(model for _, _, model in rows)
+    bare = Counter(model for _, model in rows)
     # The short name is an alias only when one provider offers it; otherwise it stays
     # ambiguous so resolve_model asks rather than guessing a provider.
     return tuple(
-        (f"{provider}/{model}", (model,) if bare[model] == 1 else ()) for _, provider, model in rows
+        (f"{provider}/{model}", (model,) if bare[model] == 1 else ()) for provider, model in rows
     )
+
+
+def pi_tiers():
+    """The tiers pi_models() can be ranked into with confidence; {} when it cannot."""
+    served = {}
+    for model_id in model_ids("pi"):
+        served.setdefault(model_id.partition("/")[2], model_id)
+    for family in PI_FAMILIES:
+        if all(model in served for model in TIERS[family].values()):
+            return {tier: served[model] for tier, model in TIERS[family].items()}
+    newest = {}
+    for model, model_id in served.items():
+        match = GEMINI_ID.fullmatch(model)
+        if match:
+            rank = (tuple(map(int, match[1].split("."))), not match[3])
+            tier = GEMINI_TIERS[match[2]]
+            newest[tier] = max(newest.get(tier, (rank, model_id)), (rank, model_id))
+    return {tier: newest[tier][1] for tier in TIER_NAMES} if len(newest) == 3 else {}
 
 
 def models_for(provider):
@@ -117,8 +131,7 @@ def tiers_for(provider):
     than through resolve_model, which calls this and would recurse.
     """
     if provider == "pi":
-        ids = model_ids(provider)
-        tiers = dict(zip(TIER_NAMES, (ids[0], ids[len(ids) // 2], ids[-1])))
+        tiers = pi_tiers()
     else:
         tiers = dict(TIERS[provider])
     names = {name: model for model, aliases in models_for(provider) for name in (model, *aliases)}
@@ -126,6 +139,15 @@ def tiers_for(provider):
         choice = config.text("models", provider, tier)
         if choice:
             tiers[tier] = names.get(normalized(choice), choice)
+    missing = [tier for tier in TIER_NAMES if tier not in tiers]
+    if missing:
+        # A guessed default is worse than an error: a weak model fails every crew turn.
+        raise CaptainError(
+            f"Cannot rank pi's models into tiers: none of the {', '.join(PI_FAMILIES)} or "
+            f"gemini families it knows is fully authenticated. Set {', '.join(missing)} "
+            "under [models.pi] in .captain/settings.toml to IDs from `pi --list-models`, "
+            "or pass --model a full provider/model ID."
+        )
     return tiers
 
 
@@ -162,7 +184,6 @@ def resolve_model(provider, text):
     # here whenever a settings key is left empty.
     wanted = normalized(text or "")
     names = {}
-    tiers = tiers_for(provider)
     for model, aliases in models_for(provider):
         for name in (model, *aliases):
             names[name] = model
@@ -171,8 +192,9 @@ def resolve_model(provider, text):
             f"Provide a tier ({'|'.join(TIER_NAMES)}) or model name. "
             f"{provider} models: {', '.join(model_ids(provider))}."
         )
-    if wanted in tiers:
-        return tiers[wanted]
+    # Only a tier asks for tiers, so a full pi ID works on a catalog that cannot be ranked.
+    if wanted in TIER_NAMES:
+        return tiers_for(provider)[wanted]
     if wanted in names:
         return names[wanted]
     for match, fuzzy in (

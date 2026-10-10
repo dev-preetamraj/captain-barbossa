@@ -309,7 +309,10 @@ class InstructionTests(SessionCase):
                     patch.object(
                         models,
                         "pi_models",
-                        return_value=(("anthropic/claude-opus-5", ()),),
+                        return_value=tuple(
+                            (f"openai-codex/{model}", ())
+                            for model in models.TIERS["codex"].values()
+                        ),
                     ),
                     contextlib.redirect_stdout(io.StringIO()) as output,
                 ):

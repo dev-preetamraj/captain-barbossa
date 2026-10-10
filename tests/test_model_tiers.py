@@ -2,7 +2,7 @@ import subprocess
 import unittest
 from unittest.mock import patch
 
-from captain_barbossa import models, runtime
+from captain_barbossa import config, models, runtime
 from captain_barbossa.runtime import CaptainError
 
 PI_TABLE = """provider      model                context  max-out  thinking  images
@@ -11,6 +11,48 @@ anthropic     claude-sonnet-5      200K     64K      yes       yes
 openai-codex  gpt-5.4-mini         272K     128K     yes       yes
 openai-codex  gpt-6-astra          272K     128K     yes       yes
 bedrock       claude-sonnet-5      200K     64K      yes       yes
+"""
+
+# Verbatim `pi --list-models` from an install where the old capability-column ranking made
+# ollama/llama3.2:3b the cheap tier and gemini-flash-lite-latest the strong one.
+PI_LIVE = """provider      model                                    context  max-out  thinking  images
+google        deep-research-max-preview-04-2026        131.1K   65.5K    yes       yes
+google        deep-research-preview-04-2026            131.1K   65.5K    yes       yes
+google        gemini-2.5-computer-use-preview-10-2025  128K     64K      yes       yes
+google        gemini-2.5-flash                         1.0M     65.5K    yes       yes
+google        gemini-2.5-flash-lite                    1.0M     65.5K    yes       yes
+google        gemini-2.5-pro                           1.0M     65.5K    yes       yes
+google        gemini-3-flash-preview                   1.0M     65.5K    yes       yes
+google        gemini-3.1-flash-lite                    1.0M     65.5K    yes       yes
+google        gemini-3.1-flash-lite-image              65.5K    4.1K     yes       yes
+google        gemini-3.1-flash-lite-preview            1.0M     65.5K    yes       yes
+google        gemini-3.1-flash-live-preview            131.1K   65.5K    yes       yes
+google        gemini-3.1-pro-preview                   1.0M     65.5K    yes       yes
+google        gemini-3.1-pro-preview-customtools       1.0M     65.5K    yes       yes
+google        gemini-3.5-flash                         1.0M     65.5K    yes       yes
+google        gemini-3.5-flash-lite                    1.0M     65.5K    yes       yes
+google        gemini-3.6-flash                         1.0M     65.5K    yes       yes
+google        gemini-3.7-flash                         1.0M     65.5K    yes       yes
+google        gemini-3.8-flash                         1.0M     65.5K    yes       yes
+google        gemini-flash-latest                      1.0M     65.5K    yes       yes
+google        gemini-flash-lite-latest                 1.0M     65.5K    yes       yes
+google        gemma-4-26b-a4b-it                       262.1K   32.8K    yes       yes
+google        gemma-4-31b-it                           262.1K   32.8K    yes       yes
+ollama        llama3.2:3b                              128K     16.4K    no        no
+ollama        qwen3:4b                                 128K     16.4K    no        no
+openai-codex  gpt-5.3-codex-spark                      128K     128K     yes       no
+openai-codex  gpt-5.5                                  272K     128K     yes       yes
+openai-codex  gpt-5.6-luna                             272K     128K     yes       yes
+openai-codex  gpt-5.6-sol                              272K     128K     yes       yes
+openai-codex  gpt-5.6-terra                            272K     128K     yes       yes
+openai-codex  gpt-6-astra                              272K     128K     yes       yes
+openai-codex  gpt-6-luna                               272K     128K     yes       yes
+openai-codex  gpt-6-sol                                272K     128K     yes       yes
+openai-codex  gpt-6.1-sol                              272K     128K     yes       yes
+xai           grok-4.3                                 1M       30K      yes       yes
+xai           grok-4.5                                 500K     500K     yes       yes
+xai           grok-4.6                                 500K     500K     yes       yes
+xai           grok-4.7                                 500K     500K     yes       yes
 """
 
 
@@ -39,25 +81,86 @@ class PiModelDiscoveryTests(unittest.TestCase):
                 [
                     "ollama/llama3.2:3b",
                     "anthropic/claude-sonnet-5",
-                    "bedrock/claude-sonnet-5",
                     "openai-codex/gpt-5.4-mini",
                     "openai-codex/gpt-6-astra",
+                    "bedrock/claude-sonnet-5",
                 ],
             )
             self.assertEqual(call.call_args.args[0], ["/usr/bin/pi", "--list-models"])
 
-    def test_tiers_rank_on_the_capability_columns_pi_reports(self):
-        which, run = fake_pi()
+    def test_a_local_3b_model_never_becomes_a_pi_tier(self):
+        which, run = fake_pi(PI_LIVE)
         with which, run:
             self.assertEqual(
                 models.tiers_for("pi"),
                 {
-                    "cheap": "ollama/llama3.2:3b",
-                    "mid": "bedrock/claude-sonnet-5",
+                    "cheap": "openai-codex/gpt-5.6-luna",
+                    "mid": "openai-codex/gpt-5.6-sol",
                     "strong": "openai-codex/gpt-6-astra",
                 },
             )
-            self.assertEqual(models.resolve_model("pi", " Strong "), "openai-codex/gpt-6-astra")
+            self.assertEqual(models.resolve_model("pi", "cheap"), "openai-codex/gpt-5.6-luna")
+
+    def test_pi_tiers_follow_the_first_family_models_ranks(self):
+        claude = "anthropic  claude-haiku-5-5  200K  64K  yes  yes\n" + "\n".join(
+            f"anthropic  {model}  200K  64K  yes  yes"
+            for model in ("claude-sonnet-5-5", "claude-opus-5-5")
+        )
+        which, run = fake_pi(PI_LIVE + claude + "\n")
+        with which, run:
+            self.assertEqual(
+                models.tiers_for("pi"),
+                {tier: f"anthropic/{model}" for tier, model in models.TIERS["claude"].items()},
+            )
+
+    def test_a_gemini_only_catalog_ranks_lite_flash_pro_newest_first(self):
+        google = "".join(
+            line + "\n" for line in PI_LIVE.splitlines() if line.startswith(("provider", "google"))
+        )
+        which, run = fake_pi(google)
+        with which, run:
+            self.assertEqual(
+                models.tiers_for("pi"),
+                {
+                    "cheap": "google/gemini-3.5-flash-lite",
+                    "mid": "google/gemini-3.8-flash",
+                    "strong": "google/gemini-3.1-pro-preview",
+                },
+            )
+
+    def test_an_unrankable_catalog_fails_pointing_at_settings(self):
+        local = "".join(
+            line + "\n" for line in PI_LIVE.splitlines() if line.startswith(("provider", "ollama"))
+        )
+        which, run = fake_pi(local)
+        with which, run:
+            with self.assertRaisesRegex(CaptainError, r"cheap, mid, strong under \[models\.pi\]"):
+                models.resolve_model("pi", "cheap")
+            self.assertEqual(models.resolve_model("pi", "ollama/qwen3:4b"), "ollama/qwen3:4b")
+            with patch.object(
+                config,
+                "text",
+                side_effect=lambda *names: "qwen3:4b" if names[-1] == "cheap" else None,
+            ):
+                with self.assertRaisesRegex(CaptainError, r"Set mid, strong under"):
+                    models.tiers_for("pi")
+
+    def test_models_pi_settings_override_the_computed_tiers(self):
+        which, run = fake_pi(PI_LIVE)
+        pinned = {"cheap": "gemini-3.8-flash", "strong": "xai/grok-4.7"}
+        with (
+            which,
+            run,
+            patch.object(config, "text", side_effect=lambda *names: pinned.get(names[-1])),
+        ):
+            self.assertEqual(
+                models.tiers_for("pi"),
+                {
+                    "cheap": "google/gemini-3.8-flash",
+                    "mid": "openai-codex/gpt-5.6-sol",
+                    "strong": "xai/grok-4.7",
+                },
+            )
 
     def test_unique_short_names_resolve_but_shared_ones_stay_ambiguous(self):
         which, run = fake_pi()
@@ -74,8 +177,8 @@ class PiModelDiscoveryTests(unittest.TestCase):
     def test_the_catalog_is_read_once_per_process(self):
         which, run = fake_pi()
         with which, run as call:
-            models.resolve_model("pi", "cheap")
-            models.resolve_model("pi", "strong")
+            models.resolve_model("pi", "astra")
+            models.resolve_model("pi", "gpt-5.4-mini")
             models.model_ids("pi")
             self.assertEqual(call.call_count, 1)
 
