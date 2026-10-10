@@ -67,7 +67,19 @@ Aliases are the labels Grok's own CLI shows and echoes back on a switch.
 ## pi
 
 Not shipped: pi is provider-agnostic, so its catalog is whatever this install has
-authenticated, read from `pi --list-models` and ranked by thinking support,
-context window, then max output. Run `captain models --agent pi` for the live
-list. A `[models.pi]` table in settings overrides its tiers the same way, using
-pi's `provider/model` IDs.
+authenticated, read from `pi --list-models`. That table gives no price, and its
+capability columns cannot tell a local 3B model from a frontier one, so tiers are
+not ranked from it. Instead, in order:
+
+1. The first of `claude`, `codex`, `grok` whose whole shipped tier set pi serves
+   (under any pi provider) gives the tiers, e.g. `openai-codex/gpt-5.6-luna`,
+   `openai-codex/gpt-5.6-sol`, `openai-codex/gpt-6-astra`.
+2. Otherwise Gemini: the newest `flash-lite` is `cheap`, the newest `flash` is
+   `mid`, the newest `pro` is `strong`, preferring a stable release over a preview
+   of the same version. Variants such as `-image`, `-live` and `-latest` never match.
+3. Otherwise asking for a tier fails and names the `[models.pi]` keys to set. A
+   full `provider/model` ID still works with `--model`.
+
+A local model (`ollama/...`) therefore never becomes a tier unless you pin it. Run
+`captain models --agent pi` for the live list. A `[models.pi]` table in settings
+overrides any tier, using pi's `provider/model` IDs or a short name pi offers once.

@@ -645,7 +645,7 @@ class CrewModelTests(SessionCase):
         for provider, name, text, model, flag in (
             ("claude", "jack", "Opus", "claude-opus-5-5", "--model"),
             ("codex", "gibbs", "5.6 terra", "gpt-5.6-terra", "-m"),
-            ("pi", "will", "cheap", "ollama/llama3.2:3b", "--model"),
+            ("pi", "will", "cheap", "openai-codex/gpt-5.6-luna", "--model"),
         ):
             with self.subTest(provider=provider):
                 args = self.args(
@@ -686,7 +686,10 @@ class CrewModelTests(SessionCase):
                     patch.object(
                         models,
                         "pi_models",
-                        return_value=(("ollama/llama3.2:3b", ()),),
+                        return_value=tuple(
+                            (f"openai-codex/{model}", ())
+                            for model in models.TIERS["codex"].values()
+                        ),
                     ),
                     contextlib.redirect_stdout(io.StringIO()) as output,
                     contextlib.redirect_stderr(io.StringIO()) as errors,
