@@ -35,9 +35,9 @@ prices_file = ""
 # The shape of a tab, read left to right as columns: each number is how many panes
 # that column holds, stacked top to bottom. Crew fill it breadth first, a new column
 # before anything stacks, and the declared slot is created however small it lands.
-# captain_tab column 1 row 1 is the captain, so [1, 2] means the captain full height
-# with two crew stacked beside it; the dashboard nests under the captain, not in a
-# slot. A depth above 1 there stacks crew under the captain instead.
+# captain_tab column 1 is the captain alone and must be 1, so [1, 2] means the captain
+# full height with two crew stacked beside it; the dashboard nests under the captain,
+# not in a slot. The captain's pane is never split in two.
 captain_tab = [1, 2]
 # Every other tab. [2, 2] is two columns of two, so four crew to a tab.
 crew_tab = [2, 2]

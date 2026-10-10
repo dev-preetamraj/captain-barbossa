@@ -5,6 +5,7 @@ import os
 import re
 import shlex
 import sys
+import time
 from itertools import cycle
 from uuid import uuid4
 
@@ -27,6 +28,10 @@ from .update_check import check_for_update
 # enough to decide what to do next, and the event file keeps the rest.
 HOOK_LIMIT = 500
 
+# How often the exit watcher checks whether the captain's CLI is still its parent. A pane
+# that outlives the captain by a second costs nothing.
+EXIT_POLL_SECONDS = 1.0
+
 # One word each: the roster name is the crew ID, the display name, and the agent suffix.
 CREW_NAMES = (
     "jack",
@@ -42,6 +47,61 @@ CREW_NAMES = (
     "davy",
     "sao",
 )
+
+
+def close_session_panes(session_id, project):
+    """Close this session's live crew panes and its dashboard pane, and nothing else.
+
+    Every pane id comes from this session's own records, so a pane the session never
+    opened is never touched. One already gone is not news, and Herdr closes a tab whose
+    last pane goes with it.
+    """
+    current = read_session(project, session_id)
+    with crew_meta(current.directory) as meta:
+        closing = [
+            (crew.record["pane"], crew.record)
+            for crew in Crew.members(current._replace(meta=meta))
+            if not crew.is_dismissed and crew.record.get("pane")
+        ]
+        board = dashboard_pane(current)
+        if board:
+            closing.append((board, None))
+        for pane_id, record in closing:
+            try:
+                runtime.herdr("pane", "close", pane_id)
+            except HERDR_ERRORS:
+                pass
+            if record is not None:
+                # Recorded as the pane goes: a resumed --session must not find ghost crew
+                # holding slots no pane backs any more.
+                record["status"] = "dismissed"
+
+
+def close_panes_on_exit(session_id, project):
+    """Fork a watcher that closes this session's panes once the captain's CLI exits.
+
+    exec replaces this process, so no code of captain's own runs at exit. The watcher
+    polls getppid() instead: it is reparented the moment that process dies, whichever way
+    it dies. An inherited pipe would be simpler but is held open by every descendant the
+    CLI forks, so one backgrounded job meant no teardown at all. setsid keeps the watcher
+    out of the pane's process group, so closing the captain's pane cannot take the
+    teardown with it, and /dev/null keeps it off a terminal that is going away.
+    """
+    captain_pid = os.getpid()
+    if os.fork():
+        return
+    try:
+        os.setsid()
+        null = os.open(os.devnull, os.O_RDWR)
+        for stream in range(3):
+            os.dup2(null, stream)
+        while os.getppid() == captain_pid:
+            time.sleep(EXIT_POLL_SECONDS)
+        close_session_panes(session_id, project)
+    finally:
+        # _exit even on an error: there is no terminal left to report one to, and the
+        # watcher must not fall back into the captain's own code path.
+        os._exit(0)
 
 
 def launch(args, pane, project):
@@ -101,6 +161,10 @@ def launch(args, pane, project):
             "dashboard": board,
         },
     )
+    try:
+        close_panes_on_exit(meta["id"], project)
+    except OSError as exc:  # teardown must never cost the captain its launch
+        print(f"captain: no exit teardown: {exc}", file=sys.stderr)
     os.execvpe(binary, command, env)
 
 
@@ -417,6 +481,13 @@ def dismiss_crew(args, pane, project):
         crew = Crew.resolve(current, args.name)
         if crew.is_dismissed:
             raise CaptainError(f"{crew.display_name} was already dismissed.")
+        # Read while the crew still holds its slot; applied once Herdr has closed the pane.
+        placement = Placement(pane, current, dashboard_pane(current))
+        try:
+            evening = placement.even_after_close(crew.record)
+        except HERDR_ERRORS as exc:  # geometry is cosmetic; never lose the dismissal over it
+            print(f"captain: tab not re-evened: {exc}", file=sys.stderr)
+            evening = []
         if crew.record.get("incarnation_id"):
             with protocol.checkpoint(current.directory) as state:
                 assignment = protocol.active(state, crew)
@@ -437,6 +508,13 @@ def dismiss_crew(args, pane, project):
         except CaptainError as exc:
             if not re.search(r"\bpane_not_found\b", str(exc)):
                 raise CaptainError(f"Could not dismiss {crew.display_name}: {exc}") from exc
+            # The pane was already gone, so Herdr rebalanced the tab without this close.
+            evening = []
+        try:
+            for source, towards, amount in evening:
+                placement.resize(source, towards, amount)
+        except HERDR_ERRORS as exc:  # geometry is cosmetic; never lose the dismissal over it
+            print(f"captain: tab not re-evened: {exc}", file=sys.stderr)
         if undelivered:
             # Close the reservation with its reason; a working assignment would linger forever.
             with protocol.checkpoint(current.directory) as state:

@@ -128,19 +128,6 @@ class FillOrderTests(GridHarness):
         # Seven crew fill [2, 2, 3]; the eighth starts another tab.
         self.assertEqual(placed[7][1], None)
 
-    def test_a_depth_above_one_stacks_crew_under_the_captain(self):
-        placed = self.walk(3, captain_tab=[2, 2])
-        self.assertEqual(
-            [(slot, pane, direction) for slot, pane, direction, _ in placed],
-            [
-                # Row 1 opens column 2 first; row 2 then walks left to right, so the
-                # slot under the captain comes before the second row of column 2.
-                ((2, 1), "captain", "vertical"),
-                ((1, 2), "captain", "horizontal"),
-                ((2, 2), "crew1", "horizontal"),
-            ],
-        )
-
     def test_a_new_splits_own_ratio_is_always_half_whatever_the_declared_depth(self):
         """A pane's own split is always even against the one new pane joining it,
 
@@ -181,21 +168,34 @@ class FillOrderTests(GridHarness):
             ],
         )
 
-    def test_a_shape_too_deep_for_herdrs_resizable_range_is_reported_not_approximated(self):
+    def test_a_shape_too_deep_for_herdrs_resizable_range_is_noted_not_refused(self):
+        """The declared slot is created however small it lands. A chain past Herdr's
+        resizable range costs the even ratios, never the crew.
+        """
         with pinned(captain_tab=[1], crew_tab=[11]):
             for _ in range(10):
                 self.recruit()
-            with self.assertRaisesRegex(CaptainError, "cannot size 11 panes evenly"):
-                self.recruit()
+            self.herdr_calls.clear()
+            with contextlib.redirect_stderr(io.StringIO()) as problem:
+                spot, _, _ = self.recruit()
+        self.assertEqual((spot.column, spot.row), (1, 11))
+        self.assertEqual(self.herdr_calls, [])
+        self.assertIn("tab not evened", problem.getvalue())
+        self.assertIn("cannot size 11 panes evenly", problem.getvalue())
 
-    def test_herdr_declining_a_resize_is_reported_not_approximated(self):
+    def test_herdr_declining_a_resize_is_noted_not_refused(self):
+        """Herdr refusing one resize leaves the tab uneven whichever way it is handled,
+        since the resizes before it have already landed; only the crew is still at stake.
+        """
         with pinned(captain_tab=[1, 2, 2]):
             self.recruit()
             with (
                 patch.object(runtime, "herdr", return_value={"resize": {"changed": False}}),
-                self.assertRaisesRegex(CaptainError, "would not resize"),
+                contextlib.redirect_stderr(io.StringIO()) as problem,
             ):
-                self.recruit()
+                spot, _, _ = self.recruit()
+        self.assertEqual((spot.column, spot.row), (3, 1))
+        self.assertIn("would not resize", problem.getvalue())
 
 
 class DeterminismTests(GridHarness):
@@ -435,6 +435,22 @@ class ShapeValidationTests(unittest.TestCase):
                 self.assertIn("[placement] captain_tab must be a list", message)
                 self.assertIn(str(self.settings), message)
                 self.assertIn(fault, message)
+
+    def test_a_captain_column_holding_more_than_the_captain_is_refused(self):
+        """The captain's pane is never split in two, so depth above 1 in column 1 is a
+        config error, not a layout to approximate.
+        """
+        self.write("captain_tab = [2, 2]")
+        with self.assertRaises(CaptainError) as raised:
+            layout.shape("captain_tab")
+        message = str(raised.exception)
+        self.assertIn("captain_tab column 1 must be 1", message)
+        self.assertIn("[2, 2]", message)
+        self.assertIn("like [1, 2]", message)
+        self.assertIn(str(self.settings), message)
+        # Only the captain's own tab holds the captain.
+        self.write("crew_tab = [2, 2]")
+        self.assertEqual(layout.shape("crew_tab"), (2, 2))
 
     def test_a_malformed_shape_is_never_quietly_replaced_by_the_default(self):
         self.write("crew_tab = [0]")
