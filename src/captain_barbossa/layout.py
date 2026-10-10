@@ -29,6 +29,16 @@ def _fault(columns):
     return ""
 
 
+def _where(key):
+    """The "from <file>" an error adds when a user file set the shape, else "".
+
+    Kept off the happy path: config.source re-reads both settings files, and only a
+    message about to be raised needs to know where the value came from.
+    """
+    source = config.source("placement", key)
+    return f" from {source}" if source else ""
+
+
 def shape(key):
     """The declared [placement] shape for key, as a tuple of column depths.
 
@@ -38,11 +48,15 @@ def shape(key):
     columns = config.lookup("placement", key)
     fault = _fault(columns)
     if fault:
-        source = config.source("placement", key)
-        where = f" from {source}" if source else ""
         raise CaptainError(
             f"[placement] {key} must be a list of whole numbers, each 1 or more, "
-            f"like [1, 2, 2]. Got {columns!r}{where}: {fault}."
+            f"like [1, 2, 2]. Got {columns!r}{_where(key)}: {fault}."
+        )
+    if key == "captain_tab" and columns[0] > 1:
+        raise CaptainError(
+            f"[placement] captain_tab column 1 must be 1: it holds the captain alone, and "
+            f"the captain's pane is never split in two. Got {columns!r}{_where(key)}. "
+            f"Put those crew in a later column, like {[1, *columns[1:]]!r}."
         )
     return tuple(columns)
 
@@ -95,7 +109,7 @@ def split_for(slot, panes, captain_pane):
     return left[0], "vertical"
 
 
-def re_even(existing_panes):
+def re_even(existing_panes, after=0):
     """(pane, shrink amount) for every earlier pane in a chain, so one more pane
     joining brings the whole chain back even.
 
@@ -104,8 +118,12 @@ def re_even(existing_panes):
     of `count` panes to 1 / count only ever needs pane p's own ratio moved from what
     it was worth against the old count to what it is worth against the new one,
     however many later panes there already were - the earlier resizes do not need to
-    know about each other, and the chain's last existing pane needs no call of its
-    own: splitting it at 0.5 to create the new pane already leaves it at its target.
+    know about each other.
+
+    `after` counts the chain's panes beyond the one being split. Those keep their share:
+    the new pane takes half of the split pane's own slot, so the chain only grows for the
+    panes before it, and the split pane itself moves by widen_split instead - 0 when it is
+    the chain's last, which is the whole of re_even's job when a tab fills in order.
     """
     if not existing_panes:
         return []
@@ -117,7 +135,19 @@ def re_even(existing_panes):
             f"{smallest_share:.3f}, is outside its resizable range "
             f"{RESIZE_RATIO_BOUNDS[0]:.2f}-{RESIZE_RATIO_BOUNDS[1]:.2f}."
         )
+    before = len(existing_panes) - after - 1
     return [
         (pane, 1 / (count - position) - 1 / (count - position + 1))
-        for position, pane in enumerate(existing_panes[:-1], start=1)
+        for position, pane in enumerate(existing_panes[:before], start=1)
     ]
+
+
+def widen_split(after):
+    """How much the pane being split has to grow first, so it and the new pane beside it
+    both land on an even share.
+
+    The pair shares the split pane's own slot, so that slot needs two of the `after + 2`
+    even shares from there on instead of one. 0 when the split pane is the chain's last:
+    halving it already leaves both on target.
+    """
+    return 2 / (after + 2) - 1 / (after + 1)

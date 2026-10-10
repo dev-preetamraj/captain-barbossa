@@ -5,9 +5,17 @@ from dataclasses import dataclass
 
 from . import runtime
 from .crew import Crew
-from .layout import HERDR_DIRECTIONS, SHRINK_DIRECTIONS, next_slot, re_even, shape, split_for
+from .layout import (
+    HERDR_DIRECTIONS,
+    SHRINK_DIRECTIONS,
+    next_slot,
+    re_even,
+    shape,
+    split_for,
+    widen_split,
+)
 from .prompts import LABELS, choose
-from .runtime import CaptainError
+from .runtime import HERDR_ERRORS, CaptainError
 
 
 @dataclass(frozen=True)
@@ -101,17 +109,87 @@ class Placement:
         captain_tab = self.pane["tab_id"]
         return [captain_tab, *(tab for tab in self.crew_tabs if tab != captain_tab)]
 
-    def chain(self, direction, column, row, panes, captain):
-        """The panes already in the column or row a new one is about to join, oldest
-        first, so re_even knows what to bring back to an even share.
+    def column_stack(self, panes, column, captain):
+        """One column's panes top to bottom. The captain is its own column's top pane,
+        and on its own tab column 1 holds nothing else (section 1 of docs/placement.md).
         """
-        captain_pane = self.pane["pane_id"]
-        if direction == "vertical":
-            return [captain_pane if c == 1 and captain else panes[c][0] for c in range(1, column)]
-        first_row = 2 if column == 1 and captain else 1
+        stack = list(panes.get(column) or ())
+        return [self.pane["pane_id"], *stack] if column == 1 and captain else stack
+
+    def column_tops(self, panes, captain):
+        """The top pane of every open column, left to right: the row a column joins."""
         return [
-            captain_pane if column == 1 and captain and r == 1 else panes[column][r - first_row]
-            for r in range(1, row)
+            self.column_stack(panes, column, captain)[0]
+            for column in sorted({*panes, *((1,) if captain else ())})
+        ]
+
+    def resize(self, source, towards, amount):
+        """Move one split. Herdr reports a refusal in the result, not by failing, so a
+        ratio it would not reach has to be raised here; what it costs is the caller's.
+        """
+        result = runtime.herdr(
+            "pane",
+            "resize",
+            "--pane",
+            source,
+            "--direction",
+            towards,
+            "--amount",
+            f"{amount:.4f}",
+        )
+        if not result.get("resize", {}).get("changed"):
+            raise CaptainError(f"Herdr would not resize pane {source} to even out this tab.")
+
+    def even_around(self, panes, column, captain, split_pane, direction):
+        """Resize what a new pane is about to squeeze, so its chain lands even.
+
+        The chain is the whole column or row the new pane joins, not only the panes
+        before the split: a dismissal can empty a column mid-row, and the crew that
+        reopens it is inserted before panes already there.
+        """
+        if direction == "vertical":
+            chain = self.column_tops(panes, captain)
+        else:
+            chain = self.column_stack(panes, column, captain)
+        if split_pane not in chain:
+            # Only a roster written before captain_tab column 1 was pinned to the captain
+            # alone: its crew under the captain is what split_for hands back, and it is in
+            # no chain. Leave such a tab's ratios alone rather than raise on the recruit.
+            return
+        after = len(chain) - chain.index(split_pane) - 1
+        for source, amount in re_even(chain, after):
+            self.resize(source, SHRINK_DIRECTIONS[direction], amount)
+        widen = widen_split(after)
+        if widen:
+            self.resize(split_pane, HERDR_DIRECTIONS[direction], widen)
+
+    def even_after_close(self, record):
+        """(pane, Herdr direction, grow amount) that brings the chain a dismissed crew's
+        pane leaves back to even shares. Read before the pane closes, applied after.
+
+        The chain is the crew's column when the column outlives it, and the row of column
+        tops when its pane was the column's last, since Herdr then hands the whole column
+        to a sibling. A crew placed by hand holds no slot, so nothing in the grid moved.
+        """
+        tab, column = record.get("tab"), record.get("column")
+        if not record.get("pane") or not tab or not isinstance(column, int):
+            return []
+        captain = tab == self.pane["tab_id"]
+        _, panes = self.occupancy(tab)
+        stack = self.column_stack(panes, column, captain)
+        if len(stack) > 1:
+            chain, direction = stack, "horizontal"
+        else:
+            chain, direction = self.column_tops(panes, captain), "vertical"
+        if record["pane"] not in chain:
+            return []
+        survivors = [pane for pane in chain if pane != record["pane"]]
+        position = chain.index(record["pane"]) + 1
+        # A dismissal is a recruit run backwards: Herdr hands the gap to the panes after
+        # the closed one, so only the ones before it are left short.
+        return [
+            (pane, HERDR_DIRECTIONS[direction], amount)
+            for pane, amount in re_even(survivors)[: position - 1]
         ]
 
     def grid_spot(self, direction=None):
@@ -134,30 +212,20 @@ class Placement:
             pane, implied = split_for(slot, panes, self.pane["pane_id"])
             chosen = direction or implied
             column, row = slot
-            # A split only resizes the two panes it touches, never a sibling already on
-            # screen, so the new pane's own split, at half, is the only ratio arithmetic
-            # can set correctly up front; everything earlier in the chain is brought
-            # back even below. A forced direction that does not match the implied one
-            # leaves Herdr to halve the pane as it would have anyway, and is never
+            # A split only resizes the two panes it touches, so the new pane's own split,
+            # at half, is the only ratio arithmetic can set up front; the rest of the
+            # chain is evened below. A forced direction that does not match the implied
+            # one leaves Herdr to halve the pane as it would have anyway, and is never
             # re-evened: the arithmetic only describes the split the shape asked for.
             ratio = 0.5 if chosen == implied else None
             if chosen == implied:
-                for source, amount in re_even(self.chain(chosen, column, row, panes, captain)):
-                    result = runtime.herdr(
-                        "pane",
-                        "resize",
-                        "--pane",
-                        source,
-                        "--direction",
-                        SHRINK_DIRECTIONS[chosen],
-                        "--amount",
-                        f"{amount:.4f}",
-                    )
-                    if not result.get("resize", {}).get("changed"):
-                        raise CaptainError(
-                            f"Herdr would not resize pane {source} to even out this tab; "
-                            "report the layout rather than leaving it uneven."
-                        )
+                try:
+                    self.even_around(panes, column, captain, pane, chosen)
+                except HERDR_ERRORS as exc:
+                    # The declared slot is created however small it lands, and a chain
+                    # past Herdr's resizable range is the shape's own doing. Refusing here
+                    # would cost the crew and still leave the earlier resizes applied.
+                    print(f"captain: tab not evened: {exc}", file=sys.stderr)
             return Spot(
                 chosen,
                 pane,

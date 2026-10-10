@@ -28,33 +28,37 @@ column holds, stacked top to bottom.
 +-----------+-----------+-----------+
 ```
 
-- `captain_tab` shapes the tab the captain launched in. Column 1 row 1 is the captain.
+- `captain_tab` shapes the tab the captain launched in. Column 1 is the captain alone,
+  so its first number must be 1.
 - `crew_tab` shapes every other tab.
 - Crew a tab holds is the sum of its columns, minus the captain: `[1,2,2]` holds four,
   `[2,2,3]` holds seven.
 - The dashboard is not a slot. It nests under the captain inside column 1 and is
   invisible to the grid.
 
-### Capacity above 1 in column 1
+### Column 1 of the captain's tab is the captain alone
 
-`captain_tab = [2, 2, 2]` means the captain plus one crew stacked beneath it, then two
-columns of two: five crew in total.
+`captain_tab[0]` must be 1. The captain's pane is never split in two, so a shape like
+`[2, 2, 2]` is refused by name (section 9), not clamped.
 
-The dashboard stays the bottom row of column 1, so a crew arriving in column 1 splits
-the lowest *slot* pane in that column downward (the captain when it is the first) and
-the dashboard is then re-nested below it. Re-nesting is not free: Herdr cannot move a
-pane inside its own tab (section 8), so each column 1 insert costs the same scratch
-tab round trip and visible flicker the dashboard already pays on a crew split.
+The reason is Herdr's: **it splits a pane, never a layout node.** `herdr pane split`
+takes `--pane <ID>` with `--direction right|down` and has no whole-row form, and
+`pane move --split right --target-pane <ID>` is pane-targeted the same way. While
+column 1 is only the captain, the captain's pane *is* the row, so opening column 2 by
+splitting it gives a full height column. Put one crew under the captain and no pane
+spans the row any more: the next column opens beside part of column 1 instead of beside
+all of it, and that crew still spans the full tab width beneath it. The declared shape
+becomes unreachable rather than merely tight.
 
-`captain_tab = [1, ...]` avoids all of that and is the recommended default. A capacity
-above 1 there is supported because the model should not have a special case, not
-because it is a good idea.
+The dashboard is the one other pane in column 1, and it is not a slot: it nests inside
+the captain's own share, so it costs the captain height and nothing else height or
+position. That is why it stays while a stacked crew does not.
 
 ## 2. Schema
 
 | Key | Type | Default | Means |
 | --- | --- | --- | --- |
-| `captain_tab` | list of ints >= 1 | `[1, 2]` | Shape of the tab the captain is in. |
+| `captain_tab` | list of ints >= 1, first 1 | `[1, 2]` | The captain's own tab. |
 | `crew_tab` | list of ints >= 1 | `[2, 2]` | Shape of every other tab. |
 
 The defaults reproduce the behaviour Captain shipped before geometric placement: two
@@ -110,20 +114,52 @@ removing a pane does not reorder the survivors.
 ### Ratios, so a declared shape looks declared
 
 Herdr halves a pane unless `--ratio` says otherwise, and ratio is the share the split
-pane keeps. Halving makes `[1, 2, 2]` come out 1/2, 1/4, 1/4 rather than in thirds.
-Since the shape is known up front, the even ratio is arithmetic:
+pane keeps. Halving alone makes `[1, 2, 2]` come out 1/2, 1/4, 1/4 rather than in
+thirds, so the new pane's own split is only part of the job: a split resizes the two
+panes it touches and never a sibling already on screen, so the rest of the chain has to
+be resized by hand before it.
 
-- Opening column `c` of `n`: `ratio = 1 / (n - c + 2)`.
-- Opening row `r` of a column holding `k`: `ratio = 1 / (k - r + 2)`.
+A ratio belongs to its own split node: a pane's ratio is its share of *itself and
+everything after it* in the chain it sits in, never of the whole tab. Bringing a chain
+of `count` panes to `1 / count` therefore only moves each pane's own ratio from what it
+was worth against the old count to what it is worth against the new one, however many
+later panes there already were. The earlier resizes never need to know about each other,
+which is what keeps this to three steps and no measuring:
 
-For `[1, 2, 2]`: column 2 opens at `1/3`, column 3 at `1/2`, giving three equal
-columns; each row 2 opens at `1/2`. The arithmetic is exact only for a tab filled in
-order from empty. After dismissals and refills the panes land wherever the surviving
-splits leave them, which the absolute grid already accepts.
+1. **Each pane before the split** shrinks by `1 / (count - p) - 1 / (count - p + 1)`,
+   for its position `p` from the chain's top or left (`layout.re_even`).
+2. **The pane being split** grows by `2 / (after + 2) - 1 / (after + 1)`, where `after`
+   is how many of the chain's panes sit beyond it (`layout.widen_split`). The pair
+   shares that pane's own slot, so the slot needs two even shares instead of one. It is
+   0 when the split pane is the chain's last, which is the fill-in-order case.
+3. **The new pane** is created at `--ratio 0.5`, halving the slot step 2 just sized.
 
-A direction forced by `--direction` drops the ratio, because the arithmetic only
-describes the split the shape asked for. Herdr then halves the pane as it would have
-anyway.
+The chain is the whole column for a down split, and the row of every open column's top
+pane for a right split. It is read from the roster, so a tab that filled, emptied and
+refilled is evened as it actually stands: a crew reopening a column a dismissal emptied
+lands in the middle of the row, and step 2 is what makes that come out even.
+
+A resize names a pane but moves that pane's own trailing edge. The dashboard never
+appears in a chain: it is nested inside the captain's slot, so the captain's own right
+edge is still the column boundary, and column 1 has no second slot for it to sit above.
+
+For `[1, 2, 2]` filling in order: column 2 opens with no resize at all, since the
+captain and the new pane are already halves; column 3 opens by shrinking the captain
+1/6, giving three equal columns; each row 2 opens with no resize either.
+
+**Herdr clamps a split ratio to 0.1-0.9.** A chain of 11 or more panes has no reachable
+even share, and a resize Herdr declines cannot be retried. Neither costs the crew: the
+declared slot is still created, as section 1 says it always is, and the tab is left
+uneven with the reason on stderr.
+
+```text
+captain: tab not evened: Herdr cannot size 11 panes evenly in one tab: the smallest
+share, 0.091, is outside its resizable range 0.10-0.90.
+```
+
+A direction forced by `--direction` drops the ratio and the evening both, because the
+arithmetic only describes the split the shape asked for. Herdr then halves the pane as
+it would have anyway.
 
 ## 5. Bookkeeping, from the roster
 
@@ -169,6 +205,44 @@ Worked, on `captain_tab = [1, 2, 2]` holding crew 1 to 4:
 Nothing is renumbered and no crew record is rewritten when another is dismissed. Every
 placement recomputes from counts, so there is no bookkeeping to drift.
 
+#### Evening out after a dismissal
+
+Herdr hands a closed pane's space to the panes *after* it in its chain, which land
+exactly on their new share; only the panes before it are left short. A dismissal is
+therefore a recruit run backwards (`placement.even_after_close`): the plan is read while
+the crew still holds its slot, applied once Herdr has closed the pane, and grows each
+pane before it by the step `re_even` would have shrunk it by.
+
+The chain is the crew's own column when the column outlives it, and the row of column
+tops when its pane was the column's last, since Herdr then hands the whole column to a
+sibling. A crew placed by hand holds no slot, so nothing in the grid moved and nothing
+is resized.
+
+Geometry is cosmetic and the dismissal is not: a plan that cannot be computed, or cannot
+be applied, is noted on stderr and the crew is dismissed anyway. A pane Herdr reports as
+`pane_not_found` skips the evening entirely, because Herdr rebalanced the tab when that
+pane went.
+
+### What the captain's exit frees
+
+The captain's own pane is the user's terminal, so it stays. What the session opened does
+not: its live crew panes and its dashboard pane close when the captain's native CLI
+exits, whichever way it exits, and each crew is recorded `dismissed` as its pane goes,
+so resuming with `--session` finds no crew holding a slot no pane backs any more.
+
+`captain` execs the native CLI over itself, so there is no exit hook to hang this on. It
+forks a watcher first (`agents.close_panes_on_exit`), which polls `getppid()` once a
+second and runs the teardown once it has been reparented away from the CLI. Polling
+rather than waiting on an inherited pipe is deliberate: a pipe is held open by every
+descendant the CLI forks, so one backgrounded job would mean no teardown at all. The
+watcher takes its own session (`setsid`), so closing the captain's pane cannot take the
+teardown with it, and it only ever closes pane ids this session's own records name. A
+pane already gone is not news, and Herdr closes a tab whose last pane goes with it.
+
+It is best effort at both ends: a watcher that cannot be forked is reported and the
+captain launches regardless, and a Herdr call that fails during teardown does not stop
+the remaining panes from closing.
+
 ### Editing the shape mid-session
 
 The new shape applies to the next placement. Crew already placed keep their panes. A
@@ -207,13 +281,14 @@ would otherwise corrupt every count after it.
 ## 8. What Herdr cannot do, and what it costs here
 
 - **`pane move` inside one tab silently does nothing.** Re-nesting the dashboard
-  therefore goes out to a scratch tab and back, one visible flicker. This is the only
-  reason `captain_tab` column 1 capacity above 1 is expensive, and the reason no part
-  of this design tries to rearrange panes that already exist.
-- **Splits are binary and one way.** `pane split` takes `right` or `down`, and the new
-  pane always takes the far half. There is no insert before and no three way split, so
-  a shape is only reachable as a sequence of splits, which is exactly why fill order is
-  fixed rather than chosen.
+  therefore goes out to a scratch tab and back, one visible flicker. It is also the
+  reason no part of this design tries to rearrange panes that already exist.
+- **Splits are binary, one way, and pane-scoped.** `pane split` takes `right` or `down`,
+  and the new pane always takes the far half of the *pane* named, never of its row or
+  column. There is no insert before, no three way split, and no whole-row split, so a
+  shape is only reachable as a sequence of splits. That is why fill order is fixed
+  rather than chosen, and why column 1 of the captain's tab holds the captain alone
+  (section 1).
 - **A closed pane is found by failing.** If a recorded pane has gone, the split call
   fails and the recruit reports it, as today. The grid does not pre-check.
 
@@ -223,7 +298,8 @@ guard that exists today becomes unnecessary rather than merely unused.
 
 ## 9. Validation
 
-Both keys must be a list of one or more whole numbers, each 1 or more.
+Both keys must be a list of one or more whole numbers, each 1 or more, and
+`captain_tab`'s first number must be 1: column 1 holds the captain alone.
 
 A malformed array **fails the command** rather than falling back to the default. This
 is a deliberate exception to the settings rule that a wrong-typed value is ignored: a
@@ -240,5 +316,12 @@ captain: [placement] crew_tab must be a list of whole numbers, each 1 or more,
 like [2, 2]. Got "wide" from /Users/me/.captain/settings.toml.
 ```
 
-`config.lookup("placement", key)` returns the configured value; placement then checks
-that it is a non-empty list of positive integers before using it.
+```text
+captain: [placement] captain_tab column 1 must be 1: it holds the captain alone, and
+the captain's pane is never split in two. Got [2, 2] from
+/Users/me/.captain/settings.toml. Put those crew in a later column, like [1, 2].
+```
+
+`config.lookup("placement", key)` returns the configured value; `layout.shape` then
+checks that it is a non-empty list of positive integers, and that `captain_tab` leaves
+column 1 to the captain, before using it.
