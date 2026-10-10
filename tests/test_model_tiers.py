@@ -107,7 +107,7 @@ class ModelTierTests(unittest.TestCase):
                     self.assertEqual(models.resolve_model(provider, tier), model)
 
     def test_tiers_are_case_and_spacing_insensitive(self):
-        self.assertEqual(models.resolve_model("claude", " Strong "), "claude-opus-5")
+        self.assertEqual(models.resolve_model("claude", " Strong "), "claude-opus-5-5")
         self.assertEqual(models.resolve_model("codex", "CHEAP"), "gpt-5.6-luna")
 
     def test_tiers_are_ordered_cheapest_to_strongest_per_provider(self):
@@ -118,10 +118,10 @@ class ModelTierTests(unittest.TestCase):
                 self.assertEqual(picked, sorted(picked))
 
     def test_free_text_matching_still_resolves_names_aliases_and_typos(self):
-        self.assertEqual(models.resolve_model("claude", "opus"), "claude-opus-5")
-        self.assertEqual(models.resolve_model("claude", "claude-haiku-4-5"), "claude-haiku-4-5")
+        self.assertEqual(models.resolve_model("claude", "opus"), "claude-opus-5-5")
+        self.assertEqual(models.resolve_model("claude", "claude-haiku-5-5"), "claude-haiku-5-5")
         self.assertEqual(models.resolve_model("codex", "astra"), "gpt-6-astra")
-        self.assertEqual(models.resolve_model("codex", "gpt 5.5"), "gpt-5.5")
+        self.assertEqual(models.resolve_model("codex", "gpt 6.1 sol"), "gpt-6.1-sol")
 
     def test_unknown_text_lists_the_tiers_and_the_models(self):
         with self.assertRaises(CaptainError) as error:
@@ -142,31 +142,31 @@ class ModelTierTests(unittest.TestCase):
 
     def test_model_names_returns_the_id_with_its_aliases(self):
         self.assertEqual(
-            models.model_names("claude", "claude-sonnet-5"), ("claude-sonnet-5", "sonnet")
+            models.model_names("claude", "claude-sonnet-5-5"), ("claude-sonnet-5-5", "sonnet")
         )
-        self.assertEqual(models.model_names("codex", "gpt-5.5"), ("gpt-5.5",))
+        self.assertEqual(models.model_names("codex", "gpt-6-sol"), ("gpt-6-sol",))
 
     def test_a_claude_id_labels_the_version_its_picker_lists_not_just_the_family(self):
         """A picker row is only the model asked for when the version matches: "opus"
         alone also names an "Opus 4.7" row, and that row once took the keypress."""
         labels = [models.claude_label(model) for model in models.model_ids("claude")]
-        self.assertEqual(labels, ["haiku 4.5", "sonnet 5", "opus 5", "fable 5.1"])
-        self.assertFalse("opus 4.7".startswith(models.claude_label("claude-opus-5")))
-        self.assertTrue("opus 5.5".startswith(models.claude_label("claude-opus-5")))
+        self.assertEqual(labels, ["haiku 5.5", "sonnet 5.5", "opus 5.5", "fable 5.1"])
+        self.assertFalse("opus 4.7".startswith(models.claude_label("claude-opus-5-5")))
+        self.assertTrue("opus 5.5.1".startswith(models.claude_label("claude-opus-5-5")))
 
 
 class ModelTextTests(unittest.TestCase):
     def test_text_matches_exact_names_then_prefixes_substrings_and_close_spellings(self):
         for provider, text, expected in (
-            ("claude", "claude-opus-5", "claude-opus-5"),
-            ("claude", "opus", "claude-opus-5"),
-            ("claude", "Claude Sonnet 5", "claude-sonnet-5"),
-            ("claude", "haiku_4_5", "claude-haiku-4-5"),
+            ("claude", "claude-opus-5-5", "claude-opus-5-5"),
+            ("claude", "opus", "claude-opus-5-5"),
+            ("claude", "Claude Sonnet 5 5", "claude-sonnet-5-5"),
+            ("claude", "haiku_5_5", "claude-haiku-5-5"),
             ("claude", "fable 5.1", "claude-fable-5-1"),
-            ("claude", "sonet", "claude-sonnet-5"),
-            ("codex", "gpt-5.5", "gpt-5.5"),
+            ("claude", "sonet", "claude-sonnet-5-5"),
+            ("codex", "gpt-6-sol", "gpt-6-sol"),
             ("codex", "astra", "gpt-6-astra"),
-            ("codex", "gpt-6", "gpt-6-astra"),
+            ("codex", "gpt-6.1", "gpt-6.1-sol"),
             ("codex", ".6-sol", "gpt-5.6-sol"),
             ("codex", "terra", "gpt-5.6-terra"),
         ):
@@ -184,6 +184,14 @@ class ModelTextTests(unittest.TestCase):
                     models.resolve_model(provider, "nonexistent-model-name")
                 for model in models.model_ids(provider):
                     self.assertIn(model, str(error.exception))
+
+    def test_a_near_miss_matching_several_models_is_unknown_not_ambiguous(self):
+        """Three codex generations now share the "sol" name, so a typo close to all three
+        must read as no real match, not as a choice between genuine candidates."""
+        with self.assertRaisesRegex(CaptainError, "No codex model matches 'gpt-6-sel'") as error:
+            models.resolve_model("codex", "gpt-6-sel")
+        self.assertNotIn("ambiguous", str(error.exception))
+        self.assertIn("gpt-6-sol", str(error.exception))
 
     def test_native_flags_follow_the_model_table(self):
         self.assertEqual(

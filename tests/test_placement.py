@@ -789,7 +789,7 @@ class PaneSplitTests(SessionCase):
         self.assertEqual(result["placement"], "pane")
         self.assertEqual(result["split_pane"], "w1:p1")
         self.assertEqual(result["direction"], "vertical")
-        self.assertEqual(result["model"], "claude-sonnet-5")
+        self.assertEqual(result["model"], "claude-sonnet-5-5")
 
     def test_auto_placement_takes_a_slot_in_the_shape_and_records_it(self):
         """The shape decides, so no pane is measured and no layout is fetched."""

@@ -19,7 +19,6 @@ Select Model and Effort
   2. gpt-5.6-sol            Reliable agentic workhorse for everyday tasks.
   3. gpt-5.6-terra          Balanced agentic coding model for everyday work.
   4. gpt-5.6-luna           Fast and affordable agentic coding.
-  5. gpt-5.5                Proven previous generation.
 
 Press enter to confirm or esc to go back
 """
@@ -47,6 +46,7 @@ CLAUDE_MODELS = (
     ("Fable 5", "Most capable for your hardest and longest-running tasks"),
     ("Opus 4.8", "Best for everyday, complex tasks"),
     ("Opus 4.7", "Best for everyday, complex tasks"),
+    ("Haiku 5.5", "Fastest for quick answers"),
 )
 
 
@@ -172,42 +172,49 @@ class SwitchModelTests(SessionCase):
     def test_claude_switch_moves_focus_onto_the_row_it_was_asked_for(self):
         """Inline `/model <id>` retiers the crew but also saves the user's global default."""
         agent_name = self.crew("claude")
-        # Sonnet 5 is row 6 and the picker opens on row 7, so the one move is upwards.
+        # Sonnet 5.5 is row 4 and the picker opens on row 7, so three moves upwards.
         herdr = self.switch(
-            self.reader(self.claude_screens([6], "⎿  Set model to Sonnet 5 for this session only")),
+            self.reader(
+                self.claude_screens([6, 5, 4], "⎿  Set model to Sonnet 5.5 for this session only")
+            ),
             "mid",
         )
         calls = [call.args for call in herdr.call_args_list]
         self.assertIn(("agent", "prompt", agent_name, "/model"), calls)
-        self.assertEqual([call[3:] for call in calls if call[1] == "send-keys"], [("up",), ("s",)])
-        self.assertFalse([c for c in calls if any("claude-sonnet-5" in str(arg) for arg in c)])
-        self.assertIn("Jack switched to claude-sonnet-5.", self.output.getvalue())
+        self.assertEqual(
+            [call[3:] for call in calls if call[1] == "send-keys"],
+            [("up",), ("up",), ("up",), ("s",)],
+        )
+        self.assertFalse([c for c in calls if any("claude-sonnet-5-5" in str(arg) for arg in c)])
+        self.assertIn("Jack switched to claude-sonnet-5-5.", self.output.getvalue())
         record = store.read_json(self.directory / "session.json")["crew"]["jack"]
-        self.assertEqual(record["model"], "claude-sonnet-5")
+        self.assertEqual(record["model"], "claude-sonnet-5-5")
 
     def test_focus_is_moved_one_key_at_a_time_and_only_towards_the_row(self):
         self.crew("claude")
-        # Haiku 4.5 is row 5: two rows up, read back one keypress at a time.
+        # Haiku 5.5 is row 11: four rows down, read back one keypress at a time.
         herdr = self.switch(
             self.reader(
-                self.claude_screens([6, 5], "Set model to Haiku 4.5 for this session only")
+                self.claude_screens([8, 9, 10, 11], "Set model to Haiku 5.5 for this session only")
             ),
             "cheap",
         )
         keys = [call.args[3:] for call in herdr.call_args_list if call.args[1] == "send-keys"]
-        self.assertEqual(keys, [("up",), ("up",), ("s",)])
-        self.assertIn("Jack switched to claude-haiku-4-5.", self.output.getvalue())
+        self.assertEqual(keys, [("down",), ("down",), ("down",), ("down",), ("s",)])
+        self.assertIn("Jack switched to claude-haiku-5-5.", self.output.getvalue())
 
-    def test_the_row_in_use_needs_no_move_and_its_own_mark_is_not_its_label(self):
-        """Opus 5 is row 7, marked in use and focused; Opus 5.5 on row 2 is another model."""
+    def test_a_claude_switch_moves_past_the_row_in_use_without_mistaking_its_mark(self):
+        """Opus 5.5 is row 2; the row in use (row 7, marked) is a different, older model."""
         self.crew("claude")
         herdr = self.switch(
-            self.reader(self.claude_screens([], "Set model to Opus 5 for this session only")),
+            self.reader(
+                self.claude_screens([6, 5, 4, 3, 2], "Set model to Opus 5.5 for this session only")
+            ),
             "strong",
         )
         keys = [call.args[3:] for call in herdr.call_args_list if call.args[1] == "send-keys"]
-        self.assertEqual(keys, [("s",)])
-        self.assertIn("Jack switched to claude-opus-5.", self.output.getvalue())
+        self.assertEqual(keys, [("up",)] * 5 + [("s",)])
+        self.assertIn("Jack switched to claude-opus-5-5.", self.output.getvalue())
 
     def picker_api(self, before, after, unfocused_reads=0):
         """A herdr stand-in for one /model pick: `before` is the picker's pane until `s`,
@@ -248,10 +255,10 @@ class SwitchModelTests(SessionCase):
 
     def test_focus_wandering_onto_another_row_presses_nothing(self):
         self.crew("claude")
-        # Fable 5, the row one below the one in use, is never the row mid asked for.
-        # Focus keeps moving but never onto row 6, so the step cap ends it.
-        wandering = [claude_picker(row) for row in (8, 9, 10, 1, 2, 3, 4, 5, 7) * 4]
-        keys = self.refuses(["", *wandering], "mid", "never focused a 'sonnet 5' row")
+        # Sonnet 5, the old version of the same family, is never the row mid asked for.
+        # Focus keeps moving but never onto row 4, so the step cap ends it.
+        wandering = [claude_picker(row) for row in (1, 2, 3, 5, 6, 7, 8, 9, 10, 11) * 3]
+        keys = self.refuses(["", *wandering], "mid", "never focused a 'sonnet 5.5' row")
         self.assertNotIn(("s",), keys)
 
     def test_a_picker_with_no_focused_row_presses_nothing(self):
@@ -261,42 +268,46 @@ class SwitchModelTests(SessionCase):
 
     def test_a_picker_without_the_session_only_key_switches_nothing(self):
         self.crew("claude")
-        kept = claude_picker(6, footer="Enter to set as default · Esc to cancel")
-        keys = self.refuses(["", claude_picker(CLAUDE_IN_USE), kept], "mid", "no session-only")
-        self.assertEqual(keys, [("up",)])
+        kept = claude_picker(4, footer="Enter to set as default · Esc to cancel")
+        keys = self.refuses(
+            ["", claude_picker(CLAUDE_IN_USE), claude_picker(6), claude_picker(5), kept],
+            "mid",
+            "no session-only",
+        )
+        self.assertEqual(keys, [("up",), ("up",), ("up",)])
 
     def test_the_confirm_modal_naming_the_asked_model_is_answered_with_enter(self):
         self.crew("claude")
         herdr = self.switch(
             self.reader(
                 self.claude_screens(
-                    [6],
-                    "Set model to Sonnet 5 for this session only",
-                    modal=claude_modal("Sonnet 5"),
+                    [6, 5, 4],
+                    "Set model to Sonnet 5.5 for this session only",
+                    modal=claude_modal("Sonnet 5.5"),
                 )
             ),
             "mid",
         )
         keys = [call.args[3:] for call in herdr.call_args_list if call.args[1] == "send-keys"]
-        self.assertEqual(keys, [("up",), ("s",), ("enter",)])
-        self.assertIn("Jack switched to claude-sonnet-5.", self.output.getvalue())
+        self.assertEqual(keys, [("up",), ("up",), ("up",), ("s",), ("enter",)])
+        self.assertIn("Jack switched to claude-sonnet-5-5.", self.output.getvalue())
         record = store.read_json(self.directory / "session.json")["crew"]["jack"]
-        self.assertEqual(record["model"], "claude-sonnet-5")
+        self.assertEqual(record["model"], "claude-sonnet-5-5")
 
     def test_a_confirm_modal_for_another_model_is_never_answered(self):
         """The modal opens on whatever model the picker reached, and it is not the one asked."""
         self.crew("claude")
         keys = self.refuses(
-            self.claude_screens([6], modal=claude_modal("Fable 5")),
+            self.claude_screens([6, 5, 4], modal=claude_modal("Fable 5")),
             "mid",
-            "asks to switch to Fable 5, not 'sonnet 5'",
+            "asks to switch to Fable 5, not 'sonnet 5.5'",
         )
         self.assertNotIn(("enter",), keys)
 
     def test_a_confirm_modal_whose_yes_is_not_focused_is_never_answered(self):
         self.crew("claude")
         keys = self.refuses(
-            self.claude_screens([6], modal=claude_modal("Sonnet 5", yes_focused=False)),
+            self.claude_screens([6, 5, 4], modal=claude_modal("Sonnet 5.5", yes_focused=False)),
             "mid",
             "Yes option unfocused",
         )
@@ -306,28 +317,42 @@ class SwitchModelTests(SessionCase):
         """`s` can apply the switch with no confirm: its own line is then the proof."""
         self.crew("claude")
         herdr = self.switch(
-            self.reader(self.claude_screens([6], "⎿  Set model to Sonnet 5 for this session only")),
+            self.reader(
+                self.claude_screens([6, 5, 4], "⎿  Set model to Sonnet 5.5 for this session only")
+            ),
             "mid",
         )
         keys = [call.args[3:] for call in herdr.call_args_list if call.args[1] == "send-keys"]
-        self.assertEqual(keys, [("up",), ("s",)])
-        self.assertIn("Jack switched to claude-sonnet-5.", self.output.getvalue())
+        self.assertEqual(keys, [("up",), ("up",), ("up",), ("s",)])
+        self.assertIn("Jack switched to claude-sonnet-5-5.", self.output.getvalue())
 
     def test_a_proven_switch_records_the_model_for_the_crew(self):
         self.crew("claude")
         self.switch(
-            self.reader(self.claude_screens([6], "⎿  Set model to Sonnet 5 for this session only")),
+            self.reader(
+                self.claude_screens([6, 5, 4], "⎿  Set model to Sonnet 5.5 for this session only")
+            ),
             "mid",
         )
         record = store.read_json(self.directory / "session.json")["crew"]["jack"]
-        self.assertEqual(record["model"], "claude-sonnet-5")
+        self.assertEqual(record["model"], "claude-sonnet-5-5")
 
     def test_a_picker_still_painting_its_focus_is_waited_for(self):
         """The live race: the picker had its focus one paint late, not missing for good."""
         self.crew("claude")
+        path = [CLAUDE_IN_USE, 6, 5, 4, 3, 2]
+        seen = {"count": 0}
+
+        def before(focused):
+            if not focused:
+                return claude_picker(None)
+            row = path[min(seen["count"], len(path) - 1)]
+            seen["count"] += 1
+            return claude_picker(row)
+
         api, state = self.picker_api(
-            lambda focused: claude_picker(CLAUDE_IN_USE if focused else None),
-            "⎿  Set model to Opus 5 for this session only",
+            before,
+            "⎿  Set model to Opus 5.5 for this session only",
             unfocused_reads=2,
         )
         with patch.object(runtime, "herdr", side_effect=api):
@@ -335,58 +360,64 @@ class SwitchModelTests(SessionCase):
                 ["--session", self.meta["id"], "model", "Jack", "strong"]
             )
             agents.switch_model(args, self.pane, self.project)
-        self.assertEqual(state["pressed"], [("s",)])
-        self.assertIn("Jack switched to claude-opus-5.", self.output.getvalue())
+        self.assertEqual(state["pressed"], [("up",)] * 5 + [("s",)])
+        self.assertIn("Jack switched to claude-opus-5-5.", self.output.getvalue())
         record = store.read_json(self.directory / "session.json")["crew"]["jack"]
-        self.assertEqual(record["model"], "claude-opus-5")
+        self.assertEqual(record["model"], "claude-opus-5-5")
 
     def test_a_session_only_line_from_an_earlier_switch_never_confirms_this_one(self):
         """The picker has scrolled out of the tail, and the old line is all that remains."""
         self.crew("claude")
         stale = "⎿  Set model to Opus 5 for this session only"
-        api, state = self.picker_api(
-            lambda _: "\n".join([stale, claude_picker(CLAUDE_IN_USE)]),
-            stale,
+        reopened = "\n".join([stale, claude_picker(2)])
+        keys = self.refuses(
+            [
+                "",
+                claude_picker(CLAUDE_IN_USE),
+                claude_picker(6),
+                claude_picker(5),
+                claude_picker(4),
+                claude_picker(3),
+                reopened,
+            ],
+            "strong",
+            "did not confirm",
         )
-        with patch.object(runtime, "herdr", side_effect=api):
-            args = cli.parser().parse_args(
-                ["--session", self.meta["id"], "model", "Jack", "strong"]
-            )
-            with self.assertRaisesRegex(CaptainError, "did not confirm"):
-                agents.switch_model(args, self.pane, self.project)
-        self.assertEqual(state["pressed"], [("s",)])
-        record = store.read_json(self.directory / "session.json")["crew"]["jack"]
-        self.assertEqual(record["model"], "claude-haiku-4-5")
+        self.assertEqual(keys, [("up",)] * 5 + [("s",)])
 
     def test_a_confirmation_above_the_open_picker_is_an_earlier_switch(self):
         """A session-only line left in the tail by an earlier switch proves nothing now."""
         self.crew("claude")
-        stale = "⎿  Set model to Sonnet 5 for this session only\n" + claude_picker(6)
+        stale = "⎿  Set model to Sonnet 5.5 for this session only\n" + claude_picker(4)
         keys = self.refuses(
-            ["", claude_picker(CLAUDE_IN_USE), claude_picker(6), stale], "mid", "did not confirm"
+            ["", claude_picker(CLAUDE_IN_USE), claude_picker(6), claude_picker(5), stale],
+            "mid",
+            "did not confirm",
         )
-        self.assertEqual(keys, [("up",), ("s",)])
+        self.assertEqual(keys, [("up",), ("up",), ("up",), ("s",)])
 
     def test_a_confirmation_saving_the_default_after_the_modal_is_refused(self):
         """The confirm step can persist the default: a line saying so is never a switch."""
         self.crew("claude")
-        saved = "⎿  Set model to Sonnet 5 and saved as your default for new sessions"
+        saved = "⎿  Set model to Sonnet 5.5 and saved as your default for new sessions"
         keys = self.refuses(
-            self.claude_screens([6], saved, modal=claude_modal("Sonnet 5")),
+            self.claude_screens([6, 5, 4], saved, modal=claude_modal("Sonnet 5.5")),
             "mid",
             "did not confirm",
         )
-        self.assertEqual(keys, [("up",), ("s",), ("enter",)])
+        self.assertEqual(keys, [("up",), ("up",), ("up",), ("s",), ("enter",)])
 
     def test_a_claude_switch_saved_as_the_users_default_is_not_accepted(self):
         self.crew("claude")
-        saved = "⎿  Set model to Sonnet 5 and saved as your default for new sessions"
-        self.refuses(self.claude_screens([6], saved), "mid", "did not confirm")
+        saved = "⎿  Set model to Sonnet 5.5 and saved as your default for new sessions"
+        self.refuses(self.claude_screens([6, 5, 4], saved), "mid", "did not confirm")
 
     def test_a_switch_is_recorded_in_session_memory(self):
         self.crew("claude")
         self.switch(
-            self.reader(self.claude_screens([6], "Set model to Sonnet 5 for this session only")),
+            self.reader(
+                self.claude_screens([6, 5, 4], "Set model to Sonnet 5.5 for this session only")
+            ),
             "mid",
         )
         graph = store.read_json(self.directory / "graph.json")
@@ -395,7 +426,7 @@ class SwitchModelTests(SessionCase):
             (labels[link["source"]], link["relation"], labels[link["target"]])
             for link in graph["links"]
         ]
-        self.assertIn(("Jack", "model", "claude-sonnet-5"), recorded)
+        self.assertIn(("Jack", "model", "claude-sonnet-5-5"), recorded)
 
     def test_codex_switch_picks_the_numbered_row_and_keeps_the_default_effort(self):
         agent_name = self.crew("codex", "gpt-6-astra")
@@ -421,16 +452,13 @@ class SwitchModelTests(SessionCase):
     def test_a_confirmation_naming_another_model_is_not_accepted(self):
         self.crew("claude")
         wrong = "Set model to Haiku 4.5 for this session only"
-        self.refuses(self.claude_screens([6], wrong), "mid", "did not confirm")
+        self.refuses(self.claude_screens([6, 5, 4], wrong), "mid", "did not confirm")
 
     def test_codex_reports_a_model_its_picker_does_not_offer(self):
         self.crew("codex", "gpt-6-astra")
-        # A screen from a Codex build whose picker dropped a row we still list.
-        stale_picker = "\n".join(
-            line for line in CODEX_PICKER.splitlines() if "gpt-5.5" not in line
-        )
+        # This build's picker predates a model we still list.
         with self.assertRaises(CaptainError) as error:
-            self.switch(self.reader(["", stale_picker]), "gpt-5.5")
+            self.switch(self.reader(["", CODEX_PICKER]), "gpt-6.1-sol")
         self.assertIn("/model picker", str(error.exception))
 
     def pi_catalog(self):
@@ -528,7 +556,9 @@ class SwitchModelTests(SessionCase):
                         draft,
                         claude_picker(CLAUDE_IN_USE),
                         claude_picker(6),
-                        "Set model to Sonnet 5 for this session only",
+                        claude_picker(5),
+                        claude_picker(4),
+                        "Set model to Sonnet 5.5 for this session only",
                     ]
                 )
                 with patch.object(runtime, "herdr", side_effect=api) as calls:
@@ -541,7 +571,9 @@ class SwitchModelTests(SessionCase):
                         with self.assertRaisesRegex(CaptainError, "delivery is unknown"):
                             agents.switch_model(args, self.pane, self.project)
                 keys = [c.args[3:] for c in calls.call_args_list if c.args[1] == "send-keys"]
-                self.assertEqual(keys, [("enter",), ("up",), ("s",)] if succeeds else [])
+                self.assertEqual(
+                    keys, [("enter",), ("up",), ("up",), ("up",), ("s",)] if succeeds else []
+                )
                 self.assertTrue(all(c.args[2] == agent for c in calls.call_args_list[1:]))
 
 
@@ -559,12 +591,12 @@ class ClaudePickerReadingTests(unittest.TestCase):
         self.assertEqual(rows[1], (2, "opus 5.5", False))
         # The in-use mark is not part of the label, and the scroll arrow is not focus.
         self.assertEqual([row for row in rows if row[2]], [(CLAUDE_IN_USE, "opus 5", True)])
-        self.assertEqual(rows[-1], (10, "opus 4.7", False))
+        self.assertEqual(rows[-1], (11, "haiku 5.5", False))
         self.assertIsNone(panes.claude_picker_focused(panes.claude_picker_rows(self.lines(None))))
 
     def test_the_steps_allowed_count_the_rows_held_out_of_view(self):
-        self.assertEqual(panes.claude_picker_steps(self.lines()), 2 * (10 + 2))
-        self.assertEqual(panes.claude_picker_steps(self.lines(hidden=0)), 2 * 10)
+        self.assertEqual(panes.claude_picker_steps(self.lines()), 2 * (11 + 2))
+        self.assertEqual(panes.claude_picker_steps(self.lines(hidden=0)), 2 * 11)
 
     def test_the_move_goes_towards_the_wanted_row_and_down_for_one_out_of_view(self):
         rows = panes.claude_picker_rows(self.lines())
@@ -611,7 +643,7 @@ class CrewModelTests(SessionCase):
 
     def test_crew_model_is_resolved_passed_to_the_native_cli_and_recorded(self):
         for provider, name, text, model, flag in (
-            ("claude", "jack", "Opus", "claude-opus-5", "--model"),
+            ("claude", "jack", "Opus", "claude-opus-5-5", "--model"),
             ("codex", "gibbs", "5.6 terra", "gpt-5.6-terra", "-m"),
             ("pi", "will", "cheap", "ollama/llama3.2:3b", "--model"),
         ):
@@ -695,14 +727,14 @@ class CrewModelTests(SessionCase):
             contextlib.redirect_stderr(io.StringIO()) as errors,
         ):
             agents.create_crew(args, self.pane, self.project)
-        self.assertEqual(json.loads(output.getvalue())["model"], "claude-haiku-4-5")
-        self.assertEqual(errors.getvalue(), "Model: claude-haiku-4-5 (from 'cheap')\n")
+        self.assertEqual(json.loads(output.getvalue())["model"], "claude-haiku-5-5")
+        self.assertEqual(errors.getvalue(), "Model: claude-haiku-5-5 (from 'cheap')\n")
         launcher = shlex.split((self.directory / "crew-jack.sh").read_text())
-        self.assertEqual(launcher[launcher.index("--model") + 1], "claude-haiku-4-5")
+        self.assertEqual(launcher[launcher.index("--model") + 1], "claude-haiku-5-5")
 
     def test_the_cheap_default_never_silently_reaches_a_mid_or_strong_model(self):
         """The whole point of the default: an unspecified tier cannot cost mid/strong money."""
-        for provider, cheap in (("claude", "claude-haiku-4-5"), ("codex", "gpt-5.6-luna")):
+        for provider, cheap in (("claude", "claude-haiku-5-5"), ("codex", "gpt-5.6-luna")):
             with self.subTest(provider=provider):
                 args = self.args("crew", "--agent", provider, "--task", "commit the fix")
                 self.assertIsNone(args.model)
@@ -719,7 +751,7 @@ class CrewModelTests(SessionCase):
                 "claude",
                 "zzz",
                 "No claude model matches 'zzz'. Tiers: cheap, mid, strong. "
-                "Options: claude-haiku-4-5, ",
+                "Options: claude-haiku-5-5, ",
             ),
             ("codex", "gpt-5.6", "ambiguous for codex: gpt-5.6-luna, gpt-5.6-terra, gpt-5.6-sol"),
             ("codex", " ", "Provide a tier (cheap|mid|strong) or model name. codex models:"),

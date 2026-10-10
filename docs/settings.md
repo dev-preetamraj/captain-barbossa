@@ -63,8 +63,10 @@ captain init --global   # writes ~/.captain/settings.toml
 a freshly written file changes nothing until you uncomment a line. It creates the
 `.captain` directory if needed and prints the path it wrote.
 
-**It never overwrites.** If the file already exists, `init` prints its path, leaves
-the contents exactly as they are, and exits 0. To start over, delete the file first.
+**It tops up, never overwrites.** If the file already exists, `init` appends only
+the sections and keys the file never mentioned, commented out at their defaults,
+and prints what it added. Every existing line stays byte for byte. A file that
+already mentions every setting is left alone, and `init` says so.
 
 `init` needs no Herdr pane, so it works from any shell.
 
@@ -81,7 +83,9 @@ and is exactly what `captain init` writes. The tables cover:
   [dashboard.md](https://github.com/dev-preetamraj/captain-barbossa/blob/main/docs/dashboard.md).
 - `[placement]`: the captain-tab and crew-tab shapes. See
   [placement.md](https://github.com/dev-preetamraj/captain-barbossa/blob/main/docs/placement.md).
-- `[models.<provider>]`: the model behind each provider-neutral tier.
+- `[models.<provider>]`: the model behind each provider-neutral tier. See
+  [models.md](https://github.com/dev-preetamraj/captain-barbossa/blob/main/docs/models.md)
+  for the full ID and alias reference, and `captain models` for what is installed now.
 
 CLI flags still win over settings for one invocation. An empty `[captain] model`
 passes no model flag, leaving the choice to the native CLI. A tier resolves through
@@ -98,7 +102,7 @@ dashboard prints `captain: no dashboard pane: ...` but does not stop the captain
 | Situation | What happens |
 | --- | --- |
 | A tier value in `[models.<provider>]` that matches no known model | Kept literally and passed to that CLI as written, so a model newer than this release still works. |
-| `[captain] model` that matches no known model | The launch fails, naming the options: `No claude model matches 'gigantic'. Tiers: cheap, mid, strong. Options: claude-haiku-4-5, claude-sonnet-5, claude-opus-5, claude-fable-5-1.` |
+| `[captain] model` that matches no known model | The launch fails, naming the options: `No claude model matches 'gigantic'. Tiers: cheap, mid, strong. Options: claude-haiku-5-5, claude-sonnet-5-5, claude-opus-5-5, claude-fable-5-1.` |
 | `[captain] agent` outside `claude`, `codex`, `pi`, `grok` | The launch fails naming them, rather than trying to run it. |
 | A value of the wrong type (`model = 123`, `enabled = "true"`, `interval = "5"`) | Ignored, and the setting falls back to the shipped default. A malformed `[placement]` shape is the one exception and fails loudly. Nothing is coerced across types: a string is never read as a boolean or a number. The one latitude is an int where a float is wanted, so `interval = 5` works. |
 | An unknown table or key | Ignored. |
