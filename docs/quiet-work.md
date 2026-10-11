@@ -55,8 +55,8 @@ instructions argue against themselves, and the lines that lose are the general o
    types. "Commit and push what Gibbs did" arrives as a sentence about files and people.
 
 Ruled out as causes: `guard_crew` blocks `do` for crew only, as intended; the captain's
-`{command}` carries `--session`, so `read_session` resolves; `RUNNABLE` contains `gate`
-and `test`, which this project's Makefile declares. One real but separate gap:
+`{command}` carries `--session`, so `read_session` resolves; this project's Makefile
+declares `gate` and `test`. One real but separate gap:
 `captain do` appears in `AGENTS.md` and not in the README command table, so users cannot
 discover it either.
 
@@ -77,7 +77,22 @@ validated and passed after a terminator - `-e` for a pattern, `--` for paths - s
 cannot become an option.
 
 The third mechanism matters as much as the two commands: **`do run <target>` is the
-general escape hatch**, limited to names in `RUNNABLE` that the project itself declares.
+general escape hatch**, limited to literal targets declared in the root Makefile.
+`do resolve --intent TEXT` maps requests through the ordered full-input rule table
+in `do.py`: Git operations precede explicit and bare declared-target requests.
+It returns `resolved`, `needs-input`, `unsupported` or `invalid`, with a stable
+reason code and accepted shapes; only `resolved` includes an execution command.
+For example, `push` selects Git and `do the release` selects the declared `release`
+target. The article forms `run the gate`, `make the gate` and `the gate` use the
+same target lookup; no fuzzy matching is involved. Resolution performs no execution
+or model call. Target declarations and
+resolved commands grant no permission. Outward-facing,
+destructive and history-rewriting actions require explicit user authorization.
+A concrete request already authorizes its stated scope; ask only for missing scope.
+Unresolved requests surface their reason and shapes instead of being guessed. Fixed argv,
+target validation and `make -- TARGET` guard syntax, not recipe effects. Discovery
+still scans simple literal declarations; included, generated and pattern rules
+are not resolved by Make for this check.
 Most "the captain shelled out for this" cases are a missing Makefile target, not a
 missing feature in this tool.
 
@@ -108,21 +123,21 @@ missing feature in this tool.
 | `fetch` | in, added | touches no worktree file at all |
 | `pull` (`--ff-only` hardwired) | in, added | fully determined: it moves the ref or exits non-zero, so no conflicted tree can appear and the merging form is not a flag anyone can pass |
 | every failed action is recorded | **in, fixed** | the module promised "every run is recorded" and only recorded successes: `_spawn` raised before `record` ran. A failed `make gate` is the run most worth reviewing and it had no pane to review. Now `_act` records, then raises |
-| `help` in `RUNNABLE` | **in, added** | a declared `help` target only prints, in this project and by convention everywhere. It is the cheapest answer to "what can this project do" |
+| declared `help` | in | this project's recipe prints available targets; the name alone says nothing about effects elsewhere |
 | dependency sync, lockfile check, tool versions | in, exists | `do run install` and `do run check`/`gate`, when the project declares them. This project's `install` is `uv sync --locked`. Wiring `uv` directly would hardcode one ecosystem where a declared target already generalises |
 | one test or one test file | out, listed below | the gap most felt in practice, and language-specific |
 | lint or format scoped to named paths | out, listed below | same |
-| `version` in `RUNNABLE` | out | here it only prints, but the name is a bump as often as a read, and the whitelist is name-based with no view of the recipe |
-| `status` in `RUNNABLE` | out | here it curls PyPI; the name promises nothing in particular |
-| `tool` in `RUNNABLE` | out | `uv tool install --force .` mutates the user's global tool environment |
-| `fmt`/`format` in `RUNNABLE` | **in today, questioned below** | `make format` rewrites the whole tree, including other crew's uncommitted work, against the editing contract |
+| declared `version` | in | here it only prints; resolution selects the target without certifying its effects |
+| declared `status` | in | here it curls PyPI; resolution grants no execution authority |
+| declared `tool` | in | `uv tool install --force .` needs authorization to change the user's tool environment |
+| declared `fmt`/`format` | in | preserve others' work; this project's whole-tree recipe can exceed the authorized scope |
 | non-Make task runners (`package.json` scripts, `Justfile`, `tox`, `cargo`) | out | YAGNI: this project has only a Makefile, so a runner-detection layer would be written blind and tested against nothing. One `_targets` parser for one declared file is the whole need today |
 | `merge`, `rebase`, `amend`, `reset`, `restore`, `clean`, `rm`, force push | out | rewrite or discard |
 | `stash`, `stash pop` | out | hides uncommitted work |
-| `tag`, release, publish, deploy, version bump | out | outward-facing compound acts |
+| `tag`, release, publish, deploy, version bump | no dedicated verbs | declared targets can perform explicitly authorized actions within the user's stated scope |
 | bare `add` | out | `commit` already stages |
 | `gh pr create`, `gh pr view`, `gh run list` | out | publishes outward, or reads an external service over the network with no auth story; its body is authored text, which bucket 2 drafts and the user posts |
-| arbitrary shell | out | the declared-target set is the safety property |
+| arbitrary shell | out | only a validated declared target is passed to Make; recipes still execute project code |
 
 ## Bucket 2: a model, no pane
 
@@ -420,7 +435,7 @@ in a temp directory, so `fetch` and `pull` are exercised rather than string-matc
 1. **The safety property, over every verb.** Run `fetch`, `pull`, `commit`, `push`,
    `branch`, `switch`, `run`, then assert no recorded command holds `--force`, `-f`,
    `--hard`, `--amend`, `reset`, `rebase`, `--no-ff` or `--rebase`. This generalises the
-   existing `RUNNABLE` assertion from one verb set to all of them. Writing it proved the
+   fixed-argv assertion from one verb set to all of them, not to recipe contents. Writing it proved the
    property twice over: with the verbs in any other order the test fails, because `push`
    refuses a remote that is ahead and `pull` refuses a diverged history instead of
    reaching for a flag that would have resolved either.
@@ -473,16 +488,14 @@ function `tests/test_dashboard.py` already covers, from the same session record
    (`test_one = "uv run --locked python -m unittest {name}"`, with a validated `{name}`)
    or a detected command table per project type. That is a design decision about what
    this tool knows, so it is the user's.
-2. **`fmt` and `format` in `RUNNABLE`.** `make format` here runs `ruff check --fix .` and
+2. **Scope of `fmt` and `format`.** `make format` here runs `ruff check --fix .` and
    `ruff format .` over the whole tree. In a shared checkout that rewrites files the
    captain does not own, including other crew's uncommitted work, which the editing
-   contract forbids in the same breath as `git add -A`. By the rule that anything which
-   rewrites stays out, both names should leave `RUNNABLE`. Not done here because it
-   removes a shipped verb.
-3. **`version` and `status` as `RUNNABLE` names.** In this project `make version` only
-   prints and would be useful; the whitelist is name-based and cannot see the recipe, so
-   admitting `version` admits a bump elsewhere. If the user wants per-project exceptions,
-   that is a settings decision, not a name decision.
+   contract forbids in the same breath as `git add -A`. Execution needs authorized scope;
+   accepting the declared target does not authorize those edits.
+3. **Meaning of `version` and `status`.** In this project `make version` only
+   prints. Both declared names resolve by the same code rule, with no per-project
+   allowlist or settings exception. Resolution does not establish safe effects.
 4. **`git diff REV..REV`,** to review a feature branch against main before merging. The
    one read I would add next. It needs caller-supplied revisions (safe behind the same
    validation `do branch` uses, plus `--`) and a way to know the default branch's name,

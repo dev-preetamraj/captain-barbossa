@@ -10,6 +10,13 @@ captain_tab = [1, 2, 2]
 crew_tab = [2, 2, 3]
 ```
 
+Recruitment resolves all choices once under the crew metadata lock. Flags override
+settings; split flags imply pane placement. With no placement setting, omitted
+placement, direction and split target select the next automatic slot without a
+picker. Agent comes from `[crew] agent` or `captain.json`; model comes from
+`[crew] model`. The command prints these sources and rejects an invalid model
+before any layout change. Explicit `--placement tab` rejects split flags.
+
 ## 1. Reading a shape
 
 An array is one tab, read left to right as columns. Each number is how many panes that
@@ -113,60 +120,60 @@ removing a pane does not reorder the survivors.
 
 ### Ratios, so a declared shape looks declared
 
-Herdr halves a pane unless `--ratio` says otherwise, and ratio is the share the split
-pane keeps. Halving alone makes `[1, 2, 2]` come out 1/2, 1/4, 1/4 rather than in
-thirds, so the new pane's own split is only part of the job: a split resizes the two
-panes it touches and never a sibling already on screen, so the rest of the chain has to
-be resized by hand before it.
+Herdr halves a pane unless told otherwise. Halving alone makes `[1, 2, 2]` come out
+1/2, 1/4, 1/4 rather than in thirds, so the new pane's own split is only part of the
+job: a split resizes the two panes it touches and never a sibling already on screen, so
+the rest of the chain has to be resized after it.
 
-A ratio belongs to its own split node: a pane's ratio is its share of *itself and
-everything after it* in the chain it sits in, never of the whole tab. Bringing a chain
-of `count` panes to `1 / count` therefore only moves each pane's own ratio from what it
-was worth against the old count to what it is worth against the new one, however many
-later panes there already were. The earlier resizes never need to know about each other,
-which is what keeps this to three steps and no measuring:
-
-1. **Each pane before the split** shrinks by `1 / (count - p) - 1 / (count - p + 1)`,
-   for its position `p` from the chain's top or left (`layout.re_even`).
-2. **The pane being split** grows by `2 / (after + 2) - 1 / (after + 1)`, where `after`
-   is how many of the chain's panes sit beyond it (`layout.widen_split`). The pair
-   shares that pane's own slot, so the slot needs two even shares instead of one. It is
-   0 when the split pane is the chain's last, which is the fill-in-order case.
-3. **The new pane** is created at `--ratio 0.5`, halving the slot step 2 just sized.
+Evening happens in two places, and resolving a recruit is not one of them.
+`Placement.resolve` touches nothing in Herdr, so a recruit that is then refused leaves
+the tab as it was. It only records the chain to even in the `Spot`. `agents.create_crew`
+splits at the default ratio, then calls `Placement.even_new_pane` with the new pane.
 
 The chain is the whole column for a down split, and the row of every open column's top
-pane for a right split. It is read from the roster, so a tab that filled, emptied and
-refilled is evened as it actually stands: a crew reopening a column a dismissal emptied
-lands in the middle of the row, and step 2 is what makes that come out even.
+pane for a right split, with the new pane inserted right after the one it split. It is
+read from the roster, so a tab that filled, emptied and refilled is evened as it
+actually stands: a crew reopening a column a dismissal emptied lands in the middle of
+the row.
 
-A resize names a pane but moves that pane's own trailing edge. The dashboard never
-appears in a chain: it is nested inside the captain's slot, so the captain's own right
-edge is still the column boundary, and column 1 has no second slot for it to sit above.
+Herdr rounds every nested split to whole cells, so a ratio computed from the pane count
+drifts by a cell or two (a 234 column tab with three panes landed 77/79/78). The
+evening reads sizes instead (`Placement.even_chain`):
 
-For `[1, 2, 2]` filling in order: column 2 opens with no resize at all, since the
-captain and the new pane are already halves; column 3 opens by shrinking the captain
-1/6, giving three equal columns; each row 2 opens with no resize either.
+1. **Read the live layout** (`pane layout`) for the chain's total width or height, and
+   split it with `layout.even_shares`: whole cells that differ by at most one, the
+   remainder going to the first panes. 234 columns over three panes is 78/78/78.
+2. **Walk the chain left to right** (top to bottom for a column). For each pane but the
+   last, re-read the layout, and if it is short of or over its share, resize its
+   trailing edge by that many cells as a fraction of the cells from it to the chain's
+   end. The target is aimed a quarter cell past the share, so Herdr's floor or round
+   both land on it.
+
+The dashboard never appears in a chain: it is nested inside the captain's slot, so the
+captain's own right edge is still the column boundary, and column 1 has no second slot
+for it to sit above.
 
 **Herdr clamps a split ratio to 0.1-0.9.** A chain of 11 or more panes has no reachable
 even share, and a resize Herdr declines cannot be retried. Neither costs the crew: the
-declared slot is still created, as section 1 says it always is, and the tab is left
-uneven with the reason on stderr.
+pane already exists, the declared slot is created as section 1 says it always is, and
+the tab is left uneven with the reason on stderr.
 
 ```text
 captain: tab not evened: Herdr cannot size 11 panes evenly in one tab: the smallest
-share, 0.091, is outside its resizable range 0.10-0.90.
+share is outside its resizable range 0.10-0.90.
 ```
 
-A direction forced by `--direction` drops the ratio and the evening both, because the
-arithmetic only describes the split the shape asked for. Herdr then halves the pane as
-it would have anyway.
+A direction forced by `--direction` carries no chain and so is not evened, because the
+shares only describe the split the shape asked for. Herdr halves the pane as it would
+have anyway.
 
 ## 5. Bookkeeping, from the roster
 
-Placement reads the session roster and nothing else. It never calls `pane layout`,
-never measures a pane, and never looks at what Herdr reports. That is what makes it
-deterministic: the same roster and the same shape give the same answer, whatever order
-Herdr would have listed panes in.
+Choosing a slot reads the session roster and nothing else: it never measures a pane or
+looks at what Herdr reports, and it moves nothing. That is what makes it deterministic:
+the same roster and the same shape give the same answer, whatever order Herdr would have
+listed panes in. Placement does call `pane layout`, but only afterwards, to even the
+chain once the pane exists (section 4); the slot never depends on what it reads.
 
 Each crew record gains its slot:
 

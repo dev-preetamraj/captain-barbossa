@@ -24,14 +24,15 @@ src/captain_barbossa/
   instructions.py role instructions and per-provider native CLI arguments
   config.py       settings layering, typed lookup, range checks
   defaults.toml   every shipped default, read as package data by config
-  placement.py    workspace pane discovery and the Spot a crew opens in
+  placement.py    recruitment defaults/sources, workspace discovery, and crew Spot
   layout.py       declared tab shapes: slot order, split target, even ratios
-  crew.py         crew identities, roster queries, native lifecycle events
+  crew.py         crew identities, roster queries, evidence-based state, native events
   pane.py         native agent terminal interaction and pane parsing
   protocol.py     assignment state, crew mail (enqueue/unread/mark_read/bounce), wait polling
   inspection.py   bounded local file, state and Git reads for `inspect`
   store.py        state and temp roots, storage dirs, atomic JSON read/write, locks
-  events.py       native CLI hook event stream and mail delivery
+  events.py       native CLI hook event stream, permission decisions, and mail delivery
+  approval.py     pure assignment-scoped approval verdicts and reason codes
   sessions.py     session dirs, Session, crew naming, live agents, prune
   memory.py       graph memory in three scopes, repo rulebook, Graphify snapshot
   models.py       provider-neutral model tiers and free-text matching
@@ -63,6 +64,19 @@ Key facts:
   and re-adding one is a no-op, and changing one needs `--supersede`.
   `memory init` seeds it from AGENTS.md/CLAUDE.md by a fixed markdown parse (bullets
   under Rules/Key facts sections), previewing until `--apply`; it only ever adds.
+- Recruitment resolves flags/settings/session defaults through `Placement.resolve` under
+  the crew metadata lock. `status` uses `Crew.current_state` and prints state/source/detail;
+  missing evidence is unknown, not inferred completion.
+- Claude PreToolUse and PermissionRequest hooks pass active incarnation grants to
+  `approval.decide`. PreToolUse is the gate, registered for crew only: it fires on every
+  tool call, so a deny blocks and an escalation returns `ask`, which reaches the user even
+  in auto mode. PermissionRequest alone could not enforce, because the native CLI only
+  raises it when it already decided to prompt. One call is decided once: PermissionRequest
+  reuses the matching PreToolUse verdict under the events lock. Crew reach the captain CLI
+  through the gate, limited to the protocol verbs and to the exact interpreter captain
+  wrote into their instructions; `do`, `crew` and any other interpreter escalate. Resolved
+  requests are logged as PermissionDecision, so wait does not announce an approval that is
+  already handled. Other providers retain native/manual permissions.
 - Crew state is signalled by the native CLI's own hooks (Claude `--settings` hooks,
   Codex `notify`), which append JSON lines to `sessions/<id>/events/<crew>.jsonl`.
   `wait` tails that file from a `.cursor` offset; pane reading is only a fallback for
@@ -82,10 +96,12 @@ Key facts:
   `done` refusal carries the body when the crew reports, the `Stop` hook when it does
   not. Dismissing a crew with unread mail bounces it with a reason.
 - `captain do` is the write side of `captain inspect`: `commit`, `push`, `branch`, and
-  `run <target>` for a Makefile target in `do.RUNNABLE`. Not built on `inspection`'s
+  `run <target>` for a literal target declared in the root Makefile. Not built on `inspection`'s
   hardened Git, which strips the user config, hooks and credentials a write needs;
-  safety is the fixed verb set instead. Amend, reset, rebase, force push, deletion and
-  release stay with the user. Every run appends a `{"type": "quiet", ...}` record to
+  `do resolve --intent TEXT` uses ordered full-input rules in `do.py`, without executing
+  or granting approval. Unresolved requests report reason codes and accepted shapes. Outward-facing,
+  destructive and history-rewriting actions require explicit user authorization; a
+  concrete request authorizes only its stated scope. Every run appends a `{"type": "quiet", ...}` record to
   `events/captain.jsonl`, raised if it cannot be written, because work with no pane is
   reviewable only through that record.
 - The delegation axis is judgment, not file-touching: `make test` writes nothing and

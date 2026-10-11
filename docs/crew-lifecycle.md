@@ -4,12 +4,16 @@
 
 Ask the captain to spin up a crew in plain language; its startup instructions
 carry a recruiting ruleset. When you state no preference it recruits with no
-questions, using:
+questions. The command resolves omitted flags, using:
 
-- **agent**: the CLI the captain itself runs as
-- **placement**: a pane split picked from the tab layout (auto), or a new tab
-  when crowded
-- **model**: the `cheap` tier, stepped up only for genuinely harder work
+- **agent**: `[crew] agent`, or the CLI the captain itself runs as
+- **placement**: `[crew] placement`, or the next declared slot (auto), opening
+  a new tab when the existing shapes are full
+- **model**: `[crew] model` (`cheap` as shipped), stepped up for harder work
+
+Explicit flags win; split flags imply pane placement. The command prints the
+source of agent, model and placement. Only a missing agent in both settings and
+captain metadata needs a picker or `--agent` in a non-TTY.
 
 Every choice you do state is used as given; the captain asks at most one
 question, and only when you hand a choice back to it ("ask me where to put
@@ -58,7 +62,8 @@ New recruits receive separate crew-incarnation, assignment, and message IDs.
 flag as needed. `read` and `search` are always granted. Other actions are `edit`,
 `test`, `build`, `format`, `commit`, `version`, and `delete`. Overlapping active
 ownership is refused, and `check` requires owned paths for mutation actions.
-These checks do not intercept native tools or grant sandbox/user approval.
+These checks do not intercept all native tools. Claude PermissionRequest hooks
+add assignment-scoped approval decisions; other providers retain native permissions.
 
 Here `check`, `ask`, and `done` run in Jack's new crew environment; `answer`
 and `assign` run as captain:
@@ -110,7 +115,16 @@ For protocol crew, `wait` returns a notification with `status`, `delivery_id`,
 selects JSON output. Statuses distinguish `working`, `idle`, `asked`,
 `awaiting_approval`, `done`, `held`, `bounced`, `timeout`, and `error`. Native
 idle is activity evidence only; assignment completion requires explicit `done`.
-Approval notifications never approve the underlying native prompt.
+Approval notifications never approve the underlying native prompt. Claude's
+PermissionRequest hook passes the tool, command/paths, cwd, and active assignment
+grants to `approval.decide`. An allow-once returns a native `allow` decision with
+no permission updates; deny returns `deny` and its reason. Both are logged as
+PermissionDecision so they do not leave a pending approval notification.
+Escalation logs the reason code, displays a user message, and leaves the native
+prompt and wait notification pending for user review. Missing or malformed input
+and unreadable grants cannot auto-approve; stale incarnation hooks are ignored.
+The captain must relay escalations to the user, not type an approval over them.
+See the [native hook contract](https://code.claude.com/docs/en/hooks#permissionrequest-decision-control).
 
 `wait` returns only when a notification carries a delivery ID. Native `working`
 never notifies, and a native idle notifies at most once per message delivered, so
@@ -177,8 +191,9 @@ captain status --all
 
 `status` prints a plain-text table of this session's crew: name, provider,
 model, pane, status, and the first line of their assigned task, truncated to
-about 60 characters. Status is refreshed live from Herdr for each crew,
-falling back to the last recorded status if Herdr cannot be reached. Dismissed
+about 60 characters. `Crew.current_state()` prints `state:… source:… detail`
+from current hook, pane, or assignment evidence. Missing evidence stays `unknown`;
+native idle or done alone does not establish assignment completion. Dismissed
 crew are omitted unless `--all` is given; `captain status` with no crew prints
 `No crew.`
 

@@ -111,12 +111,12 @@ captain crew Gibbs --task "Review the current changes" --agent claude --model mi
   --placement pane --split-pane auto --direction auto
 ```
 
-From a direct shell, omitting `--agent` or `--placement` opens an interactive
-picker; a non-TTY invocation must supply both. The second example supplies all
-choices for automation. When asked to recruit without preferences, the captain
-supplies its own CLI and automatic pane placement. The model defaults to the
-configured crew tier (`cheap` as shipped). Only the captain recruits; captain-only commands are refused
-for crew, which forward delegation requests back to it. See
+Omitted flags resolve in code: agent from `[crew] agent` or the captain's CLI,
+model from the configured crew tier (`cheap` as shipped), and placement from
+`[crew] placement` or the next automatic slot. Explicit flags win; split flags
+imply a pane. Recruitment prints each choice's source. Only an agent absent from
+both settings and session metadata needs a picker (or an explicit `--agent` in a
+non-TTY). Only the captain recruits; crew forward delegation requests to it. See
 [crew-lifecycle.md](https://github.com/dev-preetamraj/captain-barbossa/blob/main/docs/crew-lifecycle.md)
 for naming, launch behavior, failure handling, and shared-checkout guardrails.
 
@@ -200,6 +200,9 @@ captain wait Jack --json --ack <delivery-id>
 
 New crew use explicit assignments: `wait` reports activity, questions, approval
 prompts, or completion; native idle alone does not mean the assignment is done.
+Claude PermissionRequest hooks validate assignment grants: known scoped requests
+are allowed once, ungranted actions are denied, and uncertain or destructive
+requests remain at the native user prompt. No persistent permission is granted.
 Notifications repeat until acknowledged with `--ack`; `--json` returns a stable
 envelope with status, delivery ID, crew, assignment ID, and summary.
 `--timeout SECONDS` overrides the 86400-second default. It follows native
@@ -238,7 +241,8 @@ captain status
 captain status --all
 ```
 
-`status` prints each crew's name, provider, model, pane, live status, and task.
+`status` prints each crew's name, provider, model, pane, task, and evidence-based
+`state:… source:… detail`. Missing evidence stays `unknown`; native idle is not done.
 `--all` includes dismissed crew. See
 [crew-lifecycle.md](https://github.com/dev-preetamraj/captain-barbossa/blob/main/docs/crew-lifecycle.md)
 for fallbacks and output details.
@@ -352,10 +356,24 @@ branch and sets its upstream on the first push; `branch NAME` creates and
 switches to a branch; `switch NAME` switches to an existing branch; `fetch`
 fetches from the remote; `pull` is fast-forward only.
 
-`captain do run TARGET` runs a target declared in the project's Makefile from
-the allowed set: `build`, `check`, `clean`, `fmt`, `format`, `gate`, `help`,
-`install`, `lint`, `test`, `typecheck`, or `vet`. History rewriting, force push,
-deletion, and releases stay with the user.
+`captain do run TARGET` runs a literal target declared in the root Makefile.
+Outward-facing, destructive and history-rewriting actions require explicit user
+authorization; a concrete request already authorizes its stated scope. Declaring
+a target grants no permission. Git verbs still expose no force or rewriting flags.
+
+`captain do resolve --intent TEXT` resolves a verbatim operation request without
+executing it. Ordered full-input rules in `do.py` return JSON with a status, reason
+code, matched rule, operation, arguments, missing fields and accepted shapes.
+A resolved result includes the session's `captain do` command as an argument array.
+`push`, `fetch` and `pull` select Git; `create/cut a branch NAME` and `switch to NAME`
+select branch operations. `run/make [the] TARGET`, `[the] TARGET` and `do the TARGET`
+select a declared Make target. Thus `do the release` selects `make -- release`, while `push`
+selects Git even when a `push` target exists; use `run push` for that target.
+`commit` reports the missing message and scope instead of inventing them.
+An optional `please` prefix and terminal period are accepted. Command words ignore
+case; branch and target spelling is preserved. Unsupported wording, invalid names
+and missing inputs return nonzero with a reason code and the resolvable shapes.
+There is no fuzzy matching, model fallback, execution or approval in resolution.
 
 `captain quiet` runs one headless model turn using the session captain's native
 CLI, prints its report, and needs no crew assignment or wait. It is read-only
@@ -365,12 +383,13 @@ unstaged. `--diff worktree|staged` appends the selected Git diff to the task;
 `--timeout SECONDS` overrides the 900-second limit.
 
 ```sh
+captain do resolve --intent "do the release"
 captain do run test
 captain quiet --task "Review the current changes" --diff worktree
 captain quiet --task "Correct the setup instructions" --write README.md
 ```
 
-Both commands record runs in the session's `events/captain.jsonl` so work
+Execution commands record runs in the session's `events/captain.jsonl` so work
 without a pane can be reviewed afterward. They are captain-only commands.
 
 ## Memory

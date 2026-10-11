@@ -22,9 +22,10 @@
   --timeout 0`** — pane fallback starts after 6 seconds; use a non-zero
   timeout.
 - **"... is waiting for input or approval instead of starting the task."** —
-  read the pane before approving, then send the requested key with
-  `herdr agent send-keys <name> <key>` (Claude Code may need Enter or a
-  number, not always `y`).
+  inspect the native prompt. Claude PermissionRequest hooks allow scoped known
+  requests once and deny ungranted actions. An escalation remains for the user;
+  relay it instead of typing an approval. Other providers keep their native
+  permission flow; inspect the exact request before approving one command.
 - **"... did not confirm the switch to ..."** — the native CLI did not echo
   the expected model name; read the pane with `herdr agent read <name>`
   before retrying `captain model`.
