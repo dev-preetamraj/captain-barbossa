@@ -58,7 +58,10 @@ class RecruitTests(SessionCase):
         self.meta["crew"] = {"jack": {"id": "jack", "name": "Jack", "agent": "c-jack"}}
         store.write_json(self.directory / "session.json", self.meta)
         base = ("crew", "--agent", "claude", "--task", "x", "--placement", "pane")
-        with patch.object(runtime, "herdr", side_effect=pane_stub({})):
+        with (
+            patch.object(runtime, "herdr", side_effect=pane_stub({})),
+            patch.object(agents, "executable", side_effect=lambda name: f"/bin/{name}"),
+        ):
             with self.assertRaisesRegex(runtime.CaptainError, "'Jack' already exists"):
                 agents.create_crew(self.args(base[0], "Jack", *base[1:]), self.pane, self.project)
             with self.assertRaisesRegex(runtime.CaptainError, "'Nobody' is not on the crew roster"):
