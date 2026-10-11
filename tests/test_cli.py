@@ -212,7 +212,7 @@ class CliCommandTests(SessionCase):
                     self.assertEqual(self.run_cli(*command)[0], 1)
                 self.assertIn("explicit --assignment ID", error.getvalue())
 
-    def test_cli_question_answer_done_and_ack_round_trip(self):
+    def test_unacknowledged_delivery_replays_until_ack_advances_the_cursor(self):
         with patch.dict(
             os.environ,
             {"CAPTAIN_ROLE": "crew", "CAPTAIN_CREW": "jack", "CAPTAIN_INCARNATION": "first"},
@@ -227,13 +227,36 @@ class CliCommandTests(SessionCase):
         event = json.loads(output)
         self.assertEqual(event["status"], "asked")
         code, repeated = self.run_cli("wait", "Jack", "--json", "--timeout", "0")
-        self.assertEqual(code, 1)
-        self.assertIn(event["delivery_id"], json.loads(repeated)["summary"])
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(repeated), event)
+        self.assertEqual(self.saved()["ack_seq"], 0)
+        self.assertEqual(self.saved()["offset"], 0)
         code, _ = self.run_cli(
             "answer", "Jack", question, "src/a.py", "--assignment", self.assignment["id"]
         )
         self.assertEqual(code, 0)
-        self.run_cli("wait", "Jack", "--json", "--ack", event["delivery_id"], "--timeout", "0")
+        self.crew.events.parent.mkdir(exist_ok=True)
+        with self.crew.events.open("a") as stream:
+            stream.write(json.dumps({"hook_event_name": "Stop"}) + "\n")
+        code, output = self.run_cli(
+            "wait", "Jack", "--json", "--ack", event["delivery_id"], "--timeout", "0"
+        )
+        self.assertEqual(code, 0)
+        native = json.loads(output)
+        self.assertEqual(native["status"], "idle")
+        self.assertNotEqual(native["delivery_id"], event["delivery_id"])
+        self.assertEqual(self.saved()["ack_seq"], 1)
+        self.assertEqual(self.saved()["offset"], 0)
+        code, repeated = self.run_cli("wait", "Jack", "--json", "--timeout", "0")
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(repeated), native)
+        self.assertEqual(self.saved()["offset"], 0)
+        code, output = self.run_cli(
+            "wait", "Jack", "--json", "--ack", native["delivery_id"], "--timeout", "0"
+        )
+        self.assertEqual(code, 0)
+        self.assertIsNone(json.loads(output)["delivery_id"])
+        self.assertEqual(self.saved()["offset"], self.crew.events.stat().st_size)
         with patch.dict(
             os.environ,
             {"CAPTAIN_ROLE": "crew", "CAPTAIN_CREW": "jack", "CAPTAIN_INCARNATION": "first"},
@@ -315,11 +338,12 @@ class CliCommandTests(SessionCase):
         args = SimpleNamespace(session=self.current.meta["id"], all=False)
         with (
             patch.object(agents.runtime, "herdr", return_value={"agent": {"agent_status": "done"}}),
+            patch("captain_barbossa.pane.Pane.lines", return_value=[]),
             contextlib.redirect_stdout(io.StringIO()) as output,
         ):
             agents.status_crew(args, self.pane, self.project)
-        self.assertIn("idle", output.getvalue())
-        self.assertNotIn("done", output.getvalue())
+        self.assertIn("state:unknown source:none", output.getvalue())
+        self.assertNotIn("state:done", output.getvalue())
         self.assertEqual(
             {p: p.read_bytes() for p in self.directory.rglob("*") if p.is_file()}, before
         )

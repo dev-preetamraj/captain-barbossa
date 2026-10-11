@@ -2,8 +2,8 @@
 
 The write-side sibling of `inspection`, deliberately not built on it: that module's
 hardened Git strips user config, hooks and credentials, which is right for reading
-arbitrary paths and useless for writing. Safety here comes from the other side, a fixed
-verb set with no rewriting or discarding flag reachable from any of it.
+arbitrary paths and useless for writing. Intent rules select bounded operations;
+resolution neither executes project recipes nor grants authorization.
 
 Every run is recorded before it is reported, because work with no pane keeps the
 watch-your-crew rule only by being reviewable afterwards.
@@ -20,25 +20,8 @@ from pathlib import Path
 from . import config, inspection
 from .models import PROVIDERS, headless_argv, headless_report, resolve_model
 from .runtime import CaptainError, check_text, executable, inside_project
-from .store import read_json
+from .store import lock, read_json, state_storage
 
-# Declared targets that only build, check, clean, or describe the project. Not release,
-# publish, deploy, bump or version: outward-facing compound acts stay with the user, and
-# `version` is a bump as often as a read.
-RUNNABLE = (
-    "build",
-    "check",
-    "clean",
-    "fmt",
-    "format",
-    "gate",
-    "help",
-    "install",
-    "lint",
-    "test",
-    "typecheck",
-    "vet",
-)
 # A declared target may run a whole test suite.
 TIMEOUT = 900
 # Enough tail to diagnose a failure without putting a build log in the record.
@@ -46,6 +29,34 @@ TAIL = 4000
 # A headless turn reads Git through the task text, which `check_text` caps at 8000.
 DIFF_LIMIT = 6000
 BRANCH = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]*")
+TARGET = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_-]*")
+# Full-input matches, in order: Git requests win over same-named Make targets.
+INTENT_RULES = (
+    ("git", r"(?P<operation>push|fetch|pull)", None, None, "push | fetch | pull"),
+    ("commit", r"commit", "commit", None, "commit (requires message and scope)"),
+    (
+        "branch",
+        r"(?:create|cut) a branch(?: (?P<name>\S+))?",
+        "branch",
+        "name",
+        "create/cut a branch NAME",
+    ),
+    ("switch", r"switch to(?: (?P<name>\S+))?", "switch", "name", "switch to NAME"),
+    (
+        "run",
+        r"(?:run|make)(?: (?:the )?(?P<target>\S+))?",
+        "run",
+        "target",
+        "run/make [the] TARGET",
+    ),
+    (
+        "target",
+        r"(?:(?:do )?the )?(?P<target>\S+)",
+        "run",
+        "target",
+        "[the] TARGET | do the TARGET",
+    ),
+)
 # Every shipped provider has a headless turn and a gate that stops it writing, each in its
 # own shape: models.headless_argv builds the argv, models.headless_report reads the result.
 # A provider without one would need its own list here, and the refusal below is for it.
@@ -64,6 +75,10 @@ def add_arguments(subparsers):
         "do", help="deterministic work with no crew: commit, push, branch, declared targets"
     )
     actions = parser.add_subparsers(dest="do_command", required=True)
+    resolve = actions.add_parser(
+        "resolve", help="resolve an operation request without executing it"
+    )
+    resolve.add_argument("--intent", required=True, help="the user's verbatim operation request")
     commit = actions.add_parser("commit", help="stage the named paths and commit them")
     commit.add_argument("--message", required=True)
     commit.add_argument("path", nargs="*", help="paths to stage; omit to commit what is staged")
@@ -77,7 +92,7 @@ def add_arguments(subparsers):
         "pull", help="fast-forward the current branch; never merges, rebases or conflicts"
     )
     run = actions.add_parser("run", help="run one target the project declares in its Makefile")
-    run.add_argument("target", help=f"one of: {', '.join(RUNNABLE)}")
+    run.add_argument("target", help="one literal target declared in the root Makefile")
     quiet = subparsers.add_parser(
         "quiet", help="one headless model turn with no pane: a question, a review, a bounded edit"
     )
@@ -106,7 +121,7 @@ def _git(root, *arguments, check=True):
     return _spawn(root, ["git", *arguments], check=check)
 
 
-def _capture(root, command, timeout=TIMEOUT):
+def _capture(root, command, timeout=TIMEOUT, *, text=True):
     """Run a bounded command, raising only when it could not run at all.
 
     Kept apart from `_spawn` so a headless turn can read stdout on its own: its result is
@@ -117,7 +132,7 @@ def _capture(root, command, timeout=TIMEOUT):
             command,
             cwd=root,
             capture_output=True,
-            text=True,
+            text=text,
             timeout=timeout,
             stdin=subprocess.DEVNULL,
             env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
@@ -147,7 +162,9 @@ def _act(root, command, session_directory, action):
     record(session_directory, action, command, code, output)
     if code != 0:
         # A quiet action that failed silently is worse than a visible one.
-        raise CaptainError(f"{' '.join(command)} failed ({code}):\n{output[-TAIL:]}")
+        error = CaptainError(f"{' '.join(command)} failed ({code}):\n{output[-TAIL:]}")
+        error.recorded = True
+        raise error
     return output
 
 
@@ -161,6 +178,75 @@ def _name(value):
     if not BRANCH.fullmatch(value) or ".." in value or value.endswith((".lock", "/")):
         raise CaptainError(f"Not a usable branch name: {value}")
     return value
+
+
+def _resolve_intent(text, declared_targets):
+    """Resolve only the declared grammar; never run a command or infer approval."""
+    result = {
+        "status": "unsupported",
+        "code": "unsupported-request",
+        "rule": None,
+        "operation": None,
+        "arguments": {},
+        "missing": [],
+        "reason": "The whole request must match one resolvable shape.",
+        "shapes": [rule[4] for rule in INTENT_RULES],
+    }
+    try:
+        check_text(text, "intent")
+        if any(ord(char) < 32 and char != "\t" for char in text):
+            raise CaptainError("Intent must be a single line without control characters.")
+    except CaptainError as exc:
+        return {**result, "status": "invalid", "code": "invalid-intent", "reason": str(exc)}
+    request = re.sub(r"[ \t]+", " ", text.strip()).removesuffix(".")
+    request = re.sub(r"(?i)^please ", "", request)
+    for rule, pattern, operation, field, _ in INTENT_RULES:
+        match = re.fullmatch(pattern, request, re.IGNORECASE | re.ASCII)
+        if not match:
+            continue
+        operation = operation or match["operation"].lower()
+        result.update(rule=rule, operation=operation)
+        if operation == "commit":
+            return {
+                **result,
+                "status": "needs-input",
+                "code": "missing-message",
+                "missing": ["message", "scope"],
+                "reason": "Provide a commit message and explicit paths or the existing staged scope.",
+            }
+        arguments = {field: match[field]} if field and match[field] else {}
+        result["arguments"] = arguments
+        if field:
+            if field not in arguments:
+                return {
+                    **result,
+                    "status": "needs-input",
+                    "code": f"missing-{field}",
+                    "missing": [field],
+                    "reason": f"Provide the {field} for {operation}.",
+                }
+            value = arguments[field]
+            try:
+                if field == "name":
+                    _name(value)
+                elif not TARGET.fullmatch(value):
+                    raise CaptainError(f"Not a usable target name: {value}")
+            except CaptainError as exc:
+                return {**result, "status": "invalid", "code": "invalid-name", "reason": str(exc)}
+            if field == "target" and value not in declared_targets:
+                return {
+                    **result,
+                    "code": "missing-target",
+                    "reason": f"The root Makefile declares no {value} target.",
+                }
+        return {
+            **result,
+            "status": "resolved",
+            "code": "resolved",
+            "reason": "Resolved only; execution still requires the user's authorization.",
+            "command": ["captain", "do", operation, *arguments.values()],
+        }
+    return result
 
 
 def _quiet(args, root, session_directory):
@@ -244,26 +330,128 @@ def record(session_directory, action, command, code, output):
         stream.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
 
+def _git_bytes(root, *arguments):
+    result = _capture(root, ["git", *arguments], text=False)
+    if result.returncode:
+        raise CaptainError(os.fsdecode(result.stderr)[-TAIL:])
+    return result.stdout
+
+
+def _index_baseline(root):
+    return (
+        _git_bytes(root, "ls-files", "--stage", "-z"),
+        _git(root, "rev-parse", "--verify", "HEAD", check=False),
+        _git(root, "symbolic-ref", "--quiet", "HEAD", check=False),
+    )
+
+
+def _commit_scope(root, paths):
+    def changed(*options):
+        output = _git_bytes(
+            root,
+            "diff",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--no-renames",
+            "--name-only",
+            "-z",
+            *options,
+            "--",
+        )
+        return {os.fsdecode(path) for path in output.split(b"\0") if path}
+
+    if changed("--diff-filter=U"):
+        raise CaptainError("[unmerged-index] Resolve index conflicts before committing.")
+    staged = changed("--cached")
+    if paths:
+        outside = sorted(
+            name for name in staged if not any(Path(name).is_relative_to(path) for path in paths)
+        )
+        if outside:
+            raise CaptainError(f"[staged-outside-scope] Staged paths outside scope: {outside!r}")
+        untracked = _git_bytes(root, "ls-files", "--others", "--exclude-standard", "-z")
+        mixed = sorted(
+            staged & (changed() | {os.fsdecode(path) for path in untracked.split(b"\0") if path})
+        )
+        if mixed:
+            raise CaptainError(
+                f"[mixed-origin-changes] Both staged and unstaged changes: {mixed!r}. "
+                "Select the intended hunks explicitly before committing."
+            )
+    return staged
+
+
+def _commit(args, root, session_directory):
+    check_text(args.message, "message")
+    paths = [inside_project(root, value, "Path") for value in args.path]
+    baseline = _index_baseline(root)
+    # Captain commits cooperate on this lock; native Git does not acquire it.
+    with lock(state_storage(root) / "git.lock"):
+        if _index_baseline(root) != baseline:
+            raise CaptainError("[index-changed] Index or HEAD changed while waiting; retry.")
+        existing = _commit_scope(root, paths)
+        if _index_baseline(root) != baseline:
+            raise CaptainError("[index-changed] Index or HEAD changed during scope checks; retry.")
+        # A staged deletion no longer matches an add pathspec; preserve it as staged.
+        to_stage = [path for path in paths if path not in existing or (root / path).exists()]
+        if to_stage:
+            _git(root, "--literal-pathspecs", "add", "--", *to_stage)
+        staged = _index_baseline(root)
+        if staged[1:] != baseline[1:] or (not paths and staged != baseline):
+            raise CaptainError("[index-changed] Index or HEAD changed before commit; retry.")
+        if not _commit_scope(root, paths):
+            raise CaptainError("[empty-index] Nothing staged to commit; name the paths to stage.")
+        if _index_baseline(root) != staged:
+            raise CaptainError("[index-changed] Index or HEAD changed before commit; retry.")
+        output = _act(
+            root, ["git", "commit", "--message", args.message], session_directory, "commit"
+        )
+        _, head = _git(root, "rev-parse", "--short", "HEAD")
+        return f"Committed {head} on {_branch(root)}.", output
+
+
 def run(args, session_directory, project):
+    """Dispatch one `do` action; a refusal is recorded here, once, unless the run was.
+
+    `resolve` executes nothing and changes no state, so it leaves no record: the run it
+    leads to is the reviewable event, and a record per query would bury those.
+    """
+    try:
+        return _dispatch(args, session_directory, project)
+    except CaptainError as exc:
+        if args.do_command != "resolve" and not getattr(exc, "recorded", False):
+            command = ["captain", "do", args.do_command]
+            record(session_directory, args.do_command, command, 1, str(exc))
+        raise
+
+
+def _dispatch(args, session_directory, project):
     root = Path(project).resolve(strict=True)
     action = args.do_command
+    if action == "resolve":
+        result = _resolve_intent(args.intent, ())
+        if result["status"] == "unsupported" and result["code"] == "missing-target":
+            try:
+                result = _resolve_intent(args.intent, _targets(root))
+            except (CaptainError, OSError) as exc:
+                result.update(status="invalid", code="makefile-unavailable", reason=str(exc))
+        if result["status"] == "resolved" and session_directory:
+            result["command"][1:1] = ["--session", session_directory.name]
+        print(json.dumps(result, ensure_ascii=False))
+        if result["status"] != "resolved":
+            raise CaptainError(
+                f"[{result['code']}] {result['reason']} "
+                f"Resolvable shapes: {'; '.join(result['shapes'])}. "
+                "Optional: please prefix and terminal period."
+            )
+        return
     if action == "quiet":
         note = _quiet(args, root, session_directory)
         if note:
             print(note, file=sys.stderr)
         return
     if action == "commit":
-        check_text(args.message, "message")
-        paths = [inside_project(root, value, "Path") for value in args.path]
-        if paths:
-            _git(root, "add", "--", *paths)
-        code, _ = _git(root, "diff", "--cached", "--quiet", check=False)
-        if code == 0:
-            raise CaptainError("Nothing staged to commit; name the paths to stage.")
-        command = ["git", "commit", "--message", args.message]
-        output = _act(root, command, session_directory, action)
-        _, head = _git(root, "rev-parse", "--short", "HEAD")
-        summary = f"Committed {head} on {_branch(root)}."
+        summary, output = _commit(args, root, session_directory)
     elif action == "branch":
         command = ["git", "switch", "--create", _name(args.name)]
         output = _act(root, command, session_directory, action)
@@ -295,14 +483,11 @@ def run(args, session_directory, project):
         output = _act(root, command, session_directory, action)
         summary = f"Pushed {current}."
     else:
-        if args.target not in RUNNABLE:
-            raise CaptainError(
-                f"{args.target} is not a quiet target. Quiet targets only build, check, clean "
-                f"or describe the project: {', '.join(RUNNABLE)}. Anything else needs the user."
-            )
+        if not TARGET.fullmatch(args.target):
+            raise CaptainError(f"Not a usable target name: {args.target}")
         if args.target not in _targets(root):
             raise CaptainError(f"The project's Makefile declares no {args.target} target.")
-        command = ["make", args.target]
+        command = ["make", "--", args.target]
         output = _act(root, command, session_directory, action)
         summary = f"make {args.target} passed."
     print(summary)

@@ -1,6 +1,7 @@
 """Deterministic work the captain does itself: enumerated, guarded, and recorded."""
 
 import contextlib
+import fcntl
 import io
 import json
 import os
@@ -112,6 +113,13 @@ class DoTests(unittest.TestCase):
             return []
         return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
 
+    def assert_refused(self, action, count, reason):
+        entries = self.recorded()
+        self.assertEqual(len(entries), count)
+        for entry in entries:
+            self.assertEqual((entry["type"], entry["action"], entry["exit"]), ("quiet", action, 1))
+            self.assertIn(reason, entry["output"])
+
     def head(self):
         return subprocess.run(
             ["git", "log", "-1", "--format=%s"],
@@ -133,11 +141,167 @@ class DoTests(unittest.TestCase):
     def test_commit_refuses_when_nothing_is_staged(self):
         with self.assertRaisesRegex(CaptainError, "Nothing staged"):
             self.run_do("commit", message="empty", path=[])
-        self.assertEqual(self.recorded(), [])
+        self.assert_refused("commit", 1, "Nothing staged")
+
+    def test_commit_refuses_other_staged_paths_without_touching_the_index(self):
+        for name in ("other.md", " README.md", "README.md\n", "README.md\r"):
+            with self.subTest(name=name):
+                other = self.project / name
+                other.write_text("another crew\n", encoding="utf-8")
+                git(self.project, "add", "--", name)
+                (self.project / "README.md").write_text("my work\n", encoding="utf-8")
+                index = (self.project / ".git" / "index").read_bytes()
+                with self.assertRaisesRegex(CaptainError, r"\[staged-outside-scope\]"):
+                    self.run_do("commit", message="mine", path=["README.md"])
+                self.assertEqual((self.project / ".git" / "index").read_bytes(), index)
+                self.assertEqual(self.head(), "initial")
+                self.assertEqual(other.read_text(encoding="utf-8"), "another crew\n")
+                git(self.project, "reset", "--", name)
+                other.unlink()
+        self.assert_refused("commit", 4, "staged-outside-scope")
+
+    def test_commit_refuses_mixed_staged_and_unstaged_hunks_before_staging(self):
+        readme = self.project / "README.md"
+        readme.write_text("already staged\n", encoding="utf-8")
+        git(self.project, "add", "README.md")
+        readme.write_text("already staged\nnew work\n", encoding="utf-8")
+        index = (self.project / ".git" / "index").read_bytes()
+        with self.assertRaisesRegex(CaptainError, r"\[mixed-origin-changes\]"):
+            self.run_do("commit", message="ambiguous", path=["README.md"])
+        self.assertEqual((self.project / ".git" / "index").read_bytes(), index)
+        self.assertEqual(readme.read_text(encoding="utf-8"), "already staged\nnew work\n")
+        self.assertEqual(self.head(), "initial")
+        self.assert_refused("commit", 1, "mixed-origin-changes")
+
+    def test_commit_without_paths_preserves_unstaged_hunks(self):
+        readme = self.project / "README.md"
+        readme.write_text("selected\n", encoding="utf-8")
+        git(self.project, "add", "README.md")
+        readme.write_text("selected\nunselected\n", encoding="utf-8")
+        self.run_do("commit", message="selected hunks", path=[])
+        committed = subprocess.check_output(["git", "show", "HEAD:README.md"], cwd=self.project)
+        self.assertEqual(committed, b"selected\n")
+        self.assertEqual(readme.read_text(encoding="utf-8"), "selected\nunselected\n")
+
+    def test_commit_accepts_pre_staged_paths_entirely_inside_a_directory_scope(self):
+        docs = self.project / "docs"
+        docs.mkdir()
+        (docs / "one.md").write_text("staged\n", encoding="utf-8")
+        git(self.project, "add", "docs/one.md")
+        (docs / "two.md").write_text("unstaged\n", encoding="utf-8")
+        self.run_do("commit", message="docs", path=["docs"])
+        self.assertEqual(self.head(), "docs")
+        self.assertEqual(
+            subprocess.check_output(["git", "status", "--porcelain"], cwd=self.project), b""
+        )
+
+    def test_commit_path_scope_is_literal_not_a_git_glob(self):
+        (self.project / "a*").write_text("mine\n", encoding="utf-8")
+        (self.project / "another").write_text("not mine\n", encoding="utf-8")
+        self.run_do("commit", message="literal", path=["a*"])
+        names = subprocess.check_output(["git", "ls-tree", "--name-only", "HEAD"], cwd=self.project)
+        self.assertIn(b"a*\n", names)
+        self.assertNotIn(b"another\n", names)
+
+    def test_commit_revalidates_the_index_after_acquiring_the_project_lock(self):
+        (self.project / "README.md").write_text("my work\n", encoding="utf-8")
+        (self.project / "other.md").write_text("other work\n", encoding="utf-8")
+        original_lock = do.lock
+        locked_index = None
+
+        @contextlib.contextmanager
+        def competing_commit(path):
+            nonlocal locked_index
+            with original_lock(path):
+                git(self.project, "add", "other.md")
+                locked_index = (self.project / ".git" / "index").read_bytes()
+                yield
+
+        with (
+            mock.patch.object(do, "lock", competing_commit),
+            self.assertRaisesRegex(CaptainError, r"\[index-changed\]"),
+        ):
+            self.run_do("commit", message="mine", path=["README.md"])
+        self.assertEqual((self.project / ".git" / "index").read_bytes(), locked_index)
+        self.assertEqual(self.head(), "initial")
+        self.assert_refused("commit", 1, "index-changed")
+
+    def test_commit_rechecks_scope_after_staging_without_undoing_other_work(self):
+        (self.project / "README.md").write_text("my work\n", encoding="utf-8")
+        (self.project / "other.md").write_text("other work\n", encoding="utf-8")
+        original_git = do._git
+
+        def competing_add(root, *arguments, **kwargs):
+            result = original_git(root, *arguments, **kwargs)
+            if arguments[:2] == ("--literal-pathspecs", "add"):
+                git(root, "add", "other.md")
+            return result
+
+        with (
+            mock.patch.object(do, "_git", side_effect=competing_add),
+            self.assertRaisesRegex(CaptainError, r"\[staged-outside-scope\]"),
+        ):
+            self.run_do("commit", message="mine", path=["README.md"])
+        staged = subprocess.check_output(
+            ["git", "diff", "--cached", "--name-only"], cwd=self.project
+        )
+        self.assertEqual(set(staged.splitlines()), {b"README.md", b"other.md"})
+        self.assertEqual(self.head(), "initial")
+        self.assert_refused("commit", 1, "staged-outside-scope")
 
     def test_commit_refuses_a_path_outside_the_project(self):
         with self.assertRaisesRegex(CaptainError, "inside the project"):
             self.run_do("commit", message="escape", path=["../elsewhere"])
+
+    def test_commit_keeps_the_project_lock_until_git_finishes(self):
+        (self.project / "README.md").write_text("my work\n", encoding="utf-8")
+        original_act = do._act
+        lock_path = do.state_storage(self.project) / "git.lock"
+
+        def locked_commit(*args):
+            with lock_path.open("a") as contender:
+                with self.assertRaises(BlockingIOError):
+                    fcntl.flock(contender, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return original_act(*args)
+
+        with mock.patch.object(do, "_act", side_effect=locked_commit):
+            self.run_do("commit", message="locked", path=["README.md"])
+        with lock_path.open("a") as contender:
+            fcntl.flock(contender, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        self.assertEqual(self.head(), "locked")
+
+    def test_commit_checks_both_sides_of_a_staged_rename(self):
+        git(self.project, "mv", "README.md", "renamed.md")
+        index = (self.project / ".git" / "index").read_bytes()
+        with self.assertRaisesRegex(CaptainError, r"\[staged-outside-scope\]"):
+            self.run_do("commit", message="rename", path=["renamed.md"])
+        self.assertEqual((self.project / ".git" / "index").read_bytes(), index)
+        self.run_do("commit", message="rename", path=["README.md", "renamed.md"])
+        self.assertEqual(self.head(), "rename")
+
+    def test_commit_refuses_unmerged_entries_without_staging_a_resolution(self):
+        git(self.project, "switch", "-c", "side")
+        (self.project / "README.md").write_text("side\n", encoding="utf-8")
+        git(self.project, "commit", "-am", "side")
+        git(self.project, "switch", "main")
+        (self.project / "README.md").write_text("main\n", encoding="utf-8")
+        git(self.project, "commit", "-am", "main")
+        with self.assertRaises(subprocess.CalledProcessError):
+            git(self.project, "merge", "side")
+        index = (self.project / ".git" / "index").read_bytes()
+        with self.assertRaisesRegex(CaptainError, r"\[unmerged-index\]"):
+            self.run_do("commit", message="conflict", path=["README.md"])
+        self.assertEqual((self.project / ".git" / "index").read_bytes(), index)
+        self.assertEqual(self.head(), "main")
+
+    def test_commit_refuses_to_replace_a_staged_deletion_with_a_recreated_file(self):
+        git(self.project, "rm", "README.md")
+        (self.project / "README.md").write_text("someone else's new file\n", encoding="utf-8")
+        index = (self.project / ".git" / "index").read_bytes()
+        with self.assertRaisesRegex(CaptainError, r"\[mixed-origin-changes\]"):
+            self.run_do("commit", message="ambiguous", path=["README.md"])
+        self.assertEqual((self.project / ".git" / "index").read_bytes(), index)
+        self.assertEqual(self.head(), "initial")
 
     def test_commit_refuses_a_path_inside_dot_git(self):
         with self.assertRaisesRegex(CaptainError, "outside .git"):
@@ -220,15 +384,32 @@ class DoTests(unittest.TestCase):
                 with self.subTest(action=entry["action"], forbidden=forbidden):
                     self.assertNotIn(forbidden, entry["command"])
 
-    def test_run_refuses_a_target_outside_the_quiet_set(self):
-        (self.project / "Makefile").write_text("release:\n\t@true\n", encoding="utf-8")
-        with self.assertRaisesRegex(CaptainError, "not a quiet target"):
-            self.run_do("run", target="release")
+    def test_run_executes_a_declared_release_target(self):
+        (self.project / "Makefile").write_text("release:\n\t@echo released\n", encoding="utf-8")
+        self.run_do("run", target="release")
+        (entry,) = self.recorded()
+        self.assertEqual(entry["command"], ["make", "--", "release"])
+        self.assertEqual(entry["exit"], 0)
+        self.assertIn("released", entry["output"])
 
     def test_run_refuses_a_target_the_project_does_not_declare(self):
         (self.project / "Makefile").write_text("build:\n\t@true\n", encoding="utf-8")
-        with self.assertRaisesRegex(CaptainError, "declares no test target"):
-            self.run_do("run", target="test")
+        with self.assertRaisesRegex(CaptainError, "declares no release target"):
+            self.run_do("run", target="release")
+        self.assert_refused("run", 1, "declares no release target")
+
+    def test_a_refused_run_is_recorded_once_and_a_failed_one_is_not_doubled(self):
+        (self.project / "Makefile").write_text("build:\n\t@exit 1\n", encoding="utf-8")
+        with self.assertRaisesRegex(CaptainError, "declares no deploy target"):
+            self.run_do("run", target="deploy")
+        with self.assertRaisesRegex(CaptainError, "failed"):
+            self.run_do("run", target="build")
+        refused, failed = self.recorded()
+        self.assertEqual(
+            (refused["action"], refused["exit"], refused["command"]),
+            ("run", 1, ["captain", "do", "run"]),
+        )
+        self.assertEqual(failed["command"], ["make", "--", "build"])
 
     def test_run_refuses_when_there_is_no_makefile(self):
         with self.assertRaisesRegex(CaptainError, "No Makefile"):
@@ -253,15 +434,151 @@ class DoTests(unittest.TestCase):
         self.assertEqual((entry["action"], entry["exit"]), ("run", 2))
         self.assertIn("boom", entry["output"])
 
-    def test_help_is_runnable_because_it_only_describes_the_project(self):
-        self.assertIn("help", do.RUNNABLE)
+    def test_run_executes_a_declared_help_target(self):
         (self.project / "Makefile").write_text("help:\n\t@echo targets go here\n", encoding="utf-8")
         self.run_do("run", target="help")
         self.assertIn("targets go here", self.recorded()[-1]["output"])
 
-    def test_the_quiet_set_excludes_every_publishing_and_rewriting_verb(self):
-        for forbidden in ("release", "publish", "deploy", "bump", "version", "push"):
-            self.assertNotIn(forbidden, do.RUNNABLE)
+    def test_run_refuses_options_and_assignments_before_spawning(self):
+        (self.project / "Makefile").write_text("--help:\n\t@true\n", encoding="utf-8")
+        for target in ("--help", "-f", "VAR=value", "test release", "test;id"):
+            with (
+                self.subTest(target=target),
+                mock.patch.object(do, "_spawn") as spawn,
+                self.assertRaisesRegex(CaptainError, "Not a usable target name"),
+            ):
+                self.run_do("run", target=target)
+            spawn.assert_not_called()
+
+    def test_intent_rules_resolve_whole_requests_in_order(self):
+        targets = {"push", "release", "Release", "gate", "smoke-check", "verify_2"}
+        cases = (
+            ("push", "push", {}, "git"),
+            ("PLEASE PUSH.", "push", {}, "git"),
+            ("fetch", "fetch", {}, "git"),
+            ("pull", "pull", {}, "git"),
+            ("commit", "commit", {}, "commit"),
+            ("create a branch Feature.One", "branch", {"name": "Feature.One"}, "branch"),
+            ("cut a branch fix/Case", "branch", {"name": "fix/Case"}, "branch"),
+            ("switch to Feature.One", "switch", {"name": "Feature.One"}, "switch"),
+            ("run push", "run", {"target": "push"}, "run"),
+            ("run the gate", "run", {"target": "gate"}, "run"),
+            ("make the gate", "run", {"target": "gate"}, "run"),
+            ("the gate", "run", {"target": "gate"}, "target"),
+            ("do the gate", "run", {"target": "gate"}, "target"),
+            ("please RUN THE Release.", "run", {"target": "Release"}, "run"),
+            ("MAKE Release", "run", {"target": "Release"}, "run"),
+            ("do the release", "run", {"target": "release"}, "target"),
+            ("please do the Release.", "run", {"target": "Release"}, "target"),
+            ("smoke-check", "run", {"target": "smoke-check"}, "target"),
+            (" run\tverify_2 ", "run", {"target": "verify_2"}, "run"),
+        )
+        for intent, operation, arguments, rule in cases:
+            with self.subTest(intent=intent), mock.patch.object(do, "_capture") as capture:
+                result = do._resolve_intent(intent, targets)
+                self.assertEqual(result["operation"], operation)
+                self.assertEqual(result["arguments"], arguments)
+                self.assertEqual(result["rule"], rule)
+                if operation == "commit":
+                    self.assertEqual(result["status"], "needs-input")
+                    self.assertEqual(result["missing"], ["message", "scope"])
+                else:
+                    self.assertEqual(result["status"], "resolved")
+                    self.assertEqual(
+                        result["command"], ["captain", "do", operation, *arguments.values()]
+                    )
+                capture.assert_not_called()
+
+    def test_unresolved_intents_name_the_reason_and_shapes_without_spawning(self):
+        (self.project / "Makefile").write_text("test:\n\t@true\n", encoding="utf-8")
+        cases = (
+            ("commit", "needs-input", "missing-message"),
+            ("create a branch", "needs-input", "missing-name"),
+            ("switch to", "needs-input", "missing-name"),
+            ("run", "needs-input", "missing-target"),
+            ("do the release", "unsupported", "missing-target"),
+            ("do the publish", "unsupported", "missing-target"),
+            ("can you push this up?", "unsupported", "unsupported-request"),
+            ("run gate; rm -rf /", "unsupported", "unsupported-request"),
+            ("run the gate; rm -rf /", "unsupported", "unsupported-request"),
+            ("run the the gate", "unsupported", "unsupported-request"),
+            ("don't push", "unsupported", "unsupported-request"),
+            ("what does release do?", "unsupported", "unsupported-request"),
+            ("if tests pass release", "unsupported", "unsupported-request"),
+            ("push and release", "unsupported", "unsupported-request"),
+            ("push --force", "unsupported", "unsupported-request"),
+            ("push; release", "unsupported", "unsupported-request"),
+            ("run test extra", "unsupported", "unsupported-request"),
+            ("run --help", "invalid", "invalid-name"),
+            ("run VAR=value", "invalid", "invalid-name"),
+            ("run $(id)", "invalid", "invalid-name"),
+            ("switch to --force", "invalid", "invalid-name"),
+            ("cut a branch bad..name", "invalid", "invalid-name"),
+            ("", "invalid", "invalid-intent"),
+            ("push\nrelease", "invalid", "invalid-intent"),
+            ("push\x00", "invalid", "invalid-intent"),
+            ("x" * 8001, "invalid", "invalid-intent"),
+        )
+        for intent, status, code in cases:
+            with (
+                self.subTest(intent=intent[:80]),
+                mock.patch.object(do, "_capture") as capture,
+                contextlib.redirect_stdout(io.StringIO()) as output,
+            ):
+                args = cli.parser().parse_args(["do", "resolve", "--intent", intent])
+                with self.assertRaises(CaptainError) as error:
+                    do.run(args, self.session, self.project)
+                result = json.loads(output.getvalue())
+                self.assertEqual((result["status"], result["code"]), (status, code))
+                self.assertNotIn("command", result)
+                self.assertIn(f"[{code}]", str(error.exception))
+                for shape in result["shapes"]:
+                    self.assertIn(shape, str(error.exception))
+                capture.assert_not_called()
+        self.assertEqual(self.recorded(), [])
+
+    def test_resolve_returns_a_session_command_without_running_it(self):
+        (self.project / "Makefile").write_text("release:\n\t@false\n", encoding="utf-8")
+        with mock.patch.object(do, "_capture") as capture:
+            self.run_do("resolve", intent="do the release")
+            result = json.loads(self.printed)
+            self.assertEqual(
+                result["command"],
+                ["captain", "--session", self.session.name, "do", "run", "release"],
+            )
+            capture.assert_not_called()
+        self.assertEqual(self.recorded(), [])
+
+    def test_resolve_runs_without_a_session_and_other_actions_still_need_one(self):
+        (self.project / "Makefile").write_text("release:\n\t@false\n", encoding="utf-8")
+        args = SimpleNamespace(do_command="resolve", intent="do the release")
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            do.run(args, None, self.project)
+        self.assertEqual(
+            json.loads(buffer.getvalue())["command"], ["captain", "do", "run", "release"]
+        )
+        err = io.StringIO()
+        with (
+            mock.patch.dict(os.environ, {"CAPTAIN_ROLE": "captain", "CAPTAIN_SESSION": ""}),
+            mock.patch.object(cli, "current_pane", return_value="w1:p1"),
+            contextlib.chdir(self.project),
+            contextlib.redirect_stderr(err),
+        ):
+            self.assertNotEqual(cli.main(["do", "push"]), 0)
+        self.assertIn("Start captain first", err.getvalue())
+
+    def test_git_resolution_needs_no_makefile_but_target_resolution_does(self):
+        with mock.patch.object(do, "_capture") as capture:
+            self.run_do("resolve", intent="push")
+            self.assertEqual(json.loads(self.printed)["operation"], "push")
+            with self.assertRaisesRegex(CaptainError, r"\[missing-target\].*Resolvable shapes"):
+                self.run_do("resolve", intent="run")
+            with self.assertRaisesRegex(
+                CaptainError, r"\[makefile-unavailable\].*Resolvable shapes"
+            ):
+                self.run_do("resolve", intent="release")
+            capture.assert_not_called()
 
     def test_quiet_reports_the_turns_own_text_and_records_the_run(self):
         argv = self.fake_claude(SUCCESS)
@@ -314,13 +631,13 @@ class DoTests(unittest.TestCase):
                 self.assertRaisesRegex(CaptainError, "inside the project"),
             ):
                 self.run_quiet(write=[path])
-        self.assertEqual(self.recorded(), [])
+        self.assert_refused("quiet", 2, "inside the project")
 
     def test_quiet_refuses_a_turn_that_did_not_complete(self):
         self.fake_claude({**SUCCESS, "is_error": True, "subtype": "error_during_execution"})
         with self.assertRaisesRegex(CaptainError, "did not complete"):
             self.run_quiet()
-        self.assertEqual(self.recorded(), [])
+        self.assert_refused("quiet", 1, "did not complete")
 
     def test_quiet_refuses_output_that_is_not_a_result_document(self):
         self.fake_claude("not a result", status=2)

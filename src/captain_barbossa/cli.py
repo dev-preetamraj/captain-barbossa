@@ -175,6 +175,11 @@ def parser():
     )
     dismiss = commands.add_parser("dismiss", help="close an existing crew's pane and retire it")
     dismiss.add_argument("name", help="crew name or ID (case-insensitive)")
+    dismiss.add_argument(
+        "--confirm-unlanded",
+        action="store_true",
+        help="the user agreed to dismiss although Git shows the crew's owned work unlanded",
+    )
     mem = commands.add_parser("memory", help="session, project, and committed repo graph memory")
     actions = mem.add_subparsers(dest="memory_command", required=True)
     add = actions.add_parser("add", help="remember a subject → relation → object")
@@ -347,6 +352,9 @@ def main(argv=None):
             return 0
         if args.command == "models":
             print_models(args)
+            return 0
+        if args.command == "do" and args.do_command == "resolve" and not args.session:
+            do.run(args, None, project_root())
             return 0
         pane = current_pane()
         project = project_root()
