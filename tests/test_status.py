@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 from captain_barbossa import agents, cli, runtime, sessions, store
 from captain_barbossa import pane as panes
+from captain_barbossa.crew import Crew, CrewState
 from captain_barbossa.pane import Pane
 from tests.home_isolation import HERDR, SessionCase
 
@@ -53,6 +54,7 @@ class StatusCrewTests(SessionCase):
     def status(self, api, *extra):
         with (
             patch.object(runtime, "herdr", side_effect=api),
+            patch.object(Pane, "lines", return_value=[]),
             contextlib.redirect_stdout(io.StringIO()) as output,
         ):
             agents.status_crew(self.args(*extra), self.pane, self.project)
@@ -69,12 +71,13 @@ class StatusCrewTests(SessionCase):
         lines = output.splitlines()
         self.assertIn("NAME", lines[0])
         jack_line = next(line for line in lines if line.startswith("Jack"))
-        self.assertIn("idle", jack_line)
+        self.assertIn("state:unknown source:none", jack_line)
+        self.assertIn("pane state idle", jack_line)
         self.assertIn("build the thing", jack_line)
         self.assertNotIn("Gibbs", output)
         will_line = next(line for line in lines if line.startswith("Will"))
-        self.assertIn("working", will_line)
-        self.assertLessEqual(len(will_line.split("  ")[-1]), 60)
+        self.assertIn("state:working source:pane", will_line)
+        self.assertLessEqual(len(will_line.split("  ")[-1].strip()), 60)
 
     def test_all_flag_includes_dismissed_crew(self):
         def api(*call_args, **kwargs):
@@ -85,7 +88,7 @@ class StatusCrewTests(SessionCase):
         output = self.status(api, "--all")
         self.assertIn("Gibbs", output)
 
-    def test_herdr_error_keeps_recorded_status(self):
+    def test_herdr_error_reports_unknown_with_source_and_reason(self):
         def api(*call_args, **kwargs):
             if call_args[:2] == ("agent", "get"):
                 raise agents.CaptainError("herdr unreachable")
@@ -93,7 +96,38 @@ class StatusCrewTests(SessionCase):
 
         output = self.status(api)
         jack_line = next(line for line in output.splitlines() if line.startswith("Jack"))
-        self.assertIn("started", jack_line)
+        self.assertIn("state:unknown source:none", jack_line)
+        self.assertIn("pane unreadable", jack_line)
+
+    def test_long_state_detail_is_capped_in_the_status_column(self):
+        self.meta["crew"]["jack"]["status"] = "done"
+        store.write_json(self.directory / "session.json", self.meta)
+        long_state = CrewState("done", "hook", "report " * 160)
+        with patch.object(Crew, "current_state", return_value=long_state):
+            output = self.status(lambda *a, **k: {"agent": {}})
+        jack_line = next(line for line in output.splitlines() if line.startswith("Jack"))
+        self.assertLess(len(jack_line), 200)
+        self.assertIn("state:done source:hook report", jack_line)
+        self.assertIn("...", jack_line)
+
+    def test_task_and_held_mail_come_from_the_active_assignment(self):
+        crew = Crew.resolve(agents.read_session(self.project, self.meta["id"], self.pane), "jack")
+        crew.record["incarnation_id"] = "inc1"
+        self.meta["crew"]["jack"] = crew.record
+        store.write_json(self.directory / "session.json", self.meta)
+        state = {
+            "active": {"jack": "a1"},
+            "assignments": {"a1": {"incarnation_id": "inc1", "original_task": "ship it\nmore"}},
+        }
+        store.write_json(self.directory / "protocol.json", state)
+        with (
+            patch.object(agents.protocol, "unread", return_value=[{"id": "m1"}]),
+            patch.object(Pane, "nudge_block", return_value="permission prompt"),
+        ):
+            output = self.status(lambda *a, **k: {"agent": {}})
+        jack_line = next(line for line in output.splitlines() if line.startswith("Jack"))
+        self.assertIn("mail held: permission prompt", jack_line)
+        self.assertTrue(jack_line.endswith("ship it"))
 
     def test_no_crew_prints_placeholder(self):
         self.meta["crew"] = {}

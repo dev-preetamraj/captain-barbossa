@@ -1,9 +1,10 @@
 """Crew identities, roster queries, and native lifecycle events."""
 
+import re
 import time
 from dataclasses import dataclass
 
-from .events import read_events
+from .events import event_incarnation, read_events
 from .models import HOOKLESS
 from .pane import INTERRUPT_MARKER, PANE_EMPTY_PROMPT, Pane, modal_start
 from .runtime import HERDR_ERRORS, CaptainError
@@ -15,6 +16,26 @@ WAIT_INTERVAL = 2
 WAIT_POLLS = 3
 # Codex's own title-generation turn notifies like any other; its prompt names what it is.
 CODEX_TITLE_PROMPT = "single-line task title"
+STATUS_PREFIX = re.compile(r"^(working|paused-until|blocked|needs-decision|done|failed)(?=:|$)")
+
+
+@dataclass(frozen=True)
+class CrewState:
+    state: str
+    source: str
+    detail: str
+
+    def __str__(self):
+        return f"state:{self.state} source:{self.source} {' '.join(self.detail.split())}"
+
+
+def declared_state(text, source):
+    """Keep an unrecognized declaration visible instead of silently skipping it."""
+    text = str(text).strip()
+    match = STATUS_PREFIX.match(text)
+    if match:
+        return CrewState(match[1], source, text[match.end() :].lstrip(": "))
+    return CrewState("unknown", source, f"unknown status prefix: {text}")
 
 
 def event_status(event):
@@ -72,6 +93,60 @@ class Crew:
     @property
     def pane(self):
         return Pane(self.record["agent"])
+
+    def current_state(self):
+        """Read current evidence, independent of the wait consumer's event cursor."""
+        reasons = []
+        incarnation = self.record.get("incarnation_id")
+        try:
+            event_incarnation(self.events)
+        except (CaptainError, OSError, ValueError) as exc:
+            return CrewState("unknown", "none", f"cannot verify incarnation: {exc}")
+        try:
+            state = read_json(self.session.directory / "protocol.json")
+            assignment = state["assignments"].get(state["active"].get(self.crew_id))
+        except (CaptainError, OSError, KeyError, ValueError):
+            assignment = None
+            reasons.append("mail state unreadable")
+        if assignment and assignment.get("incarnation_id") != incarnation:
+            return CrewState("unknown", "none", "stale incarnation")
+        try:
+            batch, _ = read_events(self.events, 0, incarnation=incarnation)
+            if not self.events.exists():
+                reasons.append("no events file")
+            elif not batch:
+                reasons.append("no valid events (stale incarnation or sequence, or empty log)")
+        except (CaptainError, OSError, ValueError):
+            batch = []
+            reasons.append("events unreadable")
+        for event in reversed(batch):
+            if "status" in event:
+                return declared_state(event["status"], "hook")
+            kind = event.get("hook_event_name", event.get("type"))
+            if kind in ("UserPromptSubmit", "PreToolUse", "PostToolUse"):
+                return CrewState("working", "hook", kind)
+            status = event_status(event)
+            if status in ("working", "blocked"):
+                return CrewState(status, "hook", str(kind))
+            if status in ("done", "idle"):
+                reasons.append("hook reports inactivity, not assignment completion")
+                break
+        try:
+            status = self.pane.agent_status()
+            if status in ("working", "blocked"):
+                return CrewState(status, "pane", "native agent status")
+            if modal_start(self.pane.lines()) is not None:
+                return CrewState("blocked", "pane", "approval prompt")
+            reasons.append(f"pane state {status or 'missing'} does not prove assignment state")
+        except HERDR_ERRORS:
+            reasons.append("pane unreadable")
+        if assignment:
+            if assignment.get("state") == "done":
+                return CrewState("done", "mail", assignment.get("report") or "assignment completed")
+            if assignment.get("question"):
+                return CrewState("needs-decision", "mail", "assignment has an unanswered question")
+        reasons.append("no explicit assignment outcome or pending question")
+        return CrewState("unknown", "none", "; ".join(reasons))
 
     @classmethod
     def members(cls, current):
