@@ -65,6 +65,21 @@ class DismissMailTests(SessionCase):
         self.assertEqual(mail["state"], "bounced")
         self.assertIn("dismiss", mail["reason"].lower())
 
+    def test_dismiss_close_failure_preserves_queued_mail(self):
+        message_id = protocol.deliver(self.crew, "original", initial=True)
+        mail = self.mail(message_id)
+        roster = store.read_json(self.current.meta_path)
+        state = store.read_json(self.directory / "protocol.json")
+        args = SimpleNamespace(session=self.current.meta["id"], name="Jack")
+        with (
+            patch.object(runtime, "herdr", side_effect=runtime.CaptainError("close failed")),
+            self.assertRaisesRegex(runtime.CaptainError, "Could not dismiss Jack: close failed"),
+        ):
+            agents.dismiss_crew(args, self.pane, self.project)
+        self.assertEqual(self.mail(message_id), mail)
+        self.assertEqual(store.read_json(self.current.meta_path), roster)
+        self.assertEqual(store.read_json(self.directory / "protocol.json"), state)
+
     def test_dismiss_with_no_mail_prints_no_bounce_line(self):
         with protocol.checkpoint(self.directory) as state:
             assignment = protocol.active(state, self.crew, self.assignment["id"])

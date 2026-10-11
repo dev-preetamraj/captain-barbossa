@@ -107,11 +107,15 @@ agent, model, pane or tab, split target, and direction.
 
 ```sh
 captain crew --task "Review the current changes"
-captain crew Gibbs --task "Review the current changes" --agent claude --model mid
+captain crew Gibbs --task "Review the current changes" --agent claude --model mid \
+  --placement pane --split-pane auto --direction auto
 ```
 
-With no preferences, the captain uses its own CLI, automatic placement, and
-the `cheap` tier. Only the captain recruits; captain-only commands are refused
+From a direct shell, omitting `--agent` or `--placement` opens an interactive
+picker; a non-TTY invocation must supply both. The second example supplies all
+choices for automation. When asked to recruit without preferences, the captain
+supplies its own CLI and automatic pane placement. The model defaults to the
+configured crew tier (`cheap` as shipped). Only the captain recruits; captain-only commands are refused
 for crew, which forward delegation requests back to it. See
 [crew-lifecycle.md](https://github.com/dev-preetamraj/captain-barbossa/blob/main/docs/crew-lifecycle.md)
 for naming, launch behavior, failure handling, and shared-checkout guardrails.
@@ -138,9 +142,9 @@ for slot order, split ratios, dismissal behavior, and validation.
 
 | Tier     | Claude Code      | Codex                | Grok                |
 |----------|------------------|----------------------|---------------------|
-| `cheap`  | claude-haiku-4-5  | gpt-5.6-luna         | grok-4.7-build-fast  |
-| `mid`    | claude-sonnet-5   | gpt-5.6-sol          | grok-4.6             |
-| `strong` | claude-opus-5     | gpt-6-astra          | grok-4.7             |
+| `cheap`  | claude-haiku-5-5  | gpt-5.6-luna         | grok-4.7-build-fast  |
+| `mid`    | claude-sonnet-5-5 | gpt-5.6-sol          | grok-4.6             |
+| `strong` | claude-opus-5-5   | gpt-6-astra          | grok-4.7             |
 
 **`cheap` is the default**: omitting `--model` recruits a `cheap` crew rather
 than falling through to whatever the native CLI is configured to use, so
@@ -158,7 +162,8 @@ up front.
 Free text also works and is matched to the closest model the chosen CLI
 offers (exact IDs and aliases first, then prefixes, substrings, and close
 spellings): Claude Code additionally offers `claude-fable-5-1` (fable);
-Codex additionally offers `gpt-5.6-terra` (terra) and `gpt-5.5`; Grok additionally
+Codex additionally offers `gpt-5.6-terra` (terra), `gpt-6-luna` (luna),
+`gpt-6-sol`, and `gpt-6.1-sol` (sol); Grok additionally
 offers `grok-4.5`. Ambiguous or unknown text reports the options and creates nothing.
 
 ```sh
@@ -172,7 +177,8 @@ for retiering providers and setting model defaults.
 
 Nothing is required. Project settings override global settings one key at a
 time, and CLI flags win for one invocation. `init` writes a fully commented
-template and never overwrites an existing file.
+template for a new file; for an existing file it appends missing commented keys
+while preserving all existing content and values.
 
 ```sh
 captain init
@@ -212,11 +218,12 @@ owned paths with repeated `--owns PATH` and grants with repeated `--allow ACTION
 Use `ask`/`answer` for a question, `done --report` for completion, and
 `assign --handoff` to reuse a finished assignment's crew. Dismissed crew are refused.
 
-`assign`, `tell`, and `answer` write a durable mail file. The first ring
-prompts the assignment as a Herdr agent prompt plus a line to run
-`captain inbox NAME`; a later ring after that landed is the inbox line
-alone. The inbox read proves delivery and writes the receipt. `done`
-refuses while mail is unread.
+`assign`, `tell`, and `answer` write a durable mail file. For Claude crew,
+every ring is the fixed wake line; native hooks deliver the body as
+`additionalContext` and write its receipt after flushing it. For other providers,
+the first ring prompts the assignment plus a line to run `captain inbox NAME`;
+a later ring after that landed is the inbox line alone. Their inbox read proves
+delivery and writes the receipt. `done` refuses while mail is unread.
 Newly launched crew may omit `--assignment` on `ask`, `done`, and `check`: their
 launch-bound `CAPTAIN_ASSIGNMENT` is validated against crew identity, incarnation,
 and the active assignment. Missing or stale context fails; captain calls and
@@ -336,6 +343,36 @@ not used. Reads accept regular UTF-8 text files; enumeration skips symlinks and
 `.git`, and direct symlink reads fail. Native sandbox permissions still apply. See
 [crew-lifecycle.md](docs/crew-lifecycle.md) for protocol and safety limits.
 
+## Running work without a crew pane
+
+`captain do` runs synchronous, deterministic work without recruiting crew:
+`commit --message TEXT [PATH ...]` stages named paths and commits everything
+staged (omit paths to commit the existing index); `push` pushes the current
+branch and sets its upstream on the first push; `branch NAME` creates and
+switches to a branch; `switch NAME` switches to an existing branch; `fetch`
+fetches from the remote; `pull` is fast-forward only.
+
+`captain do run TARGET` runs a target declared in the project's Makefile from
+the allowed set: `build`, `check`, `clean`, `fmt`, `format`, `gate`, `help`,
+`install`, `lint`, `test`, `typecheck`, or `vet`. History rewriting, force push,
+deletion, and releases stay with the user.
+
+`captain quiet` runs one headless model turn using the session captain's native
+CLI, prints its report, and needs no crew assignment or wait. It is read-only
+by default; repeat `--write PATH` to name files it may edit, leaving edits
+unstaged. `--diff worktree|staged` appends the selected Git diff to the task;
+`--model` selects a tier or model (the configured crew tier by default), and
+`--timeout SECONDS` overrides the 900-second limit.
+
+```sh
+captain do run test
+captain quiet --task "Review the current changes" --diff worktree
+captain quiet --task "Correct the setup instructions" --write README.md
+```
+
+Both commands record runs in the session's `events/captain.jsonl` so work
+without a pane can be reviewed afterward. They are captain-only commands.
+
 ## Memory
 
 Captain stores session and project graph relationships outside the repository,
@@ -419,6 +456,8 @@ Read the affected pane before retrying or approving anything.
 | `captain done NAME [--assignment ID] --report TEXT` | Record explicit completion; ID may default for newly launched crew |
 | `captain check NAME ACTION [PATH ...] [--assignment ID]` | Check grants; ID may default for newly launched crew; executes nothing |
 | `captain inspect files\|read\|search\|state\|git ...` | Bounded local inspection |
+| `captain do commit\|push\|branch\|switch\|fetch\|pull\|run ...` | Synchronous deterministic work without crew |
+| `captain quiet --task TEXT [--diff worktree\|staged] [--write PATH] [--model MODEL] [--timeout SECONDS]` | One headless model turn; repeat `--write` for multiple files |
 | `captain status [--all]` | Print a table of this session's crew |
 | `captain dashboard [--interval SECONDS] [--refresh-prices]` | Refresh a crew token-usage table; optionally refresh prices |
 | `captain focus NAME` | Focus crew's pane and tab |
