@@ -1,6 +1,8 @@
 import contextlib
 import io
 import os
+import shutil
+import subprocess
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -272,6 +274,104 @@ class DismissCrewTests(SessionCase):
         self.assertEqual(roster["jack"]["status"], "dismissed")
         graph = store.read_json(self.directory / "graph.json")
         self.assertIn("c-session-jack", [node["label"] for node in graph["nodes"]])
+
+
+def git(project, *args):
+    return subprocess.run(
+        ["git", "-C", str(project), "-c", "user.name=t", "-c", "user.email=t@t", *args],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
+class DismissUnlandedTests(SessionCase):
+    """Dismiss refuses while Git shows the crew's owned work unlanded; a report is not consent."""
+
+    def setUp(self):
+        super().setUp()
+        self.enterContext(contextlib.chdir(self.project))
+        self.enterContext(patch.dict(os.environ, {"CAPTAIN_ROLE": "captain"}))
+        git(self.project, "init", "-q")
+        (self.project / "src").mkdir()
+        (self.project / "src" / "a.py").write_text("a = 1\n")
+        git(self.project, "add", ".")
+        git(self.project, "commit", "-q", "--no-gpg-sign", "-m", "init")
+        self.current = sessions.session(self.project, self.pane, create=True)
+        self.crew = Crew(
+            "jack",
+            {
+                "name": "Jack",
+                "agent": "jack",
+                "provider": "codex",
+                "incarnation_id": "first",
+                "pane": "w1:p2",
+            },
+            self.current,
+        )
+        self.current.meta["crew"]["jack"] = self.crew.record
+        store.write_json(self.current.meta_path, self.current.meta)
+        protocol.begin(self.crew, self.project, "edit src", ["src"], ["edit"])
+
+    def report(self, text):
+        with protocol.checkpoint(self.current.directory) as state:
+            assignment = protocol.active(state, self.crew)
+            assignment["messages"] = [{"id": "m", "delivery": "read"}]
+            assignment["state"] = "done"
+            assignment["report"] = text
+
+    def dismiss(self, *flags):
+        args = cli.parser().parse_args(
+            ["--session", self.current.meta["id"], "dismiss", "Jack", *flags]
+        )
+        calls = []
+        with (
+            patch.object(
+                agents.runtime, "herdr", side_effect=lambda *a, **_: calls.append(a) or {}
+            ),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            agents.dismiss_crew(args, self.pane, self.project)
+        return calls
+
+    def assert_refused(self, code):
+        with self.assertRaises(runtime.CaptainError) as caught:
+            self.dismiss()
+        self.assertIn(code, str(caught.exception))
+        self.assertIn(protocol.UNSAVED_CAVEAT, str(caught.exception))
+        self.assertIn("--confirm-unlanded", str(caught.exception))
+        self.assertNotEqual(
+            store.read_json(self.current.meta_path)["crew"]["jack"].get("status"), "dismissed"
+        )
+
+    def test_uncommitted_owned_change_refuses_even_with_a_done_report(self):
+        (self.project / "src" / "a.py").write_text("a = 2\n")
+        (self.project / "src" / "new.py").write_text("")
+        self.report("Done; all good.")
+        self.assert_refused("[uncommitted] src/a.py, src/new.py")
+
+    def test_user_confirmation_is_the_only_override(self):
+        (self.project / "src" / "a.py").write_text("a = 2\n")
+        self.report("Done.")
+        self.assertIn(("pane", "close", "w1:p2"), self.dismiss("--confirm-unlanded"))
+
+    def test_clean_owned_paths_and_a_reachable_commit_dismiss(self):
+        (self.project / "src" / "a.py").write_text("a = 2\n")
+        git(self.project, "commit", "-q", "--no-gpg-sign", "-am", "change")
+        head = git(self.project, "rev-parse", "--short", "HEAD")
+        # Changes outside the owned paths are another crew's business.
+        (self.project / "other.py").write_text("")
+        self.report(f"Committed {head}; assignment {'a' * 31}1.")
+        self.assertIn(("pane", "close", "w1:p2"), self.dismiss())
+
+    def test_a_named_commit_no_ref_contains_refuses(self):
+        self.report("Committed 1234abcd.")
+        self.assert_refused("[unreachable-commit] 1234abcd")
+
+    def test_outside_git_the_work_cannot_be_verified(self):
+        shutil.rmtree(self.project / ".git")
+        self.report("Done.")
+        self.assert_refused("[no-git]")
 
 
 if __name__ == "__main__":

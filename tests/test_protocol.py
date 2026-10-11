@@ -96,8 +96,10 @@ class ProtocolTests(SessionCase):
         with patch.object(protocol, "write_json", side_effect=flaky):
             with self.assertRaises(OSError):
                 protocol.deliver(self.crew, "original", initial=True)
-        self.assertEqual(self.saved()["messages"], [])
+        self.assertEqual(self.saved()["messages"][0]["delivery"], "prepared")
         self.assertEqual(protocol.unread(self.crew), [])
+        with self.assertRaisesRegex(CaptainError, "delivery-pending"):
+            self.command("done", report="No changes")
         message_id = protocol.deliver(self.crew, "original", initial=True)
         self.assertEqual(self.mail(message_id)["state"], "queued")
         self.assertEqual([m["text"] for m in self.saved()["messages"]], ["original"])
@@ -309,8 +311,7 @@ class ProtocolTests(SessionCase):
         self.assertEqual(first["status"], "asked")
         second = protocol.poll(self.crew, first["delivery_id"])
         self.assertEqual(second["status"], "done")
-        with self.assertRaisesRegex(CaptainError, second["delivery_id"]):
-            protocol.poll(self.crew)
+        self.assertEqual(protocol.poll(self.crew), second)
         self.assertIsNone(protocol.poll(self.crew, second["delivery_id"])["delivery_id"])
         with self.assertRaisesRegex(CaptainError, "dismiss the crew or hand off"):
             protocol.poll(self.crew)
@@ -325,13 +326,9 @@ class ProtocolTests(SessionCase):
         self.event({"hook_event_name": "Stop"})
         with ThreadPoolExecutor(max_workers=2) as pool:
             outcomes = list(pool.map(lambda _: self.attempt(), range(2)))
-        notified = [outcome for outcome in outcomes if isinstance(outcome, dict)]
-        refused = [outcome for outcome in outcomes if isinstance(outcome, CaptainError)]
-        self.assertEqual(len(notified), 1)
-        self.assertEqual(len(refused), 1)
-        (left,) = notified
+        left, right = outcomes
+        self.assertEqual(left, right)
         self.assertEqual(left["status"], "idle")
-        self.assertIn(left["delivery_id"], str(refused[0]))
         self.assertEqual(self.saved()["state"], "working")
         self.assertEqual(self.saved()["offset"], 0)
         with self.assertRaises(CaptainError):
@@ -428,11 +425,13 @@ class ProtocolTests(SessionCase):
             second = protocol.poll(self.crew)
         self.assertEqual(second["status"], "awaiting_approval")
 
-    def test_identical_text_is_refused_until_a_different_message_is_sent(self):
-        protocol.deliver(self.crew, "original", initial=True)
-        with self.assertRaisesRegex(CaptainError, self.saved()["messages"][0]["id"]):
-            protocol.deliver(self.crew, "original")
+    def test_message_retries_are_idempotent_after_intervening_messages(self):
+        first = protocol.deliver(self.crew, "original", initial=True)
         protocol.deliver(self.crew, "second")
+        with patch.object(protocol, "ring") as ring:
+            self.assertEqual(protocol.deliver(self.crew, "original", initial=True), first)
+        ring.assert_not_called()
+        self.assertEqual(len(self.saved()["messages"]), 2)
 
     def test_stale_assignment_incarnation_and_foreign_actor_are_refused(self):
         for assignment, incarnation in (("old", "first"), (self.assignment["id"], "old")):
@@ -469,6 +468,36 @@ class ProtocolTests(SessionCase):
             final = protocol.wait(self.crew, 5, report["delivery_id"])
         self.assertEqual(final["status"], "idle")
         self.assertIsNone(final["delivery_id"])
+
+    def test_check_refusals_carry_codes(self):
+        for action, path, code in (
+            ("commit", ["src/a"], "action-not-granted"),
+            ("edit", ["docs/a"], "outside-grant"),
+        ):
+            with self.subTest(code=code), self.assertRaisesRegex(CaptainError, rf"^\[{code}\]"):
+                self.command("check", action=action, path=path)
+
+    def test_placeholder_catches_unfilled_slots_not_prose_about_code(self):
+        for task in (
+            "Fix TBD",
+            "TODO: write the goal",
+            "Do <describe the goal>",
+            "Do <TASK>",
+            "Do <GOAL_HERE>",
+            "Do {{goal}}",
+        ):
+            with self.subTest(task=task):
+                self.assertTrue(protocol.PLACEHOLDER.search(task))
+        for task in (
+            "Return Vec<String> from parse",
+            'Render <div class="x"> and <br /> safely',
+            "Mail <dev@example.com> on failure",
+            "Grep for 'TODO' and `FIXME` markers, say a todo is fine",
+            "Compare a < b and c > d",
+            "Accept a <T> generic",
+        ):
+            with self.subTest(task=task):
+                self.assertFalse(protocol.PLACEHOLDER.search(task))
 
     def test_paths_actions_overlap_and_reported_handoff(self):
         self.command("check", action="edit", path=["src/file.py"])
@@ -985,3 +1014,119 @@ class InterruptTests(unittest.TestCase):
         store.write_json(self.current.meta_path, self.current.meta)
         with self.assertRaisesRegex(CaptainError, "already dismissed"):
             self.interrupt()
+
+
+class CoordinationContractTests(unittest.TestCase):
+    def setUp(self):
+        ProtocolTests.setUp(self)
+
+    saved = ProtocolTests.saved
+    command = ProtocolTests.command
+    event = ProtocolTests.event
+    mail = ProtocolTests.mail
+
+    def test_retry_preserves_receipt_and_rejects_changed_content(self):
+        token = protocol.deliver(self.crew, "first", message_id="request-1")
+        protocol.receipt(self.directory, self.crew.crew_id, [token])
+        protocol.deliver(self.crew, "second")
+        self.assertEqual(protocol.deliver(self.crew, "first", message_id=token), token)
+        self.assertEqual(self.mail(token)["state"], "read")
+        with self.assertRaisesRegex(CaptainError, "message-id-conflict"):
+            protocol.deliver(self.crew, "changed", message_id=token)
+        with self.assertRaisesRegex(CaptainError, "invalid-message-id"):
+            protocol.deliver(self.crew, "first", message_id="../escape")
+        self.assertNotEqual(protocol.deliver(self.crew, "first", message_id="new"), token)
+
+    def test_interrupted_enqueue_keeps_intent_and_correlated_expectation(self):
+        asked = self.command("ask", question="Which file?")
+        with patch.object(protocol, "enqueue", side_effect=OSError("interrupted")):
+            with self.assertRaises(OSError):
+                protocol.deliver(self.crew, "src/a", question_id=asked["question_id"])
+        self.assertEqual(self.saved()["question"]["id"], asked["question_id"])
+        self.assertEqual(self.saved()["messages"][0]["delivery"], "prepared")
+        token = protocol.deliver(self.crew, "src/a", question_id=asked["question_id"])
+        self.assertIsNone(self.saved()["question"])
+        self.assertEqual(len(self.saved()["messages"]), 1)
+        self.assertEqual(
+            protocol.deliver(self.crew, "src/a", question_id=asked["question_id"]), token
+        )
+
+    def test_question_reasks_then_escalates_once_without_expiry(self):
+        with patch.object(protocol.time, "time", return_value=1000):
+            asked = self.command("ask", question="Which file?")
+            first = protocol.poll(self.crew)
+            protocol.poll(self.crew, first["delivery_id"])
+        for now, code in ((1301, "question-reasked"), (1602, "question-escalated")):
+            with patch.object(protocol.time, "time", return_value=now):
+                response = protocol.poll(self.crew)
+                self.assertIn(code, response["summary"])
+                self.assertIn(asked["question_id"], response["summary"])
+                protocol.poll(self.crew, response["delivery_id"])
+        with patch.object(protocol.time, "time", return_value=99999):
+            self.assertIsNone(protocol.poll(self.crew)["delivery_id"])
+        self.assertEqual(self.saved()["question"]["id"], asked["question_id"])
+        with self.assertRaisesRegex(CaptainError, "question-id-required"):
+            protocol.deliver(self.crew, "uncorrelated")
+        protocol.deliver(self.crew, "src/a", question_id=asked["question_id"])
+        self.assertIsNone(self.saved()["question"])
+
+    def test_old_ack_cannot_consume_a_new_generation(self):
+        self.event({"hook_event_name": "PermissionRequest"})
+        first = protocol.poll(self.crew)
+        self.event({"hook_event_name": "Stop"})
+        self.assertEqual(protocol.poll(self.crew), first)
+        second = protocol.poll(self.crew, first["delivery_id"])
+        self.assertNotEqual(first["delivery_id"], second["delivery_id"])
+        self.assertEqual(protocol.poll(self.crew, first["delivery_id"]), second)
+        self.assertLess(self.saved()["offset"], self.crew.events.stat().st_size)
+        protocol.poll(self.crew, second["delivery_id"])
+        self.assertEqual(self.saved()["offset"], self.crew.events.stat().st_size)
+
+    def test_quiet_events_do_not_advance_acknowledged_cursor(self):
+        self.event({"hook_event_name": "SessionStart"})
+        protocol.poll(self.crew)
+        self.assertEqual(self.saved()["offset"], 0)
+        self.event({"hook_event_name": "Stop"})
+        pending = protocol.poll(self.crew)
+        protocol.poll(self.crew, pending["delivery_id"])
+        self.assertEqual(self.saved()["offset"], self.crew.events.stat().st_size)
+
+    def test_contract_validation_and_cross_session_allocation(self):
+        other_session = sessions.session(self.project, self.pane, create=True)
+        other = Crew("will", {"name": "Will", "incarnation_id": "second"}, other_session)
+        for goal, paths, actions, reason in (
+            ("  ", [], [], "empty-goal"),
+            ("Fix TBD", [], [], "placeholder"),
+            ("Fix files", ["<path>"], ["edit"], "placeholder"),
+            ("Fix files", [], ["edit"], "missing-owned-paths"),
+            ("Fix files", ["src/nested"], ["edit"], "owned-path-conflict"),
+        ):
+            with self.subTest(reason=reason), self.assertRaisesRegex(CaptainError, reason):
+                protocol.begin(other, self.project, goal, paths, actions)
+        self.command("done", report="No changes; relinquishing src")
+        self.assertEqual(
+            protocol.begin(other, self.project, "Fix src", ["src"], ["edit"])["paths"], ["src"]
+        )
+
+    def test_concurrent_sessions_cannot_both_allocate_the_same_path(self):
+        crews = [
+            Crew(
+                "will",
+                {"name": "Will", "incarnation_id": str(i)},
+                sessions.session(self.project, self.pane, create=True),
+            )
+            for i in range(2)
+        ]
+
+        def allocate(crew):
+            try:
+                return protocol.begin(crew, self.project, "Fix docs", ["docs"], ["edit"])
+            except CaptainError as error:
+                return str(error)
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(allocate, crews))
+        self.assertEqual(sum(isinstance(result, dict) for result in results), 1)
+        self.assertTrue(
+            any("owned-path-conflict" in result for result in results if isinstance(result, str))
+        )

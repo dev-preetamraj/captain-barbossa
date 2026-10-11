@@ -1,7 +1,10 @@
 """Explicit assignment state and acknowledged delivery, local to one session."""
 
+import hashlib
 import json
 import os
+import re
+import subprocess
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -34,6 +37,21 @@ STALLED_SUMMARY = (
     "Mail was handed over but no turn has ever started; the doorbell is being retried, "
     "so read the pane before sending anything else."
 )
+# A report's commit hashes: hex with a digit and a letter, so prose numbers stay out. Length 32
+# is skipped because every captain id is a uuid4 hex of exactly that length.
+COMMIT_TOKEN = re.compile(
+    r"\b(?=[0-9a-f]*\d)(?=[0-9a-f]*[a-f])(?:[0-9a-f]{7,31}|[0-9a-f]{33,40})\b"
+)
+QUESTION_INTERVAL = 300
+# Task text: an unquoted uppercase marker, a multi-word or SHOUTED angle slot, or a {{slot}}.
+# Tags, generics, <a@b.c> and quoted or lowercase marker words are prose about code.
+PLACEHOLDER = re.compile(
+    r"(?<![\w`'\"])(?:TODO|TBD|FIXME)(?![\w`'\"])"
+    r"|<(?:[A-Za-z]+(?:[ _-][A-Za-z]+)+|[A-Z][A-Z_]+)>|\{\{[^{}]+\}\}"
+)
+PATH_PLACEHOLDER = re.compile(r"\b(?:TODO|TBD|FIXME)\b|<[^<>]+>|\{\{[^{}]+\}\}", re.I)
+GIT_TIMEOUT = 5
+UNSAVED_CAVEAT = "Git cannot see unsaved edits still inside the crew's native session."
 
 
 @contextmanager
@@ -76,7 +94,11 @@ def active(state, crew, assignment_id=None, incarnation=None):
 
 
 def begin(crew, project, task, paths=(), actions=(), handoff=None):
+    if not isinstance(task, str) or not task.strip():
+        raise CaptainError("[empty-goal] Assignment goal must not be empty.")
     check_text(task, "task")
+    if PLACEHOLDER.search(task) or any(PATH_PLACEHOLDER.search(str(path)) for path in paths):
+        raise CaptainError("[placeholder] Replace assignment placeholder text.")
     inherit_paths, inherit_actions = not paths, not actions
     paths = owned_paths(project, paths)
     actions = sorted(set(actions) | {"read", "search"})
@@ -84,7 +106,10 @@ def begin(crew, project, task, paths=(), actions=(), handoff=None):
         raise CaptainError("Unknown assignment action.")
     if not crew.record.get("incarnation_id"):
         raise CaptainError("Legacy crew cannot be silently adopted; recruit new crew.")
-    with checkpoint(crew.session.directory) as state:
+    with (
+        lock(crew.session.directory.parent / "allocation.lock"),
+        checkpoint(crew.session.directory) as state,
+    ):
         previous = state["active"].get(crew.crew_id)
         if previous:
             old = state["assignments"][previous]
@@ -108,11 +133,19 @@ def begin(crew, project, task, paths=(), actions=(), handoff=None):
                 paths = inherited["paths"]
             if inherit_actions:
                 actions = inherited["actions"]
-        for other in state["assignments"].values():
+        if "edit" in actions and not paths:
+            raise CaptainError("[missing-owned-paths] Edit actions require owned paths.")
+        assignments = list(state["assignments"].values())
+        for path in crew.session.directory.parent.glob("*/protocol.json"):
+            if path.parent != crew.session.directory:
+                assignments.extend(read_json(path)["assignments"].values())
+        for other in assignments:
             if other["state"] != "done" and any(
                 overlaps(a, b) for a in paths for b in other["paths"]
             ):
-                raise CaptainError(f"Owned paths overlap active assignment {other['id']}.")
+                raise CaptainError(
+                    f"[owned-path-conflict] Owned paths overlap active assignment {other['id']}."
+                )
         assignment = {
             "id": uuid4().hex,
             "incarnation_id": crew.record["incarnation_id"],
@@ -159,13 +192,70 @@ def check_action(assignment, project, action, paths):
     if assignment["state"] == "done":
         raise CaptainError("Assignment is already done.")
     if action not in assignment["actions"]:
-        raise CaptainError(f"Action {action!r} was not granted.")
+        raise CaptainError(f"[action-not-granted] Action {action!r} was not granted.")
     if action in ("edit", "format", "commit", "version", "delete"):
         if not paths:
             raise CaptainError("This action requires explicit owned paths.")
         for path in owned_paths(project, paths):
             if not any(Path(path).is_relative_to(Path(owner)) for owner in assignment["paths"]):
-                raise CaptainError(f"Path is not owned by this assignment: {path}")
+                raise CaptainError(f"[outside-grant] Path is not owned by this assignment: {path}")
+
+
+def _git(project, *args):
+    """Read-only git in the project, or None when there is no readable work tree."""
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(project), *args],
+            capture_output=True,
+            text=True,
+            timeout=GIT_TIMEOUT,
+            stdin=subprocess.DEVNULL,
+            env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"},
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return result
+
+
+def unlanded(project, assignment):
+    """Reason codes for owned work Git shows as not landed; empty when Git shows none.
+
+    A report is evidence, not proof: every commit it names must be reachable from a ref,
+    and the owned paths must hold no uncommitted or untracked change.
+    """
+    paths = assignment["paths"]
+    if not paths:
+        return []
+    inside = _git(project, "rev-parse", "--is-inside-work-tree")
+    if inside is None or inside.returncode or inside.stdout.strip() != "true":
+        return [f"[no-git] cannot verify {', '.join(paths)}"]
+    reasons = []
+    status = _git(project, "status", "--porcelain=v1", "-z", "--untracked-files=all", "--", *paths)
+    if status is None or status.returncode:
+        reasons.append(f"[git-failed] status of {', '.join(paths)}")
+    else:
+        fields, changed = iter(status.stdout.split("\0")), set()
+        for entry in fields:
+            if entry:
+                changed.add(entry[3:])
+                if "R" in entry[:2] or "C" in entry[:2]:
+                    # -z gives a rename or copy its source path as the next, unprefixed field.
+                    next(fields, None)
+        if changed:
+            reasons.append(f"[uncommitted] {', '.join(sorted(changed))}")
+    missing = []
+    for token in dict.fromkeys(COMMIT_TOKEN.findall(assignment.get("report") or "")):
+        found = _git(project, "rev-parse", "--verify", "--quiet", f"{token}^{{commit}}")
+        refs = (
+            _git(project, "for-each-ref", "--count=1", "--contains", found.stdout.strip())
+            if found is not None and not found.returncode
+            else None
+        )
+        if refs is None or refs.returncode or not refs.stdout.strip():
+            missing.append(token)
+    if missing:
+        reasons.append(f"[unreachable-commit] {', '.join(missing)}")
+    return reasons
 
 
 def change(crew, args, project):
@@ -190,7 +280,13 @@ def change(crew, args, project):
             check_text(args.question, "question")
             if assignment["question"]:
                 raise CaptainError("Only one question may be pending.")
-            question = {"id": uuid4().hex, "text": args.question}
+            question = {
+                "id": uuid4().hex,
+                "text": args.question,
+                "due_at": time.time() + QUESTION_INTERVAL,
+                "reasked": False,
+                "escalated": False,
+            }
             assignment["question"] = question
             assignment["state"] = "asked"
             notice(assignment, "asked", f"{question['id']}: {args.question}")
@@ -198,6 +294,8 @@ def change(crew, args, project):
         check_text(args.report, "report")
         if assignment["question"]:
             raise CaptainError("Answer the pending question before done.")
+        if any(message["delivery"] == "prepared" for message in assignment["messages"]):
+            raise CaptainError("[delivery-pending] Retry the prepared message before done.")
         if unread(crew):
             # Raced past deliver_before_done; the retry hands it over.
             raise CaptainError("Mail arrived while this report was being filed; retry done.")
@@ -240,7 +338,16 @@ def enqueue(crew, text, kind, assignment_id, message_id=None):
     }
     directory = mail_dir(crew.session.directory, crew.crew_id)
     directory.mkdir(parents=True, exist_ok=True)
-    write_json(directory / f"{message['id']}.json", message)
+    path = directory / f"{message['id']}.json"
+    if path.exists():
+        existing = read_json(path)
+        if any(
+            existing.get(key) != message[key]
+            for key in ("id", "assignment_id", "incarnation_id", "kind", "text")
+        ):
+            raise CaptainError("[message-id-conflict] Message ID has different content.")
+    else:
+        write_json(path, message)
     return message["id"]
 
 
@@ -503,37 +610,57 @@ def drain(crew):
     ring(crew, message_id)
 
 
-def deliver(crew, text, *, assignment_id=None, question_id=None, initial=False):
+def deliver(crew, text, *, assignment_id=None, question_id=None, initial=False, message_id=None):
     check_text(text, "message")
+    if message_id is not None and not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", message_id):
+        raise CaptainError("[invalid-message-id] Use a bounded filename-safe message ID.")
     with checkpoint(crew.session.directory) as state:
         assignment = active(state, crew, assignment_id)
-        if assignment["state"] == "done":
-            raise CaptainError("Assignment is done; use assign with an explicit handoff.")
-        last = assignment["messages"][-1] if assignment["messages"] else None
-        if last and last["text"] == text:
-            raise CaptainError(
-                f"Message {last['id']} already carried this exact text; never auto-resend."
-            )
-        question = assignment["question"]
-        if question and question_id != question["id"]:
-            raise CaptainError("Use answer with the pending question ID.")
-        if question_id and (not question or question_id != question["id"]):
-            raise CaptainError("Stale question ID.")
-        message = {
-            "id": uuid4().hex,
-            "text": text,
-            "kind": "assignment" if initial else "answer" if question_id else "followup",
-            "question_id": question_id,
-            "delivery": "sent",
-        }
+        kind = "assignment" if initial else "answer" if question_id else "followup"
+        # Legacy callers have no retry token; derive one scoped to this exact request.
+        message_id = (
+            message_id
+            or hashlib.sha256(
+                json.dumps([assignment["id"], kind, question_id, text]).encode()
+            ).hexdigest()
+        )
+        message = next((m for m in assignment["messages"] if m["id"] == message_id), None)
+        if message:
+            if any(
+                message.get(key) != value
+                for key, value in (("text", text), ("kind", kind), ("question_id", question_id))
+            ):
+                raise CaptainError("[message-id-conflict] Message ID has different content.")
+        else:
+            if assignment["state"] == "done":
+                raise CaptainError("Assignment is done; use assign with an explicit handoff.")
+            question = assignment["question"]
+            if question and question_id != question["id"]:
+                raise CaptainError(
+                    "[question-id-required] Use answer with the pending question ID."
+                )
+            if question_id and (not question or question_id != question["id"]):
+                raise CaptainError("[stale-question-id] Stale question ID.")
+            message = {
+                "id": message_id,
+                "text": text,
+                "kind": kind,
+                "question_id": question_id,
+                "delivery": "prepared",
+            }
+            assignment["messages"].append(message)
         assignment_id = assignment["id"]
-        # The body is the captain's text alone; identity() renders the standing facts at
-        # read time, once per delivery, for the hook and for `inbox` alike.
-        enqueue(crew, text, message["kind"], assignment_id, message["id"])
-        assignment["messages"].append(message)
+    # Persist intent before mail: an interrupted enqueue can recover using the same ID.
+    with checkpoint(crew.session.directory) as state:
+        assignment = active(state, crew, assignment_id)
+        message = next(m for m in assignment["messages"] if m["id"] == message_id)
+        if message["delivery"] != "prepared":
+            return message_id
+        enqueue(crew, text, kind, assignment_id, message_id)
+        message["delivery"] = "sent"
         mark_sent(assignment, message)
-    ring(crew, message["id"])
-    return message["id"]
+    ring(crew, message_id)
+    return message_id
 
 
 def mark_sent(assignment, message):
@@ -588,21 +715,29 @@ def poll(crew, ack=None, modal=True):
             if pending and ack == pending["result"]["delivery_id"]:
                 assignment["ack_seq"] = pending["seq"]
                 assignment["offset"] = pending["offset"]
+                assignment["scan_offset"] = pending["offset"]
                 assignment["native_status"] = pending["native_status"]
                 assignment["pending"] = None
                 assignment["last_ack"] = ack
                 pending, acked = None, True
             elif ack != assignment["last_ack"]:
-                raise CaptainError("Unknown delivery acknowledgement.")
+                raise CaptainError("[stale-ack] Unknown delivery acknowledgement.")
+        question = assignment["question"]
+        if question:
+            question.setdefault("due_at", time.time() + QUESTION_INTERVAL)
+            if time.time() >= question["due_at"] and not question.get("escalated"):
+                reasked = question.get("reasked", False)
+                code = "question-escalated" if reasked else "question-reasked"
+                notice(
+                    assignment,
+                    "error" if reasked else "asked",
+                    f"[{code}] {question['id']}: {question['text']}",
+                )
+                question["escalated" if reasked else "reasked"] = True
+                question["due_at"] = time.time() + QUESTION_INTERVAL
         if pending:
-            # It was returned once already; repeating it is what spins a captain's wait loop.
-            notification = pending["result"]
-            raise CaptainError(
-                f"Acknowledge delivery {notification['delivery_id']} "
-                f"with wait --ack before waiting again; it reported "
-                f"{notification['status']}: {notification['summary']}"
-            )
-        seq, offset = assignment["ack_seq"], assignment["offset"]
+            return pending["result"]
+        seq, offset = assignment["ack_seq"], assignment.get("scan_offset", assignment["offset"])
         native_status = assignment["native_status"]
         if seq < len(assignment["notices"]):
             entry = assignment["notices"][seq]
@@ -628,12 +763,12 @@ def poll(crew, ack=None, modal=True):
                     # One approval arrives twice, as a PermissionRequest hook and a
                     # permission_prompt Notification, usually in separate polls.
                     if native_status == status:
-                        assignment["offset"] = offset
+                        assignment["scan_offset"] = offset
                         return result(crew, assignment, "working")
                     summary = APPROVAL_SUMMARY
                     native_status = status
                 elif assignment.get("idle_seen"):
-                    assignment["offset"] = offset
+                    assignment["scan_offset"] = offset
                     # A turn that ran proves the approval cleared.
                     assignment["native_status"] = None
                     return result(crew, assignment, "working")
@@ -656,7 +791,7 @@ def poll(crew, ack=None, modal=True):
                 else:
                     status = None
                 if status is None or status == native_status:
-                    assignment["offset"] = offset
+                    assignment["scan_offset"] = offset
                     if status is None and read_pane:
                         # Only a pane we actually looked at clears the dedupe. Clearing on
                         # the absence of a read wiped it every poll for event-driven
@@ -664,7 +799,10 @@ def poll(crew, ack=None, modal=True):
                         assignment["native_status"] = None
                     return result(crew, assignment, "working")
                 native_status = status
-        response = result(crew, assignment, status, summary, uuid4().hex)
+        generation = assignment.get("generation", 0) + 1
+        assignment["generation"] = generation
+        delivery_id = f"{assignment['id']}:{assignment['incarnation_id']}:{generation}"
+        response = result(crew, assignment, status, summary, delivery_id)
         assignment["pending"] = {
             "result": response,
             "seq": seq,
