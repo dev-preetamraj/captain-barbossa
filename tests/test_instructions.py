@@ -55,10 +55,14 @@ class InstructionTests(SessionCase):
         instructions = " ".join(
             instruction_prompts.agent_instructions(self.directory, "captain").split()
         )
+        self.assertIn(
+            "Claude PreToolUse/PermissionRequest hooks enforce assignment grants", instructions
+        )
+        self.assertIn("Relay escalations to the user; never override the hook", instructions)
         self.assertIn("checking assignment ownership and actions", instructions)
         self.assertIn("herdr agent send-keys <name> y", instructions)
         self.assertIn("Never grant global shell/Python approval", instructions)
-        self.assertIn("Escalate only destructive commands", instructions)
+        self.assertIn("Escalate destructive commands", instructions)
         self.assertIn("Decline clearly wrong commands", instructions)
         self.assertIn("Never type over the user's draft in the captain pane", instructions)
 
@@ -149,8 +153,8 @@ class InstructionTests(SessionCase):
             "Run every wait in the background; never block on a foreground wait",
             "herdr agent read <name>",
             "herdr agent send-keys <name> y",
-            "Read the pane before approving native permission prompts",
-            "Claude Code may need Enter or a number instead of y",
+            "read the pane before approving native permission prompts",
+            "Send only the requested key for that one command",
             "CAPTAIN dismiss 'NAME'",
             "Confirm with the user first if work is unreported or uncommitted",
             "CAPTAIN focus 'NAME'",
@@ -267,7 +271,7 @@ class InstructionTests(SessionCase):
                         "Search, if Graphify is installed: CAPTAIN memory query 'question'",
                         "CAPTAIN memory path",
                         "Crew recruiting ruleset, for EVERY creation",
-                        "lists every workspace pane by tab when --split-pane is missing",
+                        "Recruitment resolves omitted flags and prints their sources",
                         "--direction vertical|horizontal|auto --split-pane <pane-id>|auto] "
                         "--model cheap|mid|strong|<model>",
                         "Save concise, meaningful decisions, findings, and handoffs",
@@ -404,22 +408,16 @@ class InstructionTests(SessionCase):
             instruction_prompts.agent_instructions(self.directory, "Captain Barbossa").split()
         )
         for phrase in (
-            "Recruit with no questions when the user states no preference.",
-            "--agent is the CLI you run as",
-            "--placement pane --direction auto --split-pane auto",
-            "--model cheap.",
+            "Recruitment resolves omitted flags and prints their sources.",
             "Pick the tier by how complex the assignment is: cheap for simple work that "
             "still needs watching - a focused fix, or following a pattern the codebase "
             "already has - mid for a normal feature or a change inside one area, strong "
             "for design, debugging, or multi-file/long-context work.",
             "Never step up just because a task feels risky or important.",
-            "Each agent resolves the tier to its own model; an exact model name still works.",
             "Use every choice the user does state and keep the rest on these defaults.",
             "Ask at most one question, only when the user hands a choice back to you "
             "or names one too vaguely to map to a flag, and wait for the answer;",
             "never ask about a choice they did not raise",
-            "Auto searches crew tabs for the best split (current tab first) or opens",
-            "a new tab when geometry doesn't allow a split",
         ):
             self.assertIn(phrase, instructions)
         for gone in (
@@ -451,6 +449,14 @@ class InstructionTests(SessionCase):
         )
         settings = json.loads(claude_args[claude_args.index("--settings") + 1])
         self.assertEqual(settings["hooks"]["Stop"][0]["hooks"][0]["command"], shlex.join(hook))
+
+    def test_only_crew_register_the_pretooluse_grant_gate(self):
+        def hooks(events):
+            args = instruction_prompts.native_args("claude", "instructions", events=events)
+            return json.loads(args[args.index("--settings") + 1])["hooks"]
+
+        self.assertIn("PreToolUse", hooks("/tmp/events/jack-first.jsonl"))
+        self.assertNotIn("PreToolUse", hooks("/tmp/events/captain.jsonl"))
 
     def test_native_args_for_pi_pass_instructions_and_skip_hooks(self):
         args = instruction_prompts.native_args("pi", "instructions", "opus", events="/tmp/events")

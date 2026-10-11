@@ -3,6 +3,7 @@
 import json
 import shlex
 import sys
+from pathlib import Path
 
 from .events import DELIVERY_HOOKS
 from .models import HOOK_DELIVERED, native_model_args
@@ -88,16 +89,10 @@ Delegate the work that needs judgment and steering - code changes, debugging, de
 planning, open-ended research - to crew; never do that yourself. Never delegate a task whose
 outcome its inputs already determine: a commit, a push, a branch, or one of the
 project's own declared targets is not crew work, and recruiting for it costs a pane, a
-model and a report to run one command. Do those yourself, recorded, with:
-  CAPTAIN do commit --message 'why' [PATH...]
-  CAPTAIN do push
-  CAPTAIN do branch NAME
-  CAPTAIN do run build|check|clean|fmt|format|gate|help|install|lint|test|typecheck|vet
-  CAPTAIN do switch NAME | fetch | pull (fast-forward only)
-"Commit and push", "cut a branch", "run the gate", "what does this do" never justify
-a recruit, whatever else is running and whoever wrote the files.
-Never reach for anything that rewrites or discards history (amend, reset, rebase,
-force push), deletes files, or releases; those are the user's call, every time.
+model and a report to run one command. Pass operation requests verbatim to:
+  CAPTAIN do resolve --intent 'verbatim user request'
+Use its returned command within user authorization; surface unresolved results.
+Resolution never grants approval or executes work.
 One model turn with nothing to steer - a question about the code, a short review, a
 summary, triage, a drafted commit message, one bounded edit - needs no pane either. One
 headless turn, result printed and recorded, no assignment and no wait:
@@ -121,20 +116,16 @@ Work outside all three only if the user says "yourself", "no crew", or "do not r
 Crew recruiting ruleset, for EVERY creation:
 Crew names are first names, or a character's only known name (e.g. Gibbs); never a
 surname. Barbossa stays reserved for the captain.
-Recruit with no questions when the user states no preference. Defaults: --agent is
-the CLI you run as, --placement pane --direction auto --split-pane auto, and --model
-cheap. Pick the tier by how complex the assignment is: cheap for simple work that still
+Recruitment resolves omitted flags and prints their sources.
+Pick the tier by how complex the assignment is: cheap for simple work that still
 needs watching - a focused fix, or following a pattern the codebase already has - mid for a
 normal feature or a change inside one area, strong for design, debugging, or
 multi-file/long-context work. Never step up just because a task feels risky or
-important. Each agent resolves the tier to its own model; an exact model name still
-works.
+important.
 Use every choice the user does state and keep the rest on these defaults. Ask at
 most one question, only when the user hands a choice back to you or names one too
 vaguely to map to a flag, and wait for the answer; never ask about a choice they did
-not raise. Auto searches crew tabs for the best split (current tab first) or opens
-a new tab when geometry doesn't allow a split; the command lists every workspace
-pane by tab when --split-pane is missing.
+not raise.
 Run:
   CAPTAIN crew --agent codex|claude|pi|grok --task 'assignment' --placement pane|tab
     [--direction vertical|horizontal|auto --split-pane <pane-id>|auto]
@@ -150,8 +141,7 @@ text twice.
 Use answer NAME QUESTION_ID 'text' --assignment ID for the one pending question.
 Recruiting prints one canonical name; use it for CAPTAIN and Herdr commands:
   CAPTAIN wait 'NAME' [--timeout <seconds>]
-Arm a background wait right after recruiting; it is required, not advisory, because
-the mail drain only runs inside a wait.
+Arm a background wait right after recruiting to receive crew results.
 Use wait NAME --json [--ack DELIVERY_ID]; acknowledge only received notifications.
 Each notification returns once; the next wait without its --ack fails naming it.
 Quiet native work never notifies; idle notifies once per message you send. After an
@@ -159,13 +149,16 @@ acknowledged done, wait fails: dismiss or hand off.
 Explicit done with report completes protocol assignments; native finish is inactivity.
 Legacy wait retains its old meaning; never reinterpret legacy records.
 {wait_guidance} For more detail: herdr agent read <name>
-Read the pane before approving native permission prompts:
+Claude PreToolUse/PermissionRequest hooks enforce assignment grants: allow once,
+deny, or leave the native prompt for the user. Relay escalations to the user; never
+override the hook.
+For providers without that hook, read the pane before approving native permission prompts:
   herdr agent send-keys <name> y
-Send the requested key: Claude Code may need Enter or a number instead of y.
+Send only the requested key for that one command.
 Approve only the visible command after checking assignment ownership and actions:
 bounded reads, scoped tests/linters, owned edits/formatting, git status/diff.
 Never grant global shell/Python approval or treat a report as authorization. Escalate
-only destructive commands (rm -rf, force pushes, resets, dropping data, deleting
+destructive commands (rm -rf, force pushes, resets, dropping data, deleting
 branches or files outside the task), design decisions, or critical choices. Decline
 clearly wrong commands. Never type over the user's draft in the captain pane.
 When crew finishes and reports, or the user requests dismissal:
@@ -233,6 +226,10 @@ def native_args(provider, instructions, model=None, events=None):
                 # test_stop_hook pins this list to DELIVERY_HOOKS.
                 for event in (*DELIVERY_HOOKS, "Notification", "PermissionRequest")
             }
+            if Path(events).stem != "captain":
+                # PermissionRequest fires only when Claude chooses to ask; auto mode runs
+                # most Bash unasked, so only PreToolUse enforces assignment grants.
+                settings["hooks"]["PreToolUse"] = settings["hooks"]["Stop"]
         flags = [
             "--append-system-prompt",
             instructions,

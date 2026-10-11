@@ -23,6 +23,17 @@ class InstructionSizeTests(unittest.TestCase):
         # Guards against the crew memory block creeping back toward the captain's.
         self.assertLessEqual(crew_words, 350)
 
+    def test_operation_routing_uses_the_resolver_without_a_semantic_paragraph(self):
+        text = instruction_prompts.agent_instructions(self.directory, "Captain Barbossa")
+        routing = text.split("Pass operation requests verbatim to:", 1)[1].split(
+            "One model turn", 1
+        )[0]
+        self.assertIn("CAPTAIN do resolve --intent 'verbatim user request'", routing)
+        self.assertIn("surface unresolved results", routing)
+        self.assertLess(len(routing), 220)
+        self.assertNotIn("Judge a target by its recipe", text)
+        self.assertNotIn("CAPTAIN do run build|", text)
+
     def test_only_the_captain_learns_to_retier_a_running_crew(self):
         captain = " ".join(
             instruction_prompts.agent_instructions(self.directory, "Captain Barbossa").split()
@@ -244,10 +255,10 @@ class InstructionSizeTests(unittest.TestCase):
             instruction_prompts.agent_instructions(self.directory, "Captain Barbossa").split()
         )
         self.assertIn(
-            "Arm a background wait right after recruiting; it is required, not "
-            "advisory, because the mail drain only runs inside a wait.",
+            "Arm a background wait right after recruiting to receive crew results.",
             captain,
         )
+        self.assertNotIn("mail drain only runs inside a wait", captain)
 
     def test_a_dev_mode_captain_outruns_its_installed_crew_binary(self):
         captain = " ".join(
