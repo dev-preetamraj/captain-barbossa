@@ -495,11 +495,6 @@ def dismiss_crew(args, pane, project):
                 # its paths reserved by lingering in "working" after the crew is gone.
                 undelivered = never_read(assignment)
                 dismiss_blocker(crew, assignment)
-            # protocol.bounce takes protocol.lock itself; call it outside the checkpoint
-            # above, or a crew with mail still queued at dismissal would deadlock here.
-            bounced = protocol.unread(crew)
-            for message in bounced:
-                protocol.bounce(crew, message["id"], "Crew dismissed before mail was read.")
         if not crew.record.get("pane") and not crew.record.get("incarnation_id"):
             raise CaptainError(f"{crew.display_name} has no recorded pane to close.")
         try:
@@ -510,6 +505,12 @@ def dismiss_crew(args, pane, project):
                 raise CaptainError(f"Could not dismiss {crew.display_name}: {exc}") from exc
             # The pane was already gone, so Herdr rebalanced the tab without this close.
             evening = []
+        if crew.record.get("incarnation_id"):
+            # protocol.bounce takes protocol.lock itself; call it outside the checkpoint
+            # above, or a crew with mail still queued at dismissal would deadlock here.
+            bounced = protocol.unread(crew)
+            for message in bounced:
+                protocol.bounce(crew, message["id"], "Crew dismissed before mail was read.")
         try:
             for source, towards, amount in evening:
                 placement.resize(source, towards, amount)
