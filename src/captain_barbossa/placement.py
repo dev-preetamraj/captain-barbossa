@@ -3,19 +3,22 @@
 import sys
 from dataclasses import dataclass
 
-from . import runtime
+from . import config, runtime
 from .crew import Crew
 from .layout import (
     HERDR_DIRECTIONS,
+    RESIZE_RATIO_BOUNDS,
     SHRINK_DIRECTIONS,
+    even_shares,
     next_slot,
     re_even,
     shape,
     split_for,
-    widen_split,
 )
-from .prompts import LABELS, choose
-from .runtime import HERDR_ERRORS, CaptainError
+from .models import PROVIDERS, capabilities, chosen_model
+from .prompts import LABELS, PLACEMENTS, choose
+from .runtime import CaptainError
+from .store import read_json
 
 
 @dataclass(frozen=True)
@@ -28,7 +31,67 @@ class Spot:
     reason: str | None = None
     column: int | None = None
     row: int | None = None
-    ratio: float | None = None
+    chain: tuple = ()
+
+
+@dataclass(frozen=True)
+class Recruitment:
+    """Every recruitment input, resolved once; sources says where each one came from."""
+
+    agent: str
+    placement: str
+    spot: Spot
+    model: str
+    capabilities: tuple
+    sources: dict
+
+    @property
+    def direction(self):
+        return self.spot.direction
+
+
+def crew_agent(flag, directory):
+    """(agent, source): --agent, then [crew] agent, then the captain's own CLI.
+
+    Only a session with no captain.json and no setting is left to ask.
+    """
+    if flag:
+        return flag, "--agent"
+    wanted = config.text("crew", "agent")
+    if wanted:
+        where = config.source("crew", "agent") or "defaults.toml"
+        if wanted not in PROVIDERS:
+            raise CaptainError(
+                f"[crew] agent is '{wanted}', not one of {', '.join(PROVIDERS)}. Fix it in {where}."
+            )
+        return wanted, f"[crew] agent from {where}"
+    path = directory / "captain.json"
+    provider = read_json(path).get("provider") if path.exists() else None
+    if provider in PROVIDERS:
+        return provider, "captain.json (the captain's CLI)"
+    chosen = choose(None, PROVIDERS, "Choose your crew agent", "--agent", setting="[crew] agent")
+    return chosen, "asked"
+
+
+def crew_placement(args):
+    """(pane|tab|auto, source): --placement, then split flags imply a pane, then the setting.
+
+    auto is a pane in the next declared slot, or a new tab once every slot is taken.
+    """
+    if args.placement:
+        return args.placement, "--placement"
+    if args.direction or args.split_pane:
+        return "pane", "--direction/--split-pane"
+    wanted = config.text("crew", "placement")
+    if not wanted:
+        # ponytail: built-in until defaults.toml carries [crew] placement = "auto".
+        return "auto", "built-in default"
+    where = config.source("crew", "placement") or "defaults.toml"
+    if wanted not in (*PLACEMENTS, "auto"):
+        raise CaptainError(
+            f"[crew] placement is '{wanted}', not pane, tab or auto. Fix it in {where}."
+        )
+    return wanted, f"[crew] placement from {where}"
 
 
 class Placement:
@@ -140,28 +203,45 @@ class Placement:
         if not result.get("resize", {}).get("changed"):
             raise CaptainError(f"Herdr would not resize pane {source} to even out this tab.")
 
-    def even_around(self, panes, column, captain, split_pane, direction):
-        """Resize what a new pane is about to squeeze, so its chain lands even.
+    def even_chain(self, chain, direction):
+        """Bring a chain of panes to whole-column shares within one of each other.
 
-        The chain is the whole column or row the new pane joins, not only the panes
-        before the split: a dismissal can empty a column mid-row, and the crew that
-        reopens it is inserted before panes already there.
+        Herdr rounds every nested split to whole cells, so shares are measured from the
+        live layout and each split is moved by the cells it is short, left to right.
         """
-        if direction == "vertical":
-            chain = self.column_tops(panes, captain)
-        else:
-            chain = self.column_stack(panes, column, captain)
-        if split_pane not in chain:
-            # Only a roster written before captain_tab column 1 was pinned to the captain
-            # alone: its crew under the captain is what split_for hands back, and it is in
-            # no chain. Leave such a tab's ratios alone rather than raise on the recruit.
+        if not RESIZE_RATIO_BOUNDS[0] <= 1 / len(chain) <= RESIZE_RATIO_BOUNDS[1]:
+            raise CaptainError(
+                f"Herdr cannot size {len(chain)} panes evenly in one tab: the smallest share "
+                f"is outside its resizable range {RESIZE_RATIO_BOUNDS[0]:.2f}-"
+                f"{RESIZE_RATIO_BOUNDS[1]:.2f}."
+            )
+        axis = "width" if direction == "vertical" else "height"
+        shares = None
+        for index, pane in enumerate(chain[:-1]):
+            try:
+                panes = runtime.herdr("pane", "layout", "--pane", chain[0])["layout"]["panes"]
+                sizes = {entry["pane_id"]: entry["rect"][axis] for entry in panes}
+                if shares is None:
+                    shares = even_shares(sum(sizes[member] for member in chain), len(chain))
+                span = sum(sizes[member] for member in chain[index:])
+                gap = shares[index] - sizes[pane]
+            except (KeyError, TypeError) as exc:
+                raise CaptainError(
+                    "Herdr returned a pane layout this tab cannot be evened from."
+                ) from exc
+            if gap:
+                # Aim a quarter cell past the share so floor and round both land on it.
+                cells = gap + 0.25
+                towards = (HERDR_DIRECTIONS if cells > 0 else SHRINK_DIRECTIONS)[direction]
+                self.resize(pane, towards, abs(cells) / span)
+
+    def even_new_pane(self, spot, new_pane):
+        """Even the chain a recruit just joined; the pane exists, so nothing is undone."""
+        if not spot.chain:
             return
-        after = len(chain) - chain.index(split_pane) - 1
-        for source, amount in re_even(chain, after):
-            self.resize(source, SHRINK_DIRECTIONS[direction], amount)
-        widen = widen_split(after)
-        if widen:
-            self.resize(split_pane, HERDR_DIRECTIONS[direction], widen)
+        chain = list(spot.chain)
+        chain.insert(chain.index(spot.pane) + 1, new_pane)
+        self.even_chain(chain, spot.direction)
 
     def even_after_close(self, record):
         """(pane, Herdr direction, grow amount) that brings the chain a dismissed crew's
@@ -195,9 +275,8 @@ class Placement:
     def grid_spot(self, direction=None):
         """The first free slot in the declared shapes, or a new tab when all are full.
 
-        A crew joining a column or row that already holds others leaves Herdr to even
-        every pane already there, not just the one it splits off from; this is the one
-        place Placement drives Herdr rather than only reading the roster.
+        Reads the roster only and moves nothing: the Spot carries the chain to even, and
+        even_new_pane resizes it once the pane exists.
         """
         captain_tab = self.pane["tab_id"]
         for tab in self.tab_order():
@@ -212,20 +291,15 @@ class Placement:
             pane, implied = split_for(slot, panes, self.pane["pane_id"])
             chosen = direction or implied
             column, row = slot
-            # A split only resizes the two panes it touches, so the new pane's own split,
-            # at half, is the only ratio arithmetic can set up front; the rest of the
-            # chain is evened below. A forced direction that does not match the implied
-            # one leaves Herdr to halve the pane as it would have anyway, and is never
-            # re-evened: the arithmetic only describes the split the shape asked for.
-            ratio = 0.5 if chosen == implied else None
+            chain = ()
             if chosen == implied:
-                try:
-                    self.even_around(panes, column, captain, pane, chosen)
-                except HERDR_ERRORS as exc:
-                    # The declared slot is created however small it lands, and a chain
-                    # past Herdr's resizable range is the shape's own doing. Refusing here
-                    # would cost the crew and still leave the earlier resizes applied.
-                    print(f"captain: tab not evened: {exc}", file=sys.stderr)
+                chain = tuple(
+                    self.column_tops(panes, captain)
+                    if chosen == "vertical"
+                    else self.column_stack(panes, column, captain)
+                )
+                if pane not in chain:
+                    chain = ()
             return Spot(
                 chosen,
                 pane,
@@ -234,7 +308,7 @@ class Placement:
                 f"column {column} row {row} of {list(columns)}",
                 column,
                 row,
-                ratio,
+                chain,
             )
         return Spot(
             reason="new tab; every slot in this session's tabs is taken or unmapped",
@@ -258,6 +332,50 @@ class Placement:
             spot = self.grid_spot(direction)
         print(f"Auto placement: {spot.reason}.", file=sys.stderr)
         return spot
+
+    def resolve(self, args, directory):
+        """Every recruitment input from flags, settings and captain.json; never a prompt
+        unless the agent has no answer anywhere. The model resolves before the spot, since
+        a bad model must fail before any pane is touched.
+        """
+        agent, agent_source = crew_agent(args.crew_agent, directory)
+        model, model_source = chosen_model(agent, args.model, "crew", "model")
+        placement, placement_source = crew_placement(args)
+        if placement == "tab":
+            if args.direction or args.split_pane:
+                raise CaptainError("--direction and --split-pane apply only to --placement pane.")
+            spot = Spot()
+        else:
+            spot = self.fixed_split(args.direction, args.split_pane)
+            placement = "tab" if spot.pane is None else "pane"
+        return Recruitment(
+            agent,
+            placement,
+            spot,
+            model,
+            capabilities(agent),
+            {"agent": agent_source, "model": model_source, "placement": placement_source},
+        )
+
+    def fixed_split(self, direction, split_pane):
+        """A pane Spot with nothing asked: an omitted pane or direction means auto."""
+        free = None if direction == "auto" else direction
+        if split_pane in (None, "auto"):
+            return self.auto_split(free)
+        if split_pane == self.pane["pane_id"]:
+            tab_id = self.pane["tab_id"]
+        else:
+            groups = self.workspace_panes()
+            tab_id = next((tab for tab, (_, panes) in groups.items() if split_pane in panes), None)
+            if tab_id is None:
+                listed = ", ".join(pane for _, panes in groups.values() for pane in panes)
+                raise CaptainError(
+                    f"Pane {split_pane} is not in this workspace (closed or mistyped). "
+                    f"Panes: {listed}. Omit --split-pane for the next free slot."
+                )
+        if free is None:
+            return self.auto_split(None, split_pane, tab_id)
+        return Spot(free, split_pane, tab_id)
 
     def choose_split(self, args, placement):
         """The Spot a crew opens in; a None pane with a reason means a new tab."""

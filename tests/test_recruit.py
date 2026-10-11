@@ -54,6 +54,16 @@ class RecruitTests(SessionCase):
     def args(self, *args):
         return cli.parser().parse_args(["--session", self.meta["id"], *args])
 
+    def test_crew_name_is_case_insensitive_and_refusals_are_distinct(self):
+        self.meta["crew"] = {"jack": {"id": "jack", "name": "Jack", "agent": "c-jack"}}
+        store.write_json(self.directory / "session.json", self.meta)
+        base = ("crew", "--agent", "claude", "--task", "x", "--placement", "pane")
+        with patch.object(runtime, "herdr", side_effect=pane_stub({})):
+            with self.assertRaisesRegex(runtime.CaptainError, "'Jack' already exists"):
+                agents.create_crew(self.args(base[0], "Jack", *base[1:]), self.pane, self.project)
+            with self.assertRaisesRegex(runtime.CaptainError, "'Nobody' is not on the crew roster"):
+                agents.create_crew(self.args(base[0], "Nobody", *base[1:]), self.pane, self.project)
+
     def test_captain_requires_an_agent_selection(self):
         for provider in ("claude", "codex"):
             with (
@@ -85,9 +95,7 @@ class RecruitTests(SessionCase):
     def test_crew_requires_choices_and_cancellation_creates_nothing(self):
         for flags in (
             (),
-            ("--agent", "codex"),
             ("--placement", "pane"),
-            ("--agent", "codex", "--placement", "pane"),
         ):
             args = self.args("crew", "--task", "build", *flags)
             with (
@@ -98,7 +106,7 @@ class RecruitTests(SessionCase):
                 with self.assertRaisesRegex(runtime.CaptainError, "Ask the user"):
                     agents.create_crew(args, self.pane, self.project)
                 api.assert_not_called()
-        for answers in ([None], ["claude", None]):
+        for answers in ([None],):
             with (
                 patch.object(sys.stdin, "isatty", return_value=True),
                 patch(
@@ -155,7 +163,18 @@ class RecruitTests(SessionCase):
         ):
             with self.subTest(placement=placement):
                 task = 'Check quotes " and $() and `backticks`\nThen report.'
-                args = self.args("crew", "--task", task)
+                args = self.args(
+                    "crew",
+                    "--task",
+                    task,
+                    "--placement",
+                    placement,
+                    *(
+                        ["--direction", "vertical", "--split-pane", "w1:p1"]
+                        if placement == "pane"
+                        else []
+                    ),
+                )
                 created = {
                     "pane": {"pane_id": "w1:p2", "agent": provider, "agent_status": "idle"},
                     "root_pane": {"pane_id": "w1:p3"},
@@ -190,12 +209,8 @@ class RecruitTests(SessionCase):
                 # The composer read that confirms the task left the input box is not topology.
                 calls = [call for call in api.call_args_list if call.args[:2] != ("agent", "read")]
                 self.assertIn("Choose your crew agent", ask.call_args_list[0].args[0])
-                self.assertIn("Where should the crew open?", ask.call_args_list[1].args[0])
+                self.assertEqual(ask.call_count, 1)
                 if placement == "pane":
-                    self.assertIn("Split direction?", ask.call_args_list[2].args[0])
-                    self.assertIn("Which pane should be split?", ask.call_args_list[3].args[0])
-                    self.assertEqual([call.args for call in calls[:2]], list(self.LISTING_CALLS))
-                    calls = calls[2:]
                     self.assertEqual(calls[0].args[:2], ("pane", "split"))
                     self.assertEqual(calls[0].args[calls[0].args.index("--pane") + 1], "w1:p1")
                     self.assertEqual(calls[0].args[calls[0].args.index("--direction") + 1], "right")
@@ -203,7 +218,7 @@ class RecruitTests(SessionCase):
                     self.assertEqual(result["split_pane"], "w1:p1")
                     self.assertEqual(result["tab"], "w1:t1")
                 else:
-                    self.assertEqual(len(ask.call_args_list), 2)
+                    self.assertEqual(len(ask.call_args_list), 1)
                     self.assertEqual(calls[0].args[:2], ("tab", "create"))
                     self.assertIsNone(result["direction"])
                     self.assertEqual(result["tab"], "w1:t9")

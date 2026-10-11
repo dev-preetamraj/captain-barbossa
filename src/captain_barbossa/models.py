@@ -217,6 +217,28 @@ def resolve_model(provider, text):
     )
 
 
+def chosen_model(provider, flag, *setting):
+    """(model ID, where it came from): the flag, else the setting at names, one resolution."""
+    if flag:
+        return resolve_model(provider, flag), f"--model {flag}"
+    wanted = config.text(*setting)
+    where = config.source(*setting) or "defaults.toml"
+    label = f"[{setting[0]}] {'.'.join(setting[1:])}"
+    return resolve_model(provider, wanted), f"{label} = {wanted!r} from {where}"
+
+
+def capabilities(provider):
+    """What provider's CLI can do for the protocol, so no caller re-tests the tuples."""
+    return tuple(
+        name
+        for name, held in (
+            ("hooks", provider not in HOOKLESS),
+            ("hook_delivered_mail", provider in HOOK_DELIVERED),
+        )
+        if held
+    )
+
+
 def native_model_args(provider, model):
     if not model:
         return []

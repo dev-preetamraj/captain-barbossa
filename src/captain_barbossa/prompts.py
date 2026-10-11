@@ -29,8 +29,11 @@ STYLE = questionary.Style(
 )
 
 
-def choose(value, options, question, flag, labels=None, groups=None):
-    """Pick one of options; groups is an optional list of (title, options) for grouped display."""
+def choose(value, options, question, flag, labels=None, groups=None, setting=None):
+    """Pick one of options; groups is an optional list of (title, options) for grouped display.
+
+    setting names the settings key that would answer this for good, e.g. "[crew] agent".
+    """
     if value:
         return value
     grouped = groups or [(None, options)]
@@ -39,9 +42,12 @@ def choose(value, options, question, flag, labels=None, groups=None):
         for title, members in grouped:
             items = " / ".join(o if labels is None else f"{o} {labels[o]}" for o in members)
             listed.append(f"{title}: {items}" if title else items)
+        lasting = (
+            f" Setting {setting} in .captain/settings.toml stops this question." if setting else ""
+        )
         raise CaptainError(
             f"Ask the user: {question} ({'; '.join(listed)}). Wait for their answer, "
-            f"then rerun with {flag} <choice>. Nothing was created."
+            f"then rerun with {flag} <choice>. Nothing was created.{lasting}"
         )
     choices = [questionary.Separator(" ")]
     for title, members in grouped:
@@ -57,7 +63,7 @@ def choose(value, options, question, flag, labels=None, groups=None):
         questionary.Separator(" "),
     ]
     prompt = questionary.select(
-        question,
+        f"{question} ({setting} in .captain/settings.toml skips this)" if setting else question,
         choices=choices,
         qmark="\n ",
         pointer="   ›",

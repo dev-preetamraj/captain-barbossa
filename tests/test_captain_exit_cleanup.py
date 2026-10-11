@@ -8,12 +8,14 @@ import contextlib
 import io
 import os
 import signal
+import subprocess
 import time
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from captain_barbossa import agents, sessions, store
+from captain_barbossa import agents, protocol, sessions, store
+from captain_barbossa.crew import Crew
 from captain_barbossa.runtime import CaptainError
 from tests.home_isolation import SessionCase
 
@@ -136,6 +138,46 @@ class CloseSessionPanesTests(SessionCase):
             finally:
                 with contextlib.suppress(OSError, ValueError):
                     os.kill(int(lingering.read_text()), signal.SIGKILL)
+
+
+class UnlandedWorkSurvivesExitTests(SessionCase):
+    """At exit no user can confirm, so a crew holding unlanded owned work keeps its pane."""
+
+    def setUp(self):
+        super().setUp()
+        self.enterContext(contextlib.chdir(self.project))
+        self.enterContext(patch.dict(os.environ, {"CAPTAIN_ROLE": "captain"}))
+        subprocess.run(["git", "init", "-q", str(self.project)], check=True)
+        (self.project / "src").mkdir()
+        (self.project / "src" / "a.py").write_text("")
+        self.current = sessions.session(self.project, self.pane, create=True)
+        crew = Crew(
+            "jack",
+            {"name": "Jack", "agent": "jack", "incarnation_id": "first", "pane": "w1:p2"},
+            self.current,
+        )
+        self.current.meta["crew"] = {
+            "jack": crew.record,
+            "gibbs": {"id": "gibbs", "name": "Gibbs", "agent": "gibbs", "pane": "w1:p3"},
+        }
+        store.write_json(self.current.meta_path, self.current.meta)
+        protocol.begin(crew, self.project, "edit src", ["src"], ["edit"])
+
+    def test_the_kept_pane_is_named_with_its_unlanded_paths(self):
+        calls = []
+        with (
+            patch.object(
+                agents.runtime, "herdr", side_effect=lambda *a, **_: calls.append(a) or {}
+            ),
+            contextlib.redirect_stderr(io.StringIO()) as err,
+        ):
+            agents.close_session_panes(self.current.meta["id"], self.project)
+        self.assertEqual(calls, [("pane", "close", "w1:p3")])
+        self.assertIn("kept Jack's pane open", err.getvalue())
+        self.assertIn("[uncommitted] src/a.py", err.getvalue())
+        crew = store.read_json(self.current.meta_path)["crew"]
+        self.assertNotEqual(crew["jack"].get("status"), "dismissed")
+        self.assertEqual(crew["gibbs"]["status"], "dismissed")
 
 
 class LaunchTeardownTests(SessionCase):

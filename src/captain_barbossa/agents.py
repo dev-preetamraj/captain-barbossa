@@ -18,7 +18,7 @@ from .models import HOOKLESS, PROVIDERS, claude_label, model_names, resolve_mode
 from .pane import MODEL_TIMEOUT, PROMPT_TIMEOUT, shell_ready_for_input
 from .pi_captain import captain_extension
 from .placement import Placement
-from .prompts import PLACEMENTS, choose
+from .prompts import choose
 from .runtime import HERDR_ERRORS, CaptainError, check_text, executable
 from .sessions import agent_name, crew_meta, prune_sessions, read_session, session
 from .store import private_dir, read_cursor, read_json, state_root, temp_root, write_json
@@ -54,15 +54,34 @@ def close_session_panes(session_id, project):
 
     Every pane id comes from this session's own records, so a pane the session never
     opened is never touched. One already gone is not news, and Herdr closes a tab whose
-    last pane goes with it.
+    last pane goes with it. A crew whose owned work Git shows unlanded keeps its pane:
+    no user is present at exit to confirm leaving it behind.
     """
     current = read_session(project, session_id)
     with crew_meta(current.directory) as meta:
-        closing = [
-            (crew.record["pane"], crew.record)
+        closing = []
+        live = [
+            crew
             for crew in Crew.members(current._replace(meta=meta))
             if not crew.is_dismissed and crew.record.get("pane")
         ]
+        with protocol.checkpoint(current.directory) as state:
+            for crew in live:
+                try:
+                    reasons = protocol.unlanded(project, protocol.active(state, crew))
+                except CaptainError:  # legacy crew: no assignment, so no owned paths
+                    reasons = []
+                if reasons:
+                    try:
+                        print(
+                            f"captain: kept {crew.display_name}'s pane open; its owned work "
+                            f"has not landed: {'; '.join(reasons)}. {protocol.UNSAVED_CAVEAT}",
+                            file=sys.stderr,
+                        )
+                    except OSError:  # the terminal went with the captain; keep closing
+                        pass
+                else:
+                    closing.append((crew.record["pane"], crew.record))
         board = dashboard_pane(current)
         if board:
             closing.append((board, None))
@@ -85,7 +104,8 @@ def close_panes_on_exit(session_id, project):
     it dies. An inherited pipe would be simpler but is held open by every descendant the
     CLI forks, so one backgrounded job meant no teardown at all. setsid keeps the watcher
     out of the pane's process group, so closing the captain's pane cannot take the
-    teardown with it, and /dev/null keeps it off a terminal that is going away.
+    teardown with it. stdin and stdout go to /dev/null; stderr stays on the terminal, which
+    the user's shell gets back, so a pane kept for unlanded work says why.
     """
     captain_pid = os.getpid()
     if os.fork():
@@ -93,7 +113,7 @@ def close_panes_on_exit(session_id, project):
     try:
         os.setsid()
         null = os.open(os.devnull, os.O_RDWR)
-        for stream in range(3):
+        for stream in range(2):
             os.dup2(null, stream)
         while os.getppid() == captain_pid:
             time.sleep(EXIT_POLL_SECONDS)
@@ -196,7 +216,11 @@ def wait_crew(args, pane, project):
             json.dumps(response)
             if args.json
             else f"{response['crew']} {response['status']}: {response['summary']} "
-            f"(delivery {response['delivery_id']}; acknowledge with wait --ack)"
+            + (
+                f"(delivery {response['delivery_id']}; acknowledge with wait --ack)"
+                if response["delivery_id"]
+                else "(nothing pending to acknowledge)"
+            )
         )
         return
     if getattr(args, "ack", None):
@@ -308,26 +332,21 @@ def status_crew(args, pane, project):
     for crew in Crew.members(current):
         if crew.is_dismissed and not args.all:
             continue
-        status = crew.record.get("status") or "-"
-        try:
-            agent = runtime.herdr("agent", "get", crew.record["agent"], timeout=5).get("agent", {})
-            status = agent.get("agent_status") or status
-        except HERDR_ERRORS:
-            pass
         task = (crew.record.get("task") or "").splitlines()
+        held = None
         if crew.record.get("incarnation_id") and state and not crew.is_dismissed:
-            assignment = protocol.active(state, crew)
-            task = assignment["original_task"].splitlines()
-            status = "idle" if status == "done" else status
-            if assignment["state"] in ("asked", "done"):
-                status = assignment["state"]
+            task = protocol.active(state, crew)["original_task"].splitlines()
             if protocol.unread(crew):
                 try:
-                    gate = crew.pane.nudge_block(crew)
+                    held = crew.pane.nudge_block(crew)
                 except HERDR_ERRORS:
-                    gate = None
-                if gate:
-                    status = f"{status}; mail held: {gate}"
+                    pass
+        current_state = crew.current_state()
+        status = f"state:{current_state.state} source:{current_state.source} " + truncate_label(
+            " ".join(current_state.detail.split()), 60
+        )
+        if held:
+            status = f"{status}; mail held: {held}"
         rows.append(
             (
                 crew.display_name,
@@ -451,7 +470,7 @@ def never_read(assignment):
     return not any(message["delivery"] == "read" for message in assignment["messages"])
 
 
-def dismiss_blocker(crew, assignment):
+def dismiss_blocker(crew, assignment, project, confirmed=False):
     """Name the one thing that actually holds the dismissal, not both at once."""
     if never_read(assignment):
         # A launch that failed before its first delivery, or mail the crew never read:
@@ -470,6 +489,16 @@ def dismiss_blocker(crew, assignment):
         raise CaptainError(
             f"{crew.display_name} has {unacked} unacknowledged notification(s); "
             "acknowledge them with wait --ack before dismissal."
+        )
+    if confirmed:
+        return
+    reasons = protocol.unlanded(project, assignment)
+    if reasons:
+        # A done report is not consent: only the user can let owned work go unlanded.
+        raise CaptainError(
+            f"{crew.display_name}'s owned work has not landed: {'; '.join(reasons)}. "
+            f"{protocol.UNSAVED_CAVEAT} Have it committed, or rerun dismiss with "
+            "--confirm-unlanded once the user agrees to leave it unlanded."
         )
 
 
@@ -494,7 +523,7 @@ def dismiss_crew(args, pane, project):
                 # Same question the blocker asks: an assignment nothing reached must not keep
                 # its paths reserved by lingering in "working" after the crew is gone.
                 undelivered = never_read(assignment)
-                dismiss_blocker(crew, assignment)
+                dismiss_blocker(crew, assignment, project, getattr(args, "confirm_unlanded", False))
         if not crew.record.get("pane") and not crew.record.get("incarnation_id"):
             raise CaptainError(f"{crew.display_name} has no recorded pane to close.")
         try:
@@ -536,28 +565,27 @@ def dismiss_crew(args, pane, project):
 
 
 def create_crew(args, pane, project):
+    given = args.name
+    if given is not None:
+        args.name = given.lower()
     if args.name is not None and (
         len(args.name) > 16
         or not re.fullmatch(rf"({'|'.join(CREW_NAMES)})(-[1-9][0-9]*)?", args.name)
     ):
         raise CaptainError(
-            "Use a Pirates of the Caribbean character name (e.g. jack or gibbs), "
+            f"'{given}' is not on the crew roster. Use a Pirates of the Caribbean "
+            "character name (e.g. jack or gibbs), "
             "or omit NAME to assign one automatically. Names must be at most 16 characters."
         )
     check_text(args.task, "task")
-    provider = choose(args.crew_agent, PROVIDERS, "Choose your crew agent", "--agent")
-    placement = choose(args.placement, PLACEMENTS, "Where should the crew open?", "--placement")
     current = session(project, pane, args.session)
     with crew_meta(current.directory) as meta:
         current = current._replace(meta=meta)
         board = dashboard_pane(current)
-        spot = Placement(pane, current, board).choose_split(args, placement)
+        rec = Placement(pane, current, board).resolve(args, current.directory)
+        provider, placement, spot, model = rec.agent, rec.placement, rec.spot, rec.model
         direction, split_pane, tab_id, auto = spot.direction, spot.pane, spot.tab, spot.reason
-        if auto and split_pane is None:
-            placement = "tab"
-        wanted = args.model or config.text("crew", "model")
-        model = resolve_model(provider, wanted)
-        print(f"Model: {model} (from {wanted!r})", file=sys.stderr)
+        print(f"Recruitment sources: {json.dumps(rec.sources, sort_keys=True)}", file=sys.stderr)
         binary = executable(provider)
         name = args.name
         if name is None:
@@ -648,7 +676,6 @@ def create_crew(args, pane, project):
                     split_pane,
                     "--direction",
                     "right" if direction == "vertical" else "down",
-                    *(["--ratio", f"{spot.ratio:.4f}"] if spot.ratio else []),
                     "--cwd",
                     str(project),
                     "--no-focus",
@@ -666,6 +693,11 @@ def create_crew(args, pane, project):
                     renest_dashboard(board, pane)
                 except HERDR_ERRORS as exc:  # geometry is cosmetic; never lose the crew over it
                     print(f"captain: dashboard not re-nested: {exc}", file=sys.stderr)
+            if new_pane:
+                try:
+                    Placement(pane, current, board).even_new_pane(spot, new_pane)
+                except HERDR_ERRORS as exc:
+                    print(f"captain: tab not evened: {exc}", file=sys.stderr)
         if not new_pane:
             raise CaptainError(
                 "Herdr created a layout but returned no pane ID. Inspect the workspace before retrying."

@@ -7,6 +7,7 @@ arithmetic never looked at.
 
 import contextlib
 import io
+import math
 import os
 import unittest
 from types import SimpleNamespace
@@ -25,6 +26,38 @@ def pinned(**keys):
     return patch.object(config, "settings", lambda: merged)
 
 
+class Row:
+    """A chain of panes as Herdr lays it out: each split owns a ratio of the cells left
+    from it onward, and a pane gets that many whole cells, rounded by `snap`.
+    """
+
+    def __init__(self, panes, total, ratios, snap=math.floor):
+        self.panes, self.total, self.ratios, self.snap = panes, total, list(ratios), snap
+        self.resizes = []
+
+    def sizes(self):
+        left, sizes = self.total, []
+        for ratio in self.ratios:
+            cells = self.snap(ratio * left)
+            sizes.append(cells)
+            left -= cells
+        return [*sizes, left]
+
+    def herdr(self, *args, **_):
+        if args[:2] == ("pane", "layout"):
+            rects = [{"width": n, "height": n} for n in self.sizes()]
+            return {
+                "layout": {"panes": [{"pane_id": p, "rect": r} for p, r in zip(self.panes, rects)]}
+            }
+        if args[:2] == ("pane", "resize"):
+            sign = 1 if args[5] in ("right", "down") else -1
+            index = self.panes.index(args[3])
+            self.ratios[index] += sign * float(args[7])
+            self.resizes.append(args[3])
+            return {"resize": {"changed": True}}
+        raise AssertionError(f"placement asked Herdr: {args}")
+
+
 class EvenRatioTests(unittest.TestCase):
     """A roster the test owns; Herdr may only ever be asked to resize."""
 
@@ -41,6 +74,11 @@ class EvenRatioTests(unittest.TestCase):
             raise AssertionError(f"placement asked Herdr: {args}")
         self.resizes.append((args[3], args[5], args[7]))
         return {"resize": {"changed": True}}
+
+    def even(self, row, direction="vertical"):
+        with patch.object(runtime, "herdr", side_effect=row.herdr):
+            self.placement().even_chain(row.panes, direction)
+        return row.sizes()
 
     def place(self, name, column, row, tab="captain"):
         self.meta["crew"][name] = {
@@ -61,41 +99,63 @@ class EvenRatioTests(unittest.TestCase):
     def plan(self, name):
         return self.placement().even_after_close(self.meta["crew"][name])
 
-    def test_reopening_an_emptied_column_widens_the_pane_it_splits(self):
-        """Column 2 was emptied by a dismissal, so the new crew lands in the middle of
-        the row: the captain has to grow to two thirds before halving into even thirds.
-        """
+    def test_a_three_pane_tab_lands_within_one_column_across(self):
+        """Measured live: 234 columns, three panes, 77/79/78 with the old per-split ratios."""
+        for snap in (math.floor, round, lambda cells: math.floor(cells + 0.5)):
+            with self.subTest(snap=getattr(snap, "__name__", "half-up")):
+                row = Row(["a", "b", "c"], 234, [0.32905984, 0.5], snap)
+                self.assertEqual(self.even(row), [78, 78, 78])
+
+    def test_the_remainder_is_spread_so_panes_differ_by_one_column(self):
+        for total, count in ((235, 3), (200, 7), (101, 4)):
+            with self.subTest(total=total, count=count):
+                panes = [f"p{i}" for i in range(count)]
+                row = Row(panes, total, [0.5] * (count - 1))
+                sizes = self.even(row)
+                self.assertEqual(sum(sizes), total)
+                self.assertLessEqual(max(sizes) - min(sizes), 1)
+
+    def test_an_even_chain_is_left_alone(self):
+        row = Row(["a", "b", "c"], 234, [1 / 3, 0.5])
+        self.assertEqual(self.even(row), [78, 78, 78])
+        self.assertEqual(row.resizes, [])
+
+    def test_a_chain_past_herdrs_resizable_range_is_refused_before_any_resize(self):
+        row = Row([f"p{i}" for i in range(11)], 330, [0.5] * 10)
+        with self.assertRaisesRegex(CaptainError, "cannot size 11 panes"):
+            self.even(row)
+        self.assertEqual(row.resizes, [])
+
+    def test_herdr_declining_a_resize_raises_for_the_caller_to_note(self):
+        row = Row(["a", "b", "c"], 234, [0.5, 0.5])
+        with (
+            patch.object(
+                runtime,
+                "herdr",
+                side_effect=lambda *a, **k: (
+                    row.herdr(*a, **k) if a[1] == "layout" else {"resize": {"changed": False}}
+                ),
+            ),
+            self.assertRaisesRegex(CaptainError, "would not resize"),
+        ):
+            self.placement().even_chain(row.panes, "vertical")
+
+    def test_choosing_a_slot_in_an_emptied_column_names_the_whole_row(self):
         self.place("b", 3, 1)
         with pinned(captain_tab=[1, 2, 2]):
             spot = self.recruit()
         self.assertEqual((spot.column, spot.row, spot.pane), (2, 1, "captain"))
-        self.assertEqual(self.resizes, [("captain", "right", "0.1667")])
-        self.assertAlmostEqual(spot.ratio, 0.5)
+        self.assertEqual(spot.chain, ("captain", "b"))
+        self.assertEqual(self.resizes, [])
 
-    def test_reopening_a_column_with_panes_on_both_sides_shrinks_left_and_widens(self):
-        """Column 3 of four was emptied, so the new pane lands between the captain and
-        column 4: the captain shrinks to a quarter and column 2 widens to hold the pair.
-        """
-        self.place("a", 2, 1)
-        self.place("b", 4, 1)
-        with pinned(captain_tab=[1, 2, 2, 2]):
-            spot = self.recruit()
-        self.assertEqual((spot.column, spot.row, spot.pane), (3, 1, "a"))
-        self.assertEqual(
-            self.resizes,
-            [
-                ("captain", "left", f"{1 / 3 - 1 / 4:.4f}"),
-                ("a", "right", f"{2 / 3 - 1 / 2:.4f}"),
-            ],
-        )
-
-    def test_appending_a_column_still_only_shrinks_the_earlier_panes(self):
-        """The fill-in-order case keeps its old calls: nothing beyond the split to widen."""
-        self.place("a", 2, 1)
+    def test_a_new_pane_is_inserted_after_the_one_it_split(self):
+        self.place("b", 3, 1)
         with pinned(captain_tab=[1, 2, 2]):
             spot = self.recruit()
-        self.assertEqual((spot.column, spot.pane), (3, "a"))
-        self.assertEqual(self.resizes, [("captain", "left", "0.1667")])
+        row = Row(["captain", "new", "b"], 234, [0.5, 0.5])
+        with patch.object(runtime, "herdr", side_effect=row.herdr):
+            self.placement().even_new_pane(spot, "new")
+        self.assertEqual(row.sizes(), [78, 78, 78])
 
     def test_a_dismissal_grows_the_panes_before_it_back_to_an_even_share(self):
         self.place("a", 2, 1)
@@ -135,7 +195,7 @@ class EvenRatioTests(unittest.TestCase):
         with pinned(captain_tab=[1, 2, 2]):
             spot = self.recruit()
         self.assertEqual((spot.column, spot.pane), (3, "a"))
-        self.assertEqual(self.resizes, [("captain", "left", "0.1667")])
+        self.assertEqual(spot.chain, ("captain", "a"))
 
     def test_a_crew_placed_by_hand_moves_nothing(self):
         self.meta["crew"]["a"] = {"pane": "a", "tab": "captain", "status": "started"}

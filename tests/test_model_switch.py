@@ -696,7 +696,7 @@ class CrewModelTests(SessionCase):
                 ):
                     agents.create_crew(args, self.pane, self.project)
                 self.assertEqual(json.loads(output.getvalue())["model"], model)
-                self.assertEqual(errors.getvalue(), f"Model: {model} (from {text!r})\n")
+                self.assertIn(f'"model": "--model {text}"', errors.getvalue())
                 launcher = shlex.split((self.directory / f"crew-{name}.sh").read_text())
                 self.assertEqual(launcher[launcher.index(flag) + 1], model)
                 self.assertEqual(launcher.count(flag), 1)
@@ -731,7 +731,7 @@ class CrewModelTests(SessionCase):
         ):
             agents.create_crew(args, self.pane, self.project)
         self.assertEqual(json.loads(output.getvalue())["model"], "claude-haiku-5-5")
-        self.assertEqual(errors.getvalue(), "Model: claude-haiku-5-5 (from 'cheap')\n")
+        self.assertIn("[crew] model = 'cheap' from defaults.toml", errors.getvalue())
         launcher = shlex.split((self.directory / "crew-jack.sh").read_text())
         self.assertEqual(launcher[launcher.index("--model") + 1], "claude-haiku-5-5")
 
