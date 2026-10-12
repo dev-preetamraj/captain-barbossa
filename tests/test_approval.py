@@ -190,6 +190,13 @@ class ApprovalTests(unittest.TestCase):
         # An exec argv has no shell, so operators are plain arguments.
         self.assertEqual(argv("cat", ";", "src/mine.py"), "granted")
 
+    def test_path_qualified_executables_do_not_inherit_utility_permissions(self):
+        for command in ("./cat", "/repo/tools/cat", "uv run ./cat"):
+            with self.subTest(command=command):
+                self.assertEqual(bash(command, actions=()).verdict, Verdict.ESCALATE)
+        request = Request("Bash", PROJECT, PROJECT, argv=("/repo/bash", "-c", "cat file"))
+        self.assertEqual(decide(request).verdict, Verdict.ESCALATE)
+
 
 class ApprovalHookTests(SessionCase):
     def setUp(self):
@@ -260,6 +267,23 @@ class ApprovalHookTests(SessionCase):
         (self.project / "src" / "outside").symlink_to(self.project.parent, target_is_directory=True)
         output, event = self.hook("Edit", {"file_path": "src/outside/file.py"})
         self.assertNotIn("hookSpecificOutput", output)
+        self.assertEqual(event["approval"]["code"], "outside-grant")
+
+    def test_shell_symlinks_cannot_escape_read_or_write_grants(self):
+        (self.project / "src").mkdir()
+        (self.project / "other").mkdir()
+        (self.project / "src" / "link").symlink_to(self.project / "other")
+        (self.project / "secret").symlink_to(self.root / "secret")
+        for command in ("echo x > src/link/file", "cat secret", "cat ./secret"):
+            with self.subTest(command=command):
+                output, event = self.pretool({"command": command})
+                self.assertEqual(event["approval"]["code"], "outside-grant")
+                self.assertEqual(output["hookSpecificOutput"]["permissionDecision"], "ask")
+
+    def test_retargeting_an_owned_path_does_not_move_its_grant(self):
+        (self.project / "other").mkdir()
+        (self.project / "src").symlink_to(self.project / "other")
+        _, event = self.pretool({"command": "echo x > src/file"})
         self.assertEqual(event["approval"]["code"], "outside-grant")
 
     def pretool(self, inputs, tool="Bash"):

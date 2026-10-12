@@ -9,6 +9,7 @@ import shlex
 import sys
 from dataclasses import dataclass
 from enum import Enum
+from pathlib import Path
 
 
 class Verdict(Enum):
@@ -147,7 +148,7 @@ def decide(request):
     if request.tool not in SHELL_TOOLS:
         return Decision("unknown-tool")
     argv = list(request.argv or ())
-    if argv[:1] and posixpath.basename(argv[0]) in UNWRAPPED_SHELLS and len(argv) == 3:
+    if argv[:1] and argv[0] in UNWRAPPED_SHELLS and len(argv) == 3:
         if argv[1] in ("-c", "-lc"):
             return _decide_text(request, argv[2])
     if argv:
@@ -227,9 +228,11 @@ def _command(words):
         return _Use()
     if "=" in words[0] and not words[0].startswith(("-", "=")):
         return _Use("wrapper")
-    verb, args = posixpath.basename(words[0]), words[1:]
+    verb, args = words[0], words[1:]
     if words[0] == sys.executable and args[:2] == ["-m", "captain_barbossa"]:
         return _captain(args[2:])
+    if "/" in verb:
+        return _Use("unknown-command")
     if verb == "uv":
         return _uv(args)
     if verb in ("python", "python3") and args[:1] == ["-m"]:
@@ -416,15 +419,15 @@ def _ruff(args):
 
 
 def _path_like(args):
-    return tuple(
-        arg
-        for arg in args
-        if not arg.startswith("-") and ("/" in arg or arg in (".", "..") or arg.startswith("~"))
-    )
+    # A bare filename can be a symlink too; conservatively check every operand.
+    return tuple(arg for arg in args if not arg.startswith("-"))
 
 
 def _resolve(cwd, value):
-    return posixpath.normpath(posixpath.join(cwd, value))
+    try:
+        return str((Path(cwd) / value).resolve())
+    except (OSError, RuntimeError):
+        return ""  # An unreadable path or symlink loop is never inside a grant.
 
 
 def _inside(path, base):
@@ -446,7 +449,8 @@ def _writable(request, cwd, value):
     if path == NULL_DEVICE:
         return True
     project = posixpath.normpath(request.project)
-    owned = (_resolve(project, item) for item in request.owned)
+    # Ownership was canonicalized at assignment time; a new symlink cannot move it.
+    owned = (posixpath.normpath(posixpath.join(project, item)) for item in request.owned)
     return _readable(request, cwd, value) and any(_inside(path, item) for item in owned)
 
 
