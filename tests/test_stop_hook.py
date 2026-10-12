@@ -126,6 +126,26 @@ class StopHookTests(SessionCase):
         self.assertIn("do the thing", printed)
         self.assertEqual(len(self.still_queued()), 1)
 
+    def test_mail_arriving_during_output_is_not_receipted(self):
+        for source in ("hook", "inbox"):
+            with self.subTest(source=source):
+                self.mail("first message")
+                output = io.StringIO()
+                with (
+                    contextlib.redirect_stdout(output),
+                    patch.object(output, "flush", side_effect=lambda: self.mail("late message")),
+                    patch.object(Crew, "for_args", return_value=(self.current, self.crew)),
+                ):
+                    if source == "hook":
+                        events.deliver_mail(self.crew.events, "UserPromptSubmit")
+                    else:
+                        cli.print_inbox(SimpleNamespace(), self.pane, self.project)
+                self.assertIn("first message", output.getvalue())
+                self.assertNotIn("late message", output.getvalue())
+                pending = protocol.queued(self.current.directory, "jack")
+                self.assertEqual([message["text"] for message in pending], ["late message"])
+                protocol.receipt(self.current.directory, "jack", [m["id"] for m in pending])
+
     def test_an_unfinished_assignment_blocks_the_stop(self):
         decision = self.decision({"hook_event_name": "Stop"})
         self.assertEqual(decision["decision"], "block")

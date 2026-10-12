@@ -276,13 +276,13 @@ def print_inbox(args, pane, project):
     Same renderer as the hook, so the two never show the crew different things.
     """
     _, crew = Crew.for_args(args, pane, project)
-    body = mail_context(crew.events)
+    body, message_ids = mail_context(crew.events)
     if body is None:
         print("No mail.")
         return
     print(body)
     sys.stdout.flush()
-    receipt_for(crew.events)
+    receipt_for(crew.events, message_ids)
 
 
 def print_models(args):

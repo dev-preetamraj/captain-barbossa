@@ -46,7 +46,7 @@ def event_incarnation(path):
 
 
 def mail_context(events_path):
-    """This crew's queued mail, rendered for its own model, or None.
+    """This crew's rendered mail (or None), and the exact message IDs it contains.
 
     Flush this before stamping the receipt (`receipt_for`), or a dropped hook output
     marks mail read that no model saw.
@@ -54,15 +54,16 @@ def mail_context(events_path):
     from .protocol import queued, render
 
     directory, crew_id, _ = crew_for_events(events_path)
-    return render(directory, queued(directory, crew_id))
+    messages = queued(directory, crew_id)
+    return render(directory, messages), [message["id"] for message in messages]
 
 
-def receipt_for(events_path):
+def receipt_for(events_path, message_ids):
     """Stamp the receipt for whatever mail_context just rendered and flushed."""
-    from .protocol import queued, receipt
+    from .protocol import receipt
 
     directory, crew_id, _ = crew_for_events(events_path)
-    receipt(directory, crew_id, [message["id"] for message in queued(directory, crew_id)])
+    receipt(directory, crew_id, message_ids)
 
 
 def stop_reason(events_path):
@@ -238,7 +239,7 @@ DELIVERY_HOOKS = ("SessionStart", "UserPromptSubmit", "Stop")
 
 def deliver_mail(events_path, hook):
     """Hand this crew its queued mail, then stamp the receipt once the body is flushed."""
-    body = mail_context(events_path)
+    body, message_ids = mail_context(events_path)
     if body is None:
         reason = stop_reason(events_path) if hook == "Stop" else None
         if reason:
@@ -252,7 +253,7 @@ def deliver_mail(events_path, hook):
     print(json.dumps(payload))
     sys.stdout.flush()
     # Only after the flush: at-least-once, since a duplicate beats a silent loss.
-    receipt_for(events_path)
+    receipt_for(events_path, message_ids)
 
 
 def read_events(path, offset, *, incarnation=None):
