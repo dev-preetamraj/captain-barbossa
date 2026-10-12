@@ -99,6 +99,15 @@ captain memory path
 captain memory path --scope project
 ```
 
+At captain startup or after compaction, `captain recover` returns one JSON digest:
+memory from all three scopes, active assignments and owned paths, pending questions,
+wait deliveries and queued crew mail. Each section (and each memory scope) includes
+at most 25 entries with full text; `omitted` counts the remaining entries explicitly.
+Saved deliveries retain their IDs; queued notices have `delivery_id: null` until
+`wait` surfaces them. Recovery reads stored state only, without Herdr, native-event
+polling, acknowledgements or writes. Use `wait --all --json --timeout 0` for fresh
+native notifications and the existing scoped readers for omitted detail.
+
 `memory show` prints the most recent relationships as `[scope] [subject,
 relation, object]`; `--all` shows every link, `--json` dumps the raw graph,
 and `--scope` narrows the output to one scope. Text output caps each subject,

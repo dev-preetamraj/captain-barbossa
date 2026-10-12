@@ -243,8 +243,8 @@ class InstructionTests(SessionCase):
                         self.assertNotIn(command, text)
                     self.assertNotIn("--model", text)
                     for phrase in (
-                        "Read project/session memory at startup and after context compaction",
-                        "CAPTAIN memory show",
+                        "Recover memory, assignments, paths, questions and deliveries at startup/compaction",
+                        "CAPTAIN recover",
                         "CAPTAIN memory add 'subject' 'relation' 'object'",
                         "CAPTAIN memory query",
                         "CAPTAIN memory path",
@@ -268,8 +268,8 @@ class InstructionTests(SessionCase):
                     for phrase in (
                         "Do not create Herdr panes/tabs yourself or substitute hidden built-in subagents",
                         "Replace CAPTAIN in commands below with:",
-                        "Read project/session memory at startup and after context compaction",
-                        "CAPTAIN memory show",
+                        "Recover memory, assignments, paths, questions and deliveries at startup/compaction",
+                        "CAPTAIN recover",
                         "CAPTAIN memory add 'subject' 'relation' 'object'",
                         "Search, if Graphify is installed: CAPTAIN memory query 'question'",
                         "CAPTAIN memory path",

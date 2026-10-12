@@ -19,7 +19,7 @@ plain-text refresh loop in a Herdr pane, not a TUI.
 ```text
 src/captain_barbossa/
   cli.py          argparse entry point and dispatch: captain, crew, wait, tell, model,
-                  focus, session, init, status, dashboard, dismiss, memory
+                  focus, session, init, status, dashboard, dismiss, memory, recover
   agents.py       native launch, dashboard pane, crew create/wait/tell/model/focus/status/dismiss
   instructions.py role instructions and per-provider native CLI arguments
   config.py       settings layering, typed lookup, range checks
@@ -30,6 +30,7 @@ src/captain_barbossa/
   pane.py         native agent terminal interaction and pane parsing
   protocol.py     assignment state, crew mail (enqueue/unread/mark_read/bounce), wait polling
   inspection.py   bounded local file, state and Git reads for `inspect`
+  recovery.py     read-only memory, assignment and pending-delivery digest for `recover`
   store.py        state and temp roots, storage dirs, atomic JSON read/write, locks
   events.py       native CLI hook event stream, permission decisions, and mail delivery
   approval.py     pure assignment-scoped approval verdicts and reason codes

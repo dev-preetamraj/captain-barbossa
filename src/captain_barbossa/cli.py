@@ -5,7 +5,7 @@ import json
 import os
 import sys
 
-from . import __version__, config, dashboard, do, events, inspection, protocol
+from . import __version__, config, dashboard, do, events, inspection, protocol, recovery
 from .agents import (
     create_crew,
     dismiss_crew,
@@ -145,6 +145,7 @@ def parser():
     stop.add_argument("name", help="crew name or ID (case-insensitive)")
     stop.add_argument("--reason", help="why, recorded in session memory")
     commands.add_parser("session", help="print the current session id")
+    commands.add_parser("recover", help="JSON digest of memory, assignments and pending deliveries")
     commands.add_parser("update", help="upgrade the installed captain-barbossa tool")
     start = commands.add_parser(
         "init", help="write .captain/settings.toml, or top up an existing one"
@@ -341,6 +342,10 @@ def main(argv=None):
             return 0
         if args.command == "session":
             print_session(args)
+            return 0
+        if args.command == "recover":
+            project = project_root()
+            print(json.dumps(recovery.digest(read_session(project, args.session), project)))
             return 0
         if args.command == "update":
             return upgrade()

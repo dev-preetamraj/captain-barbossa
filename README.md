@@ -467,6 +467,7 @@ Read the affected pane before retrying or approving anything.
 | `captain crew [NAME] --task TEXT [--owns PATH] [--allow ACTION] [--handoff ID] [--agent ...] [--placement pane\|tab] [--direction ...] [--split-pane ...] [--model ...]` | Recruit crew |
 | `captain wait NAME [--timeout SECONDS] [--json] [--ack DELIVERY_ID]` | Read and acknowledge a crew notification |
 | `captain wait --all [--timeout SECONDS] [--json]` | Read all crew's pending deliveries; acknowledge per name/ID |
+| `captain recover` | JSON recovery digest with explicit omission counts; no acknowledgements |
 | `captain model NAME cheap\|mid\|strong\|<model>` | Switch a running crew's model |
 | `captain tell NAME MESSAGE [--assignment ID]` | Append a follow-up to an active assignment |
 | `captain inbox NAME` | Print a crew's queued mail oldest first and write the read receipt |

@@ -9,8 +9,9 @@ from .events import DELIVERY_HOOKS
 from .models import HOOK_DELIVERED, native_model_args
 
 # Shared memory includes other assignments; only the captain loads it automatically.
-CAPTAIN_MEMORY = """Read project/session memory at startup and after context compaction:
-  CAPTAIN memory show
+CAPTAIN_MEMORY = """Recover memory, assignments, paths, questions and deliveries at startup/compaction:
+  CAPTAIN recover
+Read omitted memory: CAPTAIN memory show --json [--scope session|project|repo].
 Save concise, meaningful decisions, findings, and handoffs as relationships:
   CAPTAIN memory add 'subject' 'relation' 'object'
 Default scope is session. Use --scope project ONLY for durable facts for future
