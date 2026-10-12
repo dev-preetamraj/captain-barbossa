@@ -108,10 +108,11 @@ captain wait Jack
 captain wait Jack --timeout 300
 captain wait Jack --json
 captain wait Jack --json --ack <delivery-id> --timeout 0
+captain wait --all --json --timeout 0
 ```
 
 For protocol crew, `wait` returns a notification with `status`, `delivery_id`,
-`crew`, `assignment_id`, and a summary capped at 1,600 characters. `--json`
+`crew`, `assignment_id`, and the full, untruncated summary. `--json`
 selects JSON output. Statuses distinguish `working`, `idle`, `asked`,
 `awaiting_approval`, `done`, `held`, `bounced`, `timeout`, and `error`. Native
 idle is activity evidence only; assignment completion requires explicit `done`.
@@ -136,9 +137,13 @@ Code crew are read from their event file alone, since their approvals arrive as
 hooks; Codex and pi crew, whose CLIs report no approval, also have their pane
 checked for a modal, once when a wait starts and then every 30 seconds.
 
-A notification is returned once. Waiting again without `wait --ack ID` fails and
-names the unacknowledged delivery, its status, and its summary, so nothing loops
-and nothing is lost. Acknowledging may return the next notification; consume that
+A notification repeats with its existing delivery ID until acknowledged.
+`wait --all` returns every protocol crew's current delivery in a `deliveries` array
+with JSON, or prints each delivery in text. It scans the whole fleet before returning;
+quiet, legacy, dismissed and fully acknowledged completed crew add no delivery.
+It never acknowledges: use `wait NAME --ack ID` for each received delivery.
+Each crew exposes one pending delivery at a time; queued notices follow its ack.
+A fleet timeout returns an empty array. Acknowledging may return the next notification; consume that
 too. `wait --ack ID` on the final `done` notification returns one `idle` status
 instead of the next notification. Waiting again once the assignment is done and
 every notification is acknowledged fails: dismiss the crew or hand off. Timeouts

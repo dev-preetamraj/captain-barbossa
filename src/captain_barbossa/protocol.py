@@ -170,7 +170,7 @@ def begin(crew, project, task, paths=(), actions=(), handoff=None):
 
 
 def notice(assignment, status, summary):
-    assignment["notices"].append({"status": status, "summary": summary[:1600]})
+    assignment["notices"].append({"status": status, "summary": summary})
 
 
 def validate_actor(crew, args):
@@ -700,7 +700,7 @@ def result(crew, assignment, status, summary="", delivery_id=None):
         "delivery_id": delivery_id,
         "crew": crew.display_name,
         "assignment_id": assignment["id"] if assignment else None,
-        "summary": summary if status == "awaiting_approval" else summary[:1600],
+        "summary": summary,
     }
 
 
@@ -737,6 +737,8 @@ def poll(crew, ack=None, modal=True):
                 question["escalated" if reasked else "reasked"] = True
                 question["due_at"] = time.time() + QUESTION_INTERVAL
         if pending:
+            if pending["result"]["status"] == "done" and assignment["report"]:
+                pending["result"]["summary"] = assignment["report"]
             return pending["result"]
         seq, offset = assignment["ack_seq"], assignment.get("scan_offset", assignment["offset"])
         native_status, cleared = assignment["native_status"], False
@@ -744,6 +746,8 @@ def poll(crew, ack=None, modal=True):
             entry = assignment["notices"][seq]
             seq += 1
             status, summary = entry["status"], entry["summary"]
+            if status == "done" and assignment["report"]:
+                summary = assignment["report"]
         elif assignment["state"] == "done":
             if acked:
                 return result(crew, assignment, "idle")
@@ -847,6 +851,47 @@ def poll(crew, ack=None, modal=True):
             "native_status": None if cleared else native_status,
         }
         return response
+
+
+def wait_all(current, timeout):
+    """Return every crew's pending delivery without advancing any acknowledgement."""
+    from .crew import Crew
+
+    deadline = time.monotonic() + timeout
+    looked = None
+    while True:
+        now = time.monotonic()
+        modal = looked is None or now - looked >= MODAL_INTERVAL
+        if modal:
+            looked = now
+        current = current._replace(meta=read_json(current.meta_path))
+        deliveries = []
+        for crew in sorted(Crew.members(current), key=lambda crew: crew.crew_id):
+            assignment = active_assignment(crew)
+            if (
+                crew.is_dismissed
+                or not assignment
+                or assignment["incarnation_id"] != crew.record.get("incarnation_id")
+                or (
+                    assignment["state"] == "done"
+                    and not assignment["pending"]
+                    and assignment["ack_seq"] == len(assignment["notices"])
+                )
+            ):
+                continue
+            try:
+                response = poll(crew, modal=modal)
+            except CaptainError as exc:
+                deliveries.append(result(crew, assignment, "error", str(exc)))
+                continue
+            if response["delivery_id"]:
+                deliveries.append(response)
+        if deliveries:
+            return {"status": "ready", "deliveries": deliveries}
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return {"status": "timeout", "deliveries": []}
+        time.sleep(min(1, remaining))
 
 
 def wait(crew, timeout, ack=None):

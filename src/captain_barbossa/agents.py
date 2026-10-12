@@ -204,6 +204,31 @@ def tail_note(current, crew, tail):
 
 
 def wait_crew(args, pane, project):
+    if getattr(args, "all", False):
+        if args.name or args.ack:
+            raise CaptainError(
+                "wait --all takes no name or ack; acknowledge with wait NAME --ack ID."
+            )
+        current = read_session(project, args.session, pane)
+        timeout = (
+            config.number("crew", "wait_timeout", kind=int)
+            if args.timeout is None
+            else config.in_range(args.timeout, "--timeout", least=0)
+        )
+        response = protocol.wait_all(current, timeout)
+        if args.json:
+            print(json.dumps(response))
+        else:
+            for delivery in response["deliveries"]:
+                print(
+                    f"{delivery['crew']} {delivery['status']}: {delivery['summary']} "
+                    f"(delivery {delivery['delivery_id']}; acknowledge with wait NAME --ack ID)"
+                )
+            if not response["deliveries"]:
+                print("timeout: no pending deliveries")
+        return
+    if not args.name:
+        raise CaptainError("wait requires a crew name or --all.")
     current, crew = Crew.for_args(args, pane, project)
     if crew.record.get("incarnation_id") or getattr(args, "json", False):
         timeout = (

@@ -87,7 +87,10 @@ def parser():
     wait = commands.add_parser(
         "wait", help="wait for a crew notification (legacy crew report native completion)"
     )
-    wait.add_argument("name", help="crew name or ID (case-insensitive)")
+    wait.add_argument("name", nargs="?", help="crew name or ID (case-insensitive)")
+    wait.add_argument(
+        "--all", action="store_true", help="return pending deliveries across the fleet"
+    )
     wait.add_argument("--json", action="store_true", help="acknowledged protocol notification")
     wait.add_argument("--ack", metavar="DELIVERY_ID")
     wait.add_argument(
@@ -390,6 +393,9 @@ def main(argv=None):
             launch(args, pane, project)
     except (*HERDR_ERRORS, EOFError) as exc:
         if args.command == "wait" and args.json:
+            if args.all:
+                print(json.dumps({"status": "error", "deliveries": [], "summary": str(exc)}))
+                return 1
             print(
                 json.dumps(
                     {

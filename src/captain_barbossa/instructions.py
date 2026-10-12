@@ -143,7 +143,8 @@ Recruiting prints one canonical name; use it for CAPTAIN and Herdr commands:
   CAPTAIN wait 'NAME' [--timeout <seconds>]
 Arm a background wait right after recruiting to receive crew results.
 Use wait NAME --json [--ack DELIVERY_ID]; acknowledge only received notifications.
-Each notification returns once; the next wait without its --ack fails naming it.
+Use wait --all --json for every crew's pending delivery; acks remain per NAME/ID.
+Unacknowledged deliveries repeat with the same ID and full text.
 Quiet native work never notifies; idle notifies once per message you send. After an
 acknowledged done, wait fails: dismiss or hand off.
 Explicit done with report completes protocol assignments; native finish is inactivity.

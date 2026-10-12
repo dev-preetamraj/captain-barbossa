@@ -280,6 +280,151 @@ class CliCommandTests(SessionCase):
         self.assertEqual(code, 0)
         self.assertIsNone(json.loads(output)["delivery_id"])
 
+    def test_fleet_wait_returns_full_reports_questions_and_approvals_with_per_crew_acks(self):
+        report = "report " * 400
+        question = "question " * 300
+        command = "echo " + "x" * 2000
+        self.command("done", report=report)
+        crews = {}
+        for name in ("Will", "Gibbs"):
+            crew = Crew(
+                name.lower(),
+                {"name": name, "agent": name.lower(), "provider": "claude", "incarnation_id": name},
+                self.current,
+            )
+            self.current.meta["crew"][crew.crew_id] = crew.record
+            assignment = protocol.begin(crew, self.project, "task")
+            crews[name] = (crew, assignment)
+        store.write_json(self.current.meta_path, self.current.meta)
+        crew, assignment = crews["Will"]
+        protocol.change(
+            crew,
+            SimpleNamespace(command="ask", assignment=assignment["id"], question=question),
+            self.project,
+        )
+        crew = crews["Gibbs"][0]
+        crew.events.parent.mkdir(exist_ok=True)
+        crew.events.write_text(
+            json.dumps({"hook_event_name": "PermissionRequest", "tool_input": {"command": command}})
+            + "\n"
+        )
+        code, output = self.run_cli("wait", "--all", "--json", "--timeout", "0")
+        self.assertEqual(code, 0)
+        fleet = json.loads(output)
+        deliveries = {row["crew"]: row for row in fleet["deliveries"]}
+        self.assertEqual(set(deliveries), {"Jack", "Will", "Gibbs"})
+        self.assertEqual(deliveries["Jack"]["summary"], report)
+        self.assertTrue(deliveries["Will"]["summary"].endswith(question))
+        self.assertTrue(deliveries["Gibbs"]["summary"].endswith(command))
+        single = json.loads(self.run_cli("wait", "Jack", "--json", "--timeout", "0")[1])
+        self.assertEqual(single, deliveries["Jack"])
+        self.assertEqual(
+            json.loads(self.run_cli("wait", "--all", "--json", "--timeout", "0")[1]), fleet
+        )
+        self.run_cli("wait", "Jack", "--ack", single["delivery_id"], "--timeout", "0")
+        after = json.loads(self.run_cli("wait", "--all", "--json", "--timeout", "0")[1])
+        self.assertEqual(after["deliveries"], [deliveries["Gibbs"], deliveries["Will"]])
+        self.assertEqual(self.saved()["ack_seq"], 1)
+
+    def test_fleet_wait_timeout_and_invalid_ack_do_not_acknowledge(self):
+        self.assertEqual(
+            json.loads(self.run_cli("wait", "--all", "--json", "--timeout", "0")[1]),
+            {"status": "timeout", "deliveries": []},
+        )
+        self.command("done", report="finished")
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(self.run_cli("wait", "--all", "--ack", "bad")[0], 1)
+        self.assertEqual(self.saved()["ack_seq"], 0)
+
+    def test_full_done_report_restores_old_truncated_notice_and_pending_delivery(self):
+        report = "old full report " * 200
+        self.command("done", report=report)
+        with protocol.checkpoint(self.directory) as state:
+            state["assignments"][self.assignment["id"]]["notices"][0]["summary"] = report[:1600]
+        first = json.loads(self.run_cli("wait", "Jack", "--json", "--timeout", "0")[1])
+        self.assertEqual(first["summary"], report)
+        with protocol.checkpoint(self.directory) as state:
+            state["assignments"][self.assignment["id"]]["pending"]["result"]["summary"] = report[
+                :1600
+            ]
+        self.assertEqual(
+            json.loads(self.run_cli("wait", "Jack", "--json", "--timeout", "0")[1]), first
+        )
+
+    def test_fleet_poll_error_does_not_hide_another_crews_delivery(self):
+        will = Crew(
+            "will",
+            {"name": "Will", "agent": "will", "provider": "codex", "incarnation_id": "will"},
+            self.current,
+        )
+        self.current.meta["crew"]["will"] = will.record
+        store.write_json(self.current.meta_path, self.current.meta)
+        assignment = protocol.begin(will, self.project, "task")
+        real_poll = protocol.poll
+        error = "poll failed " * 200
+
+        def poll(crew, **kwargs):
+            if crew.crew_id == "jack":
+                raise CaptainError(error)
+            return real_poll(crew, **kwargs)
+
+        protocol.change(
+            will,
+            SimpleNamespace(command="done", assignment=assignment["id"], report="Will report"),
+            self.project,
+        )
+        with patch.object(protocol, "poll", side_effect=poll):
+            code, output = self.run_cli("wait", "--all", "--json", "--timeout", "0")
+        self.assertEqual(code, 0)
+        fleet = json.loads(output)
+        self.assertEqual(fleet["status"], "ready")
+        failed, delivered = fleet["deliveries"]
+        self.assertEqual(failed, protocol.result(self.crew, self.assignment, "error", error))
+        self.assertEqual(delivered["crew"], "Will")
+        self.assertEqual(delivered["summary"], "Will report")
+        self.assertIsNotNone(delivered["delivery_id"])
+        self.assertEqual(self.saved()["ack_seq"], 0)
+
+    def test_fleet_json_errors_retain_fleet_shape(self):
+        code, output = self.run_cli("wait", "--all", "--json", "--ack", "invalid")
+        self.assertEqual(code, 1)
+        failure = json.loads(output)
+        self.assertEqual(failure["status"], "error")
+        self.assertEqual(failure["deliveries"], [])
+        self.assertNotIn("crew", failure)
+        self.assertIn("takes no name or ack", failure["summary"])
+        with (
+            patch.object(cli, "current_pane", side_effect=CaptainError("no workspace")),
+            contextlib.redirect_stdout(io.StringIO()) as output,
+        ):
+            code = cli.main(["--session", self.current.meta["id"], "wait", "--all", "--json"])
+        self.assertEqual(code, 1)
+        self.assertEqual(json.loads(output.getvalue())["deliveries"], [])
+
+    def test_fleet_wait_skips_legacy_dismissed_and_stale_incarnations(self):
+        self.command("done", report="finished")
+        for name, extras in (
+            ("Will", {}),
+            ("Gibbs", {"incarnation_id": "gibbs", "status": "dismissed"}),
+        ):
+            self.current.meta["crew"][name.lower()] = {
+                "name": name,
+                "agent": name.lower(),
+                "provider": "codex",
+                **extras,
+            }
+        store.write_json(self.current.meta_path, self.current.meta)
+        deliveries = json.loads(self.run_cli("wait", "--all", "--json", "--timeout", "0")[1])[
+            "deliveries"
+        ]
+        self.assertEqual([row["crew"] for row in deliveries], ["Jack"])
+        self.current.meta["crew"]["jack"]["incarnation_id"] = "replacement"
+        store.write_json(self.current.meta_path, self.current.meta)
+        self.assertEqual(
+            json.loads(self.run_cli("wait", "--all", "--json", "--timeout", "0")[1])["deliveries"],
+            [],
+        )
+
     def test_cli_json_error_is_one_object_and_does_not_adopt_legacy(self):
         del self.current.meta["crew"]["jack"]["incarnation_id"]
         store.write_json(self.current.meta_path, self.current.meta)
