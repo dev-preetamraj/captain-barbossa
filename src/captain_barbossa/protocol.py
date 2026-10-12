@@ -20,6 +20,7 @@ ACTIONS = ("read", "search", "edit", "test", "build", "format", "commit", "versi
 ECHO_GRACE = 2
 # Native "working" is a wake, not news: it fires at recruit and at every crew turn end.
 NOTIFIED = {"done": "idle", "idle": "idle", "blocked": "awaiting_approval"}
+TOOL_EVENTS = ("PreToolUse", "PostToolUse", "PermissionDecision")
 APPROVAL_SUMMARY = "Inspect native approval prompt; approval is not granted by this event."
 # Claude reports approvals through its PermissionRequest hook; these have no such event.
 MODAL_PROVIDERS = ("codex", *HOOKLESS)
@@ -738,7 +739,7 @@ def poll(crew, ack=None, modal=True):
         if pending:
             return pending["result"]
         seq, offset = assignment["ack_seq"], assignment.get("scan_offset", assignment["offset"])
-        native_status = assignment["native_status"]
+        native_status, cleared = assignment["native_status"], False
         if seq < len(assignment["notices"]):
             entry = assignment["notices"][seq]
             seq += 1
@@ -755,15 +756,27 @@ def poll(crew, ack=None, modal=True):
                 # Liveness is a started turn, never a delivered body; this is committed
                 # outside the ack dance because it only ever goes one way.
                 assignment["turn_started"] = True
-            notified = [(NOTIFIED[s], e) for e in events if (s := event_status(e)) in NOTIFIED]
+            notified = [
+                (i, NOTIFIED[s], e)
+                for i, e in enumerate(events)
+                if (s := event_status(e)) in NOTIFIED
+            ]
+            last = notified[-1][0] if notified else len(events)
+            tools = [i for i, e in enumerate(events) if e.get("hook_event_name") in TOOL_EVENTS]
+            # A later tool call proves the earlier approval was answered.
+            if any(i < last for i in tools):
+                native_status = assignment["native_status"] = None
+            cleared = any(i > last for i in tools)
             if notified:
-                status, event = notified[-1]
+                _, status, event = notified[-1]
                 summary = str(event.get("message") or event.get("last-assistant-message") or "")
                 if status == "awaiting_approval":
                     # One approval arrives twice, as a PermissionRequest hook and a
                     # permission_prompt Notification, usually in separate polls.
                     if native_status == status:
                         assignment["scan_offset"] = offset
+                        if cleared:
+                            assignment["native_status"] = None
                         return result(crew, assignment, "working")
                     summary = APPROVAL_SUMMARY
                     native_status = status
@@ -807,7 +820,7 @@ def poll(crew, ack=None, modal=True):
             "result": response,
             "seq": seq,
             "offset": offset,
-            "native_status": native_status,
+            "native_status": None if cleared else native_status,
         }
         return response
 

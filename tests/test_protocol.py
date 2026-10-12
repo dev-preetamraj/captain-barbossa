@@ -973,6 +973,24 @@ class ApprovalDedupeTests(unittest.TestCase):
         self.event({"hook_event_name": "PermissionRequest"})
         self.assertEqual(self.surfaced(), "awaiting_approval")
 
+    def test_a_later_tool_call_in_the_same_turn_makes_the_next_approval_news(self):
+        self.event({"hook_event_name": "PreToolUse"})
+        self.event({"hook_event_name": "PermissionRequest"})
+        self.assertEqual(self.surfaced(), "awaiting_approval")
+        self.event({"hook_event_name": "Notification", "notification_type": "permission_prompt"})
+        self.assertEqual(self.surfaced(), "working")
+        for tool in ("PostToolUse", "PermissionDecision", "PreToolUse"):
+            with self.subTest(tool=tool):
+                self.event({"hook_event_name": tool})
+                self.event({"hook_event_name": "PermissionRequest"})
+                self.assertEqual(self.surfaced(), "awaiting_approval")
+        # A tool call that lands after the duplicate still clears it for the next prompt.
+        self.event({"hook_event_name": "Notification", "notification_type": "permission_prompt"})
+        self.event({"hook_event_name": "PermissionDecision"})
+        self.assertEqual(self.surfaced(), "working")
+        self.event({"hook_event_name": "PermissionRequest"})
+        self.assertEqual(self.surfaced(), "awaiting_approval")
+
 
 class InterruptTests(unittest.TestCase):
     """The lifecycle channel: the only thing that reaches a crew mid-turn."""
