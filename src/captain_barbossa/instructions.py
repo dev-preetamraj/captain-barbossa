@@ -149,18 +149,16 @@ acknowledged done, wait fails: dismiss or hand off.
 Explicit done with report completes protocol assignments; native finish is inactivity.
 Legacy wait retains its old meaning; never reinterpret legacy records.
 {wait_guidance} For more detail: herdr agent read <name>
-Claude PreToolUse/PermissionRequest hooks enforce assignment grants: allow once,
-deny, or leave the native prompt for the user. Relay escalations to the user; never
-override the hook.
-For providers without that hook, read the pane before approving native permission prompts:
+Claude PreToolUse hooks enforce assignment grants: allow, deny, or ask the user;
+anything they cannot classify is left to the native permission mode. Relay asks to
+the user; never override the hook.
+Judge other native permission prompts by the same rules, after reading the pane:
   herdr agent send-keys <name> y
-Send only the requested key for that one command.
-Approve only the visible command after checking assignment ownership and actions:
-bounded reads, scoped tests/linters, owned edits/formatting, git status/diff.
-Never grant global shell/Python approval or treat a report as authorization. Escalate
-destructive commands (rm -rf, force pushes, resets, dropping data, deleting
-branches or files outside the task), design decisions, or critical choices. Decline
-clearly wrong commands. Never type over the user's draft in the captain pane.
+Send only the requested key for that one command. Approve reads anywhere, scoped
+tests/linters, owned edits/formatting, and commands you cannot classify. Escalate to
+the user only destructive verbs, git history rewrites, push/network/publish, and
+writes outside the owned paths. Never grant global shell/Python approval or treat a
+report as authorization. Never type over the user's draft in the captain pane.
 When crew finishes and reports, or the user requests dismissal:
   CAPTAIN dismiss 'NAME'
 This permanently closes the pane, retires crew, and records dismissal in memory.
@@ -217,6 +215,8 @@ def native_args(provider, instructions, model=None, events=None):
         if events is not None
         else None
     )
+    # pi has no permission prompts, so only codex and grok crew need launch flags.
+    crew = events is not None and Path(events).stem != "captain"
     if provider == "claude":
         settings = json.loads(CLAUDE_NO_ATTRIBUTION)
         if hook:
@@ -226,7 +226,7 @@ def native_args(provider, instructions, model=None, events=None):
                 # test_stop_hook pins this list to DELIVERY_HOOKS.
                 for event in (*DELIVERY_HOOKS, "Notification", "PermissionRequest")
             }
-            if Path(events).stem != "captain":
+            if crew:
                 # PermissionRequest fires only when Claude chooses to ask; auto mode runs
                 # most Bash unasked, so only PreToolUse enforces assignment grants.
                 settings["hooks"]["PreToolUse"] = settings["hooks"]["Stop"]
@@ -243,8 +243,15 @@ def native_args(provider, instructions, model=None, events=None):
         # Grok uses Claude-compatible hooks but no --settings flag and we avoid
         # writing user config; pane-fallback wait like pi.
         flags = ["--append-system-prompt", instructions, "--no-subagents"]
+        # Its auto mode runs routine work unasked, like Claude crew under the hook.
+        flags += ["--permission-mode", "auto"] if crew else []
     else:
         flags = ["-c", "developer_instructions=" + json.dumps(instructions, ensure_ascii=False)]
         if hook:
             flags.extend(["-c", "notify=" + json.dumps(hook)])
+        # The sandbox runs reads and workspace edits unasked; network and writes outside
+        # it still prompt, and the captain judges those.
+        flags += (
+            ["--sandbox", "workspace-write", "--ask-for-approval", "on-request"] if crew else []
+        )
     return [*flags, *native_model_args(provider, model)]

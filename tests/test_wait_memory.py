@@ -202,7 +202,7 @@ class WaitCrewMemoryTests(SessionCase):
                 for kind, entries in settings["hooks"].items():
                     event = {"hook_event_name": kind, "message": "quotes '\"\n雪"}
                     if kind == "PreToolUse":
-                        # Claude always names the tool; a gated tool with no crew state asks.
+                        # Claude always names the tool; with no crew state the native mode decides.
                         event |= {"tool_name": "Bash", "tool_input": {"command": "ls"}}
                     command = entries[0]["hooks"][0]["command"]
                     result = subprocess.run(
@@ -213,21 +213,17 @@ class WaitCrewMemoryTests(SessionCase):
                         timeout=10,
                     )
                     self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(result.stdout, "")
                     if kind == "PermissionRequest":
-                        self.assertIn(
-                            "User approval required", json.loads(result.stdout)["systemMessage"]
-                        )
-                        event["approval"] = {"verdict": "escalate", "code": "unparsed"}
+                        event["approval"] = {"verdict": "defer", "code": "unparsed"}
                     elif kind == "PreToolUse":
-                        decision = json.loads(result.stdout)["hookSpecificOutput"]
-                        self.assertEqual(decision["permissionDecision"], "ask")
                         event["approval"] = {
-                            "verdict": "escalate",
+                            "verdict": "defer",
                             "code": "unparsed",
                             "source": "PreToolUse",
                         }
-                    else:
-                        self.assertEqual(result.stdout, "")
+                        event["hook_event_name"] = "PermissionDecision"
+                        event["status"] = "working: approval defer [unparsed]"
                     expected.append(event)
             else:
                 command = tomllib.loads(next(arg for arg in args if arg.startswith("notify=")))[

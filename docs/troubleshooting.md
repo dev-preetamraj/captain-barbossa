@@ -22,10 +22,13 @@
   --timeout 0`** — pane fallback starts after 6 seconds; use a non-zero
   timeout.
 - **"... is waiting for input or approval instead of starting the task."** —
-  inspect the native prompt. Claude PermissionRequest hooks allow scoped known
-  requests once and deny ungranted actions. An escalation remains for the user;
-  relay it instead of typing an approval. Other providers keep their native
-  permission flow; inspect the exact request before approving one command.
+  inspect the native prompt. Claude PreToolUse hooks allow reads and scoped
+  known requests, deny ungranted actions, and leave anything they cannot
+  classify to the native permission mode. Only destructive, outward (network,
+  push, publish) or out-of-scope writes ask the user; relay those instead of
+  typing an approval. Codex crew launch with `--sandbox workspace-write
+  --ask-for-approval on-request` and grok crew with `--permission-mode auto`;
+  judge their prompts by the same rules.
 - **"... did not confirm the switch to ..."** — the native CLI did not echo
   the expected model name; read the pane with `herdr agent read <name>`
   before retrying `captain model`.

@@ -120,9 +120,12 @@ PermissionRequest hook passes the tool, command/paths, cwd, and active assignmen
 grants to `approval.decide`. An allow-once returns a native `allow` decision with
 no permission updates; deny returns `deny` and its reason. Both are logged as
 PermissionDecision so they do not leave a pending approval notification.
-Escalation logs the reason code, displays a user message, and leaves the native
-prompt and wait notification pending for user review. Missing or malformed input
-and unreadable grants cannot auto-approve; stale incarnation hooks are ignored.
+Escalation (destructive verbs, network/push/publish, writes outside the owned
+paths) logs the reason code, displays a user message, and leaves the native
+prompt and wait notification pending for user review. Reads pass wherever they
+point. A request the policy cannot classify, including missing or malformed input
+and unreadable grants, gets no hook decision, so the native permission mode
+decides as if no gate ran; stale incarnation hooks are ignored.
 The captain must relay escalations to the user, not type an approval over them.
 See the [native hook contract](https://code.claude.com/docs/en/hooks#permissionrequest-decision-control).
 

@@ -55,16 +55,19 @@ class InstructionTests(SessionCase):
         instructions = " ".join(
             instruction_prompts.agent_instructions(self.directory, "captain").split()
         )
-        self.assertIn(
-            "Claude PreToolUse/PermissionRequest hooks enforce assignment grants", instructions
-        )
-        self.assertIn("Relay escalations to the user; never override the hook", instructions)
-        self.assertIn("checking assignment ownership and actions", instructions)
-        self.assertIn("herdr agent send-keys <name> y", instructions)
-        self.assertIn("Never grant global shell/Python approval", instructions)
-        self.assertIn("Escalate destructive commands", instructions)
-        self.assertIn("Decline clearly wrong commands", instructions)
-        self.assertIn("Never type over the user's draft in the captain pane", instructions)
+        for phrase in (
+            "Claude PreToolUse hooks enforce assignment grants",
+            "anything they cannot classify is left to the native permission mode",
+            "Relay asks to the user; never override the hook",
+            "Judge other native permission prompts by the same rules",
+            "herdr agent send-keys <name> y",
+            "Approve reads anywhere",
+            "Escalate to the user only destructive verbs, git history rewrites, "
+            "push/network/publish, and writes outside the owned paths",
+            "Never grant global shell/Python approval",
+            "Never type over the user's draft in the captain pane",
+        ):
+            self.assertIn(phrase, instructions)
 
     def test_instructions_require_captain_to_delegate_user_tasks_to_new_crew(self):
         rule = (
@@ -153,7 +156,7 @@ class InstructionTests(SessionCase):
             "Run every wait in the background; never block on a foreground wait",
             "herdr agent read <name>",
             "herdr agent send-keys <name> y",
-            "read the pane before approving native permission prompts",
+            "after reading the pane",
             "Send only the requested key for that one command",
             "CAPTAIN dismiss 'NAME'",
             "Confirm with the user first if work is unreported or uncommitted",
@@ -472,7 +475,25 @@ class InstructionTests(SessionCase):
         # Grok takes no hook flag, so wait falls back to Herdr's own status and the pane.
         self.assertNotIn("append_event", " ".join(args))
         self.assertNotIn("--settings", args)
-        self.assertEqual(args[3:], models.native_model_args("grok", "grok-4.6"))
+        self.assertEqual(args[3:5], ["--permission-mode", "auto"])
+        self.assertEqual(args[5:], models.native_model_args("grok", "grok-4.6"))
+
+    def test_codex_and_grok_crew_launch_in_a_mode_that_runs_routine_work_unasked(self):
+        codex = instruction_prompts.native_args("codex", "instructions", events="/tmp/jack.jsonl")
+        self.assertEqual(
+            codex[codex.index("--sandbox") :][:4],
+            ["--sandbox", "workspace-write", "--ask-for-approval", "on-request"],
+        )
+        grok = instruction_prompts.native_args("grok", "instructions", events="/tmp/jack.jsonl")
+        self.assertIn("--permission-mode", grok)
+        # The captain keeps the user's own permission mode.
+        for provider in ("codex", "grok"):
+            with self.subTest(provider=provider):
+                captain = instruction_prompts.native_args(
+                    provider, "instructions", events="/tmp/captain.jsonl"
+                )
+                self.assertNotIn("--sandbox", captain)
+                self.assertNotIn("--permission-mode", captain)
 
 
 if __name__ == "__main__":

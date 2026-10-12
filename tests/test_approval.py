@@ -3,7 +3,9 @@ import io
 import json
 import shlex
 import sys
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from captain_barbossa import events, protocol, sessions, store
@@ -54,6 +56,88 @@ class ApprovalTests(unittest.TestCase):
             bash,
         )
 
+    def test_reads_anywhere_and_routine_edits_pass_without_a_prompt(self):
+        # Issue #1: these asked even in auto mode.
+        self.check(
+            [
+                ("cat /etc/passwd", "granted"),
+                ("cat .git/config", "granted"),
+                ("cd .. && ls", "granted"),
+                (
+                    "ls /Users/x/Downloads 2>/dev/null; ls /Users/x/Downloads | grep -i OND",
+                    "granted",
+                ),
+                ("wc -l research/report-*.md", "granted"),
+                ("grep -n 'def .*' src/other.py", "granted"),
+                ("grep -n 'x$' src/other.py", "granted"),
+                ("cat ~/secrets", "granted"),
+                ("cp src/*.py docs/notes", "granted"),
+                ("sed -n '/start/,/end/p' src/other.py", "granted"),
+                ("sed -n '$p' src/other.py", "granted"),
+                ("sed 's/a/b/g' src/other.py", "granted"),
+                ("sed -i '' 's/a/b/g;3d' src/mine.py", "granted"),
+                ("sed -i.bak -e 's|a|[b]|' docs/notes/x.md", "granted"),
+                ("gh issue view 1", "granted"),
+                ("gh pr list", "granted"),
+            ],
+            bash,
+        )
+        self.assertEqual(bash("ls", cwd="/tmp").code, "granted")
+
+    def test_unclassified_commands_still_escalate_writes_deletes_and_recipes(self):
+        self.check(
+            [
+                ("sed -i s/a/b/ /etc/hosts", "outside-grant"),
+                ("cp -f a /etc/hosts", "outside-grant"),
+                ("jq . a > /etc/hosts", "outside-grant"),
+                ("python3 -c 'import os; os.remove(\"x\")'", "destructive"),
+                ("python3 -c 'import shutil; shutil.rmtree(\"x\")'", "destructive"),
+                ('python3 -c \'open("x", "w").write("y")\'', "destructive"),
+                ('node -e \'require("fs").unlinkSync("x")\'', "destructive"),
+                ("python3 -c 'import urllib.request as u; u.urlopen(\"http://x\")'", "outward"),
+                ("python3 -c 'print(open(\"x\").read())'", "shell"),
+                ("jq . a > docs/notes/out.json", "unknown-command"),
+            ],
+            bash,
+        )
+
+    def test_make_targets_escalate_when_their_recipe_pushes_tags_or_deletes(self):
+        with tempfile.TemporaryDirectory() as root:
+            Path(root, "Makefile").write_text(
+                ".DEFAULT_GOAL := help\nhelp: ## usage\n\t@echo help\n"
+                "guard:\n\tgit diff --quiet\nrelease: guard ## tag\n"
+                "\tgit tag v1 && git push origin v1\nship:\n\t$(MAKE) release\n"
+                "clean:\n\trm -rf dist\nlint:\n\truff check .\n"
+            )
+
+            def make(command):
+                return decide(Request("Bash", root, root, OWNED, ALL_ACTIONS, command=command))
+
+            self.check(
+                [
+                    ("make release", "destructive"),
+                    ("make ship", "destructive"),
+                    ("make -C . clean", "destructive"),
+                    ("make lint", "unknown-command"),
+                    ("make", "unknown-command"),
+                ],
+                make,
+            )
+
+    def test_outward_actions_escalate(self):
+        self.check(
+            [
+                ("curl https://example.com", "outward"),
+                ("gh pr create --fill", "outward"),
+                ("gh api repos/x/y", "outward"),
+                ("npm publish", "outward"),
+                ("uv publish", "outward"),
+                ("sh -c 'curl https://example.com'", "outward"),
+                ("for f in a; do curl -d @$f x; done", "outward"),
+            ],
+            bash,
+        )
+
     def test_destructive_verbs_escalate_whatever_the_grants(self):
         grants = (*ALL_ACTIONS, "delete", "version")
         self.check(
@@ -67,11 +151,18 @@ class ApprovalTests(unittest.TestCase):
                 ("git branch -D old", "destructive"),
                 ("find docs -delete", "destructive"),
                 ("cat src/mine.py; rm src/mine.py", "destructive"),
+                ("ls\nrm -rf /", "destructive"),
+                ("sh -c 'rm -rf beta.txt'", "destructive"),
+                ("find . -exec rm {} +", "destructive"),
+                ("ls | xargs rm", "destructive"),
+                ("echo $(git reset --hard)", "destructive"),
+                ("sudo ls", "destructive"),
+                ("git pull", "destructive"),
             ],
             lambda command: bash(command, grants),
         )
 
-    def test_unknown_shells_and_unparsed_input_escalate(self):
+    def test_unclassified_shell_defers_to_the_native_permission_mode(self):
         self.check(
             [
                 ("", "unparsed"),
@@ -85,33 +176,35 @@ class ApprovalTests(unittest.TestCase):
                 ("ls | xargs cat", "shell"),
                 ("echo $(whoami)", "unsupported-syntax"),
                 ("echo `id`", "unsupported-syntax"),
-                ("cat $HOME/x", "unsupported-syntax"),
-                ("ls\nrm -rf /", "unsupported-syntax"),
+                ('cat "$HOME/x"', "unsupported-syntax"),
                 ("sleep 1 &", "unsupported-syntax"),
                 ("(cd /tmp && ls)", "unsupported-syntax"),
                 ("cat <<EOF", "unsupported-syntax"),
-                ("cat ~/secrets", "unsupported-syntax"),
-                ("cp src/*.py docs/notes", "unsupported-syntax"),
                 ("FOO=1 make test", "wrapper"),
-                ("sudo ls", "wrapper"),
                 ("git -C /tmp status", "wrapper"),
-                ("curl https://example.com", "unknown-command"),
                 ("make gate", "unknown-command"),
                 ("sed -i s/a/b/ src/mine.py", "unknown-command"),
+                ("sed 's/a/b/w out' src/mine.py", "unknown-command"),
+                ("sed 's/a/b/e' src/mine.py", "unknown-command"),
+                ("sed -n '/[/]/p;w x' src/mine.py", "unknown-command"),
+                ("sed 1r/etc/passwd src/mine.py", "unknown-command"),
                 ("git log --output=src/mine.py", "unknown-command"),
                 ("git commit -a -m x", "unknown-command"),
             ],
             bash,
         )
+        self.assertEqual(bash("make gate").verdict, Verdict.DEFER)
 
     def test_paths_outside_the_grants_escalate(self):
         self.check(
             [
-                ("cat /etc/passwd", "outside-grant"),
-                ("cat ../other/file", "outside-grant"),
-                ("cat .git/config", "outside-grant"),
-                ("cd .. && ls", "outside-grant"),
                 ("echo x > src/other.py", "outside-grant"),
+                ("echo x > ~/x", "outside-grant"),
+                ("echo x > docs/notes/{a,../../b}", "outside-grant"),
+                ("echo x > docs/notes/.*", "outside-grant"),
+                ("cd .. && echo x > repo/src/mine.py.bak", "outside-grant"),
+                ("sed -i '' s/a/b/ src/other.py", "outside-grant"),
+                ("sed -i.bak s/a/b/ src/mine.py", "outside-grant"),
                 ("touch src/mine.py.bak", "outside-grant"),
                 ("git add -A", "outside-grant"),
                 ("git add .", "outside-grant"),
@@ -122,7 +215,6 @@ class ApprovalTests(unittest.TestCase):
             ],
             bash,
         )
-        self.assertEqual(bash("ls", cwd="/tmp").code, "outside-grant")
 
     def test_missing_action_grant_denies(self):
         self.check(
@@ -144,13 +236,16 @@ class ApprovalTests(unittest.TestCase):
 
         self.assertEqual(tool("Read", ("/repo/src/other.py",)), "granted")
         self.assertEqual(tool("Grep", ()), "granted")
-        self.assertEqual(tool("Read", ("/Users/x/.ssh/id_ed25519",)), "outside-grant")
+        self.assertEqual(
+            tool("Read", ("/Users/x/.claude/projects/p/s/tool-results/a.txt",)), "granted"
+        )
         self.assertEqual(tool("Edit", ("/repo/src/mine.py",)), "granted")
         self.assertEqual(tool("Write", ("/repo/docs/notes/new.md",)), "granted")
         self.assertEqual(tool("Edit", ("/repo/src/other.py",)), "outside-grant")
         self.assertEqual(tool("Edit", ("/repo/src/mine.py",), ()), "action-not-granted")
         self.assertEqual(tool("Edit", ()), "unparsed")
         self.assertEqual(tool("WebFetch", ()), "unknown-tool")
+        self.assertEqual(Decision(tool("mcp__x__write", ())).verdict, Verdict.ESCALATE)
 
     def test_crew_protocol_verbs_pass_but_captain_cannot_launder_other_work(self):
         captain = shlex.join([sys.executable, "-m", "captain_barbossa", "--session", "s1"])
@@ -162,20 +257,21 @@ class ApprovalTests(unittest.TestCase):
                 (f"{captain} inbox Tia", "granted"),
                 (f"{captain} memory show --scope repo", "granted"),
                 (f"{captain} memory add Tia report 'summary'", "granted"),
-                (f"{captain} memory add a decided b --because c --scope repo", "shell"),
-                (f"{captain} do commit --message fix", "shell"),
-                (f"{captain} crew --task x", "shell"),
-                ("python3 -m captain_barbossa done Tia", "shell"),
-                ("python3 -c 'import os'", "shell"),
-                ("sh -c 'rm -rf beta.txt'", "shell"),
-                ("sh -c 'curl https://example.com'", "shell"),
+                (f"{captain} memory add a decided b --because c --scope repo", "captain-verb"),
+                (f"{captain} do commit --message fix", "captain-verb"),
+                (f"{captain} crew --task x", "captain-verb"),
+                ("python3 -m captain_barbossa done Tia", "captain-verb"),
+                ("captain do push", "captain-verb"),
+                ("/abs/path/bin/captain do push", "captain-verb"),
+                ("cd /tmp && ../usr/bin/captain crew --task x", "captain-verb"),
+                ("cd /repo/captain-barbossa && python3 -c 'import os'", "shell"),
             ],
             bash,
         )
         # `python -m` imports from its cwd first; a crew-writable module there runs as captain.
         owned = ("src",)
         request = Request("Bash", PROJECT, f"{PROJECT}/src", owned, command=f"{captain} done Tia")
-        self.assertEqual(decide(request).code, "shell")
+        self.assertEqual(decide(request).code, "captain-verb")
         request = Request("Bash", PROJECT, PROJECT, owned, command=f"{captain} done Tia")
         self.assertEqual(decide(request).code, "granted")
 
@@ -193,9 +289,11 @@ class ApprovalTests(unittest.TestCase):
     def test_path_qualified_executables_do_not_inherit_utility_permissions(self):
         for command in ("./cat", "/repo/tools/cat", "uv run ./cat"):
             with self.subTest(command=command):
-                self.assertEqual(bash(command, actions=()).verdict, Verdict.ESCALATE)
+                self.assertEqual(bash(command, actions=()).verdict, Verdict.DEFER)
         request = Request("Bash", PROJECT, PROJECT, argv=("/repo/bash", "-c", "cat file"))
-        self.assertEqual(decide(request).verdict, Verdict.ESCALATE)
+        self.assertEqual(decide(request).verdict, Verdict.DEFER)
+        request = Request("Bash", PROJECT, PROJECT, argv=("/repo/bash", "-c", "rm file"))
+        self.assertEqual(decide(request).code, "destructive")
 
 
 class ApprovalHookTests(SessionCase):
@@ -219,7 +317,7 @@ class ApprovalHookTests(SessionCase):
         with contextlib.redirect_stdout(io.StringIO()) as output:
             events.append_event([str(self.crew.events), json.dumps(event)])
         logged = json.loads(self.crew.events.read_text().splitlines()[-1])
-        return json.loads(output.getvalue()), logged
+        return json.loads(output.getvalue() or "{}"), logged
 
     def test_allow_once_uses_native_response_and_does_not_leave_an_approval_notice(self):
         output, event = self.hook("Edit", {"file_path": "src/a.py"})
@@ -239,7 +337,7 @@ class ApprovalHookTests(SessionCase):
         self.assertIsNone(event_status(event))
 
     def test_escalation_reaches_the_native_user_prompt_and_wait(self):
-        for command in ("rm src/a.py", "python -c 'print(1)'", "cat /etc/passwd"):
+        for command in ("rm src/a.py", "curl https://example.com", "echo x > /etc/hosts"):
             with self.subTest(command=command):
                 output, event = self.hook(inputs={"command": command})
                 self.assertNotIn("hookSpecificOutput", output)
@@ -274,11 +372,12 @@ class ApprovalHookTests(SessionCase):
         (self.project / "other").mkdir()
         (self.project / "src" / "link").symlink_to(self.project / "other")
         (self.project / "secret").symlink_to(self.root / "secret")
-        for command in ("echo x > src/link/file", "cat secret", "cat ./secret"):
-            with self.subTest(command=command):
-                output, event = self.pretool({"command": command})
-                self.assertEqual(event["approval"]["code"], "outside-grant")
-                self.assertEqual(output["hookSpecificOutput"]["permissionDecision"], "ask")
+        output, event = self.pretool({"command": "echo x > src/link/file"})
+        self.assertEqual(event["approval"]["code"], "outside-grant")
+        self.assertEqual(output["hookSpecificOutput"]["permissionDecision"], "ask")
+        # Reads pass wherever a link points; only writes are bound to the owned paths.
+        _, event = self.pretool({"command": "cat ./secret"})
+        self.assertEqual(event["approval"]["code"], "granted")
 
     def test_retargeting_an_owned_path_does_not_move_its_grant(self):
         (self.project / "other").mkdir()
@@ -307,6 +406,18 @@ class ApprovalHookTests(SessionCase):
                 self.assertEqual(output["hookSpecificOutput"]["permissionDecision"], "ask")
                 self.assertEqual(event["hook_event_name"], "PreToolUse")
                 self.assertEqual(self.crew.current_state().state, "working")
+
+    def test_unclassified_commands_leave_the_decision_to_the_native_mode(self):
+        inputs = {"command": "make gate"}
+        output, event = self.pretool(inputs)
+        self.assertEqual(output, {})
+        self.assertEqual(event["hook_event_name"], "PermissionDecision")
+        self.assertEqual(event["approval"]["verdict"], "defer")
+        # If the native mode prompts anyway, the prompt is pending for wait, with no verdict.
+        output, event = self.hook(inputs=inputs)
+        self.assertEqual(output, {})
+        self.assertEqual(event["hook_event_name"], "PermissionRequest")
+        self.assertEqual(event_status(event), "blocked")
 
     def test_pretooluse_leaves_tools_without_policy_to_the_native_flow(self):
         with contextlib.redirect_stdout(io.StringIO()) as output:

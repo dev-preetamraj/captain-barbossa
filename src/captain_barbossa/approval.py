@@ -1,10 +1,14 @@
 """Native approval policy: one pure verdict on one tool request against an assignment's grants.
 
-Shell text is lexed with shlex and never evaluated, expanded or run. Anything the lexer
-cannot classify escalates to the user; nothing here grants more than one call.
+Shell text is lexed with shlex and never evaluated or run. Reads always pass. Anything
+the lexer cannot classify defers to the native permission mode unless it names a
+destructive or outward verb; nothing here grants more than one call.
 """
 
+import glob
+import os
 import posixpath
+import re
 import shlex
 import sys
 from dataclasses import dataclass
@@ -16,6 +20,8 @@ class Verdict(Enum):
     ALLOW_ONCE = "allow-once"
     DENY = "deny"
     ESCALATE = "escalate"
+    # No verdict: the native CLI's own permission mode decides, as if no gate ran.
+    DEFER = "defer"
 
 
 # The decision table: each code carries exactly one verdict.
@@ -23,24 +29,26 @@ REASONS = {
     "granted": (Verdict.ALLOW_ONCE, "every command and path is inside the assignment's grants"),
     "action-not-granted": (Verdict.DENY, "the assignment does not grant this action"),
     "unknown-tool": (Verdict.ESCALATE, "the tool has no policy"),
-    "unparsed": (Verdict.ESCALATE, "the request is empty or the shell text does not lex"),
+    "unparsed": (Verdict.DEFER, "the request is empty or the shell text does not lex"),
     "unsupported-syntax": (
-        Verdict.ESCALATE,
+        Verdict.DEFER,
         "expansion, substitution, glob, subshell, heredoc, background or multi-line shell",
     ),
-    "shell": (Verdict.ESCALATE, "a nested shell, interpreter or eval runs code this cannot read"),
-    "wrapper": (Verdict.ESCALATE, "an env prefix or wrapper changes how the command runs"),
-    "unknown-command": (Verdict.ESCALATE, "the command or one of its flags has no policy"),
+    "shell": (Verdict.DEFER, "a nested shell, interpreter or eval runs code this cannot read"),
+    "wrapper": (Verdict.DEFER, "an env prefix or wrapper changes how the command runs"),
+    "unknown-command": (Verdict.DEFER, "the command or one of its flags has no policy"),
     "destructive": (
         Verdict.ESCALATE,
         "destructive verbs always need the user, whatever the grants",
     ),
-    "outside-grant": (
+    "outward": (Verdict.ESCALATE, "network, push or publish acts outside this machine"),
+    "captain-verb": (
         Verdict.ESCALATE,
-        "a path is outside the project, inside .git, or a write outside the owned paths",
+        "only the crew protocol verbs may run captain, from the interpreter it named",
     ),
+    "outside-grant": (Verdict.ESCALATE, "a write outside the owned paths or inside .git"),
 }
-SEVERITY = {Verdict.ALLOW_ONCE: 0, Verdict.ESCALATE: 1, Verdict.DENY: 2}
+SEVERITY = {Verdict.ALLOW_ONCE: 0, Verdict.DEFER: 1, Verdict.ESCALATE: 2, Verdict.DENY: 3}
 
 READ_TOOLS = {"Read", "Glob", "Grep", "LS", "NotebookRead"}
 EDIT_TOOLS = {"Edit", "MultiEdit", "Write", "NotebookEdit"}
@@ -52,9 +60,7 @@ SEPARATORS = {"&&", "||", ";", "|", "|&"}
 WRITE_REDIRECTS = {">", ">>", ">|", "&>", "&>>"}
 FD_DUPS = {">&", "<&"}
 PUNCTUATION = set("();<>|&")
-# shlex drops quoting, so these are refused in the raw text wherever they appear.
-RAW_UNSUPPORTED = ("$", "`", "\n", "\r")
-GLOB = set("*?[{~")
+GLOB = set("*?[")
 NULL_DEVICE = "/dev/null"
 
 READ_VERBS = {
@@ -78,8 +84,23 @@ GIT_READ = {"status", "diff", "log", "show", "blame", "rev-parse", "ls-files", "
 GIT_DESTRUCTIVE = {
     "push", "reset", "clean", "rebase", "checkout", "restore", "rm", "mv", "stash", "switch",
     "merge", "cherry-pick", "revert", "am", "apply", "tag", "worktree", "filter-branch", "gc",
-    "prune", "reflog", "update-ref",
+    "prune", "reflog", "update-ref", "pull",
 }  # fmt: skip
+OUTWARD = {
+    "curl", "wget", "ssh", "scp", "sftp", "nc", "ncat", "telnet", "ftp", "push", "publish",
+    "upload", "deploy",
+}  # fmt: skip
+# Words that make an unclassified command escalate instead of deferring.
+PRIVILEGE = {"sudo", "doas", "su"}
+# Interpreter payloads (python -c, node -e) are not lexed; these names in them escalate.
+DELETE_APIS = {
+    "remove", "unlink", "rmtree", "rmdir", "removedirs", "rename", "renames",
+    "truncate", "write_text", "write_bytes", "unlinkSync", "rmSync", "rmdirSync",
+    "writeFile", "writeFileSync", "appendFileSync", "renameSync", "copyfile", "move",
+}  # fmt: skip
+NETWORK_APIS = {"urlopen", "urlretrieve", "requests", "httpx", "socket", "urllib", "fetch"}
+WRITE_OPEN = re.compile(r"open\([^)]*,\s*\\?['\"][wax]")
+GH_READ = {"view", "list", "status", "diff", "checks", "search", "token"}
 FIND_DESTRUCTIVE = {"-delete", "-fprint", "-fprint0", "-fprintf", "-fls"}
 FIND_SHELL = {"-exec", "-execdir", "-ok", "-okdir"}
 # Allowed flags per editing verb; any other flag (cp -t, mv -f ...) has no policy.
@@ -136,11 +157,37 @@ class _Use:
     action: str | None = None
     reads: tuple = ()
     writes: tuple = ()
+    make: tuple | None = None
 
 
 def decide(request):
+    decision = _decide(request)
+    if decision.verdict == Verdict.DEFER and request.tool in SHELL_TOOLS:
+        text = request.command if request.argv is None else shlex.join(request.argv)
+        return _flagged(text or "") or decision
+    return decision
+
+
+def _flagged(text):
+    """Escalate unclassified shell or a recipe that names a destructive, outward or captain
+    verb, or an interpreter delete/write/network API, anywhere in its text."""
+    paths = re.split(r"[\s;&|()<>`$'\"{}=\\,]+", text)
+    names = {posixpath.basename(word) for word in paths}
+    if any(name == "captain" or name.startswith("captain_barbossa") for name in names):
+        return Decision("captain-verb")
+    words = names | {part for word in paths for part in re.split(r"[./:]+", word)}
+    if words & (DESTRUCTIVE | PRIVILEGE | DELETE_APIS) or WRITE_OPEN.search(text):
+        return Decision("destructive")
+    if "git" in words and words & GIT_DESTRUCTIVE:
+        return Decision("destructive")
+    if words & (OUTWARD | NETWORK_APIS):
+        return Decision("outward")
+    return None
+
+
+def _decide(request):
     if request.tool in READ_TOOLS:
-        return _judge(request, [(request.cwd, _Use(action="read", reads=request.paths or (".",)))])
+        return Decision("granted")
     if request.tool in EDIT_TOOLS:
         if not request.paths:
             return Decision("unparsed")
@@ -159,7 +206,7 @@ def decide(request):
 def _decide_text(request, text):
     if not text.strip():
         return Decision("unparsed")
-    if any(mark in text for mark in RAW_UNSUPPORTED):
+    if _expands(text):
         return Decision("unsupported-syntax")
     lexer = shlex.shlex(text, posix=True, punctuation_chars=True)
     lexer.whitespace_split = True
@@ -188,6 +235,27 @@ def _decide_text(request, text):
     return _judge(request, uses)
 
 
+def _expands(text):
+    """Multi-line text, or `$`/backtick outside single quotes; shlex drops the quoting."""
+    quote, escaped = None, False
+    for char in text:
+        if char in "\n\r":
+            return True
+        if escaped:
+            escaped = False
+        elif quote == "'":
+            quote = None if char == "'" else quote
+        elif char == "\\":
+            escaped = True
+        elif char in "$`":
+            return True
+        elif char == quote:
+            quote = None
+        elif quote is None and char in "'\"":
+            quote = char
+    return False
+
+
 def _segments(tokens):
     """Split tokens into (words, redirects) per simple command, or None on unsupported ops."""
     segments, words, redirects = [], [], []
@@ -195,7 +263,7 @@ def _segments(tokens):
     while index < len(tokens):
         token = tokens[index]
         index += 1
-        if not set(token) <= PUNCTUATION:
+        if not token or not set(token) <= PUNCTUATION:  # '' is an empty word
             words.append(token)
             continue
         if token in SEPARATORS:
@@ -240,13 +308,17 @@ def _command(words):
     if verb == "pytest":
         return _tests(["pytest"], args)
     if verb == "make":
-        return _Use(action="test") if args == ["test"] else _Use("unknown-command")
+        return _Use(action="test") if args == ["test"] else _Use("unknown-command", make=args)
     if verb == "git":
         return _git(args)
+    if verb == "gh":
+        return _gh(args)
     if verb == "find":
         return _find(args)
     if verb in DESTRUCTIVE:
         return _Use("destructive")
+    if verb in OUTWARD:
+        return _Use("outward")
     if verb in SHELLS:
         return _Use("shell")
     if verb in WRAPPERS:
@@ -273,7 +345,7 @@ def _captain(args):
     # Only the legacy session report; any flag could name the committed repo scope.
     report = rest[:1] == ["add"] and len(rest) == 4 and not any(a.startswith("-") for a in rest)
     memory = verb == "memory" and (rest[:1] == ["show"] or report)
-    return _Use(action="captain") if verb in CAPTAIN_VERBS or memory else _Use("shell")
+    return _Use(action="captain") if verb in CAPTAIN_VERBS or memory else _Use("captain-verb")
 
 
 def _uv(args):
@@ -330,6 +402,12 @@ def _git(args):
     return _Use("unknown-command")
 
 
+def _gh(args):
+    if len(args) >= 2 and args[1] in GH_READ and not args[0].startswith("-"):
+        return _Use(action="read")
+    return _Use("outward")
+
+
 def _git_add(args):
     if any(arg in ("-A", "--all", "-u", "--update") for arg in args):
         return _Use(action="commit", writes=(".",))
@@ -377,7 +455,7 @@ def _edit(verb, args):
     flags = [arg for arg in args if arg.startswith("-")]
     paths = [arg for arg in args if not arg.startswith("-")]
     if set(flags) - EDIT_FLAGS[verb] or (not paths and verb != "tee"):
-        return _Use("unknown-command")
+        return _Use("unknown-command", writes=tuple(paths[-1:] if verb in ("cp", "mv") else paths))
     if verb == "cp":
         if len(paths) < 2:
             return _Use("unknown-command")
@@ -386,16 +464,106 @@ def _edit(verb, args):
 
 
 def _sed(args):
-    # Only `sed -n 'N[,M]p' FILE...`: other sed scripts can write (w) or execute (e).
-    if len(args) < 2 or args[0] != "-n":
+    use = _sed_parse(args)
+    short = [arg for arg in args if arg[:1] == "-" and arg[1:2] != "-"]
+    if use.code and (any("i" in arg for arg in short) or any("--in-place" in a for a in args)):
+        operands = [arg for arg in args if arg and not arg.startswith("-")]
+        # Without -e the first operand is the script; any other one may be rewritten.
+        use.writes = tuple(operands if "-e" in args else operands[1:])
+    return use
+
+
+def _sed_parse(args):
+    scripts, operands, suffix, rest = [], [], None, list(args)
+    while rest:
+        arg = rest.pop(0)
+        if arg == "-e" and rest:
+            scripts.append(rest.pop(0))
+        elif arg == "-i":
+            # BSD sed reads the next word as the backup suffix; only '' means the same to both.
+            if rest[:1] != [""]:
+                return _Use("unknown-command")
+            suffix = rest.pop(0)
+        elif arg.startswith("-i"):
+            suffix = arg[2:]
+        elif arg in ("-n", "-E", "-r"):
+            continue
+        elif arg.startswith("-"):
+            return _Use("unknown-command")
+        else:
+            operands.append(arg)
+    if not scripts and operands:
+        scripts.append(operands.pop(0))
+    if not scripts or not all(_sed_script(script) for script in scripts):
         return _Use("unknown-command")
-    script = args[1].split(",")
-    if len(script) > 2 or not script[-1].endswith("p"):
+    if suffix is None:
+        return _Use(action="read", reads=tuple(operands))
+    if not operands:
         return _Use("unknown-command")
-    script[-1] = script[-1][:-1]
-    if not all(part.isdigit() for part in script):
-        return _Use("unknown-command")
-    return _Use(action="read", reads=tuple(args[2:]))
+    backups = tuple(path + suffix for path in operands) if suffix else ()
+    return _Use(action="edit", writes=(*operands, *backups))
+
+
+def _sed_script(script):
+    """Only addressed p, d and s///[gpiI0-9]: w, r, e and s///w|e write files or execute."""
+    index = 0
+    while index < len(script):
+        for _ in range(2):
+            index = _sed_address(script, index)
+            if index is None:
+                return False
+            if script[index : index + 1] != ",":
+                break
+            index += 1
+        command = script[index : index + 1]
+        index += 1
+        if command == "s":
+            delimiter = script[index : index + 1]
+            if not delimiter or delimiter.isalnum() or delimiter in "\\ ;":
+                return False
+            index = _sed_delimited(script, index + 1, delimiter, brackets=False)
+            if index is not None:
+                index = _sed_delimited(script, index, delimiter, brackets=True)
+            if index is None:
+                return False
+            while script[index : index + 1] and script[index] in "gpiI0123456789":
+                index += 1
+        elif command not in ("p", "d"):
+            return False
+        if index < len(script):
+            if script[index] != ";":
+                return False
+            index += 1
+    return True
+
+
+def _sed_address(script, index):
+    char = script[index : index + 1]
+    if char == "$":
+        return index + 1
+    if char.isdigit():
+        while script[index : index + 1].isdigit():
+            index += 1
+        return index
+    if char == "/":
+        return _sed_delimited(script, index + 1, "/", brackets=False)
+    return index
+
+
+def _sed_delimited(script, index, delimiter, brackets):
+    """Index past the closing delimiter, or None. `brackets` is True for a replacement, where
+    `[` is literal; a regex bracket may hide the delimiter, so it is refused."""
+    while index < len(script):
+        char = script[index]
+        if char == "\\":
+            index += 2
+            continue
+        if char == delimiter:
+            return index + 1
+        if char == "[" and not brackets:
+            return None  # ponytail: no bracket expressions in sed regexes, parse them if missed
+        index += 1
+    return None
 
 
 def _ruff(args):
@@ -457,8 +625,6 @@ def _writable(request, cwd, value):
 def _judge(request, uses):
     """Most severe outcome across every simple command; deny outranks escalate."""
     codes = []
-    if not _inside(posixpath.normpath(request.cwd), posixpath.normpath(request.project)):
-        codes.append("outside-grant")
     for cwd, use in uses:
         codes.append(_judge_one(request, cwd, use))
     if not uses:
@@ -467,7 +633,14 @@ def _judge(request, uses):
 
 
 def _judge_one(request, cwd, use):
+    if use.make is not None:
+        flagged = _flagged(_make_recipes(cwd, use.make))
+        if flagged:
+            return flagged.code
     if use.code:
+        # Even a command with no policy may not write outside the owned paths.
+        if REASONS[use.code][0] == Verdict.DEFER and not _owns(request, cwd, use.writes):
+            return "outside-grant"
         return use.code
     if use.action is None:
         return "unparsed"
@@ -476,17 +649,76 @@ def _judge_one(request, cwd, use):
         owned = [_resolve(project, item) for item in request.owned]
         modules = [_resolve(cwd, name) for name in CAPTAIN_MODULE]
         if any(_inside(m, o) or _inside(o, m) for m in modules for o in owned):
-            return "shell"
+            return "captain-verb"
         return "granted"
-    if any(GLOB & set(path) for path in (*use.reads, *use.writes)):
-        return "unsupported-syntax"
     granted = {"read", "search", *request.actions}
     writes = [path for path in use.writes if path != NULL_DEVICE]
     needed = {use.action, *(["edit"] if writes and use.action in ("read", "test") else [])}
     if needed - granted:
         return "action-not-granted"
-    if not all(_readable(request, cwd, path) for path in use.reads):
-        return "outside-grant"
-    if not all(_writable(request, cwd, path) for path in writes):
-        return "outside-grant"
-    return "granted"
+    return "granted" if _owns(request, cwd, writes) else "outside-grant"
+
+
+def _owns(request, cwd, writes):
+    targets = [match for path in writes if path != NULL_DEVICE for match in _expand(cwd, path)]
+    return None not in targets and all(_writable(request, cwd, path) for path in targets)
+
+
+def _make_recipes(cwd, args):
+    """Recipe text of the named targets and everything they reach, or "" if unreadable."""
+    directory, makefile, goals, rest = cwd, "Makefile", [], list(args)
+    while rest:
+        arg = rest.pop(0)
+        if arg in ("-C", "--directory", "-f", "--file", "--makefile") and rest:
+            value = rest.pop(0)
+            if arg in ("-C", "--directory"):
+                directory = _resolve(directory, value)
+            else:
+                makefile = value
+        elif not arg.startswith("-") and "=" not in arg:
+            goals.append(arg)
+    try:
+        text = (Path(directory) / makefile).read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return ""
+    rules, target, default = {}, None, None
+    for line in text.splitlines():
+        if line.startswith("\t") and target:
+            for name in target:
+                rules[name][1].append(line)
+            continue
+        match = re.match(r"([\w./%-]+(?:\s+[\w./%-]+)*)\s*::?(?!=)([^#;]*)", line)
+        if match:
+            target = match[1].split()
+            for name in target:
+                rules.setdefault(name, ([], []))[0].extend(match[2].split())
+            default = default or next((n for n in target if not n.startswith(".")), None)
+        elif goal := re.match(r"\.DEFAULT_GOAL\s*:?=\s*(\S+)", line):
+            default = goal[1]
+        elif line.strip():
+            target = None
+    recipes, queue, seen = [], goals or [default], set()
+    while queue:
+        name = queue.pop()
+        if name in seen or name not in rules:
+            continue
+        seen.add(name)
+        prerequisites, lines = rules[name]
+        recipes.extend(lines)
+        # Prerequisites and recursive $(MAKE) targets run too.
+        queue += prerequisites + [word for line in lines for word in line.split() if word in rules]
+    return "\n".join(recipes)
+
+
+def _expand(cwd, value):
+    """What a shell word can name: tilde and glob matches. Brace lists cannot be known."""
+    if value.startswith("~"):
+        value = os.path.expanduser(value)
+    if "{" in value and ("," in value or ".." in value):
+        return [None]
+    if not GLOB & set(value):
+        return [value]
+    # bash <5.2 lets `.*` match `..`, which glob.glob never returns.
+    if any(part.startswith(".") and GLOB & set(part) for part in value.split("/")):
+        return [None]
+    return glob.glob(value, root_dir=cwd) or [value]

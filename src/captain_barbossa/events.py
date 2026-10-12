@@ -131,6 +131,8 @@ def pretool_decision(records, event):
 
 
 def permission_output(decision, hook="PermissionRequest"):
+    if decision.verdict == Verdict.DEFER:
+        return None
     message = f"Captain approval [{decision.code}]: {decision.reason}"
     if hook == "PreToolUse":
         verdicts = {Verdict.ALLOW_ONCE: "allow", Verdict.DENY: "deny", Verdict.ESCALATE: "ask"}
@@ -197,7 +199,7 @@ def append_event(args=None):
         prior = pretool_decision(records, event) if kind == "PermissionRequest" else None
         if prior:
             permission = Decision(prior["approval"]["code"])
-            if permission.verdict != Verdict.ESCALATE:
+            if permission.verdict in (Verdict.ALLOW_ONCE, Verdict.DENY):
                 # Already decided and logged; a native ask rule re-prompted the same call.
                 print(json.dumps(permission_output(permission)))
                 return
@@ -211,7 +213,10 @@ def append_event(args=None):
             event["approval"] = {"verdict": permission.verdict.value, "code": permission.code}
             if kind == "PreToolUse":
                 event["approval"]["source"] = kind
-            if permission.verdict != Verdict.ESCALATE:
+            # A deferred PermissionRequest is the native mode's own prompt, still pending.
+            if permission.verdict != Verdict.ESCALATE and (
+                kind == "PreToolUse" or permission.verdict != Verdict.DEFER
+            ):
                 # Resolved requests are audit evidence, not a pending approval for wait.
                 event["hook_event_name"] = "PermissionDecision"
                 event["status"] = (
@@ -220,8 +225,10 @@ def append_event(args=None):
         file.write(json.dumps(event, ensure_ascii=False) + "\n")
         file.flush()
     if permission is not None:
-        print(json.dumps(permission_output(permission, kind)))
-        sys.stdout.flush()
+        output = permission_output(permission, kind)
+        if output:
+            print(json.dumps(output))
+            sys.stdout.flush()
         return
     # Only Claude sends hook_event_name, so Codex notify and pi are untouched. stop_hook_active
     # means a block already fired; blocking again would loop the crew.
