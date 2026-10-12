@@ -84,7 +84,7 @@ GIT_READ = {"status", "diff", "log", "show", "blame", "rev-parse", "ls-files", "
 GIT_DESTRUCTIVE = {
     "push", "reset", "clean", "rebase", "checkout", "restore", "rm", "mv", "stash", "switch",
     "merge", "cherry-pick", "revert", "am", "apply", "tag", "worktree", "filter-branch", "gc",
-    "prune", "reflog", "update-ref", "pull",
+    "prune", "update-ref", "pull",
 }  # fmt: skip
 OUTWARD = {
     "curl", "wget", "ssh", "scp", "sftp", "nc", "ncat", "telnet", "ftp", "push", "publish",
@@ -178,7 +178,11 @@ def _flagged(text):
     words = names | {part for word in paths for part in re.split(r"[./:]+", word)}
     if words & (DESTRUCTIVE | PRIVILEGE | DELETE_APIS) or WRITE_OPEN.search(text):
         return Decision("destructive")
-    if "git" in words and words & GIT_DESTRUCTIVE:
+    if "git" in words and (
+        words & GIT_DESTRUCTIVE
+        or "reflog" in words
+        and words & {"expire", "delete", "drop", "write"}
+    ):
         return Decision("destructive")
     if words & (OUTWARD | NETWORK_APIS):
         return Decision("outward")
@@ -391,8 +395,23 @@ def _git(args):
         if any(arg.startswith(("--output", "--ext-diff")) for arg in rest):
             return _Use("unknown-command")
         return _Use(action="read", reads=_path_like(rest))
-    if sub == "branch":
-        return _Use(action="read") if not rest else _Use("destructive")
+    if sub == "reflog":
+        if rest[:1] in (["expire"], ["delete"], ["drop"], ["write"]):
+            return _Use("destructive")
+        return _git(["log", *rest])
+    if sub in ("stash", "worktree") and rest[:1] in (["list"], ["show"]):
+        if sub == "stash" or rest[0] == "list":
+            return _git(["log", *rest[1:]])
+    if sub in ("branch", "tag"):
+        listing = {"-l", "--list", "-a", "--all", "-r", "--remotes", "-v", "-vv"}
+        return (
+            _Use(action="read")
+            if not rest
+            or (sub == "branch" and all(arg in listing for arg in rest))
+            or rest[:1] in (["--list"], ["-l"])
+            and all(not arg.startswith("-") for arg in rest[1:])
+            else _Use("destructive")
+        )
     if sub in GIT_DESTRUCTIVE:
         return _Use("destructive")
     if sub == "add":
@@ -652,7 +671,7 @@ def _judge_one(request, cwd, use):
             return "captain-verb"
         return "granted"
     granted = {"read", "search", *request.actions}
-    writes = [path for path in use.writes if path != NULL_DEVICE]
+    writes = [path for path in use.writes if _resolve(cwd, path) != NULL_DEVICE]
     needed = {use.action, *(["edit"] if writes and use.action in ("read", "test") else [])}
     if needed - granted:
         return "action-not-granted"

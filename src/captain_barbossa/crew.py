@@ -50,7 +50,9 @@ def event_status(event):
         return "done"
     if kind == "SessionStart":
         return "working"
-    if kind == "PermissionRequest":
+    if kind == "PermissionRequest" or (
+        kind == "PreToolUse" and event.get("approval", {}).get("verdict") == "escalate"
+    ):
         return "blocked"
     if kind == "Notification" and isinstance(event.get("notification_type"), str):
         return {"idle_prompt": "idle", "permission_prompt": "blocked"}.get(
@@ -110,6 +112,13 @@ class Crew:
             reasons.append("mail state unreadable")
         if assignment and assignment.get("incarnation_id") != incarnation:
             return CrewState("unknown", "none", "stale incarnation")
+        pane_status = None
+        try:
+            pane_status = self.pane.agent_status()
+            if pane_status is None:
+                reasons.append("pane missing or agent no longer registered")
+        except HERDR_ERRORS:
+            reasons.append("pane unreadable")
         try:
             batch, _ = read_events(self.events, 0, incarnation=incarnation)
             if not self.events.exists():
@@ -120,9 +129,13 @@ class Crew:
             batch = []
             reasons.append("events unreadable")
         for event in reversed(batch):
+            if pane_status is None:
+                break  # Historical hooks cannot prove a missing agent is still blocked or working.
             if "status" in event:
                 return declared_state(event["status"], "hook")
             kind = event.get("hook_event_name", event.get("type"))
+            if event_status(event) == "blocked":
+                return CrewState("blocked", "hook", str(kind))
             if kind in ("UserPromptSubmit", "PreToolUse", "PostToolUse"):
                 return CrewState("working", "hook", kind)
             status = event_status(event)
@@ -132,10 +145,10 @@ class Crew:
                 reasons.append("hook reports inactivity, not assignment completion")
                 break
         try:
-            status = self.pane.agent_status()
+            status = pane_status
             if status in ("working", "blocked"):
                 return CrewState(status, "pane", "native agent status")
-            if modal_start(self.pane.lines()) is not None:
+            if status is not None and modal_start(self.pane.lines()) is not None:
                 return CrewState("blocked", "pane", "approval prompt")
             reasons.append(f"pane state {status or 'missing'} does not prove assignment state")
         except HERDR_ERRORS:

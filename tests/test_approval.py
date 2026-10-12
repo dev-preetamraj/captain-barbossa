@@ -56,6 +56,42 @@ class ApprovalTests(unittest.TestCase):
             bash,
         )
 
+    def test_read_only_git_forms_and_null_redirects_need_no_edit_grant(self):
+        for command in (
+            "git reflog",
+            "git reflog show HEAD",
+            "git reflog -5",
+            "git branch -a",
+            "git branch --list feature",
+            "git tag --list v1",
+            "git tag",
+            "git stash list",
+            "git stash show",
+            "git worktree list",
+            "ls 2>/dev/null",
+            "ls >/dev/null 2>&1",
+            "ls &>/dev/null",
+            "ls 2>/dev/../dev/null",
+        ):
+            with self.subTest(command=command):
+                self.assertEqual(bash(command, actions=()).code, "granted")
+        for command in (
+            "git reflog expire --all",
+            "git reflog delete HEAD@{0}",
+            "git reflog drop HEAD",
+            "git reflog write HEAD a b message",
+            "git branch --list -D feature",
+            "git tag --list --delete v1",
+            "git branch feature",
+            "git tag v1",
+            "git stash pop",
+            "git worktree prune",
+            "git -C /repo reflog expire --all",
+        ):
+            with self.subTest(command=command):
+                self.assertEqual(bash(command).code, "destructive")
+        self.assertEqual(bash("ls 2>/tmp/output", actions=()).code, "action-not-granted")
+
     def test_reads_anywhere_and_routine_edits_pass_without_a_prompt(self):
         # Issue #1: these asked even in auto mode.
         self.check(
@@ -300,11 +336,14 @@ class ApprovalHookTests(SessionCase):
     def setUp(self):
         super().setUp()
         self.current = sessions.session(self.project, self.pane, create=True)
-        self.crew = Crew("jack", {"name": "Jack", "incarnation_id": "first"}, self.current)
+        self.crew = Crew(
+            "jack", {"name": "Jack", "agent": "jack", "incarnation_id": "first"}, self.current
+        )
         self.current.meta["crew"]["jack"] = self.crew.record
         store.write_json(self.current.meta_path, self.current.meta)
         self.assignment = protocol.begin(self.crew, self.project, "edit src", ["src"], ["edit"])
         self.crew.events.parent.mkdir(parents=True, exist_ok=True)
+        self.enterContext(patch("captain_barbossa.crew.Pane.agent_status", return_value="working"))
 
     def hook(self, tool="Bash", inputs=None, **extra):
         event = {
@@ -405,7 +444,24 @@ class ApprovalHookTests(SessionCase):
                 output, event = self.pretool({"command": command})
                 self.assertEqual(output["hookSpecificOutput"]["permissionDecision"], "ask")
                 self.assertEqual(event["hook_event_name"], "PreToolUse")
-                self.assertEqual(self.crew.current_state().state, "working")
+                self.assertEqual(self.crew.current_state().state, "blocked")
+
+    def test_pretool_ask_reports_command_and_reason_before_permissionrequest(self):
+        command = "rm " + "x" * 1700
+        self.pretool({"command": command})
+        response = protocol.wait(self.crew, 0)
+        self.assertEqual(response["status"], "awaiting_approval")
+        self.assertIn(command, response["summary"])
+        self.assertIn(REASONS["destructive"][1], response["summary"])
+        self.assertIn("[destructive]", response["summary"])
+        protocol.poll(self.crew, response["delivery_id"])
+        self.hook(inputs={"command": command})
+        self.assertEqual(protocol.poll(self.crew)["status"], "working")
+        self.pretool({"command": "rm another-file"})
+        second = protocol.wait(self.crew, 0)
+        self.assertEqual(second["status"], "awaiting_approval")
+        self.assertIn("rm another-file", second["summary"])
+        self.assertNotEqual(second["delivery_id"], response["delivery_id"])
 
     def test_unclassified_commands_leave_the_decision_to_the_native_mode(self):
         inputs = {"command": "make gate"}

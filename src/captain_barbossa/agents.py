@@ -605,7 +605,7 @@ def create_crew(args, pane, project):
             current,
         )
         assignment = protocol.begin(crew, project, args.task, args.owns, args.allow, args.handoff)
-        # A failed layout/launcher must leave a resolvable owner for the reservation.
+        # Reserve ownership before launch; failures before native startup release it below.
         crew.record.update(
             assignment_id=assignment["id"],
             provider=provider,
@@ -614,94 +614,103 @@ def create_crew(args, pane, project):
         )
         meta["crew"][name] = crew.record
         write_json(current.meta_path, meta)
-        launcher = current.directory / f"crew-{name}.sh"
-        environment = [
-            "--env",
-            "CAPTAIN_ROLE=crew",
-            "--env",
-            f"CAPTAIN_CREW={name}",
-            "--env",
-            f"CAPTAIN_INCARNATION={incarnation}",
-            "--env",
-            f"CAPTAIN_ASSIGNMENT={assignment['id']}",
-            "--env",
-            f"CAPTAIN_SESSION={meta['id']}",
-            "--env",
-            f"CAPTAIN_PROJECT={project.resolve()}",
-            "--env",
-            f"CAPTAIN_STATE_ROOT={state_root()}",
-            "--env",
-            f"CAPTAIN_TEMP_ROOT={temp_root()}",
-            "--env",
-            f"CAPTAIN_CREW_LAUNCHER={launcher}",
-        ]
-        instruction_text = instructions.agent_instructions(
-            current.directory, f"crew member {display_name}", provider
-        )
-        events = crew.events
-        private_dir(events.parent)
-        events.write_text("", encoding="utf-8")
-        events.chmod(0o600)
-        crew.cursor.unlink(missing_ok=True)
-        write_json(crew.report_cursor, len(crew.reports))
-        command = shlex.join(
-            [binary, *instructions.native_args(provider, instruction_text, model, events)]
-        )
-        launcher.write_text(
-            f"#!/bin/sh\nunset CAPTAIN_CREW_LAUNCHER\nexec {command}\n",
-            encoding="utf-8",
-        )
-        launcher.chmod(0o600)
-        if placement == "tab":
-            created = runtime.herdr(
-                "tab",
-                "create",
-                "--workspace",
-                pane["workspace_id"],
-                "--cwd",
-                str(project),
-                "--label",
-                display_name,
-                "--no-focus",
-                *environment,
+        try:
+            launcher = current.directory / f"crew-{name}.sh"
+            environment = [
+                "--env",
+                "CAPTAIN_ROLE=crew",
+                "--env",
+                f"CAPTAIN_CREW={name}",
+                "--env",
+                f"CAPTAIN_INCARNATION={incarnation}",
+                "--env",
+                f"CAPTAIN_ASSIGNMENT={assignment['id']}",
+                "--env",
+                f"CAPTAIN_SESSION={meta['id']}",
+                "--env",
+                f"CAPTAIN_PROJECT={project.resolve()}",
+                "--env",
+                f"CAPTAIN_STATE_ROOT={state_root()}",
+                "--env",
+                f"CAPTAIN_TEMP_ROOT={temp_root()}",
+                "--env",
+                f"CAPTAIN_CREW_LAUNCHER={launcher}",
+            ]
+            instruction_text = instructions.agent_instructions(
+                current.directory, f"crew member {display_name}", provider
             )
-            new_pane = created.get("root_pane", {}).get("pane_id")
-            tab_id = created.get("tab_id") or created.get("root_pane", {}).get("tab_id")
-        else:
-            try:
+            events = crew.events
+            private_dir(events.parent)
+            events.write_text("", encoding="utf-8")
+            events.chmod(0o600)
+            crew.cursor.unlink(missing_ok=True)
+            write_json(crew.report_cursor, len(crew.reports))
+            command = shlex.join(
+                [binary, *instructions.native_args(provider, instruction_text, model, events)]
+            )
+            launcher.write_text(
+                f"#!/bin/sh\nunset CAPTAIN_CREW_LAUNCHER\nexec {command}\n",
+                encoding="utf-8",
+            )
+            launcher.chmod(0o600)
+            if placement == "tab":
                 created = runtime.herdr(
-                    "pane",
-                    "split",
-                    "--pane",
-                    split_pane,
-                    "--direction",
-                    "right" if direction == "vertical" else "down",
+                    "tab",
+                    "create",
+                    "--workspace",
+                    pane["workspace_id"],
                     "--cwd",
                     str(project),
+                    "--label",
+                    display_name,
                     "--no-focus",
                     *environment,
                 )
-            except CaptainError as exc:
+                new_pane = created.get("root_pane", {}).get("pane_id")
+                tab_id = created.get("tab_id") or created.get("root_pane", {}).get("tab_id")
+            else:
+                try:
+                    created = runtime.herdr(
+                        "pane",
+                        "split",
+                        "--pane",
+                        split_pane,
+                        "--direction",
+                        "right" if direction == "vertical" else "down",
+                        "--cwd",
+                        str(project),
+                        "--no-focus",
+                        *environment,
+                    )
+                except CaptainError as exc:
+                    raise CaptainError(
+                        f"Could not split pane {split_pane}; it may have closed: {exc}. "
+                        "Ask the user which pane to split again."
+                    ) from exc
+                new_pane = created.get("pane", {}).get("pane_id")
+                tab_id = created.get("pane", {}).get("tab_id") or tab_id
+                if board and tab_id == pane["tab_id"]:
+                    try:
+                        renest_dashboard(board, pane)
+                    except HERDR_ERRORS as exc:  # geometry is cosmetic; never lose the crew over it
+                        print(f"captain: dashboard not re-nested: {exc}", file=sys.stderr)
+                if new_pane:
+                    try:
+                        Placement(pane, current, board).even_new_pane(spot, new_pane)
+                    except HERDR_ERRORS as exc:
+                        print(f"captain: tab not evened: {exc}", file=sys.stderr)
+            if not new_pane:
                 raise CaptainError(
-                    f"Could not split pane {split_pane}; it may have closed: {exc}. "
-                    "Ask the user which pane to split again."
-                ) from exc
-            new_pane = created.get("pane", {}).get("pane_id")
-            tab_id = created.get("pane", {}).get("tab_id") or tab_id
-            if board and tab_id == pane["tab_id"]:
-                try:
-                    renest_dashboard(board, pane)
-                except HERDR_ERRORS as exc:  # geometry is cosmetic; never lose the crew over it
-                    print(f"captain: dashboard not re-nested: {exc}", file=sys.stderr)
-            if new_pane:
-                try:
-                    Placement(pane, current, board).even_new_pane(spot, new_pane)
-                except HERDR_ERRORS as exc:
-                    print(f"captain: tab not evened: {exc}", file=sys.stderr)
-        if not new_pane:
-            raise CaptainError(
-                "Herdr created a layout but returned no pane ID. Inspect the workspace before retrying."
-            )
+                    "Herdr created a layout but returned no pane ID. Inspect the workspace before retrying."
+                )
+        except HERDR_ERRORS as exc:
+            # No native task was delivered, so release ownership but retain the failure record.
+            with protocol.checkpoint(current.directory) as state:
+                failed = protocol.active(state, crew)
+                failed.update(state="done", report=f"Recruitment failed before launch: {exc}")
+            crew.record.update(status="dismissed", startup_error=str(exc))
+            write_json(current.meta_path, meta)
+            raise
         record = {
             "id": name,
             "incarnation_id": incarnation,

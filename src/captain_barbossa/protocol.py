@@ -21,7 +21,6 @@ ECHO_GRACE = 2
 # Native "working" is a wake, not news: it fires at recruit and at every crew turn end.
 NOTIFIED = {"done": "idle", "idle": "idle", "blocked": "awaiting_approval"}
 TOOL_EVENTS = ("PreToolUse", "PostToolUse", "PermissionDecision")
-APPROVAL_SUMMARY = "Inspect native approval prompt; approval is not granted by this event."
 # Claude reports approvals through its PermissionRequest hook; these have no such event.
 MODAL_PROVIDERS = ("codex", *HOOKLESS)
 MODAL_INTERVAL = 30
@@ -701,11 +700,12 @@ def result(crew, assignment, status, summary="", delivery_id=None):
         "delivery_id": delivery_id,
         "crew": crew.display_name,
         "assignment_id": assignment["id"] if assignment else None,
-        "summary": summary[:1600],
+        "summary": summary if status == "awaiting_approval" else summary[:1600],
     }
 
 
 def poll(crew, ack=None, modal=True):
+    from .approval import REASONS
     from .crew import event_status
 
     drain(crew)
@@ -762,7 +762,11 @@ def poll(crew, ack=None, modal=True):
                 if (s := event_status(e)) in NOTIFIED
             ]
             last = notified[-1][0] if notified else len(events)
-            tools = [i for i, e in enumerate(events) if e.get("hook_event_name") in TOOL_EVENTS]
+            tools = [
+                i
+                for i, e in enumerate(events)
+                if e.get("hook_event_name") in TOOL_EVENTS and event_status(e) != "blocked"
+            ]
             # A later tool call proves the earlier approval was answered.
             if any(i < last for i in tools):
                 native_status = assignment["native_status"] = None
@@ -773,12 +777,29 @@ def poll(crew, ack=None, modal=True):
                 if status == "awaiting_approval":
                     # One approval arrives twice, as a PermissionRequest hook and a
                     # permission_prompt Notification, usually in separate polls.
-                    if native_status == status:
+                    new_ask = any(e.get("hook_event_name") == "PreToolUse" for _, _, e in notified)
+                    if native_status == status and not new_ask:
                         assignment["scan_offset"] = offset
                         if cleared:
                             assignment["native_status"] = None
                         return result(crew, assignment, "working")
-                    summary = APPROVAL_SUMMARY
+                    detail = next(
+                        (
+                            e
+                            for _, s, e in reversed(notified)
+                            if s == status and e.get("tool_input")
+                        ),
+                        event,
+                    )
+                    inputs = detail.get("tool_input")
+                    command = inputs.get("command") if isinstance(inputs, dict) else None
+                    command = (
+                        command or detail.get("message") or json.dumps(inputs, ensure_ascii=False)
+                    )
+                    approval = detail.get("approval") or {}
+                    code = approval.get("code")
+                    reason = REASONS[code][1] if code in REASONS else "native permission prompt"
+                    summary = f"{detail.get('tool_name', 'Approval')} [{code or 'native'}]: {reason}\n{command}"
                     native_status = status
                 elif assignment.get("idle_seen"):
                     assignment["scan_offset"] = offset
@@ -798,7 +819,10 @@ def poll(crew, ack=None, modal=True):
                         "Crew startup failed; inspect before explicit done/handoff.",
                     )
                 elif read_pane and crew.pane.choice_modal():
-                    status, summary = "awaiting_approval", APPROVAL_SUMMARY
+                    status = "awaiting_approval"
+                    summary = "Native permission prompt (no policy verdict):\n" + "\n".join(
+                        crew.pane.lines()
+                    )
                 elif stalled(crew, assignment):
                     status, summary = "error", STALLED_SUMMARY
                 else:

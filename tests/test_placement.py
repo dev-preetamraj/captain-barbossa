@@ -548,7 +548,7 @@ class PaneSplitTests(SessionCase):
                     agents.create_crew(args, self.pane, self.project)
                 api.assert_not_called()
 
-    def test_pane_split_failure_preserves_a_recoverable_assignment_reservation(self):
+    def test_pane_split_failure_releases_assignment_reservation(self):
         def api(*call, **_):
             if call[:2] == ("pane", "split"):
                 raise runtime.CaptainError("pane_not_found")
@@ -566,6 +566,10 @@ class PaneSplitTests(SessionCase):
             "vertical",
             "--split-pane",
             "w1:p9",
+            "--owns",
+            "src",
+            "--allow",
+            "edit",
         )
         with (
             patch.object(runtime, "herdr", side_effect=api) as calls,
@@ -579,10 +583,36 @@ class PaneSplitTests(SessionCase):
         self.assertIn("Ask the user which pane to split again", str(error.exception))
         self.assertEqual(calls.call_args_list[-1].args[:2], ("pane", "split"))
         record = store.read_json(self.directory / "session.json")["crew"]["jack"]
-        self.assertEqual(record["status"], "needs_attention")
+        self.assertEqual(record["status"], "dismissed")
         self.assertNotIn("pane", record)
         state = store.read_json(self.directory / "protocol.json")
         self.assertIn(record["assignment_id"], state["assignments"])
+        failed = state["assignments"][record["assignment_id"]]
+        self.assertEqual(failed["state"], "done")
+        self.assertIn("pane_not_found", failed["report"])
+        current = Session(self.directory, store.read_json(self.directory / "session.json"))
+        self.assertFalse(agents.Crew.name_reserved(current, "jack"))
+        retry = agents.Crew("jack", {"name": "Jack", "incarnation_id": "retry"}, current)
+        replacement = agents.protocol.begin(retry, self.project, "retry build", ["src"], ["edit"])
+        self.assertEqual(replacement["paths"], failed["paths"])
+
+    def test_tab_creation_failure_releases_assignment(self):
+        def api(*call, **_):
+            if call[:2] == ("tab", "create"):
+                raise runtime.CaptainError("tab creation failed")
+            return self.listing(*call)
+
+        args = self.args("crew", "--agent", "codex", "--task", "build", "--placement", "tab")
+        with (
+            patch.object(runtime, "herdr", side_effect=api),
+            patch.object(agents, "executable", return_value="/bin/codex"),
+            self.assertRaisesRegex(runtime.CaptainError, "tab creation failed"),
+        ):
+            agents.create_crew(args, self.pane, self.project)
+        record = store.read_json(self.directory / "session.json")["crew"]["jack"]
+        state = store.read_json(self.directory / "protocol.json")
+        self.assertEqual(record["status"], "dismissed")
+        self.assertEqual(state["assignments"][record["assignment_id"]]["state"], "done")
 
     def test_pane_split_rejects_panes_missing_from_the_workspace(self):
         for bad in ("w1:p7", "w2:p1", "w1:p1 "):

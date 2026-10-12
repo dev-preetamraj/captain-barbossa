@@ -80,6 +80,19 @@ class CrewStateTests(unittest.TestCase):
         self.assertIn("no events file", verdict.detail)
         self.assertIn("pane unreadable", verdict.detail)
 
+    def test_closed_pane_invalidates_old_blocked_hook(self):
+        self.append(hook_event_name="PermissionRequest")
+        for missing in (None, CaptainError("pane not found")):
+            with self.subTest(missing=missing):
+                self.pane_status.return_value = None
+                self.pane_status.side_effect = missing
+                verdict = self.crew.current_state()
+                self.assertEqual(verdict.state, "unknown")
+                self.assertIn("pane", verdict.detail)
+        self.assignment.update(state="done", report="completed before pane closed")
+        self.save_assignment()
+        self.assertEqual(self.crew.current_state().state, "done")
+
     def test_stale_assignment_never_reads_new_incarnation_pane(self):
         self.assignment["incarnation_id"] = "second"
         self.save_assignment()

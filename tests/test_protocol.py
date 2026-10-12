@@ -34,6 +34,7 @@ class ProtocolTests(SessionCase):
         self.enterContext(patch.dict(os.environ, {"CAPTAIN_ROLE": "captain"}))
         self.enterContext(patch.object(Pane, "agent_status", return_value=None))
         self.enterContext(patch.object(Pane, "choice_modal", return_value=False))
+        self.enterContext(patch.object(Pane, "lines", return_value=[]))
         # nudge/nudge_block are pane.py's, built concurrently; stub the doorbell for delivery.
         self.enterContext(patch.object(Pane, "nudge_block", return_value=None, create=True))
         self.enterContext(patch.object(Pane, "nudge", create=True))
@@ -399,6 +400,17 @@ class ProtocolTests(SessionCase):
             self.assertEqual(protocol.wait(self.crew, 70)["status"], "timeout")
             self.assertEqual(modal.call_count, 4)
         self.assertGreaterEqual(elapsed, 70)
+
+    def test_hookless_approval_includes_native_prompt_text(self):
+        prompt = ["Run git push origin main?", "1. Allow", "2. Deny"]
+        with (
+            patch.object(Pane, "choice_modal", return_value=True),
+            patch.object(Pane, "lines", return_value=prompt),
+        ):
+            response = protocol.wait(self.crew, 0)
+        self.assertEqual(response["status"], "awaiting_approval")
+        self.assertIn("git push origin main", response["summary"])
+        self.assertIn("no policy verdict", response["summary"])
 
     def test_a_second_approval_event_is_not_swallowed_by_the_first(self):
         self.event({"hook_event_name": "PermissionRequest"})
