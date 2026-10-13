@@ -46,6 +46,7 @@ REASONS = {
         Verdict.ESCALATE,
         "only the crew protocol verbs may run captain, from the interpreter it named",
     ),
+    "captain-do": (Verdict.DENY, "`captain do` is captain-only; report back to the captain"),
     "outside-grant": (Verdict.ESCALATE, "a write outside the owned paths or inside .git"),
 }
 SEVERITY = {Verdict.ALLOW_ONCE: 0, Verdict.DEFER: 1, Verdict.ESCALATE: 2, Verdict.DENY: 3}
@@ -66,7 +67,7 @@ NULL_DEVICE = "/dev/null"
 READ_VERBS = {
     "basename", "cat", "cmp", "comm", "cut", "diff", "dirname", "du", "echo", "false",
     "file", "grep", "head", "ls", "nl", "printf", "pwd", "realpath", "stat", "tail",
-    "test", "tr", "true", "wc", "which", "[",
+    "test", "tr", "true", "type", "wc", "which", "whereis", "[",
 }  # fmt: skip
 SHELLS = {
     "sh", "bash", "zsh", "dash", "ksh", "fish", "csh", "tcsh", "pwsh", "eval", "source",
@@ -158,14 +159,19 @@ class _Use:
     reads: tuple = ()
     writes: tuple = ()
     make: tuple | None = None
+    text: str = ""
 
 
 def decide(request):
     decision = _decide(request)
-    if decision.verdict == Verdict.DEFER and request.tool in SHELL_TOOLS:
-        text = request.command if request.argv is None else shlex.join(request.argv)
-        return _flagged(text or "") or decision
+    # Lexed commands were flagged one by one in _judge_one; only unlexed text is scanned whole.
+    if decision.code in ("unparsed", "unsupported-syntax") and request.tool in SHELL_TOOLS:
+        return _flagged(_text(request)) or decision
     return decision
+
+
+def _text(request):
+    return (request.command if request.argv is None else shlex.join(request.argv)) or ""
 
 
 def _flagged(text):
@@ -240,10 +246,11 @@ def _decide_text(request, text):
 
 
 def _expands(text):
-    """Multi-line text, or `$`/backtick outside single quotes; shlex drops the quoting."""
+    """A newline outside quotes, or `$`/backtick outside single quotes; shlex drops the quoting."""
     quote, escaped = None, False
     for char in text:
-        if char in "\n\r":
+        # Backslash-newline joins lines in bash but stays in the word for shlex.
+        if char in "\n\r" and (quote is None or escaped):
             return True
         if escaped:
             escaped = False
@@ -296,6 +303,12 @@ def _segments(tokens):
 
 
 def _command(words):
+    use = _classify(words)
+    use.text = shlex.join(words)
+    return use
+
+
+def _classify(words):
     if not words:
         return _Use()
     if "=" in words[0] and not words[0].startswith(("-", "=")):
@@ -303,6 +316,11 @@ def _command(words):
     verb, args = words[0], words[1:]
     if words[0] == sys.executable and args[:2] == ["-m", "captain_barbossa"]:
         return _captain(args[2:])
+    if posixpath.basename(verb) == "captain" or args[:2] == ["-m", "captain_barbossa"]:
+        use = _captain(args[2:] if args[:1] == ["-m"] else args)
+        return use if use.code == "captain-do" else _Use("captain-verb")
+    if verb == "command" and args[:1] in (["-v"], ["-V"]):
+        return _Use(action="read")
     if "/" in verb:
         return _Use("unknown-command")
     if verb == "uv":
@@ -346,6 +364,8 @@ def _captain(args):
     if args[:1] == ["--session"] and len(args) > 1:
         args = args[2:]
     verb, rest = (args[0], args[1:]) if args else ("", [])
+    if verb == "do":
+        return _Use("captain-do")
     # Only the legacy session report; any flag could name the committed repo scope.
     report = rest[:1] == ["add"] and len(rest) == 4 and not any(a.startswith("-") for a in rest)
     memory = verb == "memory" and (rest[:1] == ["show"] or report)
@@ -657,9 +677,15 @@ def _judge_one(request, cwd, use):
         if flagged:
             return flagged.code
     if use.code:
-        # Even a command with no policy may not write outside the owned paths.
-        if REASONS[use.code][0] == Verdict.DEFER and not _owns(request, cwd, use.writes):
-            return "outside-grant"
+        if REASONS[use.code][0] == Verdict.DEFER:
+            # Even a command with no policy may not write outside the owned paths.
+            if not _owns(request, cwd, use.writes):
+                return "outside-grant"
+            # A shell or wrapper may run any other part of the text, piped in as stdin.
+            whole = use.code != "unknown-command" and request.tool in SHELL_TOOLS
+            flagged = _flagged(_text(request) if whole else use.text)
+            if flagged:
+                return flagged.code
         return use.code
     if use.action is None:
         return "unparsed"

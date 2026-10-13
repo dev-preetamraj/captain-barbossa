@@ -294,11 +294,13 @@ class ApprovalTests(unittest.TestCase):
                 (f"{captain} memory show --scope repo", "granted"),
                 (f"{captain} memory add Tia report 'summary'", "granted"),
                 (f"{captain} memory add a decided b --because c --scope repo", "captain-verb"),
-                (f"{captain} do commit --message fix", "captain-verb"),
+                (f"{captain} do commit --message fix", "captain-do"),
+                (f"{captain} do run test", "captain-do"),
                 (f"{captain} crew --task x", "captain-verb"),
                 ("python3 -m captain_barbossa done Tia", "captain-verb"),
-                ("captain do push", "captain-verb"),
-                ("/abs/path/bin/captain do push", "captain-verb"),
+                ("captain do push", "captain-do"),
+                ("/abs/path/bin/captain do push", "captain-do"),
+                ("python3 -m captain_barbossa do push", "captain-do"),
                 ("cd /tmp && ../usr/bin/captain crew --task x", "captain-verb"),
                 ("cd /repo/captain-barbossa && python3 -c 'import os'", "shell"),
             ],
@@ -310,6 +312,33 @@ class ApprovalTests(unittest.TestCase):
         self.assertEqual(decide(request).code, "captain-verb")
         request = Request("Bash", PROJECT, PROJECT, owned, command=f"{captain} done Tia")
         self.assertEqual(decide(request).code, "granted")
+
+    def test_protocol_verbs_pass_whatever_their_argument_text(self):
+        captain = shlex.join([sys.executable, "-m", "captain_barbossa", "--session", "s1"])
+        report = "ran do run test; rm and git push are\nnot run; `x` costs $5"
+        self.check(
+            [
+                (f"{captain} done Tia --report {shlex.quote(report)}", "granted"),
+                (f"{captain} ask Tia 'push now?\nor rm it?'", "granted"),
+                (f"codex --help; {captain} done Tia --report 'no push'", "unknown-command"),
+                (f'{captain} done Tia --report "line\\\nrm"', "captain-verb"),
+                (f'{captain} done Tia --report "$(rm -rf x)"', "captain-verb"),
+            ],
+            bash,
+        )
+        self.assertEqual(Decision("captain-do").verdict, Verdict.DENY)
+
+    def test_lookups_are_reads(self):
+        self.check(
+            [
+                ('which captain 2>/dev/null; echo "---"; type captain 2>/dev/null', "granted"),
+                ("command -v captain", "granted"),
+                ("whereis git", "granted"),
+                ("cat ~/.zshrc /etc/hosts", "granted"),
+                ("echo 'rm -rf x' | sh", "destructive"),
+            ],
+            lambda command: bash(command, actions=()),
+        )
 
     def test_argv_requests_unwrap_only_known_shells(self):
         def argv(*words):
