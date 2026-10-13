@@ -380,6 +380,27 @@ assert.equal(calls.length, 3);
 shutdown();
 """)
 
+    def test_background_auto_sweep_uses_persisted_profile_effective_execution(self):
+        self.run_js(r"""
+const { writeFileSync } = await import("node:fs");
+const ctx = { ui: { notify: (...args) => notices.push(args) },
+  sessionManager: { getBranch: () => history } };
+const record = { incarnation_id: "i1", provider: "codex", execution: "background",
+  status: "started", profile: "nightly",
+  effective: { agent: "codex", model: "gpt-test", execution: "background" },
+  sources: { execution: "[profiles.nightly] execution from settings" } };
+const persisted = JSON.stringify({ crew: { jack: record } });
+assert.doesNotMatch(persisted, /--background/);
+writeFileSync(join(dirname(path), "session.json"), persisted);
+writeFileSync(join(dirname(path), "protocol.json"), JSON.stringify({ active: { jack: "a1" },
+  assignments: { a1: { incarnation_id: "i1", state: "working", pending: null,
+    ack_seq: 0, notices: [] } } }));
+start({ type: "session_start", reason: "startup" }, ctx);
+assert.equal(calls.length, 1);
+assert.deepEqual(calls[0].args.slice(-5), ["wait", "jack", "--json", "--timeout", "60"]);
+shutdown();
+""")
+
     def test_an_explicit_cancel_is_never_reversed_by_the_automatic_sweep(self):
         self.run_js(r"""
 const { writeFileSync } = await import("node:fs");
@@ -637,7 +658,7 @@ class PiCaptainLaunchTests(SessionCase):
         self.assertIn(env["CAPTAIN_SESSION"], extension.read_text())
         text = argv[argv.index("--append-system-prompt") + 1]
         self.assertIn("Use the captain_wait tool", text)
-        self.assertIn("rearm after answers", text)
+        self.assertIn("rearm pane watches after answers", text)
         self.assertNotIn("Run every\nwait in the background", text)
         self.assertEqual(list(self.project.iterdir()), [])
 

@@ -167,6 +167,40 @@ class InstructionTests(SessionCase):
         ):
             self.assertIn(phrase, instructions)
 
+    def test_pi_instructions_separate_pane_watches_from_automatic_background_watches(self):
+        pi = " ".join(
+            instruction_prompts.agent_instructions(self.directory, "Captain Barbossa", "pi").split()
+        )
+        for phrase in (
+            "Use the captain_wait tool with a pane crew's display name after recruiting",
+            "Effective background crew, including profile-selected execution=background, "
+            "are watched automatically; never arm another watcher for them",
+            "crew, reported by its automatic watch; no tell, answer, focus or model",
+            "For an explicit nonblocking check or acknowledgement only",
+            "CAPTAIN wait 'NAME' --json --timeout 0 [--ack DELIVERY_ID]",
+            "Never run blocking CAPTAIN wait or wait --all from Bash in pi",
+        ):
+            self.assertIn(phrase, pi)
+        for phrase in (
+            "Arm a background wait right after recruiting",
+            "Use wait --all --json for every crew's pending delivery",
+            "Run every wait in the background",
+        ):
+            self.assertNotIn(phrase, pi)
+
+        codex = " ".join(
+            instruction_prompts.agent_instructions(
+                self.directory, "Captain Barbossa", "codex"
+            ).split()
+        )
+        for phrase in (
+            "Arm a background wait right after recruiting",
+            "Use wait --all --json for every crew's pending delivery",
+            "Run every wait in the background",
+            "crew, reported through wait; no tell, answer, focus or model",
+        ):
+            self.assertIn(phrase, codex)
+
     def test_instructions_give_crew_a_report_and_the_captain_a_completion_signal(self):
         crew = " ".join(
             instruction_prompts.agent_instructions(self.directory, "crew member Gibbs").split()

@@ -62,16 +62,24 @@ def parser():
         help="crew CLI (asks when omitted)",
     )
     crew.add_argument("--task", required=True)
+    crew.add_argument("--profile", help="recruitment preset from [profiles.NAME] settings")
     crew.add_argument("--owns", action="append", default=[], metavar="PATH")
     crew.add_argument("--allow", action="append", default=[], choices=protocol.ACTIONS)
     crew.add_argument("--handoff", metavar="ASSIGNMENT_ID", help="explicitly reuse a retired name")
-    crew.add_argument(
+    execution = crew.add_mutually_exclusive_group()
+    execution.add_argument(
         "--background",
         action="store_true",
         help="one read-only headless turn with no pane; its report arrives through wait",
     )
+    execution.add_argument(
+        "--foreground", action="store_true", help="open a pane/tab, overriding profile execution"
+    )
     crew.add_argument(
-        "--placement", choices=PLACEMENTS, help="the placement explicitly chosen by the user"
+        "--placement",
+        "--p",
+        choices=(*PLACEMENTS, "auto"),
+        help="the placement explicitly chosen by the user",
     )
     crew.add_argument(
         "--direction",

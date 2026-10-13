@@ -120,6 +120,13 @@ non-TTY). Only the captain recruits; crew forward delegation requests to it. See
 [crew-lifecycle.md](https://github.com/dev-preetamraj/captain-barbossa/blob/main/docs/crew-lifecycle.md)
 for naming, launch behavior, failure handling, and shared-checkout guardrails.
 
+Use `--profile NAME` to select `[profiles.NAME]` from global/project settings,
+bundling agent, model, execution (`foreground` or `background`) and placement.
+Flags override profile keys; omitted keys retain existing defaults. `--foreground`
+overrides background execution. Profiles print and persist their effective choices
+and sources, and never grant assignment permissions. See
+[settings.md](docs/settings.md#explicit-recruitment-profiles) for examples and restrictions.
+
 ## Placing crew
 
 Automatic recruits fill `[placement] captain_tab`, then existing crew tabs,

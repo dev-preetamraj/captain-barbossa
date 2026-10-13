@@ -9,7 +9,7 @@ import time
 from itertools import cycle
 from uuid import uuid4
 
-from . import background, config, instructions, protocol, runtime
+from . import background, config, instructions, profiles, protocol, runtime
 from .crew import Crew, CrewState
 from .dashboard import dashboard_pane, renest_dashboard, start_dashboard
 from .events import read_events
@@ -702,6 +702,7 @@ def create_crew(args, pane, project):
             "or omit NAME to assign one automatically. Names must be at most 16 characters."
         )
     check_text(args.task, "task")
+    args, profile_sources = profiles.apply(args)
     paneless = getattr(args, "background", False)
     if paneless:
         background.refuse_flags(args)
@@ -723,6 +724,25 @@ def create_crew(args, pane, project):
             provider, placement, spot, model = rec.agent, rec.placement, rec.spot, rec.model
             direction, split_pane, tab_id, auto = spot.direction, spot.pane, spot.tab, spot.reason
             sources = rec.sources
+        recruitment = {}
+        if getattr(args, "profile", None) is not None:
+            sources.setdefault(
+                "execution", "--foreground" if args.foreground else "existing foreground default"
+            )
+            sources.update(profile_sources)
+            effective = {
+                "agent": provider,
+                "model": model,
+                "execution": "background" if paneless else "foreground",
+            }
+            if not paneless:
+                effective.update(placement=placement, direction=direction, split_pane=split_pane)
+                sources["direction"] = "--direction" if args.direction else "automatic placement"
+                sources["split_pane"] = "--split-pane" if args.split_pane else "automatic placement"
+            recruitment = {"profile": args.profile, "effective": effective, "sources": sources}
+            print(
+                f"Recruitment profile: {json.dumps(recruitment, sort_keys=True)}", file=sys.stderr
+            )
         print(f"Recruitment sources: {json.dumps(sources, sort_keys=True)}", file=sys.stderr)
         binary = executable(provider)
         name = args.name
@@ -739,7 +759,13 @@ def create_crew(args, pane, project):
         incarnation = uuid4().hex
         crew = Crew(
             name,
-            {"id": name, "name": display_name, "agent": crew_agent, "incarnation_id": incarnation},
+            {
+                "id": name,
+                "name": display_name,
+                "agent": crew_agent,
+                "incarnation_id": incarnation,
+                **recruitment,
+            },
             current,
         )
         if paneless:
@@ -853,6 +879,7 @@ def create_crew(args, pane, project):
             write_json(current.meta_path, meta)
             raise
         record = {
+            **recruitment,
             "id": name,
             "incarnation_id": incarnation,
             "assignment_id": assignment["id"],
