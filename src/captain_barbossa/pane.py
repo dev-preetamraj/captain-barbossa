@@ -349,15 +349,20 @@ class Pane:
                 "⏵⏵ auto mode on (shift+tab to cycle) · ← for agents",
             )
         ):
+            lines.pop()
+            # A user statusLine draws its rows between the composer's bottom rule and the
+            # footer; without a rule below it the composer is still unreadable.
+            while lines and not PANE_RULE.fullmatch(lines[-1]):
+                lines.pop()
             # Only this captured native placeholder; arbitrary "Try ..." text is a draft.
             if (
-                lines[-3] == '❯\u00a0Try "how do I log an error?"'
-                and re.fullmatch(r"─{3,}", lines[-4])
-                and lines[-4] == lines[-2]
+                len(lines) >= 3
+                and lines[-2] == '❯\u00a0Try "how do I log an error?"'
+                and re.fullmatch(r"─{3,}", lines[-3])
+                and lines[-3] == lines[-1]
                 and sum(bool(re.fullmatch(r"─{3,}", line)) for line in lines) == 2
             ):
                 return "", styled
-            lines.pop()
         if (
             provider == "codex"
             and len(lines) >= 3

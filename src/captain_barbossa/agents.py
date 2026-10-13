@@ -774,11 +774,14 @@ def create_crew(args, pane, project):
                     f"Shell in pane {new_pane} is not ready for input; answer any interactive "
                     "question before retrying."
                 )
+            message_id = protocol.deliver(
+                crew, args.task, assignment_id=assignment["id"], initial=True, queue_only=True
+            )
             runtime.herdr(
                 "pane", "run", new_pane, '/bin/sh "$CAPTAIN_CREW_LAUNCHER"', expect_output=False
             )
             crew.pane.wait_for_crew(new_pane, provider)
-            protocol.deliver(crew, args.task, assignment_id=assignment["id"], initial=True)
+            protocol.ring(crew, message_id)
             record["status"] = "started"
             if tab_id != pane["tab_id"]:
                 label = Crew.tab_label(current, tab_id)

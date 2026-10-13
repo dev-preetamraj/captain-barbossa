@@ -7,7 +7,7 @@ import unittest
 from itertools import count, repeat
 from unittest.mock import patch
 
-from captain_barbossa import agents, cli, runtime, sessions, store
+from captain_barbossa import agents, cli, events, protocol, runtime, sessions, store
 from captain_barbossa import pane as panes
 from captain_barbossa.crew import Crew
 from captain_barbossa.pane import Pane
@@ -56,6 +56,46 @@ class StartupTests(SessionCase):
         return cli.parser().parse_args(["--session", self.meta["id"], *args])
 
     EMPTY_COMPOSER = "› Ask Codex to do anything"
+
+    def test_initial_task_is_available_to_session_start_before_readiness(self):
+        args = self.args(
+            "crew",
+            "jack",
+            "--agent",
+            "claude",
+            "--task",
+            "build",
+            "--placement",
+            "pane",
+            "--direction",
+            "vertical",
+            "--split-pane",
+            "w1:p1",
+        )
+        delivered = []
+
+        def api(*call, **kwargs):
+            if call[:2] == ("pane", "run"):
+                meta = store.read_json(self.directory / "session.json")
+                crew = Crew("jack", meta["crew"]["jack"], sessions.Session(self.directory, meta))
+                self.assertEqual(len(protocol.unread(crew)), 1)
+                body, ids = events.mail_context(crew.events)
+                self.assertIn("build", body)
+                events.receipt_for(crew.events, ids)
+                delivered.extend(ids)
+            return {"pane": {"pane_id": "w1:p2"}}
+
+        with (
+            patch.object(runtime, "herdr", side_effect=pane_stub(api)),
+            patch.object(agents, "executable", return_value="/bin/claude"),
+            patch.object(Pane, "wait_for_crew") as ready,
+            patch.object(protocol, "ring", wraps=protocol.ring) as ring,
+        ):
+            agents.create_crew(args, self.pane, self.project)
+        ready.assert_called_once()
+        self.assertEqual(len(delivered), 1)
+        self.assertEqual(ring.call_args.args[1], delivered[0])
+        self.assertEqual(protocol.queued(self.directory, "jack"), [])
 
     def test_startup_failure_preserves_pane_and_prevents_duplicate_retry(self):
         args = self.args(

@@ -197,6 +197,8 @@ class WaitCrewMemoryTests(SessionCase):
                         "Notification",
                         "PermissionRequest",
                         "PreToolUse",
+                        "PostToolUse",
+                        "PostToolUseFailure",
                     },
                 )
                 for kind, entries in settings["hooks"].items():
@@ -235,7 +237,10 @@ class WaitCrewMemoryTests(SessionCase):
                 )
                 self.assertEqual(result.returncode, 0, result.stderr)
                 expected.append(event)
-        self.assertEqual([json.loads(line) for line in events.read_text().splitlines()], expected)
+        records = [json.loads(line) for line in events.read_text().splitlines()]
+        for record in records:
+            self.assertTrue(record.pop("timestamp"))
+        self.assertEqual(records, expected)
 
     def test_wait_consumes_native_completion_before_wait_without_reading_herdr(self):
         for event, status in (

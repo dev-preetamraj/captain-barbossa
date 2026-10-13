@@ -8,6 +8,7 @@ import fcntl
 import json
 import os
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 from .approval import Decision, Request, Verdict, decide
@@ -159,6 +160,7 @@ def append_event(args=None):
     event = json.loads(args[1]) if len(args) > 1 else json.load(sys.stdin)
     if not isinstance(event, dict):
         return
+    event.setdefault("timestamp", datetime.now(timezone.utc).isoformat())
     try:
         incarnation = event_incarnation(Path(events_path))
     except CaptainError:
@@ -195,7 +197,7 @@ def append_event(args=None):
         if kind == "PreToolUse":
             permission = permission_decision(Path(events_path), event)
             if permission.code == "unknown-tool":
-                return  # no policy, so the native permission flow decides alone
+                permission = None  # Keep activity evidence without changing native permissions.
         prior = pretool_decision(records, event) if kind == "PermissionRequest" else None
         if prior:
             permission = Decision(prior["approval"]["code"])
@@ -207,7 +209,7 @@ def append_event(args=None):
             approval = {key: prior["approval"][key] for key in ("verdict", "code")}
             event["approval"] = {**approval, "pretool": prior.get("tool_use_id")}
             permission = None
-        elif kind in ("PreToolUse", "PermissionRequest"):
+        elif kind == "PermissionRequest" or (kind == "PreToolUse" and permission is not None):
             if kind == "PermissionRequest":
                 permission = permission_decision(Path(events_path), event)
             event["approval"] = {"verdict": permission.verdict.value, "code": permission.code}

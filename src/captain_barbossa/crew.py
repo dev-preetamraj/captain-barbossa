@@ -136,7 +136,7 @@ class Crew:
             kind = event.get("hook_event_name", event.get("type"))
             if event_status(event) == "blocked":
                 return CrewState("blocked", "hook", str(kind))
-            if kind in ("UserPromptSubmit", "PreToolUse", "PostToolUse"):
+            if kind in ("UserPromptSubmit", "PreToolUse", "PostToolUse", "PostToolUseFailure"):
                 return CrewState("working", "hook", kind)
             status = event_status(event)
             if status in ("working", "blocked"):

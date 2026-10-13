@@ -634,6 +634,17 @@ class HookDeliveryTests(unittest.TestCase):
             protocol.drain(self.crew)
             self.assertEqual(nudge.call_args_list, [nudge.call_args_list[0]] * 2)
 
+    def test_queue_only_waits_for_the_session_start_hook(self):
+        """Recruit queues before launch so SessionStart hands the task over, then rings."""
+        with patch.object(Pane, "nudge") as nudge:
+            message_id = protocol.deliver(self.crew, "original", initial=True, queue_only=True)
+            nudge.assert_not_called()
+            self.assertFalse(protocol.drain_stamp(self.crew).exists())
+            queued = protocol.queued(self.directory, self.crew.crew_id)
+            self.assertEqual([message["id"] for message in queued], [message_id])
+            protocol.ring(self.crew, message_id)
+            nudge.assert_called_once_with(self.crew, None)
+
     def test_the_wake_line_names_no_command_to_run(self):
         from captain_barbossa.pane import WAKE_LINE, inbox_line
 
@@ -778,6 +789,27 @@ class UnreadableComposerTests(unittest.TestCase):
             protocol.ring(self.crew, message_id)
         nudge.assert_not_called()
         self.assertEqual(store.read_json(protocol.drain_stamp(self.crew))["gate"], DRAFT_GATE)
+
+    def drained_after_unreadable_expiry(self, gate, draft):
+        """Gate calls made by deliver's ring, then by a drain just past UNREADABLE_EXPIRY."""
+        clock = [1000.0]
+        with (
+            patch.object(protocol.time, "time", side_effect=lambda: clock[0]),
+            patch.object(Pane, "nudge_block", return_value=gate) as block,
+            patch.object(Pane, "draft", return_value=draft),
+            patch.object(Pane, "nudge"),
+        ):
+            protocol.deliver(self.crew, "original", initial=True)
+            clock[0] += UNREADABLE_EXPIRY + 1
+            protocol.drain(self.crew)
+        return block.call_count
+
+    def test_drain_retries_an_unreadable_hold_on_its_own_expiry(self):
+        """Seen live: every claude ring waited DRAIN_INTERVAL (30s), not the gate's 15s."""
+        self.assertEqual(self.drained_after_unreadable_expiry(UNREADABLE_GATE, None), 2)
+
+    def test_drain_keeps_the_ordinary_cooldown_for_a_draft(self):
+        self.assertEqual(self.drained_after_unreadable_expiry(DRAFT_GATE, "half a sentence"), 1)
 
 
 class StalledCrewTests(unittest.TestCase):

@@ -3,10 +3,11 @@
 import json
 import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
-from captain_barbossa import events
+from captain_barbossa import events, instructions
 from captain_barbossa.crew import Crew, CrewState, declared_state, event_status
 from captain_barbossa.runtime import CaptainError
 from captain_barbossa.sessions import Session
@@ -150,7 +151,35 @@ class CrewStateTests(unittest.TestCase):
     def test_captain_and_legacy_logs_remain_supported(self):
         captain = self.crew.events.parent / "captain.jsonl"
         events.append_event([str(captain), '{"type": "agent-turn-complete"}'])
-        self.assertEqual(events.read_events(captain, 0)[0], [{"type": "agent-turn-complete"}])
+        event = events.read_events(captain, 0)[0][0]
+        self.assertEqual(event["type"], "agent-turn-complete")
+        self.assertIsNotNone(datetime.fromisoformat(event["timestamp"]).tzinfo)
+
+    def test_native_timestamp_is_preserved(self):
+        self.append(timestamp="2026-10-13T00:00:00Z", hook_event_name="SessionStart")
+        self.assertEqual(
+            events.read_events(self.crew.events, 0)[0][0]["timestamp"],
+            "2026-10-13T00:00:00Z",
+        )
+
+    def test_tool_activity_clears_old_permission_prompt(self):
+        args = instructions.native_args("claude", "crew", events=self.crew.events)
+        hooks = json.loads(args[args.index("--settings") + 1])["hooks"]
+        for kind in ("PostToolUse", "PostToolUseFailure"):
+            with self.subTest(kind=kind):
+                self.assertIn(kind, hooks)
+                self.append(hook_event_name="Notification", notification_type="permission_prompt")
+                self.append(hook_event_name=kind)
+                self.assertEqual(self.crew.current_state().state, "working")
+
+    def test_unknown_tool_defers_but_records_working_evidence(self):
+        with patch(
+            "captain_barbossa.events.permission_decision",
+            return_value=events.Decision("unknown-tool"),
+        ):
+            self.append(hook_event_name="Notification", notification_type="permission_prompt")
+            self.append(hook_event_name="PreToolUse", tool_name="CustomTool")
+        self.assertEqual(self.crew.current_state().state, "working")
 
     def test_old_hook_cannot_read_current_mail(self):
         with self.assertRaisesRegex(CaptainError, "Stale crew incarnation"):

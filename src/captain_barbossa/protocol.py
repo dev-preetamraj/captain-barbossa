@@ -11,7 +11,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from .models import HOOK_DELIVERED, HOOKLESS
-from .pane import DRAFT_GATE, HOLD_EXPIRY
+from .pane import DRAFT_GATE, HOLD_EXPIRY, UNREADABLE_EXPIRY, UNREADABLE_GATE
 from .runtime import HERDR_ERRORS, CaptainError, check_text, inside_project
 from .store import lock, read_json, write_json
 
@@ -605,12 +605,30 @@ def drain(crew):
         # A ring that started no turn did not work, so it retries on the ordinary
         # cooldown; the slow one only exists to bounce a pane that died after the nudge.
         landed = record["landed"] and record["id"] == message_id and not stall
-        if time.time() - record["at"] < (DRAIN_LANDED_INTERVAL if landed else DRAIN_INTERVAL):
+        if landed:
+            interval = DRAIN_LANDED_INTERVAL
+        elif record.get("gate") == UNREADABLE_GATE:
+            # Its hold ages out on UNREADABLE_EXPIRY; waiting the full cooldown doubled it.
+            interval = UNREADABLE_EXPIRY
+        else:
+            interval = DRAIN_INTERVAL
+        if time.time() - record["at"] < interval:
             return
     ring(crew, message_id)
 
 
-def deliver(crew, text, *, assignment_id=None, question_id=None, initial=False, message_id=None):
+def deliver(
+    crew,
+    text,
+    *,
+    assignment_id=None,
+    question_id=None,
+    initial=False,
+    message_id=None,
+    queue_only=False,
+):
+    """Durably enqueue, then ring. queue_only leaves the ring to the caller, so recruit can
+    queue before launch for the SessionStart hook and ring once the TUI is ready."""
     check_text(text, "message")
     if message_id is not None and not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", message_id):
         raise CaptainError("[invalid-message-id] Use a bounded filename-safe message ID.")
@@ -659,7 +677,8 @@ def deliver(crew, text, *, assignment_id=None, question_id=None, initial=False, 
         enqueue(crew, text, kind, assignment_id, message_id)
         message["delivery"] = "sent"
         mark_sent(assignment, message)
-    ring(crew, message_id)
+    if not queue_only:
+        ring(crew, message_id)
     return message_id
 
 

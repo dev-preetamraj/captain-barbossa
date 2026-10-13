@@ -377,6 +377,32 @@ class SubmitTaskTests(unittest.TestCase):
             [("agent", "prompt", "builder", TASK)],
         )
 
+    def test_claude_statusline_rows_under_the_composer_are_not_its_contents(self):
+        """Seen live: a user statusLine row made every idle claude composer unreadable."""
+        rule = "─" * 78
+        for composer, expected in (("❯", ""), ("❯ half typed", "half typed")):
+            screen = "\n".join(
+                [
+                    rule,
+                    composer,
+                    rule,
+                    "  Opus 5.5 : high   █░░░░░░░░░ 9% │ ↑ 973.1k ↓ 4.4k │ $0.78",
+                    "  ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents",
+                ]
+            )
+            with self.subTest(composer=composer):
+                with patch.object(runtime, "herdr", return_value=screen):
+                    self.assertEqual(Pane("builder").composer("claude"), expected)
+                    # Still never typed over: the draft keeps its gate.
+                    self.assertEqual(Pane("builder").draft_pending("claude"), bool(expected))
+
+    def test_claude_composer_without_a_rule_below_stays_unreadable(self):
+        screen = "\n".join(
+            ["❯", "  some status row", "  ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents"]
+        )
+        with patch.object(runtime, "herdr", return_value=screen):
+            self.assertIsNone(Pane("builder").composer("claude"))
+
     def test_a_dim_contextual_suggestion_is_empty_but_the_same_typed_text_is_a_draft(self):
         """A plain read cannot tell them apart; only the SGR codes of an ansi read can."""
         suggestion = "go ahead and format pane.py"

@@ -58,8 +58,9 @@ class InstructionTests(SessionCase):
         for phrase in (
             "Claude PreToolUse hooks enforce assignment grants",
             "anything they cannot classify is left to the native permission mode",
-            "Relay asks to the user; never override the hook",
-            "Judge other native permission prompts by the same rules",
+            "Read every pending prompt in the crew pane and judge that exact action",
+            "never override a deny",
+            "Handle native permission prompts yourself",
             "herdr agent send-keys <name> y",
             "Approve reads anywhere",
             "Escalate to the user only destructive verbs, git history rewrites, "

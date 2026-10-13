@@ -198,6 +198,59 @@ class ApprovalTests(unittest.TestCase):
             lambda command: bash(command, grants),
         )
 
+    def test_read_only_probes_are_not_mistaken_for_destructive_or_captain_calls(self):
+        probe = "from captain_barbossa.pane import Pane; print(Pane(1).composer(2))"
+        heredoc = 'python3 - "$TMPDIR/x.json" <<EOF\nimport json,sys\nprint(json.load(open(sys.argv[1])))\nEOF'
+        self.check(
+            [
+                (
+                    "herdr pane move --help; herdr workspace create --help; herdr --version",
+                    "granted",
+                ),
+                (
+                    "herdr api schema pane.move | python3 -c 'import json,sys; json.load(sys.stdin)'",
+                    "shell",
+                ),
+                (
+                    "git branch --show-current; git status --short; sed -n 15,35p FILE; grep -n P F",
+                    "granted",
+                ),
+                (
+                    f"cd src/captain_barbossa; grep -n terminal_id *.py; {heredoc}",
+                    "unsupported-syntax",
+                ),
+            ],
+            bash,
+        )
+        self.check(
+            [
+                ("herdr pane close x; rm -rf y --help", "destructive"),
+                ("herdr api schema x | python3 -c 'import os; os.remove(\"f\")'", "destructive"),
+                ("echo 'import os; os.remove(1)' | python3", "destructive"),
+                ('python3 -c "import captain_barbossa.cli as c; c.main()"', "captain-verb"),
+                (
+                    "python3 -c \"import runpy; runpy.run_module('captain_barbossa')\"",
+                    "captain-verb",
+                ),
+                (
+                    f"{heredoc.replace('python3 -', 'python3 -m captain_barbossa do push')}",
+                    "captain-verb",
+                ),
+                ("git branch --show-current -D old", "destructive"),
+                ("git push --force; git branch --show-current", "destructive"),
+                (f'uv run --locked python -c "{probe}"', "captain-verb"),
+                ('python3 -c "import captain_barbossa.protocol as p; p.bounce(1)"', "captain-verb"),
+                ('python3 -c "from captain_barbossa.agents import crew"', "captain-verb"),
+                ("./evil.sh --help", "unknown-command"),
+                ("mytool --help; rm -rf x", "destructive"),
+                ("mytool rm --help | python3 -c 'import os; os.remove(1)'", "destructive"),
+                ("python3 evil.py --help", "shell"),
+                ("uv run evil --help", "unknown-command"),
+                ("herdr api schema x > out.json", "outside-grant"),
+            ],
+            bash,
+        )
+
     def test_unclassified_shell_defers_to_the_native_permission_mode(self):
         self.check(
             [
@@ -320,13 +373,35 @@ class ApprovalTests(unittest.TestCase):
             [
                 (f"{captain} done Tia --report {shlex.quote(report)}", "granted"),
                 (f"{captain} ask Tia 'push now?\nor rm it?'", "granted"),
-                (f"codex --help; {captain} done Tia --report 'no push'", "unknown-command"),
+                (f"codex run; {captain} done Tia --report 'no push'", "unknown-command"),
                 (f'{captain} done Tia --report "line\\\nrm"', "captain-verb"),
                 (f'{captain} done Tia --report "$(rm -rf x)"', "captain-verb"),
             ],
             bash,
         )
         self.assertEqual(Decision("captain-do").verdict, Verdict.DENY)
+
+    def test_a_report_assembled_from_a_heredoc_variable_passes_as_a_protocol_verb(self):
+        captain = shlex.join([sys.executable, "-m", "captain_barbossa", "--session", "s1"])
+
+        def report(body, rest=None, quote=""):
+            rest = rest or f'{captain} done Jack --report "$REPORT"'
+            return f"REPORT=$(cat <<{quote}EOF{quote}\n{body}\nEOF\n); {rest}"
+
+        self.check(
+            [
+                (report("files: a.py; rm and git push were not run"), "granted"),
+                (report("costs $5 and `x`", quote="'"), "granted"),
+                (report("costs $5"), "captain-verb"),
+                (report("x\nEOF\nrm -rf y\n", quote="'"), "captain-verb"),
+                (report("ok", f'{captain} crew --task "$REPORT"'), "captain-verb"),
+                (report("ok", f'{captain} do commit --message "$REPORT"'), "captain-do"),
+                (report("rm -rf y", 'sh -c "$REPORT"', "'"), "destructive"),
+                (report("ok", 'rm -rf "$REPORT"'), "destructive"),
+                (report("ok", f"{captain} done Jack --report $REPORT"), "captain-verb"),
+            ],
+            bash,
+        )
 
     def test_lookups_are_reads(self):
         self.check(
@@ -511,7 +586,9 @@ class ApprovalHookTests(SessionCase):
                 "tool_name": "WebFetch", "tool_input": {"url": "https://example.com"},
             })])  # fmt: skip
         self.assertEqual(output.getvalue(), "")
-        self.assertEqual(self.crew.events.read_text(), "")
+        recorded = [json.loads(line) for line in self.crew.events.read_text().splitlines()]
+        self.assertEqual([event["hook_event_name"] for event in recorded], ["PreToolUse"])
+        self.assertNotIn("approval", recorded[0])
 
     def test_a_pretooluse_ask_is_not_decided_or_logged_again_by_permissionrequest(self):
         inputs = {"command": "rm -rf beta.txt"}

@@ -119,6 +119,8 @@ COMMIT_FLAGS = {"-q", "--quiet", "-s", "--signoff", "-v", "--verbose"}
 # Crew protocol verbs: they only validate and record through captain's own state. `do` and
 # every other verb write or run work, so they stay behind the interpreter rule.
 CAPTAIN_VERBS = {"done", "ask", "check", "inbox", "inspect"}
+# Tools whose `<words> --help|--version` is a read, with how many words may precede the flag.
+PROBE_VERBS = {"herdr": 4, "codex": 4, "claude": 4, "git": 1, "uv": 1, "python3": 0}
 # `python -m` imports from its cwd first, so a writable module there would run as captain.
 CAPTAIN_MODULE = ("captain_barbossa", "captain_barbossa.py")
 
@@ -160,6 +162,8 @@ class _Use:
     writes: tuple = ()
     make: tuple | None = None
     text: str = ""
+    # A help/version/schema probe: its output is never run, so the whole-text scan skips it.
+    inert: bool = False
 
 
 def decide(request):
@@ -179,7 +183,10 @@ def _flagged(text):
     verb, or an interpreter delete/write/network API, anywhere in its text."""
     paths = re.split(r"[\s;&|()<>`$'\"{}=\\,]+", text)
     names = {posixpath.basename(word) for word in paths}
-    if any(name == "captain" or name.startswith("captain_barbossa") for name in names):
+    if re.search(r"-m\s+captain_barbossa|captain_barbossa\.", text) or any(
+        name == "captain" or word == name == "captain_barbossa"
+        for word, name in ((w, posixpath.basename(w)) for w in paths)
+    ):
         return Decision("captain-verb")
     words = names | {part for word in paths for part in re.split(r"[./:]+", word)}
     if words & (DESTRUCTIVE | PRIVILEGE | DELETE_APIS) or WRITE_OPEN.search(text):
@@ -213,9 +220,31 @@ def _decide(request):
     return _decide_text(request, request.command or "")
 
 
+HEREDOC_VAR = re.compile(
+    r"\s*(\w+)=\$\(\s*cat <<(['\"]?)(\w+)\2[ \t]*\n(.*?\n)\3\n\s*\)\s*[;\n]\s*(.+)", re.S
+)
+
+
+def _heredoc_var(text):
+    """`V=$(cat <<EOF ... EOF); cmd "$V"` as plain `cmd '<body>'`, or None. An unquoted
+    heredoc expands `$` and backticks, so such a body is refused."""
+    match = HEREDOC_VAR.fullmatch(text)
+    if not match:
+        return None
+    name, quote, delimiter, body, rest = match.groups()
+    # A delimiter line inside the body ends the heredoc early; bash runs what follows.
+    if f"\n{delimiter}\n" in f"\n{body}" or (not quote and re.search(r"[$`\\]", body)):
+        return None
+    for form in (f'"${name}"', f'"${{{name}}}"'):
+        rest = rest.replace(form, shlex.quote(body.removesuffix("\n")))
+    return rest
+
+
 def _decide_text(request, text):
     if not text.strip():
         return Decision("unparsed")
+    if (rest := _heredoc_var(text)) is not None:
+        text = rest
     if _expands(text):
         return Decision("unsupported-syntax")
     lexer = shlex.shlex(text, posix=True, punctuation_chars=True)
@@ -323,6 +352,8 @@ def _classify(words):
         return _Use(action="read")
     if "/" in verb:
         return _Use("unknown-command")
+    if _probe(verb, args):
+        return _Use(action="read", inert=True)
     if verb == "uv":
         return _uv(args)
     if verb in ("python", "python3") and args[:1] == ["-m"]:
@@ -358,6 +389,17 @@ def _classify(words):
     if verb in READ_VERBS:
         return _Use(action="read", reads=_path_like(args))
     return _Use("unknown-command")
+
+
+def _probe(verb, args):
+    """A help/version read of a known tool, or `herdr api schema`; nothing here runs a script."""
+    plain = lambda words: all(re.fullmatch(r"[\w][\w.-]*", word) for word in words)  # noqa: E731
+    if verb == "herdr" and args[:2] == ["api", "schema"]:
+        return plain(args[2:])
+    if args[-1:] not in (["--help"], ["--version"]):
+        return False
+    limit = PROBE_VERBS.get(verb)
+    return limit is not None and len(args) <= limit + 1 and plain(args[:-1])
 
 
 def _captain(args):
@@ -423,7 +465,7 @@ def _git(args):
         if sub == "stash" or rest[0] == "list":
             return _git(["log", *rest[1:]])
     if sub in ("branch", "tag"):
-        listing = {"-l", "--list", "-a", "--all", "-r", "--remotes", "-v", "-vv"}
+        listing = {"-l", "--list", "-a", "--all", "-r", "--remotes", "-v", "-vv", "--show-current"}
         return (
             _Use(action="read")
             if not rest
@@ -664,14 +706,16 @@ def _writable(request, cwd, value):
 def _judge(request, uses):
     """Most severe outcome across every simple command; deny outranks escalate."""
     codes = []
+    probes = any(use.inert for _, use in uses)
+    scan = " ".join(use.text for _, use in uses if not use.inert) if probes else None
     for cwd, use in uses:
-        codes.append(_judge_one(request, cwd, use))
+        codes.append(_judge_one(request, cwd, use, scan))
     if not uses:
         codes.append("unparsed")
     return Decision(max(codes, key=lambda code: SEVERITY[REASONS[code][0]], default="granted"))
 
 
-def _judge_one(request, cwd, use):
+def _judge_one(request, cwd, use, scan=None):
     if use.make is not None:
         flagged = _flagged(_make_recipes(cwd, use.make))
         if flagged:
@@ -683,7 +727,7 @@ def _judge_one(request, cwd, use):
                 return "outside-grant"
             # A shell or wrapper may run any other part of the text, piped in as stdin.
             whole = use.code != "unknown-command" and request.tool in SHELL_TOOLS
-            flagged = _flagged(_text(request) if whole else use.text)
+            flagged = _flagged((_text(request) if scan is None else scan) if whole else use.text)
             if flagged:
                 return flagged.code
         return use.code

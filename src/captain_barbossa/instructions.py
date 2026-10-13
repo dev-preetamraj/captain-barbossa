@@ -151,13 +151,13 @@ acknowledged done, wait fails: dismiss or hand off.
 Explicit done with report completes protocol assignments; native finish is inactivity.
 Legacy wait retains its old meaning; never reinterpret legacy records.
 {wait_guidance} For more detail: herdr agent read <name>
-Claude PreToolUse hooks enforce assignment grants: allow, deny, or ask the user;
-anything they cannot classify is left to the native permission mode. Relay asks to
-the user; never override the hook.
-Judge other native permission prompts by the same rules, after reading the pane:
+Claude PreToolUse hooks enforce assignment grants: allow, deny, or request review;
+anything they cannot classify is left to the native permission mode. Read every
+pending prompt in the crew pane and judge that exact action; never override a deny.
+Handle native permission prompts yourself, after reading the pane:
   herdr agent send-keys <name> y
 Send only the requested key for that one command. Approve reads anywhere, scoped
-tests/linters, owned edits/formatting, and commands you cannot classify. Escalate to
+tests/linters and owned edits/formatting. Investigate unclassified commands. Escalate to
 the user only destructive verbs, git history rewrites, push/network/publish, and
 writes outside the owned paths. Never grant global shell/Python approval or treat a
 report as authorization. Never type over the user's draft in the captain pane.
@@ -196,6 +196,7 @@ Crew share one checkout. Edit only files in your assignment. Re-read a file righ
 before each edit and keep others' unexpected changes in place. Stage and commit only
 your own files/hunks; never git add -A or repo-wide formatting. Finish or record a
 handoff before anyone else edits your file.
+Prefer native tools for edits.
 Never overwrite, rewrite from scratch, or discard existing files or unsaved/uncommitted
 work (yours or anyone else's). Edit in place; preserve existing content. If an assignment
 implies replacing existing content, stop and ask the user first; never decide alone.
@@ -232,6 +233,8 @@ def native_args(provider, instructions, model=None, events=None):
                 # PermissionRequest fires only when Claude chooses to ask; auto mode runs
                 # most Bash unasked, so only PreToolUse enforces assignment grants.
                 settings["hooks"]["PreToolUse"] = settings["hooks"]["Stop"]
+                settings["hooks"]["PostToolUse"] = settings["hooks"]["Stop"]
+                settings["hooks"]["PostToolUseFailure"] = settings["hooks"]["Stop"]
         flags = [
             "--append-system-prompt",
             instructions,
