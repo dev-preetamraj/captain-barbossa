@@ -18,11 +18,32 @@ const FLOOR = 60;
 const STATUSES = new Set(["timeout", "working", "idle", "asked", "awaiting_approval",
   "done", "error"]);
 
+// Background crew watches arm themselves: re-checked this often, each armed this long.
+const SWEEP = 5000;
+const AUTO = 3600;
+
 export default function (pi) {
   const pending = new Map();
+  // An auto watch that stopped on an error stays down until the next start or a manual
+  // rearm, so one uncertain delivery is reported once rather than on every sweep.
+  const stopped = new Set();
+  let sweeper;
   pi.on("session_shutdown", () => {
+    clearInterval(sweeper);
     for (const controller of pending.values()) controller.abort();
     pending.clear();
+  });
+  // Nobody arms a background crew's wait, so its watch arms itself on every start, reload
+  // or reconnect while its work is unresolved (pi docs: timers start in session_start).
+  pi.on("session_start", (_event, ctx) => {
+    clearInterval(sweeper);
+    stopped.clear();
+    const sweep = () => {
+      for (const name of unresolved()) if (!stopped.has(watchKey(name))) arm(name, AUTO, ctx, true);
+    };
+    sweep();
+    sweeper = setInterval(sweep, SWEEP);
+    sweeper.unref?.();
   });
   pi.registerTool({
     name: "captain_wait",
@@ -47,13 +68,53 @@ export default function (pi) {
           timeout < 0 || timeout > 86400) throw new Error("Invalid crew name or wait timeout.");
       const key = name.toLowerCase();
       if (cancel) {
+        // Cancel only this assignment, not a future incarnation reusing its name.
+        stopped.add(watchKey(name));
         pending.get(key)?.abort();
         pending.delete(key);
         return { content: [{ type: "text", text: `Wait cancelled for ${name}.` }], details: {} };
       }
+      stopped.delete(watchKey(name));
+      arm(name, timeout, ctx, false);
+      return { content: [{ type: "text", text: `Wait armed for ${name}; result will arrive in pi.` }],
+        details: {} };
+    },
+  });
+
+  function watchKey(name) {
+    const key = name.toLowerCase();
+    try {
+      const state = JSON.parse(readFileSync(join(directory, "protocol.json"), "utf8"));
+      return `${key}:${state.active?.[key] ?? ""}`;
+    } catch {
+      return `${key}:`;
+    }
+  }
+
+  function unresolved() {
+    let roster, state;
+    try {
+      roster = JSON.parse(readFileSync(join(directory, "session.json"), "utf8")).crew ?? {};
+      state = JSON.parse(readFileSync(join(directory, "protocol.json"), "utf8"));
+    } catch {
+      return [];
+    }
+    // Mirrors protocol.wait_all: skip dismissed, stale, and done-and-acknowledged work.
+    return Object.entries(roster).filter(([id, record]) => {
+      const assignment = state.assignments?.[state.active?.[id]];
+      return record.execution === "background" && record.status !== "dismissed" &&
+        assignment?.incarnation_id === record.incarnation_id &&
+        !(assignment.state === "done" && !assignment.pending &&
+          assignment.ack_seq === assignment.notices.length);
+    }).map(([id]) => id);
+  }
+
+  function arm(name, timeout, ctx, auto) {
+      const key = name.toLowerCase();
       if (!pending.has(key)) {
         // Tool-turn cancellation must not cancel a successfully armed background watch.
         const controller = new AbortController();
+        const identity = watchKey(name);
         pending.set(key, controller);
         const abort = controller.signal;
         const deadline = Date.now() + Math.max(timeout, FLOOR) * 1000;
@@ -116,14 +177,24 @@ export default function (pi) {
             }, { triggerTurn: true, deliverAs: "steer" });
           }
           // sendMessage is void in pi: only session history proves ingestion, not its return.
-          const receiptDeadline = Math.min(deadline, Date.now() + 30000);
+          // A steer enters history only after the current turn (docs/how-pi-works.md), so a
+          // captain busy in a long tool call ingests it late. Past the warning the watch only
+          // keeps reading history until it expires: no resend, no ack before it appears.
+          const warnAt = Date.now() + 30000;
+          let warned = false;
           while (!recorded()) {
             abort.throwIfAborted();
-            if (Date.now() >= receiptDeadline) {
+            if (Date.now() >= deadline) {
               throw new Error(`Delivery ${id} is uncertain; inspect ${log} and pi history. ` +
                 "It was not resent or acknowledged.");
             }
-            await pause(100);
+            if (!warned && Date.now() >= warnAt) {
+              warned = true;
+              ctx.ui.notify(`Delivery ${id} is uncertain: not in pi history after 30s, so ` +
+                "pi may still be busy. It is not resent; it is acknowledged only once it " +
+                "appears there before this watch expires.", "warning");
+            }
+            await pause(warned ? 1000 : 100);
           }
           abort.throwIfAborted();
           appendFileSync(log, '{"delivered":true}\n');
@@ -138,6 +209,8 @@ export default function (pi) {
               if (!["idle", "working"].includes(event.status)) await deliver(event);
               const ack = await wait(0, event.delivery_id);
               if (ack.status === "error") throw new Error(`Acknowledgement failed: ${ack.summary}`);
+              // An acknowledged done or failure leaves nothing more to watch.
+              if (ack.status === "idle" && ack.delivery_id === null) return;
             } else if (event.status === "error") {
               throw new Error(event.summary);
             }
@@ -145,8 +218,10 @@ export default function (pi) {
             await pause(Math.min(Math.max(1000 - (Date.now() - started), 0),
               Math.max(deadline - Date.now(), 0)));
           }
-          ctx.ui.notify(`Captain watch for ${name} expired; rearm captain_wait if needed.`, "info");
+          // An auto watch is rearmed by the next sweep while its work remains.
+          if (!auto) ctx.ui.notify(`Captain watch for ${name} expired; rearm captain_wait if needed.`, "info");
         })().catch(error => {
+          if (auto && !abort.aborted) stopped.add(identity);
           if (!abort.aborted) ctx.ui.notify(
             `Captain watch for ${name} stopped: ${error}. Inspect Captain memory and pi history; ` +
             "rearm captain_wait after resolving the error. Unacknowledged events are retained.", "error");
@@ -154,10 +229,7 @@ export default function (pi) {
           if (pending.get(key) === controller) pending.delete(key);
         });
       }
-      return { content: [{ type: "text", text: `Wait armed for ${name}; result will arrive in pi.` }],
-        details: {} };
-    },
-  });
+  }
 }
 """
 

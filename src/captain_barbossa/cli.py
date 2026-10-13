@@ -66,6 +66,11 @@ def parser():
     crew.add_argument("--allow", action="append", default=[], choices=protocol.ACTIONS)
     crew.add_argument("--handoff", metavar="ASSIGNMENT_ID", help="explicitly reuse a retired name")
     crew.add_argument(
+        "--background",
+        action="store_true",
+        help="one read-only headless turn with no pane; its report arrives through wait",
+    )
+    crew.add_argument(
         "--placement", choices=PLACEMENTS, help="the placement explicitly chosen by the user"
     )
     crew.add_argument(
@@ -326,6 +331,27 @@ def pump_mail(args, pane, project):
             pass
 
 
+def paneless_target(args):
+    """Whether this wait or interrupt reaches only background crew of an explicit session.
+
+    Those need the session alone, so no Herdr pane is resolved, even from a stale Herdr
+    environment. Anything involving a visual crew still needs Herdr: its wait rings
+    doorbells, and ringing without Herdr would bounce its mail. Anything unresolvable
+    falls through to the usual pane lookup and its error.
+    """
+    if args.command not in ("wait", "interrupt") or not args.session:
+        return False
+    try:
+        current = read_session(project_root(), args.session)
+        if args.name:
+            crews = [Crew.resolve(current, args.name)]
+        else:
+            crews = [crew for crew in Crew.members(current) if not crew.is_dismissed]
+    except CaptainError:
+        return False
+    return bool(crews) and all(crew.is_background for crew in crews)
+
+
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
     if argv[:1] == ["hook"]:
@@ -364,9 +390,10 @@ def main(argv=None):
         if args.command == "do" and args.do_command == "resolve" and not args.session:
             do.run(args, None, project_root())
             return 0
-        pane = current_pane()
+        pane = None if paneless_target(args) else current_pane()
         project = project_root()
-        pump_mail(args, pane, project)
+        if pane is not None:
+            pump_mail(args, pane, project)
         if args.command == "crew":
             create_crew(args, pane, project)
         elif args.command == "wait":

@@ -11,6 +11,7 @@ import os
 import stat
 import sys
 import tempfile
+import time
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -143,11 +144,20 @@ def write_json(path, data):
 
 
 @contextmanager
-def lock(path):
+def lock(path, timeout=None):
+    """Hold the file lock; with a timeout, raise rather than wait past it."""
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     fd = os.open(str(path), os.O_CREAT | os.O_WRONLY, 0o600)
     os.close(fd)
     path.chmod(0o600)
     with path.open("a") as file:
-        fcntl.flock(file, fcntl.LOCK_EX)
+        deadline = None if timeout is None else time.monotonic() + timeout
+        while True:
+            try:
+                fcntl.flock(file, fcntl.LOCK_EX | (0 if deadline is None else fcntl.LOCK_NB))
+                break
+            except BlockingIOError as exc:
+                if time.monotonic() >= deadline:
+                    raise CaptainError(f"[lock-timeout] {path} stayed locked.") from exc
+                time.sleep(0.05)
         yield

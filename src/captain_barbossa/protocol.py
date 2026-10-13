@@ -13,7 +13,8 @@ from uuid import uuid4
 from .models import HOOK_DELIVERED, HOOKLESS
 from .pane import DRAFT_GATE, HOLD_EXPIRY, UNREADABLE_EXPIRY, UNREADABLE_GATE
 from .runtime import HERDR_ERRORS, CaptainError, check_text, inside_project
-from .store import lock, read_json, write_json
+from .sessions import session_directories
+from .store import lock, read_json, state_storage, write_json
 
 ACTIONS = ("read", "search", "edit", "test", "build", "format", "commit", "version", "delete")
 # Our own ring is still painting for about this long, so a draft seen inside it is ours.
@@ -55,9 +56,9 @@ UNSAVED_CAVEAT = "Git cannot see unsaved edits still inside the crew's native se
 
 
 @contextmanager
-def checkpoint(directory):
+def checkpoint(directory, timeout=None):
     # ponytail: one session lock; split by assignment only if contention matters.
-    with lock(directory / "protocol.lock"):
+    with lock(directory / "protocol.lock", timeout):
         path = directory / "protocol.json"
         state = read_json(path) if path.exists() else {"active": {}, "assignments": {}}
         yield state
@@ -106,8 +107,9 @@ def begin(crew, project, task, paths=(), actions=(), handoff=None):
         raise CaptainError("Unknown assignment action.")
     if not crew.record.get("incarnation_id"):
         raise CaptainError("Legacy crew cannot be silently adopted; recruit new crew.")
+    # One lock for the project, whichever root a session lives in.
     with (
-        lock(crew.session.directory.parent / "allocation.lock"),
+        lock(state_storage(project) / "allocation.lock"),
         checkpoint(crew.session.directory) as state,
     ):
         previous = state["active"].get(crew.crew_id)
@@ -136,8 +138,9 @@ def begin(crew, project, task, paths=(), actions=(), handoff=None):
         if "edit" in actions and not paths:
             raise CaptainError("[missing-owned-paths] Edit actions require owned paths.")
         assignments = list(state["assignments"].values())
-        for path in crew.session.directory.parent.glob("*/protocol.json"):
-            if path.parent != crew.session.directory:
+        for directory in session_directories(project):
+            path = directory / "protocol.json"
+            if directory != crew.session.directory and path.exists():
                 assignments.extend(read_json(path)["assignments"].values())
         for other in assignments:
             if other["state"] != "done" and any(
@@ -589,6 +592,8 @@ def drain(crew):
     Unread mail is the usual queue, but a hook-delivered body is stamped read before any
     turn runs, so a stalled crew's doorbell is retried on liveness instead.
     """
+    if crew.is_background:
+        return  # no doorbell: its owner reads the one message it runs
     messages = unread(crew)
     record = last_ring(crew)
     stall = False
@@ -759,6 +764,11 @@ def poll(crew, ack=None, modal=True):
             if pending["result"]["status"] == "done" and assignment["report"]:
                 pending["result"]["summary"] = assignment["report"]
             return pending["result"]
+        paneless = crew.is_background
+        if paneless:
+            from .background import reconcile
+
+            reconcile(crew, assignment)
         seq, offset = assignment["ack_seq"], assignment.get("scan_offset", assignment["offset"])
         native_status, cleared = assignment["native_status"], False
         if seq < len(assignment["notices"]):
@@ -835,7 +845,9 @@ def poll(crew, ack=None, modal=True):
                     native_status = None
             else:
                 # Live state rather than a consumed event, so native_status is its only dedupe.
-                read_pane = modal and crew.record.get("provider") in MODAL_PROVIDERS
+                read_pane = (
+                    modal and not paneless and crew.record.get("provider") in MODAL_PROVIDERS
+                )
                 if not crew.record.get("pane") and crew.record.get("status") == "needs_attention":
                     status, summary = (
                         "error",
@@ -846,7 +858,7 @@ def poll(crew, ack=None, modal=True):
                     summary = "Native permission prompt (no policy verdict):\n" + "\n".join(
                         crew.pane.lines()
                     )
-                elif stalled(crew, assignment):
+                elif not paneless and stalled(crew, assignment):
                     status, summary = "error", STALLED_SUMMARY
                 else:
                     status = None

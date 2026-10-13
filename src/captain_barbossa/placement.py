@@ -73,6 +73,13 @@ def crew_agent(flag, directory):
     return chosen, "asked"
 
 
+def launch_choices(args, directory):
+    """(agent, model, sources) for any crew, resolved apart from where it opens."""
+    agent, agent_source = crew_agent(args.crew_agent, directory)
+    model, model_source = chosen_model(agent, args.model, "crew", "model")
+    return agent, model, {"agent": agent_source, "model": model_source}
+
+
 def crew_placement(args):
     """(pane|tab|auto, source): --placement, then split flags imply a pane, then the setting.
 
@@ -338,8 +345,7 @@ class Placement:
         unless the agent has no answer anywhere. The model resolves before the spot, since
         a bad model must fail before any pane is touched.
         """
-        agent, agent_source = crew_agent(args.crew_agent, directory)
-        model, model_source = chosen_model(agent, args.model, "crew", "model")
+        agent, model, sources = launch_choices(args, directory)
         placement, placement_source = crew_placement(args)
         if placement == "tab":
             if args.direction or args.split_pane:
@@ -354,7 +360,7 @@ class Placement:
             spot,
             model,
             capabilities(agent),
-            {"agent": agent_source, "model": model_source, "placement": placement_source},
+            {**sources, "placement": placement_source},
         )
 
     def fixed_split(self, direction, split_pane):

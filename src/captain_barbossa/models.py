@@ -245,11 +245,15 @@ def native_model_args(provider, model):
     return ["-m", model] if provider == "codex" else ["--model", model]
 
 
-def headless_argv(provider, binary, task, *, writable=False, add_dir=None, model=None):
+def headless_argv(
+    provider, binary, task, *, writable=False, add_dir=None, model=None, isolated=False
+):
     """The whole literal argv for one paneless turn, built per provider, never composed.
 
     Each CLI gets the strongest gate it actually has rather than one forced shape, and
     every element here is written by this function: nothing a caller passes becomes a flag.
+    `isolated` (background crew, pi only) also drops pi's extensions, MCP and other
+    executable resources; quiet leaves it off and is unchanged.
     """
     if provider == "claude":
         argv = [binary, "-p", task, "--output-format", "json", "--permission-mode", "dontAsk"]
@@ -286,6 +290,16 @@ def headless_argv(provider, binary, task, *, writable=False, add_dir=None, model
         return argv + native_model_args(provider, model)
     # pi silently drops a tool name it does not know, so only names pi documents are used.
     tools = "read,write,edit" if writable else "read"
+    # pi 1.1 docs/cli.md: --tools keeps MCP tools, and extensions bring their own tools.
+    isolation = [
+        "--no-extensions",
+        "--no-mcp",
+        "--exclude-tools",
+        "mcp__*",
+        "--no-skills",
+        "--no-prompt-templates",
+        "--no-approve",
+    ]
     return [
         binary,
         "-p",
@@ -293,6 +307,7 @@ def headless_argv(provider, binary, task, *, writable=False, add_dir=None, model
         "json",
         "--no-session",
         "--no-context-files",
+        *(isolation if isolated else []),
         "--tools",
         tools,
         *native_model_args(provider, model),

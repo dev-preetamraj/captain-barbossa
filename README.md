@@ -392,6 +392,58 @@ captain quiet --task "Correct the setup instructions" --write README.md
 Execution commands record runs in the session's `events/captain.jsonl` so work
 without a pane can be reviewed afterward. They are captain-only commands.
 
+### Background crew
+
+`captain crew --background --agent codex|pi --task TEXT [NAME] [--model ...]` runs
+the same read-only headless turn as `quiet`, without blocking the captain: a crew
+with a name, assignment and report, but no pane. Its report or failure arrives
+through `wait` like any crew's, and a pi captain watches it automatically. pi takes a
+steered message in only once its current turn ends, so a delivery can reach its history
+late; the watch warns after 30 seconds and keeps checking history until it expires,
+acknowledging the delivery only once it is there and never resending it.
+
+- Opt-in only; plain `captain crew` is unchanged. Placement flags, `--owns`,
+  `--handoff`, any `--allow` beyond `read`/`search`, a non-finite timeout, and the
+  `claude` and `grok` agents are refused before anything is reserved.
+- Only codex and pi run in the background, because only their read-only gate holds
+  against the user's own configuration: codex ignores the user's config under its
+  OS read-only sandbox, and pi adds `--no-extensions --no-mcp --exclude-tools
+  mcp__* --no-skills --no-prompt-templates --no-approve`. A headless claude turn
+  still runs the user's hooks and honours their settings' allow rules, and grok
+  documents no flag to drop its MCP servers and plugins. `quiet` is unchanged for
+  all four.
+- A detached owner process runs the native CLI under a guard that leads its own
+  process group, bounded by `[crew] background_timeout` (1800 seconds by default)
+  and 8 MiB of output. When the run ends, for any reason, the whole group is
+  killed. If the owner itself dies, at any point, the guard kills the group. That
+  contains every process that stays in the group; one that leaves it (`setsid`,
+  daemonizing, its own process group) is outside it and can outlive the run, and
+  the owner stops waiting for output it holds after 5 seconds. The owner records exactly one outcome:
+  `done` with the report, or an `error` for a failure, timeout, oversize output or
+  cancellation. An exit status never counts as success; only a complete result
+  document does.
+- `captain interrupt NAME` asks the owner to stop the run and reports whether the
+  cancel took effect or completion won; only the owner signals the native CLI. If the
+  owner is gone, `status` shows `state:failed` with `[background-lost]` and the next
+  `wait` records and delivers it; nothing is restarted.
+- `tell`, `answer`, `focus` and `model` are refused: there is no conversation to
+  continue. `dismiss` works once the outcome is acknowledged.
+- The run continues when the captain exits; its outcome is delivered when the session
+  is reopened with `captain --session ID`. `wait` and `interrupt` with `--session` need
+  no Herdr pane when every crew they reach is a background crew. A session started by
+  an older captain in temporary storage refuses `--background`.
+
+Reported checkout smoke covered Pi completion, Codex cancellation, unchanged pane
+counts, wait/ack, and paneless commands. Pi auto-delivery/reconnect and exhaustive
+provider permission enforcement remain unverified; Codex successful completion was not
+live tested. Automated tests drive a stub CLI.
+
+```sh
+captain crew --background --agent codex --task "Find why startup is slow; report the cause"
+captain status
+captain interrupt Jack --reason "no longer needed"
+```
+
 ## Memory
 
 Captain stores session and project graph relationships outside the repository,
@@ -416,7 +468,10 @@ captain memory path
 captain memory prune --older-than 30
 ```
 
-The default scope is session; project facts survive into future sessions. Repo
+The default scope is session; project facts survive into future sessions. New
+sessions live in the durable state root, so a reopened session still holds its
+assignments and undelivered outcomes; one created by an older captain in OS temp
+storage is opened where it is. Repo
 facts are shared with the team through version control, so the code fixes their
 shape: an explicit `--scope repo` only, a relation from the closed set
 `decided|method|convention`, a required `--because` rationale, deterministic
@@ -465,6 +520,8 @@ Read the affected pane before retrying or approving anything.
 |---|---|
 | `captain [--agent claude\|codex\|pi\|grok] [--prompt TEXT] [--no-dashboard]` | Start a captain in this pane |
 | `captain crew [NAME] --task TEXT [--owns PATH] [--allow ACTION] [--handoff ID] [--agent ...] [--placement pane\|tab] [--direction ...] [--split-pane ...] [--model ...]` | Recruit crew |
+| `captain crew [NAME] --background --agent codex\|pi --task TEXT [--model ...]` | One read-only headless turn as a paneless crew |
+| `captain interrupt NAME [--reason TEXT]` | Stop a crew's current turn; cancels a background run |
 | `captain wait NAME [--timeout SECONDS] [--json] [--ack DELIVERY_ID]` | Read and acknowledge a crew notification |
 | `captain wait --all [--timeout SECONDS] [--json]` | Read all crew's pending deliveries; acknowledge per name/ID |
 | `captain recover` | JSON recovery digest with explicit omission counts; no acknowledgements |

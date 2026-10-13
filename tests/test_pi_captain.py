@@ -25,15 +25,18 @@ import { readFileSync, readdirSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { mock } from "node:test";
-mock.timers.enable({ apis: ["setTimeout", "Date"] });
+mock.timers.enable({ apis: ["setTimeout", "setInterval", "Date"] });
 const path = process.argv[2];
 const { default: extension } = await import(pathToFileURL(path));
 const calls = [], messages = [], notices = [];
 const history = [];
 let recordMessages = true;
-let tool, shutdown;
+let tool, shutdown, start;
 const pi = {
-  on(event, handler) { assert.equal(event, "session_shutdown"); shutdown = handler; },
+  on(event, handler) {
+    if (event === "session_start") start = handler;
+    else { assert.equal(event, "session_shutdown"); shutdown = handler; }
+  },
   registerTool(value) { tool = value; },
   exec(command, args, options) {
     return new Promise((resolve, reject) => calls.push({ command, args, options, resolve, reject }));
@@ -330,6 +333,218 @@ assert.equal(messages.length, 1);
 assert.match(notices.at(-1)[0], /uncertain/);
 """)
 
+    def test_background_crew_watches_arm_themselves_and_survive_reconnect(self):
+        self.run_js(r"""
+const { writeFileSync } = await import("node:fs");
+const ctx = { ui: { notify: (...args) => notices.push(args) },
+  sessionManager: { getBranch: () => history } };
+const crew = (execution, status = "started") => ({ incarnation_id: "i1", execution, status });
+const assignment = (state, ack_seq = 0, notices = []) => ({ incarnation_id: "i1", state,
+  pending: null, ack_seq, notices });
+const save = (roster, assignments) => {
+  writeFileSync(join(dirname(path), "session.json"), JSON.stringify({ crew: roster }));
+  writeFileSync(join(dirname(path), "protocol.json"), JSON.stringify({
+    active: Object.fromEntries(Object.keys(assignments).map(id => [id, id])), assignments }));
+};
+save({ jack: crew("background"), will: crew(undefined), gibbs: crew("background", "dismissed"),
+  cotton: crew("background") },
+  { jack: assignment("working"), will: assignment("working"), gibbs: assignment("working"),
+    cotton: assignment("done", 1, [{}]) });
+start({ type: "session_start", reason: "startup" }, ctx);
+// Only the unresolved, live background crew is watched; nothing was asked of the model.
+assert.equal(calls.length, 1);
+assert.deepEqual(calls[0].args.slice(-5), ["wait", "jack", "--json", "--timeout", "60"]);
+calls[0].resolve(result("found the slow path", "done", "d1", "Jack"));
+await flush();
+assert.match(messages[0].message.content, /found the slow path/);
+assert.deepEqual(calls[1].args.slice(-2), ["--ack", "d1"]);
+calls[1].resolve(result("", "idle", null, "Jack"));
+await flush();
+// Acknowledged done ends the watch; the next sweep finds nothing left to arm.
+save({ jack: crew("background") }, { jack: assignment("done", 1, [{}]) });
+await tick(5000);
+assert.equal(calls.length, 2);
+assert.deepEqual(notices, []);
+// Reconnect: a new extension runtime restores the watch for an unresolved assignment.
+shutdown();
+save({ jack: crew("background") }, { jack: assignment("done", 0, [{}]) });
+extension(pi);
+start({ type: "session_start", reason: "resume" }, ctx);
+assert.equal(calls.length, 3);
+calls[2].resolve({ stdout: "", stderr: "boom", code: 1 });
+await flush();
+assert.match(notices.at(-1)[0], /boom/);
+// A failed auto watch is reported once, not rearmed on every sweep.
+await tick(5000);
+assert.equal(calls.length, 3);
+shutdown();
+""")
+
+    def test_an_explicit_cancel_is_never_reversed_by_the_automatic_sweep(self):
+        self.run_js(r"""
+const { writeFileSync } = await import("node:fs");
+const ctx = { ui: { notify: (...args) => notices.push(args) },
+  sessionManager: { getBranch: () => history } };
+const save = assignments => {
+  writeFileSync(join(dirname(path), "session.json"), JSON.stringify({ crew: {
+    jack: { incarnation_id: "i1", execution: "background", status: "started" } } }));
+  writeFileSync(join(dirname(path), "protocol.json"), JSON.stringify({
+    active: { jack: "x" }, assignments }));
+};
+save({});
+start({ type: "session_start", reason: "startup" }, ctx);
+assert.equal(calls.length, 0);
+await arm("jack");  // armed by hand before the sweep would arm it
+assert.equal(calls.length, 1);
+save({ x: { incarnation_id: "i1", state: "working", pending: null, ack_seq: 0, notices: [] } });
+await arm("jack", undefined, true);
+assert.equal(calls[0].options.signal.aborted, true);
+await tick(5000);
+await tick(5000);
+assert.equal(calls.length, 1);
+await arm("jack");  // an explicit rearm lifts it
+assert.equal(calls.length, 2);
+shutdown();
+""")
+
+    def test_stopped_watches_do_not_suppress_a_new_incarnation_of_the_same_name(self):
+        for stop in ("failure", "cancel"):
+            with self.subTest(stop=stop):
+                self.run_js(
+                    f"const stop = {json.dumps(stop)};\n"
+                    + r"""
+const { writeFileSync } = await import("node:fs");
+const ctx = { ui: { notify: (...args) => notices.push(args) },
+  sessionManager: { getBranch: () => history } };
+const save = incarnation => {
+  writeFileSync(join(dirname(path), "session.json"), JSON.stringify({ crew: {
+    jack: { incarnation_id: incarnation, execution: "background", status: "started" } } }));
+  writeFileSync(join(dirname(path), "protocol.json"), JSON.stringify({
+    active: { jack: incarnation }, assignments: {
+      [incarnation]: { incarnation_id: incarnation, state: "working", pending: null,
+        ack_seq: 0, notices: [] } } }));
+};
+save("old");
+start({ type: "session_start", reason: "startup" }, ctx);
+assert.equal(calls.length, 1);
+if (stop === "failure") {
+  calls[0].resolve({ stdout: "", stderr: "boom", code: 1 });
+} else {
+  await arm("Jack", undefined, true);
+  assert.equal(calls[0].options.signal.aborted, true);
+  calls[0].reject(new Error("cancelled"));
+}
+await flush();
+await tick(5000);
+assert.equal(calls.length, 1); // The old assignment stays stopped.
+save("new"); // Dismiss old Jack and recruit another incarnation with a fresh assignment.
+await tick(5000);
+assert.equal(calls.length, 2);
+assert.deepEqual(calls[1].args.slice(-5), ["wait", "jack", "--json", "--timeout", "60"]);
+calls[1].resolve(result("new report", "done", `new-${stop}`, "Jack", "new"));
+await flush();
+assert.equal(messages.length, 1);
+assert.equal(messages[0].message.details.assignment_id, "new");
+assert.deepEqual(calls.at(-1).args.slice(-2), ["--ack", `new-${stop}`]);
+calls.at(-1).resolve(result("", "idle", null));
+await flush();
+shutdown();
+"""
+                )
+
+    def test_auto_cancel_then_immediate_rearm_is_not_undone_by_late_abort(self):
+        self.run_js(r"""
+const { writeFileSync } = await import("node:fs");
+const ctx = { ui: { notify: (...args) => notices.push(args) },
+  sessionManager: { getBranch: () => history } };
+writeFileSync(join(dirname(path), "session.json"), JSON.stringify({ crew: {
+  jack: { incarnation_id: "i1", execution: "background", status: "started" } } }));
+writeFileSync(join(dirname(path), "protocol.json"), JSON.stringify({ active: { jack: "a1" },
+  assignments: { a1: { incarnation_id: "i1", state: "working", pending: null,
+    ack_seq: 0, notices: [] } } }));
+start({}, ctx);
+await arm("Jack", undefined, true);
+await tick(5000);
+assert.equal(calls.length, 1);
+await arm("Jack", 60);
+assert.equal(calls.length, 2);
+calls[0].reject(new Error("late abort"));
+await flush();
+await tick(60000);
+calls[1].resolve(result("", "timeout", null));
+await flush();
+await tick(1000);
+await tick(5000);
+assert.equal(calls.length, 3); // Manual rearm expired; automatic renewal still works.
+assert.equal(notices.filter(([, level]) => level === "error").length, 0);
+shutdown();
+""")
+
+    def test_a_delivery_ingested_after_the_warning_is_acknowledged_without_resend(self):
+        # The live incident: the captain sat in a 45s tool call, so the steered delivery
+        # reached history about 40s after it was sent and the watch had already given up.
+        self.run_js(r"""
+const { writeFileSync } = await import("node:fs");
+const ctx = { ui: { notify: (...args) => notices.push(args) },
+  sessionManager: { getBranch: () => history } };
+writeFileSync(join(dirname(path), "session.json"), JSON.stringify({ crew: {
+  jack: { incarnation_id: "i1", execution: "background", status: "started" } } }));
+writeFileSync(join(dirname(path), "protocol.json"), JSON.stringify({ active: { jack: "x" },
+  assignments: { x: { incarnation_id: "i1", state: "done", pending: null, ack_seq: 0,
+    notices: [{}] } } }));
+recordMessages = false;  // pi is mid-turn: the steer is queued, not yet in history
+start({ type: "session_start", reason: "startup" }, ctx);
+calls[0].resolve(result("late report", "done", "d1", "Jack"));
+await flush();
+assert.equal(messages.length, 1);
+await tick(30000);
+assert.match(notices.at(-1)[0], /uncertain.*not resent/);
+assert.equal(notices.at(-1)[1], "warning");
+await tick(10000);
+assert.equal(calls.length, 1);  // neither acknowledged nor waited on again
+history.push({ type: "custom_message", ...messages[0].message });  // the turn ends
+await tick(1000);
+assert.deepEqual(calls.at(-1).args.slice(-2), ["--ack", "d1"]);
+assert.equal(messages.length, 1);  // never resent
+calls.at(-1).resolve(result("", "idle", null, "Jack"));
+await flush();
+const [log] = readdirSync(dirname(path)).filter(name => name.startsWith("pi-wait-"));
+assert.match(readFileSync(join(dirname(path), log), "utf8"), /\{"delivered":true\}\n$/);
+assert.equal(notices.filter(([, level]) => level === "error").length, 0);
+shutdown();
+""")
+
+    def test_a_delivery_never_ingested_is_never_acknowledged_and_rearm_reconciles(self):
+        self.run_js(r"""
+const acked = () => calls.some(call => call.args.includes("--ack"));
+recordMessages = false;
+await arm("Jack", 60);
+calls[0].resolve(result());
+await flush();
+await tick(30000);
+assert.equal(notices.at(-1)[1], "warning");
+await tick(31000);  // the watch expires with the delivery still absent
+assert.match(notices.at(-1)[0], /uncertain.*not resent or acknowledged/);
+assert.equal(notices.at(-1)[1], "error");
+assert.equal(acked(), false);
+// A fresh delivery whose watch is cancelled while it waits for history acknowledges
+// nothing either, now or later.
+await arm("Will", 60);
+calls.at(-1).resolve(result("will report", "done", "d2", "Will"));
+await flush();
+await tick(30000);
+await arm("Will", undefined, true);
+history.push({ type: "custom_message", ...messages[1].message });
+await tick(30000);
+assert.equal(acked(), false);
+// Once pi has ingested it, an explicit rearm acknowledges it without resending.
+await arm("Will");
+calls.at(-1).resolve(result("will report", "done", "d2", "Will"));
+await flush();
+assert.deepEqual(calls.at(-1).args.slice(-2), ["--ack", "d2"]);
+assert.equal(messages.length, 2);
+""")
+
     def test_generated_extensions_preserve_previous_launches(self):
         original = self.extension.read_bytes()
         second = captain_extension(self.directory)
@@ -374,7 +589,11 @@ for (const busy of [true, false]) {
   await AgentSession.prototype.sendCustomMessage.call({
     isStreaming: busy,
     agent: { steer(value) { delivered = value; } },
-    async _runAgentPrompt(value) { delivered = value; },
+    async _startRun(value) {
+      assert.equal(value.messageType, "custom");
+      assert.equal(busy, false);
+      delivered = value.message;
+    },
   }, message, options);
   assert.equal(delivered.role, "custom");
   assert.match(delivered.content, /reported: FIN/);

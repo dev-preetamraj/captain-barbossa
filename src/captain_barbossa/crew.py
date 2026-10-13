@@ -80,6 +80,10 @@ class Crew:
         return self.record.get("status") == "dismissed"
 
     @property
+    def is_background(self):
+        return self.record.get("execution") == "background"
+
+    @property
     def events(self):
         incarnation = self.record.get("incarnation_id")
         return self.session.events(f"{self.crew_id}-{incarnation}" if incarnation else self.crew_id)
@@ -112,6 +116,10 @@ class Crew:
             reasons.append("mail state unreadable")
         if assignment and assignment.get("incarnation_id") != incarnation:
             return CrewState("unknown", "none", "stale incarnation")
+        if self.is_background:
+            from .background import describe
+
+            return CrewState(*describe(self, assignment))
         pane_status = None
         try:
             pane_status = self.pane.agent_status()

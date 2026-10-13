@@ -55,6 +55,78 @@ Placement flags and tab shapes are documented in
 Model tiers and defaults are documented in
 [settings.md](https://github.com/dev-preetamraj/captain-barbossa/blob/main/docs/settings.md).
 
+## Background crew
+
+`crew --background` recruits a crew with no pane for one read-only headless turn.
+It has the same name, incarnation, assignment, read/search grants and acknowledged
+deliveries as any crew; only execution differs. Agent and model resolve as above,
+with placement skipped; Herdr is never called to launch it.
+
+Lifecycle:
+
+1. Recruitment refuses placement flags, `--owns`, `--handoff`, write grants, a
+   non-finite `[crew] background_timeout`, and the `claude` and `grok` agents (a
+   headless claude turn still runs the user's hooks and settings allow rules; grok
+   documents no flag to drop its MCP servers and plugins) before reserving
+   anything, and refuses a legacy temp-root session. codex and pi are supported.
+2. The roster entry (`status: starting`) is written before the assignment is
+   reserved, and the run record and intent before any process starts, so a
+   recruiter killed at any step leaves a crew that `status` shows (`state:failed`
+   when nothing ran), the next `wait` reconciles, and `dismiss` retires; its name
+   stays taken until then. From before the assignment is reserved until the owner
+   claims or the recruiter withdraws, the recruiter holds a lock that tells
+   `status` and `wait` it is still deciding. A detached owner then starts. Claim and
+   withdrawal are each one rename of the same intent file, so exactly one wins,
+   atomically and with no lock a stopped process could hold: recruitment returns
+   once the owner claims, or after 10 seconds withdraws the intent (`abandoned`),
+   closes the assignment as `[background-start]` (waiting at most 2 seconds for the
+   protocol lock, else leaving that to the next `wait`) and frees the name. An owner
+   that resumes later finds the intent gone and runs nothing; a claim made more than
+   20 seconds after the intent, or for an assignment already closed, withdraws too.
+   That clock only expires stale intent; whether a recruiter or owner is alive is
+   always decided by its lock, never by time or a PID.
+3. The owner runs the provider's read-only headless argv (quiet's gate plus pi's
+   isolation flags in the README) under a guard process that leads its own process
+   group, with stdout capped at 8 MiB and stderr at 64 KiB, until the CLI exits,
+   `[crew] background_timeout` passes, the output cap is hit, or a cancel is
+   requested. The guard starts watching the owner before it starts the CLI, keeps
+   running through TERM, and after the CLI exits reports its status and waits to be
+   killed, so it is the group's last member until the owner's KILL. However the run
+   ends, the owner sends the group TERM, then KILL after up to 5 seconds of grace
+   (none after a clean exit), and only then reaps the guard; a descendant that
+   ignored TERM or still held the output pipes is gone. Only a process that left
+   the group (`setsid`, daemonizing, its own process group) can outlive the run; the
+   owner waits 5 seconds more for output such a process holds and moves on.
+4. A complete result document becomes `done` with the report (at most 4000
+   characters in the delivery; the whole report is kept beside the run record).
+   Anything else closes the assignment with an `error` delivery:
+   `[background-failed]`, `[background-timeout]`, `[background-output-limit]` or
+   `[background-cancelled]`. `status` shows those as `state:failed`, never done.
+5. A free lock with no recorded outcome means the owner was lost. The guard holds a
+   pipe only the owner writes to, so the owner's death, however and whenever it
+   happens (before the CLI starts, after it exits, or between TERM and KILL), closes
+   it and the guard kills the whole group. `status` then shows `state:failed` with
+   `[background-lost]`, and the next `wait` records and delivers that. Nothing is
+   restarted.
+
+`interrupt NAME` writes a cancel request and waits up to 10 seconds for the owner to
+confirm it, reporting `cancelled` only when the cancel took effect and otherwise the
+outcome that won. Only the owner signals the native CLI's group, before reaping its
+leader, so a recycled id cannot be hit. With no owner running, nothing is signalled.
+`wait NAME`, `wait --all` and `interrupt NAME` with an explicit `--session` resolve
+no Herdr pane when every crew they reach is a background crew; involving a visual
+crew they still need Herdr and fail clearly without it. `tell`, `answer`,
+`assign --handoff`, `focus` and `model` are refused as `[background-unsupported]`.
+`dismiss` needs the outcome acknowledged, like any crew, and closes no pane.
+
+A pi captain arms a watch for every unresolved background crew when its session
+starts, reloads or is reopened, rechecks every 5 seconds, and stops once the
+outcome is acknowledged. A watch cancelled with `captain_wait` `cancel:true`, or one
+that stopped on an error, is not rearmed by that sweep until it is armed again by
+hand or the session starts again. Delivery is the existing bridge: written to the session
+journal before sending and acknowledged only after it appears in pi's history.
+Other captains arm `wait` as they do for any crew.
+
 ## Assignments and questions
 
 New recruits receive separate crew-incarnation, assignment, and message IDs.

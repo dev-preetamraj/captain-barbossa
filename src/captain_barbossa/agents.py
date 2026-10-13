@@ -9,18 +9,18 @@ import time
 from itertools import cycle
 from uuid import uuid4
 
-from . import config, instructions, protocol, runtime
-from .crew import Crew
+from . import background, config, instructions, protocol, runtime
+from .crew import Crew, CrewState
 from .dashboard import dashboard_pane, renest_dashboard, start_dashboard
 from .events import read_events
 from .memory import add_memory, truncate_label
 from .models import HOOKLESS, PROVIDERS, claude_label, model_names, resolve_model
 from .pane import MODEL_TIMEOUT, PROMPT_TIMEOUT, shell_ready_for_input
 from .pi_captain import captain_extension
-from .placement import Placement
+from .placement import Placement, launch_choices
 from .prompts import choose
 from .runtime import HERDR_ERRORS, CaptainError, check_text, executable
-from .sessions import agent_name, crew_meta, prune_sessions, read_session, session
+from .sessions import agent_name, crew_meta, is_durable, prune_sessions, read_session, session
 from .store import private_dir, read_cursor, read_json, state_root, temp_root, write_json
 from .update_check import check_for_update
 
@@ -215,14 +215,28 @@ def wait_crew(args, pane, project):
             if args.timeout is None
             else config.in_range(args.timeout, "--timeout", least=0)
         )
-        response = protocol.wait_all(current, timeout)
+        # A recruiter can publish the roster and die before begin reserves anything.
+        # These failures have no assignment to acknowledge; never adopt a stale one.
+        orphans = [
+            protocol.result(crew, None, "error", background.UNRESERVED)
+            for crew in Crew.members(current)
+            if not crew.is_dismissed and unreserved(crew)
+        ]
+        response = protocol.wait_all(current, 0 if orphans else timeout)
+        if orphans:
+            response["status"] = "ready"
+            response["deliveries"].extend(orphans)
         if args.json:
             print(json.dumps(response))
         else:
             for delivery in response["deliveries"]:
                 print(
                     f"{delivery['crew']} {delivery['status']}: {delivery['summary']} "
-                    f"(delivery {delivery['delivery_id']}; acknowledge with wait NAME --ack ID)"
+                    + (
+                        f"(delivery {delivery['delivery_id']}; acknowledge with wait NAME --ack ID)"
+                        if delivery["delivery_id"]
+                        else "(nothing pending to acknowledge)"
+                    )
                 )
             if not response["deliveries"]:
                 print("timeout: no pending deliveries")
@@ -310,6 +324,7 @@ def wait_crew(args, pane, project):
 
 def focus_crew(args, pane, project):
     _, crew = Crew.for_args(args, pane, project)
+    refuse_background(crew, "focus")
     try:
         agent = runtime.herdr("agent", "get", crew.record["agent"]).get("agent", {})
         # The live agent wins over the recorded tab when its pane has moved.
@@ -332,6 +347,13 @@ def interrupt_crew(args, pane, project):
     current, crew = Crew.for_args(args, pane, project)
     if crew.is_dismissed:
         raise CaptainError(f"{crew.display_name} was already dismissed.")
+    if crew.is_background:
+        outcome = background.cancel(crew, args.reason)
+        # Only the owner's confirmation proves this turn was actually interrupted.
+        if outcome == "cancelled":
+            add_memory(current.graph, crew.record["agent"], "interrupted", args.reason or "captain")
+        print(f"{crew.display_name}: {outcome}.")
+        return
     try:
         runtime.herdr("agent", "send-keys", crew.record["agent"], "escape")
     except CaptainError as exc:
@@ -359,14 +381,24 @@ def status_crew(args, pane, project):
             continue
         task = (crew.record.get("task") or "").splitlines()
         held = None
+        orphan = False
         if crew.record.get("incarnation_id") and state and not crew.is_dismissed:
-            task = protocol.active(state, crew)["original_task"].splitlines()
-            if protocol.unread(crew):
+            try:
+                task = protocol.active(state, crew)["original_task"].splitlines()
+            except CaptainError:
+                if not crew.is_background:
+                    raise
+                orphan = True
+            if crew.record.get("pane") and protocol.unread(crew):
                 try:
                     held = crew.pane.nudge_block(crew)
                 except HERDR_ERRORS:
                     pass
-        current_state = crew.current_state()
+        current_state = (
+            CrewState("failed", "process", background.UNRESERVED)
+            if orphan
+            else crew.current_state()
+        )
         status = f"state:{current_state.state} source:{current_state.source} " + truncate_label(
             " ".join(current_state.detail.split()), 60
         )
@@ -377,7 +409,7 @@ def status_crew(args, pane, project):
                 crew.display_name,
                 crew.record.get("provider", "-"),
                 crew.record.get("model") or "-",
-                crew.record.get("pane") or "-",
+                crew.record.get("pane") or ("background" if crew.is_background else "-"),
                 status,
                 truncate_label(task[0], 60) if task else "-",
             )
@@ -401,6 +433,7 @@ def tell_crew(args, pane, project):
     if crew.record.get("incarnation_id"):
         if crew.is_dismissed:
             raise CaptainError("Crew was dismissed; recruit new crew instead.")
+        refuse_background(crew, "tell")
         if not args.assignment:
             raise CaptainError("Protocol follow-ups require --assignment ID.")
         message_id = protocol.deliver(crew, args.message, assignment_id=args.assignment)
@@ -427,6 +460,8 @@ def protocol_command(args, pane, project):
     _, crew = Crew.for_args(args, pane, project)
     if crew.is_dismissed:
         raise CaptainError("Crew was dismissed; recruit new crew instead.")
+    if args.command in ("assign", "answer"):
+        refuse_background(crew, args.command)
     if args.command == "assign":
         assignment = protocol.begin(crew, project, args.task, args.owns, args.allow, args.handoff)
         message_id = protocol.deliver(crew, args.task, assignment_id=assignment["id"], initial=True)
@@ -444,6 +479,7 @@ def protocol_command(args, pane, project):
 def switch_model(args, pane, project):
     """Switch a running crew to another model through the native CLI's own /model command."""
     current, crew = Crew.for_args(args, pane, project)
+    refuse_background(crew, "a model switch")
     provider = crew.record["provider"]
     model = resolve_model(provider, args.model)
     crew_agent = crew.record["agent"]
@@ -542,7 +578,8 @@ def dismiss_crew(args, pane, project):
         except HERDR_ERRORS as exc:  # geometry is cosmetic; never lose the dismissal over it
             print(f"captain: tab not re-evened: {exc}", file=sys.stderr)
             evening = []
-        if crew.record.get("incarnation_id"):
+        # A background recruit that died before reserving holds nothing to settle.
+        if crew.record.get("incarnation_id") and not unreserved(crew):
             with protocol.checkpoint(current.directory) as state:
                 assignment = protocol.active(state, crew)
                 # Same question the blocker asks: an assignment nothing reached must not keep
@@ -589,6 +626,68 @@ def dismiss_crew(args, pane, project):
     print(f"Dismissed {crew.display_name}.")
 
 
+def launch_background(crew, current, project, provider, binary, model, args):
+    """Start a paneless crew. The roster entry is written before the assignment is
+    reserved, so a recruiter that dies at any later point leaves a crew status shows
+    (failed, if nothing ran), wait reconciles, and dismiss can retire."""
+    task = args.task
+    record = {
+        **crew.record,
+        "provider": provider,
+        "execution": "background",
+        "model": model,
+        "task": task,
+        "status": "starting",
+    }
+    crew.record = record
+    current.meta["crew"][crew.crew_id] = record
+    write_json(current.meta_path, current.meta)
+    try:
+        # Held before begin publishes the assignment, so a wait in between sees a live
+        # recruiter rather than a lost run.
+        with background.launching(crew):
+            assignment = protocol.begin(crew, project, task, args.owns, args.allow, args.handoff)
+            record["assignment_id"] = assignment["id"]
+            write_json(current.meta_path, current.meta)
+            files = background.prepare(
+                crew, project, provider, binary, model, task, assignment["id"]
+            )
+            background.start(files)
+    except (CaptainError, OSError) as exc:
+        try:
+            with protocol.checkpoint(current.directory, timeout=background.LOCK_WAIT) as state:
+                assignment = protocol.active(state, crew)
+                if assignment["state"] != "done":
+                    background.close(assignment, "failed", f"[background-start] {exc}")
+        except CaptainError:
+            pass  # nothing reserved, or the lock stayed held: the next wait reconciles it
+        record.update(status="dismissed", startup_error=str(exc))
+        write_json(current.meta_path, current.meta)
+        raise
+    record["status"] = "started"
+    write_json(current.meta_path, current.meta)
+    add_memory(current.graph, f"session:{current.meta['id']}", "crew", record["agent"])
+    add_memory(current.graph, record["agent"], "name", record["name"])
+    add_memory(current.graph, record["agent"], "assigned", task)
+    print(json.dumps({key: value for key, value in record.items() if key != "task"}))
+
+
+def unreserved(crew):
+    """Whether a background recruit died before `protocol.begin` reserved its assignment."""
+    if not crew.is_background:
+        return False
+    assignment = protocol.active_assignment(crew)
+    return not assignment or assignment["incarnation_id"] != crew.record.get("incarnation_id")
+
+
+def refuse_background(crew, action):
+    if crew.is_background:
+        raise CaptainError(
+            f"[background-unsupported] {crew.display_name} runs in the background with no pane "
+            f"and no conversation to continue; {action} is not supported for it."
+        )
+
+
 def create_crew(args, pane, project):
     given = args.name
     if given is not None:
@@ -603,14 +702,28 @@ def create_crew(args, pane, project):
             "or omit NAME to assign one automatically. Names must be at most 16 characters."
         )
     check_text(args.task, "task")
+    paneless = getattr(args, "background", False)
+    if paneless:
+        background.refuse_flags(args)
     current = session(project, pane, args.session)
+    if paneless and not is_durable(current.directory, project):
+        raise CaptainError(
+            "[legacy-session] This session lives in temporary storage from an older captain, "
+            "so a background run could not be recovered. Start a new captain session."
+        )
     with crew_meta(current.directory) as meta:
         current = current._replace(meta=meta)
-        board = dashboard_pane(current)
-        rec = Placement(pane, current, board).resolve(args, current.directory)
-        provider, placement, spot, model = rec.agent, rec.placement, rec.spot, rec.model
-        direction, split_pane, tab_id, auto = spot.direction, spot.pane, spot.tab, spot.reason
-        print(f"Recruitment sources: {json.dumps(rec.sources, sort_keys=True)}", file=sys.stderr)
+        if paneless:
+            provider, model, sources = launch_choices(args, current.directory)
+            background.check_provider(provider)
+            sources["execution"] = "--background"
+        else:
+            board = dashboard_pane(current)
+            rec = Placement(pane, current, board).resolve(args, current.directory)
+            provider, placement, spot, model = rec.agent, rec.placement, rec.spot, rec.model
+            direction, split_pane, tab_id, auto = spot.direction, spot.pane, spot.tab, spot.reason
+            sources = rec.sources
+        print(f"Recruitment sources: {json.dumps(sources, sort_keys=True)}", file=sys.stderr)
         binary = executable(provider)
         name = args.name
         if name is None:
@@ -629,6 +742,9 @@ def create_crew(args, pane, project):
             {"id": name, "name": display_name, "agent": crew_agent, "incarnation_id": incarnation},
             current,
         )
+        if paneless:
+            launch_background(crew, current, project, provider, binary, model, args)
+            return
         assignment = protocol.begin(crew, project, args.task, args.owns, args.allow, args.handoff)
         # Reserve ownership before launch; failures before native startup release it below.
         crew.record.update(

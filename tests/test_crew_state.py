@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from captain_barbossa import events, instructions
+from captain_barbossa.agents import unreserved
 from captain_barbossa.crew import Crew, CrewState, declared_state, event_status
 from captain_barbossa.runtime import CaptainError
 from captain_barbossa.sessions import Session
@@ -184,3 +185,13 @@ class CrewStateTests(unittest.TestCase):
     def test_old_hook_cannot_read_current_mail(self):
         with self.assertRaisesRegex(CaptainError, "Stale crew incarnation"):
             events.crew_for_events(self.crew.events.parent / "will-old.jsonl")
+
+    def test_only_a_background_crew_without_its_own_assignment_is_unreserved(self):
+        self.assertFalse(unreserved(self.crew))
+        self.record["execution"] = "background"
+        self.assertFalse(unreserved(self.crew))
+        self.assignment["incarnation_id"] = "older"
+        self.save_assignment()
+        self.assertTrue(unreserved(self.crew))
+        (self.directory / "protocol.json").unlink()
+        self.assertTrue(unreserved(self.crew))

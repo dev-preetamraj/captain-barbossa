@@ -77,7 +77,7 @@ The commented list of shipped keys and defaults is in
 and is exactly what `captain init` writes. The tables cover:
 
 - `[captain]`: the captain's CLI and optional starting model.
-- `[crew]`: the default crew model and wait timeout.
+- `[crew]`: the default crew model, wait timeout, and background turn timeout.
 - `[dashboard]`: automatic launch, refresh interval, pane ratio, context limit,
   and price-file override. See
   [dashboard.md](https://github.com/dev-preetamraj/captain-barbossa/blob/main/docs/dashboard.md).

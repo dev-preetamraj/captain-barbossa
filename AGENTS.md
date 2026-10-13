@@ -43,6 +43,7 @@ src/captain_barbossa/
   prompts.py      keyboard selectors for agent and placement choices
   onboarding.py   bootstrap Herdr when captain runs outside a workspace
   pi_captain.py   pi delivery bridge, shipped inside the wheel
+  background.py   paneless read-only crew: detached owner process, liveness, cancel, outcome
   update_check.py startup PyPI update check and `captain update`
 tests/            unittest suite; Herdr and model sessions are mocked, a real PTY is used
 docs/             plan.md is current scope; settings, placement, dashboard, memory,
@@ -53,9 +54,11 @@ Key facts:
 
 - Herdr is driven only through `herdr` subprocesses in `runtime.herdr`, which
   validates the JSON response. Never shell out to Herdr elsewhere.
-- Memory lives outside the checkout, split by durability: project-scope `graph.json`
-  under `~/.local/state/captain-barbossa/<project hash>/` (or `$XDG_STATE_HOME`),
-  session-scope `sessions/<id>/` under `<OS temp>/captain-barbossa-<uid>/<project hash>/`.
+- Memory lives outside the checkout: project-scope `graph.json` and new sessions'
+  `sessions/<id>/` under `~/.local/state/captain-barbossa/<project hash>/` (or
+  `$XDG_STATE_HOME`). Sessions made earlier under `<OS temp>/captain-barbossa-<uid>/`
+  are opened in place via `sessions.locate`; each id has one directory, and
+  enumeration (`sessions.session_directories`), allocation and prune cover both roots.
   `CAPTAIN_MEMORY_ROOT` overrides both roots at once. Repo scope is the exception:
   `.captain/graph.json` in the checkout, written only by an explicit
   `memory add --scope repo`, read without migration, locked from the state root.
@@ -105,6 +108,19 @@ Key facts:
   concrete request authorizes only its stated scope. Every run appends a `{"type": "quiet", ...}` record to
   `events/captain.jsonl`, raised if it cannot be written, because work with no pane is
   reviewable only through that record.
+- `crew --background` is opt-in and read-only: a crew record with `execution:
+  "background"` and no pane, running `models.headless_argv(isolated=True)` (codex
+  and pi only; claude and grok refused; quiet never passes `isolated`) under a
+  detached `background.py` owner. The roster entry precedes `protocol.begin`, which runs
+  under the recruiter's launch flock; claim and withdrawal are renames of one intent
+  file. Recruiter and owner flocks are liveness (never a PID or a clock); the one clock
+  only expires intent unclaimed past twice the startup window; a guard leads the
+  native group, survives TERM and the CLI's exit, and kills the group when the
+  owner's lifeline pipe closes; only the owner signals that group, before reaping the
+  guard, and only after KILL.
+  Exactly one outcome is written; failures, timeouts, cancels and a lost owner
+  close the assignment with an `error` notice and `outcome`, never a `done`. No pane
+  reads, doorbell, `tell` or `answer` for it.
 - The delegation axis is judgment, not file-touching: `make test` writes nothing and
   needs no crew, while research changes no file and does.
 - Settings layer bottom to top: `defaults.toml` (package data, the only place a default

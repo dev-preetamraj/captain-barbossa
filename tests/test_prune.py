@@ -138,6 +138,66 @@ class PruneTests(SessionCase):
             self.assertEqual(sessions.prune_sessions(self.project), [])
         api.assert_not_called()
 
+    def test_unresolved_work_is_kept_at_any_age_and_dismissed_work_is_not(self):
+        assignment = {
+            "incarnation_id": "i1",
+            "state": "done",
+            "pending": None,
+            "ack_seq": 1,
+            "notices": [{}],
+        }
+        cases = {
+            "a" * 32: ({"status": "started"}, {"state": "working"}),
+            "b" * 32: ({"status": "started"}, {"ack_seq": 0}),
+            "c" * 32: ({"status": "started"}, {"pending": {"seq": 1}}),
+            "d" * 32: ({"status": "dismissed"}, {"state": "working"}),
+            "e" * 32: ({"status": "started"}, {}),
+        }
+        directories = {}
+        for session_id, (record, change) in cases.items():
+            directory = self.make_session(session_id, 365)
+            meta = store.read_json(directory / "session.json")
+            meta["crew"]["jack"] = {"incarnation_id": "i1", **record}
+            store.write_json(directory / "session.json", meta)
+            state = {"active": {"jack": "x"}, "assignments": {"x": {**assignment, **change}}}
+            store.write_json(directory / "protocol.json", state)
+            stamp = time.time() - 365 * 86400
+            for path in (*directory.rglob("*"), directory):
+                os.utime(path, (stamp, stamp))
+            directories[session_id] = directory
+        corrupt = self.make_session("f" * 32, 365)
+        (corrupt / "protocol.json").write_text("{", encoding="utf-8")
+        os.utime(corrupt, (time.time() - 365 * 86400,) * 2)
+        with patch.object(sessions, "herdr", return_value=agent_list()):
+            removed = sessions.prune_sessions(self.project)
+        self.assertEqual(sorted(removed), [directories["d" * 32], directories["e" * 32]])
+        self.assertTrue(corrupt.is_dir())
+
+    def test_an_assignment_reserved_before_its_roster_entry_is_kept(self):
+        orphan = self.make_session("a" * 32, 365)
+        assignment = {"incarnation_id": "i1", "state": "working", "pending": None}
+        state = {"active": {"jack": "x"}, "assignments": {"x": {**assignment, "notices": []}}}
+        store.write_json(orphan / "protocol.json", state)
+        os.utime(orphan, (time.time() - 365 * 86400,) * 2)
+        os.utime(orphan / "protocol.json", (time.time() - 365 * 86400,) * 2)
+        with patch.object(sessions, "herdr", return_value=agent_list()):
+            self.assertEqual(sessions.prune_sessions(self.project), [])
+        self.assertTrue(orphan.is_dir())
+
+    def test_prunes_stale_sessions_in_both_the_durable_and_the_legacy_root(self):
+        roots = {
+            "CAPTAIN_STATE_ROOT": str(self.root / "durable"),
+            "CAPTAIN_TEMP_ROOT": str(self.root / "temp"),
+        }
+        self.enterContext(patch.dict(os.environ, roots))
+        self.sessions = store.storage(self.project) / "sessions"
+        legacy = self.make_session("a" * 32, 30)
+        self.sessions = store.state_storage(self.project) / "sessions"
+        durable = self.make_session("b" * 32, 30)
+        with patch.object(sessions, "herdr", return_value=agent_list()):
+            removed = sessions.prune_sessions(self.project)
+        self.assertEqual(sorted(removed), sorted([legacy, durable]))
+
     def test_command_reports_what_it_removed_without_an_active_session(self):
         stale = self.make_session("a" * 32, 30)
         self.make_session("b" * 32, 1)

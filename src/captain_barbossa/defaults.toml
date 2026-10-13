@@ -14,6 +14,9 @@ model = "cheap"
 # full day: quiet stays quiet and only a real event returns. --timeout still wins, and 0
 # means "report whatever has already arrived".
 wait_timeout = 86400
+# Seconds a `captain crew --background` turn may run before its owner stops it and
+# records a failure. Bounded so no unattended worker outlives its usefulness.
+background_timeout = 1800
 
 [dashboard]
 # Open the crew token-usage pane below the captain at launch.

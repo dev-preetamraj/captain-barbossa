@@ -90,6 +90,33 @@ class MemoryRootTests(unittest.TestCase):
         self.assertIn("unittest", text)
         self.assertNotIn("Rust", text)
 
+    def test_new_sessions_are_durable_and_legacy_temp_sessions_open_in_place(self):
+        env = {
+            "CAPTAIN_TEMP_ROOT": str(self.root / "temp"),
+            "CAPTAIN_STATE_ROOT": str(self.root / "state"),
+        }
+        with self.clean_env(**env):
+            fresh, meta = sessions.session(self.project, self.pane, create=True)
+            durable = store.state_storage(self.project) / "sessions"
+            self.assertEqual(fresh.parent, durable)
+            self.assertTrue(sessions.is_durable(fresh, self.project))
+            legacy = store.storage(self.project) / "sessions" / ("a" * 32)
+            legacy.mkdir(parents=True)
+            store.write_json(legacy / "session.json", {**meta, "id": "a" * 32})
+            # Opened where it was made, never copied or moved into the durable root.
+            self.assertEqual(sessions.read_session(self.project, "a" * 32).directory, legacy)
+            self.assertEqual(sessions.session(self.project, self.pane, "a" * 32)[0], legacy)
+            self.assertFalse((durable / ("a" * 32)).exists())
+            self.assertFalse(sessions.is_durable(legacy, self.project))
+            self.assertEqual(
+                sorted(sessions.session_directories(self.project)), sorted([fresh, legacy])
+            )
+            copy = durable / ("a" * 32)
+            copy.mkdir()
+            store.write_json(copy / "session.json", {**meta, "id": "a" * 32})
+            with self.assertRaisesRegex(CaptainError, r"\[duplicate-session\]"):
+                sessions.read_session(self.project, "a" * 32)
+
     def test_state_storage_rejects_root_inside_project(self):
         with self.clean_env(CAPTAIN_MEMORY_ROOT=str(self.project / ".memory")):
             with self.assertRaisesRegex(CaptainError, "outside the project"):

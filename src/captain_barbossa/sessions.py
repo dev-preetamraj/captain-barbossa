@@ -13,11 +13,63 @@ from .store import (
     private_dir,
     read_json,
     read_storage,
+    state_root,
     state_storage,
     storage,
     temp_root,
     write_json,
 )
+
+
+def session_bases(project):
+    """Project namespaces that may hold sessions: durable first, then the legacy temp root.
+
+    New sessions are durable; one started before that stays where it was made and is
+    opened in place, never moved, so each session has exactly one authoritative directory.
+    """
+    bases = []
+    for root in (state_root(), temp_root()):
+        base = read_storage(root, project)
+        if base not in bases:
+            bases.append(base)
+    return bases
+
+
+def locate(project, session_id):
+    """The one existing directory for session_id, or None; never creates anything."""
+    found = []
+    for base in session_bases(project):
+        directory = base / "sessions" / session_id
+        if directory.resolve() != base.resolve() / "sessions" / session_id:
+            raise CaptainError("Session memory must not be a symlink.")
+        path = directory / "session.json"
+        if path.is_symlink():
+            raise CaptainError("Session metadata must not be a symlink.")
+        if path.is_file():
+            found.append(directory)
+    if len(found) > 1:
+        raise CaptainError(
+            f"[duplicate-session] Session {session_id} exists in both {found[0]} and "
+            f"{found[1]}; remove the stale copy."
+        )
+    return found[0] if found else None
+
+
+def is_durable(directory, project):
+    """Whether a session lives under the durable state root rather than the OS temp root."""
+    return directory.parent.parent == read_storage(state_root(), project)
+
+
+def session_directories(project):
+    """Every session directory of this project, across both roots."""
+    for base in session_bases(project):
+        sessions = base / "sessions"
+        if sessions.is_symlink() or not sessions.is_dir():
+            continue
+        for directory in sorted(sessions.iterdir()):
+            if SESSION_ID.fullmatch(directory.name) and directory.is_dir():
+                if not directory.is_symlink():
+                    yield directory
 
 
 def read_session(project, session_id, pane=None, *, max_bytes=None):
@@ -26,16 +78,10 @@ def read_session(project, session_id, pane=None, *, max_bytes=None):
         raise CaptainError("Start captain first, or pass --session <id>.")
     if not SESSION_ID.fullmatch(session_id):
         raise CaptainError("Invalid captain session ID.")
-    base = read_storage(temp_root(), project)
-    directory = base / "sessions" / session_id
-    if directory.resolve() != base.resolve() / "sessions" / session_id:
-        raise CaptainError("Session memory must not be a symlink.")
-    path = directory / "session.json"
-    if path.is_symlink():
-        raise CaptainError("Session metadata must not be a symlink.")
-    if not path.is_file():
+    directory = locate(project, session_id)
+    if directory is None:
         raise CaptainError("This session does not exist for the current project.")
-    meta = read_json(path, max_bytes=max_bytes)
+    meta = read_json(directory / "session.json", max_bytes=max_bytes)
     if not isinstance(meta, dict) or meta.get("project") != str(project.resolve()):
         raise CaptainError("This session belongs to another project.")
     if pane is not None and meta.get("workspace") != pane["workspace_id"]:
@@ -121,10 +167,11 @@ def session(project, pane, session_id=None, create=False):
         session_id = uuid.uuid4().hex
     if not SESSION_ID.fullmatch(session_id):
         raise CaptainError("Invalid captain session ID.")
-    base = storage(project)
-    directory = private_dir(base / "sessions") / session_id
-    if not create and not (directory / "session.json").is_file():
-        raise CaptainError("This session does not exist for the current project.")
+    directory = locate(project, session_id)
+    if directory is None:
+        if not create:
+            raise CaptainError("This session does not exist for the current project.")
+        directory = private_dir(state_storage(project) / "sessions") / session_id
     private_dir(directory)
     with lock(directory / "session.lock"):
         meta_path = directory / "session.json"
@@ -190,24 +237,56 @@ def session_terminal_id(directory):
     return terminal_id if isinstance(terminal_id, str) else None
 
 
+def unresolved(directory):
+    """Whether a session holds work or an outcome nobody has received yet, kept at any age.
+
+    A dismissed crew can receive nothing more, so only live roster entries count. State
+    that cannot be read cannot prove there is nothing left, so it counts too.
+    """
+    try:
+        path = directory / "session.json"
+        roster = read_json(path).get("crew", {}) if path.exists() else {}
+        path = directory / "protocol.json"
+        state = read_json(path) if path.exists() else {}
+        for crew_id, assignment_id in state.get("active", {}).items():
+            record = roster.get(crew_id)
+            assignment = state["assignments"].get(assignment_id)
+            if not assignment:
+                continue
+            if record is None:
+                # Reserved before its roster entry: a recruit that died part-way.
+                if assignment["state"] != "done":
+                    return True
+                continue
+            dismissed = record.get("status") == "dismissed"
+            if dismissed or assignment["incarnation_id"] != record.get("incarnation_id"):
+                continue
+            if (
+                assignment["state"] != "done"
+                or assignment["pending"]
+                or assignment["ack_seq"] < len(assignment["notices"])
+            ):
+                return True
+    except (CaptainError, AttributeError, KeyError, TypeError):
+        return True
+    return False
+
+
 def prune_sessions(project, days=PRUNE_DAYS, current=None):
-    """Remove session directories older than `days` that hold no live Herdr agent.
+    """Remove session directories older than `days` that hold no live Herdr agent and no
+    unresolved work, in both the durable and the legacy temp root.
 
     Herdr being unreachable makes liveness unknowable, so the cutoff doubles rather
     than guessing. Returns the directories removed.
     """
-    sessions = storage(project) / "sessions"
-    if not sessions.is_dir():
+    directories = [path for path in session_directories(project) if path.name != current]
+    if not directories:
         return []
     agents = live_agents()
     cutoff = time.time() - days * 86400 * (2 if agents is None else 1)
     removed = []
-    for directory in sorted(sessions.iterdir()):
-        if directory.is_symlink() or not directory.is_dir():
-            continue
-        if not SESSION_ID.fullmatch(directory.name) or directory.name == current:
-            continue
-        if newest_mtime(directory) >= cutoff:
+    for directory in directories:
+        if newest_mtime(directory) >= cutoff or unresolved(directory):
             continue
         if agents is not None:
             terminal_ids, names = agents

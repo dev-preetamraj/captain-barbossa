@@ -897,6 +897,17 @@ class HeadlessProviderTests(unittest.TestCase):
             "--add-dir", models.headless_argv("claude", "claude", "t", writable=True, add_dir="/x")
         )
 
+    def test_background_pi_drops_user_extensions_while_quiet_is_unchanged(self):
+        pi = models.headless_argv("pi", "pi", "task", isolated=True)
+        for flag in ("--no-extensions", "--no-mcp", "--no-skills", "--no-approve"):
+            self.assertIn(flag, pi)
+        for provider in ("claude", "codex", "pi", "grok"):
+            quiet = models.headless_argv(provider, provider, "task")
+            self.assertEqual(
+                quiet, models.headless_argv(provider, provider, "task", isolated=False)
+            )
+            self.assertNotIn("--no-extensions", quiet)
+
 
 if __name__ == "__main__":
     unittest.main()

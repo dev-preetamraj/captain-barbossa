@@ -325,8 +325,11 @@ whole instruction up front:
   `ask`.
 - **Anything that will hit a native permission prompt.** Approval needs a pane to read
   and a key to send; a headless turn can only be denied.
-- **Anything the user may want to watch, interrupt, retier, or hand off.** `interrupt`,
-  `model`, `tell` and `--handoff` all address a living pane.
+- **Anything the user may want to watch, interrupt, retier, or hand off.** `model`,
+  `tell` and `--handoff` all address a living pane. (`crew --background` is the one
+  exception: a quiet-shaped read-only turn the captain need not block on, which
+  `interrupt` cancels through its owner but nobody can steer. See
+  [crew-lifecycle.md](crew-lifecycle.md#background-crew).)
 - **Long-context work**, where the useful context is built across turns.
 - **Work that outlives one timeout.**
 - **Work that commits its own hunks**, per the convention that crew own their commits.

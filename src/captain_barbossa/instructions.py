@@ -52,6 +52,7 @@ notified. A background wait announces its own completion: never sleep, poll, or
 re-read its output file while waiting."""
     if provider == "pi" and not is_crew:
         wait_guidance = """Use the captain_wait tool with the crew's display name after recruiting.
+Background crew are watched automatically; never arm one yourself.
 It returns immediately and delivers the wait result into pi, waking you when idle.
 Do not launch shell background waits or run another wait for the same crew.
 Quiet results rearm without a model turn. Acknowledge delivery IDs only after receipt.
@@ -102,6 +103,9 @@ headless turn, result printed and recorded, no assignment and no wait:
 It reads the checkout and this session's own state itself; --diff hands it Git, which it
 cannot read. Paste nothing you can name instead. If the turn reports no answer, relay
 its own words; never present an answer of your own in their place.
+Only when the user asks for it in the background: the same read-only turn as a paneless
+crew, reported through wait; no tell, answer, focus or model; interrupt NAME cancels it:
+  CAPTAIN crew --background --agent codex|pi --task 'instruction' [--model cheap|mid|strong]
 Answer from what you have already read. Any question that means opening files you have
 not read goes to CAPTAIN quiet, whatever you could answer by reading them yourself: the
 captain's context is the scarce resource, and a quiet turn spends a throwaway one.

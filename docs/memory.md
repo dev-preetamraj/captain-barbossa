@@ -1,23 +1,28 @@
 # Memory
 
 Captain stores graph relationships and launch metadata in three scopes.
-Session and project memory live outside the repository, split so durable
-project facts survive OS temp cleanup while ephemeral session state does
-not; repo memory is committed with the code and shared by the team:
+Session and project memory live outside the repository in the durable state
+root, so both survive OS temp cleanup; repo memory is committed with the code
+and shared by the team:
 
 ```text
 <project>/.captain/graph.json     # curated --scope repo facts, committed
 
 ~/.local/state/captain-barbossa/<hash of project path>/
   graph.json                      # explicit --scope project facts
-
-<OS temp>/captain-barbossa-<uid>/<hash of project path>/
   sessions/<session-id>/
     session.json                  # workspace and crew references
     graph.json                    # this session's memory only
     protocol.json                 # assignments, questions, delivery acknowledgements
     events/<crew>-<incarnation>.jsonl  # native events; legacy crew omit incarnation
+    background/<crew>-<incarnation>.*  # background run record, lock, bounded output, report
 ```
+
+Sessions created by an older captain live under
+`<OS temp>/captain-barbossa-<uid>/<hash of project path>/sessions/` and are opened
+there in place, never moved; one session id has exactly one directory, and an id
+found in both roots is refused as `[duplicate-session]`. Background crew need a
+durable session.
 
 ## Repo scope
 
@@ -145,7 +150,10 @@ Session directories accumulate as sessions end. `captain memory prune` (also
 run automatically, silently, and best-effort at every launch) removes
 directories where nothing has been touched for `--older-than` days (7 by
 default) and Herdr reports no live agent in their panes; when Herdr is
-unreachable, only directories twice that age are removed. The current
+unreachable, only directories twice that age are removed. Both the durable and
+the legacy temp root are pruned. A session that still holds unresolved work is
+kept at any age: an unfinished assignment or an unacknowledged outcome of a crew
+that is not dismissed, or protocol state that cannot be read. The current
 session, the durable project graph, and the committed repo graph are never
 removed.
 
