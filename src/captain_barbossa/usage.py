@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+import stat
 import threading
 import time
 import urllib.request
@@ -20,6 +22,7 @@ PRICES_URL = (
 )
 PRICES_TTL = 24 * 3600
 RATE_WINDOW = 600  # seconds of trailing turns behind the $/h reading
+JOURNAL_BYTES = 1 << 20  # cap on captain-written incarnation evidence
 # Codex rollout logs, one per thread, named rollout-<stamp>-<thread id>.jsonl.
 CODEX_SESSIONS_ROOT = Path.home() / ".codex" / "sessions"
 _THREAD_ID = re.compile(r"[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}")
@@ -57,15 +60,31 @@ _PRICE_KEYS = (
 
 def usage_for_events(events_path, *, cached_only=True):
     """Read frozen incarnation accounting first, otherwise the native session usage."""
+    # native_history imports usage to freeze accounting.
+    from . import native_history
+
     saved = Path(events_path).with_suffix(".usage.json")
-    if saved.exists():
-        return _read_json(saved).get("usage")
-    manifest = Path(events_path).parent.parent / "native-history" / f"{Path(events_path).stem}.json"
-    owned = _read_json(manifest)
-    if owned.get("provider") == "pi":
+    if os.path.lexists(saved):
+        try:
+            value = _saved(saved)
+        except CaptainError:
+            return None
+        return value.get("usage") if isinstance(value.get("usage"), dict) else None
+    directory = Path(events_path).parent.parent.resolve() / "native-history"
+    manifest = directory / f"{Path(events_path).stem}.json"
+    if not os.path.lexists(manifest):
+        return _live_usage(events_path, cached_only=cached_only)
+    try:
+        owned = native_history.read_manifest(manifest)
+        identities = journal(manifest.with_suffix(".pi.jsonl")) if owned["provider"] == "pi" else []
+    except CaptainError:
+        return None
+    if owned["provider"] == "claude":
+        owned["transcripts"] = owned["transcripts"] + owned.get("usage_transcripts", [])
+    if owned["provider"] == "pi":
         root = Path(owned["native_root"])
         transcripts = dict.fromkeys(owned.get("transcripts", []))
-        for event in records(manifest.with_suffix(".pi.jsonl")):
+        for event in identities:
             value = event.get("transcript_path")
             if event.get("incarnation_id") != owned.get("incarnation_id") or not isinstance(
                 value, str
@@ -88,8 +107,8 @@ def freeze(events_path, incarnation, *, provider=None, transcripts=None, native_
     """Persist only accounting fields before cleanup; unknown usage remains unknown."""
     events_path = Path(events_path)
     saved = events_path.with_suffix(".usage.json")
-    if saved.exists():
-        data = store.read_json(saved)
+    if os.path.lexists(saved):
+        data = _saved(saved)
         if data.get("incarnation_id") != incarnation:
             raise CaptainError("Saved usage belongs to another incarnation.")
         return data.get("usage")
@@ -102,6 +121,13 @@ def freeze(events_path, incarnation, *, provider=None, transcripts=None, native_
     store.private_dir(saved.parent)
     store.write_json(saved, {"incarnation_id": incarnation, "usage": value})
     return value
+
+
+def _saved(path):
+    data = store.read_json(path, max_bytes=JOURNAL_BYTES)
+    if not isinstance(data, dict) or not isinstance(data.get("usage", {}), (dict, type(None))):
+        raise CaptainError(f"Saved usage is malformed: {path}")
+    return data
 
 
 def _live_usage(
@@ -510,6 +536,35 @@ def _transcript_paths(events_path):
         if isinstance(path, str) and path:
             paths[path] = None
     return list(paths)
+
+
+def journal(path, max_bytes=JOURNAL_BYTES):
+    """Captain-written JSONL evidence: regular file, bounded, every line an object."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        return []
+    except OSError as exc:
+        raise CaptainError(f"Cannot read journal {path}: {exc}") from exc
+    try:
+        with os.fdopen(fd, "rb") as file:
+            if not stat.S_ISREG(os.fstat(file.fileno()).st_mode):
+                raise CaptainError(f"Journal is not a regular file: {path}")
+            data = file.read(max_bytes + 1)
+    except OSError as exc:
+        raise CaptainError(f"Cannot read journal {path}: {exc}") from exc
+    if len(data) > max_bytes:
+        raise CaptainError(f"Journal exceeds {max_bytes} bytes: {path}")
+    result = []
+    for line in data.decode("utf-8", errors="replace").splitlines():
+        try:
+            record = json.loads(line)
+        except ValueError:
+            record = None
+        if not isinstance(record, dict):
+            raise CaptainError(f"Journal line is malformed: {path}")
+        result.append(record)
+    return result
 
 
 def records(path):

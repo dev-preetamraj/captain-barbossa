@@ -89,6 +89,13 @@ class CheckoutChoiceTests(SessionCase):
             self.choose("--allow", "commit"), ("shared", "[crew] checkout: not a Git checkout")
         )
 
+    def test_non_git_settings_worktree_refuses(self):
+        (self.project / ".git").rmdir()
+        with patch.object(config, "text", return_value="worktree"):
+            with self.assertRaisesRegex(runtime.CaptainError, "worktree-required"):
+                self.choose()
+        self.assertEqual(self.choose("--checkout", "shared")[0], "shared")
+
     def test_explicit_flag_profile_and_settings_win(self):
         self.assertEqual(self.choose("--checkout", "worktree"), ("worktree", "--checkout"))
         self.assertEqual(

@@ -1,4 +1,5 @@
 import json
+import os
 import subprocess
 import tempfile
 import unittest
@@ -253,6 +254,93 @@ class NativeHistoryCleanupTests(unittest.TestCase):
         self.assertEqual(recall.read_text(), "shared prompt recall")
         self.assertTrue(sidecar.is_dir())
 
+    def test_claude_absent_config_dir_is_not_synthesized(self):
+        with patch.dict("os.environ"):
+            native_history.os.environ.pop("CLAUDE_CONFIG_DIR")
+            policy = self.prepare("claude")
+        self.assertEqual(policy["argv"], ["--session-id", self.record()["session_ids"][0]])
+        self.assertNotIn("CLAUDE_CONFIG_DIR", policy["env"])
+        self.assertEqual(self.record()["native_root"], str(self.home / ".claude"))
+
+    def test_claude_explicit_config_dir_is_passed_unchanged(self):
+        real = self.root / "real-claude"
+        real.mkdir()
+        link = self.root / "claude-link"
+        link.symlink_to(real, target_is_directory=True)
+        for value in (f"{self.root}/real-claude/../real-claude", str(link)):
+            with self.subTest(value=value):
+                self.incarnation = uuid.uuid4().hex
+                self.crew.record["incarnation_id"] = self.incarnation
+                with patch.dict("os.environ", {"CLAUDE_CONFIG_DIR": value}):
+                    policy = self.prepare("claude")
+                self.assertEqual(policy["env"], {"CLAUDE_CONFIG_DIR": value})
+                self.assertEqual(policy["argv"], ["--session-id", self.record()["session_ids"][0]])
+                self.assertEqual(self.record()["native_root"], str(real))
+
+    def test_claude_relative_config_dir_is_bookkept_at_launch_cwd(self):
+        launch = self.root / "worktree"
+        launch.mkdir()
+        self.crew.record["execution_root"] = str(launch)
+        with patch.dict("os.environ", {"CLAUDE_CONFIG_DIR": "relative-claude"}):
+            policy = self.prepare("claude")
+        self.assertEqual(policy["env"], {"CLAUDE_CONFIG_DIR": "relative-claude"})
+        self.assertEqual(self.record()["native_root"], str(launch / "relative-claude"))
+        identity = self.record()["session_ids"][0]
+        transcript = launch / "relative-claude" / "projects" / "p" / f"{identity}.jsonl"
+        transcript.parent.mkdir(parents=True)
+        transcript.write_text("{}\n")
+        self.observe(identity, transcript_path=str(transcript))
+        self.assertFalse(self.record()["ambiguous"])
+        self.assertEqual(self.record()["transcripts"], [str(transcript)])
+
+    def test_claude_usage_continues_across_clear_without_owning_it(self):
+        self.prepare("claude")
+        identity = self.record()["session_ids"][0]
+        directory = self.home / ".claude" / "projects" / "p"
+        directory.mkdir(parents=True)
+        cleared_id = str(uuid.uuid4())
+        first, cleared = directory / f"{identity}.jsonl", directory / f"{cleared_id}.jsonl"
+        for path, tokens in ((first, 7), (cleared, 5)):
+            turn = {"id": str(path), "model": "m", "usage": {"input_tokens": tokens}}
+            path.write_text(json.dumps({"type": "assistant", "message": turn}) + "\n")
+        self.observe(identity, source="startup", transcript_path=str(first))
+        self.observe(cleared_id, source="clear", transcript_path=str(cleared))
+        record = self.record()
+        self.assertEqual(record["session_ids"], [identity])
+        self.assertEqual(record["transcripts"], [str(first)])
+        self.assertEqual(record["usage_transcripts"], [str(cleared)])
+        self.assertEqual(usage.usage_for_events(self.crew.events)["tokens"], 12)
+        result = native_history.cleanup(self.crew)
+        self.assertEqual(result["state"], "partial")
+        self.assertTrue(cleared.exists())
+        self.assertEqual(usage.usage_for_events(self.crew.events)["tokens"], 12)
+
+    def test_malformed_or_fifo_evidence_fails_closed_without_rewrite(self):
+        self.prepare("pi")
+        manifest = native_history._path(self.crew)
+        identities = manifest.with_suffix(".pi.jsonl")
+        os.mkfifo(identities)
+        self.assertEqual(native_history.cleanup(self.crew)["state"], "partial")
+        self.assertIsNone(usage.usage_for_events(self.crew.events))
+        identities.unlink()
+        identities.write_text("[]\n")
+        self.assertIsNone(usage.usage_for_events(self.crew.events))
+        for body in ("[]", "{}", json.dumps({**self.record(), "anchors": "x"}), None):
+            with self.subTest(body=body):
+                manifest.unlink()
+                if body is None:
+                    os.mkfifo(manifest)
+                else:
+                    manifest.write_text(body)
+                result = native_history.cleanup(self.crew)
+                self.assertEqual(result["state"], "partial")
+                self.assertTrue(native_history.pending(self.session.directory))
+                self.assertIsNone(usage.usage_for_events(self.crew.events))
+                with self.assertRaises(CaptainError):
+                    self.observe()
+                if body is not None:
+                    self.assertEqual(manifest.read_text(), body)
+
     def test_pi_background_preserves_no_session_and_unknown_usage(self):
         self.lifetime_read.return_value = {"argv": ["/mock/native", "-p", "--no-session", "task"]}
         self.assertEqual(self.prepare("pi", background=True)["argv"], [])
@@ -420,7 +508,7 @@ class NativeHistoryCleanupTests(unittest.TestCase):
         path = native_history._path(self.crew)
         script = """
 import assert from 'node:assert/strict';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 const [extension, root, events] = process.argv.slice(1);
 const mod = await import('data:text/javascript,' + encodeURIComponent(readFileSync(extension, 'utf8')));
@@ -438,6 +526,15 @@ const event = JSON.parse(readFileSync(events, 'utf8'));
 assert.equal(event.provider, 'pi');
 assert.equal(event.session_id, 'owned');
 assert.equal(event.transcript_path, inside);
+const ctx = {sessionManager: {getSessionId: () => 'again', getSessionFile: () => null}};
+await handlers.session_start({}, ctx);
+assert.equal(readFileSync(events, 'utf8').trim().split('\\n').length, 2);
+const target = join(root, 'target');
+writeFileSync(target, 'kept');
+unlinkSync(events);
+symlinkSync(target, events);
+await assert.rejects(handlers.session_start({}, ctx), {code: 'ELOOP'});
+assert.equal(readFileSync(target, 'utf8'), 'kept');
 """
         try:
             subprocess.run(

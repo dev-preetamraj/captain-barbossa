@@ -5,7 +5,7 @@ import json
 
 def extension(directory, events, incarnation):
     """Record identities, and prevent resuming a session outside the exclusive directory."""
-    return """import { appendFileSync, realpathSync } from 'node:fs';
+    return """import { closeSync, constants, openSync, realpathSync, writeSync } from 'node:fs';
 import { dirname } from 'node:path';
 export default function(pi) {
   const { root, events, incarnation } = CONFIG;
@@ -17,11 +17,14 @@ export default function(pi) {
     return { cancel: true };
   });
   pi.on('session_start', async (event, ctx) => {
-    appendFileSync(events, JSON.stringify({
+    const line = Buffer.from(JSON.stringify({
       provider: 'pi', incarnation_id: incarnation,
       type: 'session_start', session_id: ctx.sessionManager.getSessionId(),
       transcript_path: ctx.sessionManager.getSessionFile() ?? null
-    }) + '\\n', { mode: 0o600 });
+    }) + '\\n');
+    const { O_APPEND, O_CREAT, O_NOFOLLOW, O_WRONLY } = constants;
+    const fd = openSync(events, O_WRONLY | O_APPEND | O_CREAT | O_NOFOLLOW, 0o600);
+    try { writeSync(fd, line); } finally { closeSync(fd); }
   });
 }
 """.replace(

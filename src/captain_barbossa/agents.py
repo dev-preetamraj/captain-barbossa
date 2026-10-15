@@ -777,7 +777,7 @@ def choose_checkout(args, project, directory, profile_source=None):
         where = config.source("crew", "checkout")
         source = f"[crew] checkout from {where}" if where else "[crew] checkout"
     if not git.exists():
-        if explicit == "worktree":
+        if checkout == "worktree":
             raise CaptainError("[worktree-required] Isolated crew requires a Git checkout.")
         return "shared", f"{source}: not a Git checkout"
     if checkout == "auto":

@@ -556,6 +556,13 @@ class CodexUsageTests(LimitTestCase):
         manifest.write_text(
             json.dumps(
                 {
+                    **dict.fromkeys(
+                        ("crew_id", "incarnation_id", "project", "execution_root"), "x"
+                    ),
+                    **dict.fromkeys(("native_alias", "events", "state", "reason"), "x"),
+                    **dict.fromkeys(("background", "ambiguous", "observed"), False),
+                    "deleted_ids": [],
+                    "anchors": [],
                     "provider": "codex",
                     "transcripts": [],
                     "session_ids": [],
