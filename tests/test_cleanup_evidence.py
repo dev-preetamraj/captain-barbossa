@@ -1,10 +1,13 @@
 """Cleanup accepts authoritative revoked lifetime receipts, never activity guesses."""
 
+import itertools
+import os
+import signal
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from home_isolation import SessionCase
 
@@ -290,6 +293,71 @@ class CleanupEvidenceTests(SessionCase):
         self.stopped(native_returncode=-9)
         self.assertTrue(lifetime.check(self.session, self.ref, **identity).ok)
 
+    def test_linux_group_absence_needs_subreaped_zombies_reaped(self):
+        # A killed group member orphaned to the subreaper owner stays a zombie, and an
+        # unreaped zombie still answers killpg(group, 0).
+        proc = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        (proc / "601").mkdir()
+        (proc / "601" / "stat").write_text(f"601 (sleep) Z {os.getpid()} 77 77")
+        zombies = {601}
+
+        def reap(pid, options):
+            zombies.discard(pid)
+            (proc / str(pid) / "stat").unlink()
+            return pid, 0
+
+        def group_signal(group, signum):
+            if signum == 0 and not zombies:
+                raise ProcessLookupError()
+
+        with (
+            patch.object(lifetime, "_LINUX", True),
+            patch.object(lifetime, "_DARWIN", False),
+            patch.object(lifetime, "_PROC", proc),
+            patch.object(lifetime, "_subreaper"),
+            patch.object(lifetime, "_live_children", return_value={1}),
+            lifetime.claim(self.session, self.ref) as job,
+        ):
+            job._guard = Mock(pid=77)
+            job._guard.wait.return_value = -signal.SIGKILL
+            job._baseline = {1}
+            job.native_returncode = 0
+            with (
+                patch.object(lifetime.os, "waitpid", side_effect=reap) as waitpid,
+                patch.object(lifetime.os, "killpg", side_effect=group_signal),
+                patch.object(job, "_drain"),
+                patch.object(lifetime.time, "monotonic", side_effect=itertools.count(0, 100)),
+            ):
+                self.assertEqual(job.shutdown(), lifetime.Verdict(True, "group-absent"))
+            waitpid.assert_called_once_with(601, os.WNOHANG)
+            self.assertTrue(job.finish().ok)
+
+    def test_zombie_reaping_takes_only_dead_children_of_the_group(self):
+        proc = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        owner = os.getpid()
+        for pid, stat in (
+            ("601", f"601 (a b) Z {owner} 77 77"),
+            ("602", f"602 (live) S {owner} 77 77"),
+            ("603", f"603 (other) Z {owner} 88 88"),
+            ("604", f"604 (foreign) Z {owner + 1} 77 77"),
+            ("605", None),
+            ("self", f"0 (self) Z {owner} 77 77"),
+        ):
+            (proc / pid).mkdir()
+            if stat:
+                (proc / pid / "stat").write_text(stat)
+        with (
+            patch.object(lifetime, "_PROC", proc),
+            patch.object(lifetime.os, "waitpid") as waitpid,
+        ):
+            lifetime._reap_group_zombies(77)
+            waitpid.assert_called_once_with(601, os.WNOHANG)
+            # An unreadable /proc reaps nothing; the absence check still decides.
+            waitpid.reset_mock()
+            with patch.object(lifetime, "_PROC", proc / "missing"):
+                lifetime._reap_group_zombies(77)
+            waitpid.assert_not_called()
+
 
 class CwdSweepTests(SessionCase):
     """Worktree removal sees processes still working inside it, and never kills them."""
@@ -309,6 +377,14 @@ class CwdSweepTests(SessionCase):
         (proc / "126" / "cwd").symlink_to(f"{self.tree} (deleted)")
         with patch.object(lifetime, "_LINUX", True), patch.object(lifetime, "_PROC", proc):
             self.assertEqual(lifetime.cwd_holders(self.tree), [123, 126])
+
+    def test_unlistable_proc_retains(self):
+        with (
+            patch.object(lifetime, "_LINUX", True),
+            patch.object(lifetime, "_PROC", self.root / "missing-proc"),
+            self.assertRaisesRegex(CaptainError, "cleanup-pending"),
+        ):
+            lifetime.cwd_holders(self.tree)
 
     def lsof(self):
         return patch.multiple(lifetime, _LINUX=False)

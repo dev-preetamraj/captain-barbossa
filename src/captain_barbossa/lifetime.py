@@ -217,17 +217,50 @@ def _subreaper(enabled):
         raise OSError(ctypes.get_errno(), "prctl(PR_SET_CHILD_SUBREAPER) failed")
 
 
-def _live_children(pid):
-    """Linux: live (non-zombie) direct children of pid, from /proc."""
-    children = set()
-    for stat in _PROC.glob("[0-9]*/stat"):
+def _pids():
+    """Linux: /proc process entries, listed without stat-ing them.
+
+    Python 3.11's Path.glob stats each match, silently dropping dangling or unreadable
+    links such as a deleted cwd; a listing failure raises instead of reading as empty.
+    """
+    return [entry for entry in _PROC.iterdir() if entry.name.isdigit()]
+
+
+def _children(pid):
+    """Linux: {child: (state, process group)} for direct children of pid, from /proc."""
+    children = {}
+    for entry in _pids():
         try:
-            fields = stat.read_text().rsplit(")", 1)[1].split()
+            fields = (entry / "stat").read_text().rsplit(")", 1)[1].split()
         except (OSError, IndexError):
-            continue
-        if fields[0] != "Z" and int(fields[1]) == pid:
-            children.add(int(stat.parent.name))
+            continue  # exited during the scan
+        if int(fields[1]) == pid:
+            children[int(entry.name)] = (fields[0], int(fields[2]))
     return children
+
+
+def _live_children(pid):
+    """Linux: live (non-zombie) direct children of pid."""
+    return {child for child, (state, _) in _children(pid).items() if state != "Z"}
+
+
+def _reap_group_zombies(pgid):
+    """Linux: reap killed group members subreaped to this owner.
+
+    An unreaped zombie still answers killpg(pgid, 0), so group absence could never be
+    confirmed. Only exact zombie children in pgid are reaped; live members stay visible.
+    Best effort: a failed scan reaps nothing, and the absence check still decides.
+    """
+    try:
+        children = _children(os.getpid())
+    except (OSError, ValueError):
+        return
+    for child, (state, group) in children.items():
+        if state == "Z" and group == pgid:
+            try:
+                os.waitpid(child, os.WNOHANG)
+            except ChildProcessError:
+                pass
 
 
 def cwd_holders(root):
@@ -238,7 +271,11 @@ def cwd_holders(root):
     root = Path(root).resolve()
     holders = set()
     if _LINUX:
-        for link in _PROC.glob("[0-9]*/cwd"):
+        try:
+            links = [entry / "cwd" for entry in _pids()]
+        except OSError as exc:
+            raise CaptainError(f"[cleanup-pending] cwd sweep failed: {exc}") from exc
+        for link in links:
             try:
                 cwd = os.readlink(link)
             except FileNotFoundError:
@@ -573,6 +610,8 @@ class ManagedJob:
                 self.invalidate("guard-exited-before-final-kill")
             self._drain(stopping=True)
             while True:
+                if _LINUX:
+                    _reap_group_zombies(self._guard.pid)
                 try:
                     os.killpg(self._guard.pid, 0)
                 except ProcessLookupError:
