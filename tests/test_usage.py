@@ -545,6 +545,35 @@ class CodexUsageTests(LimitTestCase):
         # Each turn is priced at the model that was live for it, luna then terra.
         self.assertAlmostEqual(result["cost"], 0.002440 + 0.013428)
 
+    def test_empty_manifest_preserves_read_only_codex_usage_discovery(self):
+        self.events = self.root / "events" / "jack-current.jsonl"
+        self.events.parent.mkdir()
+        native_root = self.root / "native-codex"
+        self.day = native_root / "sessions" / "2026" / "09" / "20"
+        self.day.mkdir(parents=True)
+        manifest = self.root / "native-history" / "jack-current.json"
+        manifest.parent.mkdir()
+        manifest.write_text(
+            json.dumps(
+                {
+                    "provider": "codex",
+                    "transcripts": [],
+                    "session_ids": [],
+                    "native_root": str(native_root),
+                }
+            )
+        )
+        before = manifest.read_bytes()
+        self.notify(self.THREAD)
+        self.rollout(self.THREAD, [_turn_context("gpt-5.6-terra"), _token_count(9, output=1)])
+        self.assertEqual(usage_for_events(self.events)["tokens"], 10)
+        self.assertEqual(manifest.read_bytes(), before)
+        saved = usage.freeze(
+            self.events, "current", provider="codex", transcripts=[], native_root=native_root
+        )
+        self.assertEqual(saved["tokens"], 10)
+        self.assertEqual(manifest.read_bytes(), before)
+
     def test_title_generation_thread_has_no_rollout_and_is_skipped(self):
         self.notify(self.THREAD, self.TITLE_THREAD)
         self.rollout(self.THREAD, [_turn_context("gpt-5.6-terra"), _token_count(9, output=1)])
@@ -685,6 +714,63 @@ class PriceSourceTests(unittest.TestCase):
             _dashboard(prices_file="~/contracted.json"),
         ):
             self.assertEqual(usage._prices()["claude-opus-5"], {"output_cost_per_token": 2e-09})
+
+
+class SavedUsageTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.events = self.root / "jack-old.jsonl"
+        self.transcript = self.root / "transcript.jsonl"
+
+    def test_frozen_totals_survive_deletion_without_content_or_live_context(self):
+        _jsonl(self.events, [{"transcript_path": str(self.transcript)}])
+        _jsonl(self.transcript, [_turn(input=17, output=3, call="private-content")])
+        with patch.object(usage, "_prices", return_value={}):
+            usage.freeze(self.events, "old")
+        self.transcript.unlink()
+        self.events.unlink()
+        value = usage_for_events(self.events)
+        self.assertEqual(value["tokens"], 20)
+        self.assertIsNone(value["cost"])
+        self.assertIsNone(value["context"])
+        self.assertIsNone(value["rate"])
+        saved = self.events.with_suffix(".usage.json").read_text()
+        self.assertNotIn("private-content", saved)
+        self.assertNotIn(str(self.transcript), saved)
+        self.assertEqual(usage.freeze(self.events, "old"), value)
+
+    def test_unknown_is_not_fabricated_zero(self):
+        usage.freeze(self.events, "old", provider="grok")
+        self.assertIsNone(usage_for_events(self.events))
+
+    def test_pi_usage_includes_non_message_usage(self):
+        _jsonl(
+            self.transcript,
+            [
+                {
+                    "type": "message",
+                    "message": {
+                        "role": "assistant",
+                        "model": "test",
+                        "usage": {"input": 4, "output": 2, "cost": {"total": 0.1}},
+                    },
+                },
+                {
+                    "type": "usage",
+                    "kind": "cache_warm",
+                    "usage": {"cacheRead": 8, "cost": {"total": 0.2}},
+                },
+            ],
+        )
+        value = usage.freeze(self.events, "old", provider="pi", transcripts=[self.transcript])
+        self.assertEqual(value["tokens"], 14)
+        self.assertAlmostEqual(value["cost"], 0.3)
+
+    def test_provider_tagged_codex_transcript_is_not_a_claude_transcript(self):
+        _jsonl(self.events, [{"provider": "codex", "transcript_path": str(self.transcript)}])
+        self.assertEqual(usage._transcript_paths(self.events), [])
 
 
 if __name__ == "__main__":

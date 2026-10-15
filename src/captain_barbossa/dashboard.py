@@ -165,7 +165,13 @@ def _orphaned(events_dir, claimed):
     disk under its own uuid; count it so TOTAL never shrinks when a name is reused.
     """
     try:
-        paths = sorted(events_dir.glob("*.jsonl"))
+        paths = sorted(
+            set(events_dir.glob("*.jsonl"))
+            | {
+                path.with_name(path.name.removesuffix(".usage.json") + ".jsonl")
+                for path in events_dir.glob("*.usage.json")
+            }
+        )
     except OSError:
         return []
     return [_retired(path) for path in paths if path.stem not in claimed and path.stem != "captain"]

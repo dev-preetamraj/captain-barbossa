@@ -2,7 +2,6 @@ import contextlib
 import io
 import json
 import os
-import shlex
 import unittest
 from unittest.mock import patch
 
@@ -618,7 +617,17 @@ def pane_stub(base):
     def api(*call, **kwargs):
         if call[:2] == ("pane", "read"):
             return SETTLED_SHELL_TEXT
-        return base(*call, **kwargs) if callable(base) else base
+        result = base(*call, **kwargs) if callable(base) else base
+        if call[:2] in (("pane", "split"), ("tab", "create")):
+            result = dict(result)
+            key = "pane" if call[0] == "pane" else "root_pane"
+            if key in result:
+                result[key] = {
+                    "terminal_id": "crew-terminal",
+                    "tab_id": "w1:t1",
+                    **result[key],
+                }
+        return result
 
     return api
 
@@ -697,11 +706,15 @@ class CrewModelTests(SessionCase):
                     agents.create_crew(args, self.pane, self.project)
                 self.assertEqual(json.loads(output.getvalue())["model"], model)
                 self.assertIn(f'"model": "--model {text}"', errors.getvalue())
-                launcher = shlex.split((self.directory / f"crew-{name}.sh").read_text())
-                self.assertEqual(launcher[launcher.index(flag) + 1], model)
-                self.assertEqual(launcher.count(flag), 1)
                 saved = store.read_json(self.directory / "session.json")["crew"][name]
                 self.assertEqual(saved["model"], model)
+                from captain_barbossa import lifetime
+
+                launch = lifetime.read(
+                    sessions.Session(self.directory, self.meta), saved["lifetime_id"]
+                )
+                self.assertEqual(launch["argv"][launch["argv"].index(flag) + 1], model)
+                self.assertEqual(launch["argv"].count(flag), 1)
                 graph = store.read_json(self.directory / "graph.json")
                 self.assertIn(model, [node["label"] for node in graph["nodes"]])
 
@@ -732,8 +745,11 @@ class CrewModelTests(SessionCase):
             agents.create_crew(args, self.pane, self.project)
         self.assertEqual(json.loads(output.getvalue())["model"], "claude-haiku-5-5")
         self.assertIn("[crew] model = 'cheap' from defaults.toml", errors.getvalue())
-        launcher = shlex.split((self.directory / "crew-jack.sh").read_text())
-        self.assertEqual(launcher[launcher.index("--model") + 1], "claude-haiku-5-5")
+        from captain_barbossa import lifetime
+
+        saved = store.read_json(self.directory / "session.json")["crew"]["jack"]
+        launch = lifetime.read(sessions.Session(self.directory, self.meta), saved["lifetime_id"])
+        self.assertEqual(launch["argv"][launch["argv"].index("--model") + 1], "claude-haiku-5-5")
 
     def test_the_cheap_default_never_silently_reaches_a_mid_or_strong_model(self):
         """The whole point of the default: an unspecified tier cannot cost mid/strong money."""

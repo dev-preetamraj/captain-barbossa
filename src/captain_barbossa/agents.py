@@ -7,9 +7,22 @@ import shlex
 import sys
 import time
 from itertools import cycle
+from pathlib import Path
 from uuid import uuid4
 
-from . import background, config, instructions, profiles, protocol, runtime
+from . import (
+    background,
+    config,
+    execution,
+    instructions,
+    lifetime,
+    native_history,
+    profiles,
+    protocol,
+    results,
+    runtime,
+    worktrees,
+)
 from .crew import Crew, CrewState
 from .dashboard import dashboard_pane, renest_dashboard, start_dashboard
 from .events import read_events
@@ -68,9 +81,19 @@ def close_session_panes(session_id, project):
         with protocol.checkpoint(current.directory) as state:
             for crew in live:
                 try:
-                    reasons = protocol.unlanded(project, protocol.active(state, crew))
-                except CaptainError:  # legacy crew: no assignment, so no owned paths
-                    reasons = []
+                    assignment = protocol.active(state, crew)
+                    if crew.record.get("worktree_id"):
+                        results.collect(
+                            current,
+                            crew.record["worktree_id"],
+                            assignment["paths"],
+                            assignment.get("report") or "",
+                        )
+                        reasons = []
+                    else:
+                        reasons = protocol.unlanded(project, assignment)
+                except CaptainError as exc:
+                    reasons = [str(exc)] if crew.record.get("worktree_id") else []
                 if reasons:
                     try:
                         print(
@@ -87,7 +110,11 @@ def close_session_panes(session_id, project):
             closing.append((board, None))
         for pane_id, record in closing:
             try:
-                runtime.herdr("pane", "close", pane_id)
+                if record is not None and record.get("lifetime_id"):
+                    crew = Crew(record["id"], record, current._replace(meta=meta))
+                    record["cleanup"] = execution.retire(crew)
+                else:
+                    runtime.herdr("pane", "close", pane_id)
             except HERDR_ERRORS:
                 pass
             if record is not None:
@@ -139,6 +166,8 @@ def launch(args, pane, project):
     binary = executable(provider)
     current = session(project, pane, args.session, create=args.session is None)
     meta = current.meta
+    meta["captain_provider"] = provider
+    write_json(current.meta_path, meta)
     try:
         prune_sessions(project, current=meta["id"])
     except HERDR_ERRORS:
@@ -551,7 +580,7 @@ def dismiss_blocker(crew, assignment, project, confirmed=False):
             f"{crew.display_name} has {unacked} unacknowledged notification(s); "
             "acknowledge them with wait --ack before dismissal."
         )
-    if confirmed:
+    if confirmed or crew.record.get("worktree_id"):
         return
     reasons = protocol.unlanded(project, assignment)
     if reasons:
@@ -589,7 +618,9 @@ def dismiss_crew(args, pane, project):
         if not crew.record.get("pane") and not crew.record.get("incarnation_id"):
             raise CaptainError(f"{crew.display_name} has no recorded pane to close.")
         try:
-            if crew.record.get("pane"):
+            if crew.record.get("lifetime_id"):
+                crew.record["cleanup"] = execution.retire(crew)
+            elif crew.record.get("pane"):
                 runtime.herdr("pane", "close", crew.record["pane"])
         except CaptainError as exc:
             if not re.search(r"\bpane_not_found\b", str(exc)):
@@ -613,6 +644,14 @@ def dismiss_crew(args, pane, project):
                 assignment = protocol.active(state, crew)
                 assignment["state"] = "done"
                 assignment["report"] = "Dismissed before any message was read."
+        if crew.record.get("worktree_id") and not crew.record.get("lifetime_id"):
+            assignment = protocol.active_assignment(crew)
+            results.collect(
+                current,
+                crew.record["worktree_id"],
+                assignment["paths"],
+                assignment.get("report") or "",
+            )
         (current.directory / f"crew-{crew.crew_id}.sh").unlink(missing_ok=True)
         crew.record["status"] = "dismissed"
         tab_id = crew.record.get("tab")
@@ -624,6 +663,43 @@ def dismiss_crew(args, pane, project):
     for message in bounced:
         print(f"Bounced unread mail to {crew.display_name}: {message['id']}.")
     print(f"Dismissed {crew.display_name}.")
+
+
+def begin_recruitment(crew, project, args):
+    try:
+        if crew.record["checkout"] == "worktree":
+            if args.handoff:
+                raise CaptainError(
+                    "[worktree-handoff] Recruit a fresh isolated crew for a new assignment."
+                )
+            assignment_id = uuid4().hex
+            registered = worktrees.reserve(
+                crew.session, crew.crew_id, crew.record["incarnation_id"], assignment_id
+            )
+            crew.record.update(worktree_id=registered["id"], assignment_id=assignment_id)
+            crew.session.meta["crew"][crew.crew_id] = crew.record
+            write_json(crew.session.meta_path, crew.session.meta)
+            registered = worktrees.create(crew.session, registered["id"])
+            crew.record["execution_root"] = registered["execution_root"]
+            write_json(crew.session.meta_path, crew.session.meta)
+        else:
+            assignment_id = None
+            crew.record["execution_root"] = str(Path(project).resolve())
+        return protocol.begin(
+            crew,
+            project,
+            args.task,
+            args.owns,
+            args.allow,
+            args.handoff,
+            assignment_id=assignment_id,
+        )
+    except (CaptainError, OSError) as exc:
+        if crew.record.get("worktree_id"):
+            crew.record.update(status="dismissed", startup_error=str(exc))
+            crew.session.meta["crew"][crew.crew_id] = crew.record
+            write_json(crew.session.meta_path, crew.session.meta)
+        raise
 
 
 def launch_background(crew, current, project, provider, binary, model, args):
@@ -646,7 +722,7 @@ def launch_background(crew, current, project, provider, binary, model, args):
         # Held before begin publishes the assignment, so a wait in between sees a live
         # recruiter rather than a lost run.
         with background.launching(crew):
-            assignment = protocol.begin(crew, project, task, args.owns, args.allow, args.handoff)
+            assignment = begin_recruitment(crew, project, args)
             record["assignment_id"] = assignment["id"]
             write_json(current.meta_path, current.meta)
             files = background.prepare(
@@ -688,6 +764,44 @@ def refuse_background(crew, action):
         )
 
 
+def choose_checkout(args, project, directory, profile_source=None):
+    """The crew checkout and why: explicit choices win, auto isolates only contention."""
+    explicit = getattr(args, "checkout", None)
+    checkout = explicit or config.text("crew", "checkout")
+    if checkout not in ("auto", "shared", "worktree"):
+        raise CaptainError("[crew] checkout must be auto, shared or worktree.")
+    git = Path(project) / ".git"
+    if explicit:
+        source = profile_source or "--checkout"
+    else:
+        where = config.source("crew", "checkout")
+        source = f"[crew] checkout from {where}" if where else "[crew] checkout"
+    if not git.exists():
+        if explicit == "worktree":
+            raise CaptainError("[worktree-required] Isolated crew requires a Git checkout.")
+        return "shared", f"{source}: not a Git checkout"
+    if checkout == "auto":
+        writes = set(args.allow) & set(protocol.WRITE_ACTIONS)
+        if args.handoff:
+            checkout, reason = "shared", "handoff keeps shared (worktrees cannot hand off)"
+        elif not writes:
+            checkout, reason = "shared", "read-only crew"
+        elif not args.owns:
+            checkout, reason = "worktree", "write grant without owned paths"
+        elif other := protocol.occupant(project, directory, args.owns):
+            checkout = "worktree"
+            reason = f"owns overlap active assignment {other['id']} ({other['crew']})"
+        else:
+            checkout, reason = "shared", "owns disjoint from active crew"
+        source = f"{source} auto: {reason}"
+    if checkout == "worktree" and (git.is_symlink() or not git.is_dir()):
+        raise CaptainError(
+            "[unsupported-checkout] Isolated crew currently requires an ordinary Git checkout; "
+            "linked captain checkouts are unsupported. Use --checkout shared explicitly."
+        )
+    return checkout, source
+
+
 def create_crew(args, pane, project):
     given = args.name
     if given is not None:
@@ -707,13 +821,26 @@ def create_crew(args, pane, project):
     if paneless:
         background.refuse_flags(args)
     current = session(project, pane, args.session)
-    if paneless and not is_durable(current.directory, project):
+    managed = is_durable(current.directory, project)
+    if paneless and not managed:
         raise CaptainError(
             "[legacy-session] This session lives in temporary storage from an older captain, "
             "so a background run could not be recovered. Start a new captain session."
         )
     with crew_meta(current.directory) as meta:
         current = current._replace(meta=meta)
+        # Under the crew lock, so a same-session recruit cannot slip into the gap.
+        checkout, checkout_source = choose_checkout(
+            args, project, current.directory, profile_sources.get("checkout")
+        )
+        if "checkout" in profile_sources:
+            profile_sources["checkout"] = checkout_source
+        if not managed and checkout == "shared":
+            print(
+                "captain: legacy shared crew uses an unmanaged launch; native-history cleanup is "
+                "unavailable. Start a new captain session for managed cleanup.",
+                file=sys.stderr,
+            )
         if paneless:
             provider, model, sources = launch_choices(args, current.directory)
             background.check_provider(provider)
@@ -724,6 +851,7 @@ def create_crew(args, pane, project):
             provider, placement, spot, model = rec.agent, rec.placement, rec.spot, rec.model
             direction, split_pane, tab_id, auto = spot.direction, spot.pane, spot.tab, spot.reason
             sources = rec.sources
+        sources["checkout"] = checkout_source
         recruitment = {}
         if getattr(args, "profile", None) is not None:
             sources.setdefault(
@@ -734,6 +862,7 @@ def create_crew(args, pane, project):
                 "agent": provider,
                 "model": model,
                 "execution": "background" if paneless else "foreground",
+                "checkout": checkout,
             }
             if not paneless:
                 effective.update(placement=placement, direction=direction, split_pane=split_pane)
@@ -764,6 +893,8 @@ def create_crew(args, pane, project):
                 "name": display_name,
                 "agent": crew_agent,
                 "incarnation_id": incarnation,
+                "checkout": checkout,
+                "provider": provider,
                 **recruitment,
             },
             current,
@@ -771,7 +902,7 @@ def create_crew(args, pane, project):
         if paneless:
             launch_background(crew, current, project, provider, binary, model, args)
             return
-        assignment = protocol.begin(crew, project, args.task, args.owns, args.allow, args.handoff)
+        assignment = begin_recruitment(crew, project, args)
         # Reserve ownership before launch; failures before native startup release it below.
         crew.record.update(
             assignment_id=assignment["id"],
@@ -803,6 +934,18 @@ def create_crew(args, pane, project):
                 "--env",
                 f"CAPTAIN_CREW_LAUNCHER={launcher}",
             ]
+            execution_root = execution.root(current, crew.record)
+            if crew.record.get("worktree_id"):
+                environment.extend(["--env", f"CAPTAIN_WORKTREE_ID={crew.record['worktree_id']}"])
+            else:
+                environment.extend(["--env", "CAPTAIN_WORKTREE_ID="])
+            history = (
+                native_history.prepare(crew, incarnation=incarnation, project=project)
+                if managed
+                else {"argv": [], "env": {}}
+            )
+            for key, value in history["env"].items():
+                environment.extend(["--env", f"{key}={value}"])
             instruction_text = instructions.agent_instructions(
                 current.directory, f"crew member {display_name}", provider
             )
@@ -812,9 +955,28 @@ def create_crew(args, pane, project):
             events.chmod(0o600)
             crew.cursor.unlink(missing_ok=True)
             write_json(crew.report_cursor, len(crew.reports))
-            command = shlex.join(
-                [binary, *instructions.native_args(provider, instruction_text, model, events)]
-            )
+            native_argv = [
+                binary,
+                *instructions.native_args(provider, instruction_text, model, events),
+                *history["argv"],
+            ]
+            command = shlex.join(native_argv)
+            if managed:
+                overrides = dict(value.split("=", 1) for value in environment[1::2])
+                overrides.pop("CAPTAIN_CREW_LAUNCHER", None)
+                ref = lifetime.prepare(current, crew.record, native_argv, overrides, execution_root)
+                crew.record["lifetime_id"] = ref
+                write_json(current.meta_path, meta)
+                command = shlex.join(
+                    [
+                        sys.executable,
+                        "-c",
+                        "import sys; from pathlib import Path; from captain_barbossa.lifetime import run; "
+                        "sys.exit(run(Path(sys.argv[1]), sys.argv[2]))",
+                        str(current.directory),
+                        ref,
+                    ]
+                )
             launcher.write_text(
                 f"#!/bin/sh\nunset CAPTAIN_CREW_LAUNCHER\nexec {command}\n",
                 encoding="utf-8",
@@ -827,7 +989,7 @@ def create_crew(args, pane, project):
                     "--workspace",
                     pane["workspace_id"],
                     "--cwd",
-                    str(project),
+                    str(execution_root),
                     "--label",
                     display_name,
                     "--no-focus",
@@ -845,7 +1007,7 @@ def create_crew(args, pane, project):
                         "--direction",
                         "right" if direction == "vertical" else "down",
                         "--cwd",
-                        str(project),
+                        str(execution_root),
                         "--no-focus",
                         *environment,
                     )
@@ -879,6 +1041,7 @@ def create_crew(args, pane, project):
             write_json(current.meta_path, meta)
             raise
         record = {
+            **crew.record,
             **recruitment,
             "id": name,
             "incarnation_id": incarnation,
@@ -888,6 +1051,10 @@ def create_crew(args, pane, project):
             "provider": provider,
             "pane": new_pane,
             "tab": tab_id,
+            "workspace": pane["workspace_id"],
+            "terminal_id": created.get("root_pane" if placement == "tab" else "pane", {}).get(
+                "terminal_id"
+            ),
             "placement": placement,
             "direction": direction,
             "split_pane": split_pane,
@@ -904,6 +1071,20 @@ def create_crew(args, pane, project):
         meta["crew"][name] = record
         write_json(current.meta_path, meta)
         try:
+            if managed:
+                if not record["terminal_id"]:
+                    actual = runtime.herdr("pane", "get", new_pane).get("pane", {})
+                    if (
+                        actual.get("pane_id") != new_pane
+                        or actual.get("workspace_id") != pane["workspace_id"]
+                        or actual.get("tab_id") != tab_id
+                    ):
+                        raise CaptainError(
+                            "Herdr returned an unexpected response for herdr pane get; cannot verify crew terminal identity."
+                        )
+                    record["terminal_id"] = actual.get("terminal_id")
+                    write_json(current.meta_path, meta)
+                lifetime.bind(current, ref, record)
             add_memory(current.graph, f"session:{meta['id']}", "crew", crew_agent)
             add_memory(current.graph, crew_agent, "name", display_name)
             add_memory(current.graph, crew_agent, "assigned", args.task)

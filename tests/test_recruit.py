@@ -33,7 +33,13 @@ def pane_stub(base):
     def api(*call, **kwargs):
         if call[:2] == ("pane", "read"):
             return SETTLED_SHELL_TEXT
-        return base(*call, **kwargs) if callable(base) else base
+        result = base(*call, **kwargs) if callable(base) else base
+        if call[:2] in (("pane", "split"), ("tab", "create")):
+            result = dict(result)
+            key = "pane" if call[0] == "pane" else "root_pane"
+            if key in result:
+                result[key] = {"terminal_id": "crew-terminal", "tab_id": "w1:t1", **result[key]}
+        return result
 
     return api
 
@@ -53,6 +59,83 @@ class RecruitTests(SessionCase):
 
     def args(self, *args):
         return cli.parser().parse_args(["--session", self.meta["id"], *args])
+
+    def test_legacy_shared_recruitment_stays_unmanaged_without_migration(self):
+        from captain_barbossa import lifetime, native_history
+
+        args = self.args(
+            "crew",
+            "jack",
+            "--agent",
+            "codex",
+            "--task",
+            "review",
+            "--checkout",
+            "shared",
+            "--placement",
+            "tab",
+        )
+        created = {"root_pane": {"pane_id": "w1:p9"}, "tab_id": "w1:t9"}
+        with (
+            patch.object(agents, "is_durable", return_value=False),
+            patch.object(agents, "executable", return_value="/bin/codex"),
+            patch.object(runtime, "herdr", side_effect=pane_stub(created)),
+            patch.object(Pane, "wait_for_crew"),
+            patch.object(native_history, "prepare") as history,
+            patch.object(lifetime, "prepare") as prepare,
+            contextlib.redirect_stderr(io.StringIO()) as error,
+        ):
+            agents.create_crew(args, self.pane, self.project)
+        history.assert_not_called()
+        prepare.assert_not_called()
+        saved = store.read_json(self.directory / "session.json")["crew"]["jack"]
+        self.assertEqual(saved["execution_root"], str(self.project))
+        self.assertNotIn("lifetime_id", saved)
+        self.assertIn("cleanup is unavailable", error.getvalue())
+        self.assertIn("exec /bin/codex", (self.directory / "crew-jack.sh").read_text())
+
+    def test_linked_captain_checkout_refuses_isolation_before_native_launch(self):
+        (self.project / ".git").write_text("gitdir: /unrelated/admin\n")
+        with (
+            patch.object(runtime, "herdr") as herdr,
+            self.assertRaisesRegex(runtime.CaptainError, "unsupported-checkout.*--checkout shared"),
+        ):
+            agents.create_crew(
+                self.args("crew", "--task", "edit src", "--checkout", "worktree"),
+                self.pane,
+                self.project,
+            )
+        herdr.assert_not_called()
+        self.assertEqual(store.read_json(self.directory / "session.json")["crew"], {})
+
+    def test_failed_worktree_creation_keeps_identity_but_releases_crew_name(self):
+        from captain_barbossa import worktrees
+
+        current = sessions.Session(self.directory, self.meta)
+        crew = Crew(
+            "jack",
+            {
+                "id": "jack",
+                "name": "Jack",
+                "incarnation_id": "a" * 32,
+                "checkout": "worktree",
+                "provider": "codex",
+            },
+            current,
+        )
+        with (
+            patch.object(worktrees, "reserve", return_value={"id": "a" * 32}),
+            patch.object(worktrees, "create", side_effect=runtime.CaptainError("creation failed")),
+            patch.object(runtime, "herdr") as herdr,
+            self.assertRaisesRegex(runtime.CaptainError, "creation failed"),
+        ):
+            agents.begin_recruitment(crew, self.project, self.args("crew", "--task", "edit src"))
+        saved = store.read_json(current.meta_path)["crew"]["jack"]
+        self.assertEqual(saved["status"], "dismissed")
+        self.assertEqual(saved["worktree_id"], "a" * 32)
+        self.assertIn("creation failed", saved["startup_error"])
+        self.assertFalse(Crew.name_reserved(current, "jack"))
+        herdr.assert_not_called()
 
     def test_crew_name_is_case_insensitive_and_refusals_are_distinct(self):
         self.meta["crew"] = {"jack": {"id": "jack", "name": "Jack", "agent": "c-jack"}}
@@ -255,7 +338,13 @@ class RecruitTests(SessionCase):
                         calls[0].args[calls[0].args.index("--label") + 1], display_name
                     )
                 launcher = self.directory / f"crew-{name}.sh"
-                self.assertIn(f"crew member {display_name}", launcher.read_text())
+                from captain_barbossa import lifetime
+
+                launch = lifetime.read(
+                    sessions.Session(self.directory, self.meta), saved["lifetime_id"]
+                )
+                self.assertIn(f"crew member {display_name}", " ".join(launch["argv"]))
+                self.assertIn("lifetime import run", launcher.read_text())
                 graph = store.read_json(self.directory / "graph.json")
                 self.assertIn(display_name, [node["label"] for node in graph["nodes"]])
                 self.assertIn(task, [node["label"] for node in graph["nodes"]])
@@ -264,6 +353,7 @@ class RecruitTests(SessionCase):
                 self.assertEqual(list(self.project.iterdir()), [])
 
     def test_long_native_instructions_survive_canonical_terminal_input(self):
+        # The pty is not a controlling terminal: launch must still run, without a handoff.
         native = self.root / "fake agent's cli"
         received = self.root / "received.json"
         capture = "import json, os, sys; from pathlib import Path; Path(os.environ['CAPTAIN_TEST_ARGS']).write_text(json.dumps(sys.argv[1:]))"
@@ -299,6 +389,10 @@ class RecruitTests(SessionCase):
                         instruction_prompts, "agent_instructions", return_value=instructions
                     ),
                     patch.object(Pane, "submit_task"),
+                    patch(
+                        "captain_barbossa.native_history.prepare",
+                        return_value={"argv": ["--session-id", "owned-native-session"], "env": {}},
+                    ),
                 ):
                     agents.create_crew(args, self.pane, self.project)
                 command = next(
@@ -337,7 +431,8 @@ class RecruitTests(SessionCase):
                                 store.read_json(self.directory / "session.json")["crew"][name],
                                 sessions.Session(self.directory, self.meta),
                             ).events,
-                        ),
+                        )
+                        + ["--session-id", "owned-native-session"],
                     )
                 finally:
                     os.close(master)

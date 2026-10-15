@@ -8,13 +8,12 @@ import contextlib
 import io
 import json
 import os
-import select
 import signal
-import subprocess
 import sys
 import threading
 import time
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 from captain_barbossa import agents, background, cli, protocol, runtime, sessions, store
 from captain_barbossa.crew import Crew
@@ -140,8 +139,8 @@ class BackgroundCrewTests(SessionCase):
         self.native(SAY)
         begin = protocol.begin
 
-        def poll_after_begin(crew, *args):
-            assignment = begin(crew, *args)
+        def poll_after_begin(crew, *args, **kwargs):
+            assignment = begin(crew, *args, **kwargs)
             self.assertFalse(background.paths(background.stem(crew))["record"].exists())
             response = protocol.wait(crew, 0)
             self.assertIsNone(response["delivery_id"])
@@ -555,62 +554,78 @@ class BackgroundCrewTests(SessionCase):
             self.recruit()
         self.assertFalse((legacy / "protocol.json").exists())
 
-    def guard(self, script):
-        """The guard with this test as its owner: (guard, lifeline write end, status read end)."""
-        lifeline, keep = os.pipe()
-        status, report = os.pipe()
-        guard = subprocess.Popen(
-            [sys.executable, "-m", "captain_barbossa.background", "--guard"]
-            + [str(lifeline), str(report), "--", "sh", "-c", script],
-            pass_fds=(lifeline, report),
-            start_new_session=True,
+    def managed_job(self):
+        job = Mock()
+        job.stdout = io.BufferedReader(
+            io.BytesIO("\n".join(json.dumps(event) for event in REPORT).encode())
         )
-        os.close(lifeline)
-        os.close(report)
-        self.addCleanup(lambda: guard.poll() is None and os.killpg(guard.pid, signal.SIGKILL))
-        self.addCleanup(guard.wait)
-        return guard, keep, status
+        job.stderr = io.BufferedReader(io.BytesIO(b""))
+        job.poll.return_value = 0
+        job.native_returncode = 0
+        job.shutdown.return_value = SimpleNamespace(ok=True, reason="stopped")
+        job.finish.return_value = SimpleNamespace(ok=True, reason="complete")
+        return job
 
-    def assertExited(self, status):
-        self.assertTrue(select.select([status], [], [], 10)[0], "the CLI never exited")
+    def execute_job(self, job):
+        files = background.paths(self.root / "managed")
+        record = {"timeout": 10, "provider": "codex", "model": None}
+        return background._execute_claimed(files, record, job)
 
-    def test_the_guard_contains_descendants_after_the_cli_exits_and_the_owner_dies(self):
-        pids = self.root / "pids"
-        guard, keep, status = self.guard(f"sleep 30 & echo $! > {pids}; exit 0")
-        self.assertExited(status)
-        self.assertEqual(os.read(status, 64), b"0\n")
-        descendant = self.pids(pids, 1)
-        self.assertIsNone(guard.poll())  # still there to clean up after the CLI
-        os.close(keep)  # the owner dies
-        self.assertGone(descendant)
-        guard.wait(timeout=10)
+    def test_background_finishes_only_after_shutdown_and_output_readers(self):
+        job = self.managed_job()
 
-    def test_the_guard_survives_term_so_the_owner_dying_before_kill_is_contained(self):
-        pids = self.root / "pids"
-        guard, keep, status = self.guard(
-            f"(trap '' TERM; exec sleep 30) & echo $! > {pids}; exec sleep 30"
-        )
-        descendant = self.pids(pids, 1)
-        os.killpg(guard.pid, signal.SIGTERM)  # the owner's stop, before its KILL
-        self.assertExited(status)
-        time.sleep(0.3)
-        self.assertIsNone(guard.poll())
-        os.kill(descendant[0], 0)  # ignored TERM, still running
-        os.close(keep)  # the owner dies between TERM and KILL
-        self.assertGone(descendant)
-        guard.wait(timeout=10)
+        def finish():
+            job.shutdown.assert_called_once_with()
+            self.assertTrue(job.stdout.closed)
+            self.assertTrue(job.stderr.closed)
+            return SimpleNamespace(ok=True, reason="complete")
 
-    def test_an_owner_dying_as_the_guard_starts_leaves_no_cli_running(self):
-        pids = self.root / "pids"
-        guard, keep, status = self.guard(f"echo $$ > {pids}; exec sleep 30")
-        os.close(keep)  # before the guard has even imported anything
-        guard.wait(timeout=10)
-        if pids.exists():
-            self.assertGone(self.pids(pids, 1))
+        job.finish.side_effect = finish
+        self.assertEqual(self.execute_job(job), ("done", "slow path is X"))
+        job.finish.assert_called_once_with()
+        job.invalidate.assert_not_called()
+
+    def test_incomplete_shutdown_cannot_publish_a_background_receipt(self):
+        job = self.managed_job()
+        job.shutdown.return_value = SimpleNamespace(ok=False, reason="group still present")
+        outcome, report = self.execute_job(job)
+        self.assertEqual(outcome, "failed")
+        self.assertIn("group still present", report)
+        job.finish.assert_not_called()
+
+    def test_escaped_pipe_holders_invalidate_cleanup_without_hanging(self):
+        job = self.managed_job()
+        with patch.object(background.threading, "Thread") as thread:
+            thread.return_value.is_alive.return_value = True
+            outcome, report = self.execute_job(job)
+        self.assertEqual(outcome, "failed")
+        self.assertIn("artifacts retained", report)
+        job.invalidate.assert_called_once()
+        job.finish.assert_not_called()
+        for call in thread.return_value.join.call_args_list:
+            self.assertGreaterEqual(call.kwargs["timeout"], 0)
+            self.assertLessEqual(call.kwargs["timeout"], 5)
+        job.stdout.close()
+        job.stderr.close()
+
+    def test_output_read_errors_prevent_a_background_receipt(self):
+        job = self.managed_job()
+        job.stdout.close()
+        job.stdout = Mock()
+        job.stdout.__enter__ = Mock(return_value=job.stdout)
+        job.stdout.__exit__ = Mock(return_value=False)
+        job.stdout.read1.side_effect = OSError("broken output")
+        outcome, report = self.execute_job(job)
+        self.assertEqual(outcome, "failed")
+        self.assertIn("artifacts retained", report)
+        job.invalidate.assert_called_once()
+        job.finish.assert_not_called()
 
     def test_output_past_the_limit_is_drained_but_not_kept(self):
         path = self.root / "out"
         over = threading.Event()
-        background._copy(io.BufferedReader(io.BytesIO(b"x" * 100)), path, 10, over)
+        failed = threading.Event()
+        background._copy(io.BufferedReader(io.BytesIO(b"x" * 100)), path, 10, over, failed)
+        self.assertFalse(failed.is_set())
         self.assertEqual(path.read_bytes(), b"x" * 10)
         self.assertTrue(over.is_set())

@@ -28,14 +28,34 @@ class CrewTabLabelTests(SessionCase):
     def test_tab_label_shows_all_crew_occupants(self):
         """Tab labels update on second crew join and on dismissal."""
         created_jack = {
-            "pane": {"pane_id": "w1:p2", "agent": "claude", "agent_status": "idle"},
-            "root_pane": {"pane_id": "w1:p2"},
+            "pane": {
+                "pane_id": "w1:p2",
+                "terminal_id": "crew-terminal-jack",
+                "tab_id": "w1:t9",
+                "agent": "claude",
+                "agent_status": "idle",
+            },
+            "root_pane": {
+                "pane_id": "w1:p2",
+                "tab_id": "w1:t9",
+                "terminal_id": "crew-terminal-jack",
+            },
             "tab_id": "w1:t9",
             "agent": {"name": f"c-{self.meta['id'][:8]}-jack", "agent_status": "working"},
         }
         created_will = {
-            "pane": {"pane_id": "w1:p3", "agent": "claude", "agent_status": "idle"},
-            "root_pane": {"pane_id": "w1:p3"},
+            "pane": {
+                "pane_id": "w1:p3",
+                "terminal_id": "crew-terminal-will",
+                "tab_id": "w1:t9",
+                "agent": "claude",
+                "agent_status": "idle",
+            },
+            "root_pane": {
+                "pane_id": "w1:p3",
+                "tab_id": "w1:t9",
+                "terminal_id": "crew-terminal-will",
+            },
             "tab_id": "w1:t9",
             "agent": {"name": f"c-{self.meta['id'][:8]}-will", "agent_status": "working"},
         }

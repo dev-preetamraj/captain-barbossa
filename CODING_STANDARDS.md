@@ -104,7 +104,15 @@ those here.
 - **B-1 Every subprocess has a `timeout`** (or, for a streamed `Popen`, a monotonic
   deadline as in `inspection`) and an argv list (no `shell=True`); resolve the binary
   with `runtime.executable`. Untimed only: the interactive `update_check.upgrade` and
-  the detached `herdr server` in `onboarding`.
+  the detached `herdr server` in `onboarding`. Also exempt from a total runtime
+  deadline: the user-controlled interactive native session supervised by lifetime, and
+  its claim-bound guard. Startup handshakes, individual supervision waits, shutdown,
+  reaping, and shutdown observation must be bounded; shutdown uses monotonic deadlines.
+  The supervisor must respond to revocation and termination requests, retain on
+  incomplete evidence, and never signal a recovered process identity. This exception
+  does not apply to background assignments or auxiliary subprocesses. This documents
+  the user-approved interactive lifecycle feature, not a general weakening of
+  subprocess deadlines.
 - **B-2 Validate external JSON shape before use.** Copy `runtime.herdr`: check the
   envelope, check each nested object's type, and raise `CaptainError` with the raw
   output on mismatch. Never index a decoded payload you did not check.

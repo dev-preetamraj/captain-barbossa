@@ -56,6 +56,118 @@ _PRICE_KEYS = (
 
 
 def usage_for_events(events_path, *, cached_only=True):
+    """Read frozen incarnation accounting first, otherwise the native session usage."""
+    saved = Path(events_path).with_suffix(".usage.json")
+    if saved.exists():
+        return _read_json(saved).get("usage")
+    manifest = Path(events_path).parent.parent / "native-history" / f"{Path(events_path).stem}.json"
+    owned = _read_json(manifest)
+    if owned.get("provider") == "pi":
+        root = Path(owned["native_root"])
+        transcripts = dict.fromkeys(owned.get("transcripts", []))
+        for event in records(manifest.with_suffix(".pi.jsonl")):
+            value = event.get("transcript_path")
+            if event.get("incarnation_id") != owned.get("incarnation_id") or not isinstance(
+                value, str
+            ):
+                continue
+            path = Path(value)
+            if path.parent == root and path.suffix == ".jsonl" and not path.is_symlink():
+                transcripts[str(path)] = None
+        owned["transcripts"] = list(transcripts)
+    return _live_usage(
+        events_path,
+        cached_only=cached_only,
+        provider=owned.get("provider"),
+        transcripts=owned.get("transcripts"),
+        native_root=owned.get("native_root"),
+    )
+
+
+def freeze(events_path, incarnation, *, provider=None, transcripts=None, native_root=None):
+    """Persist only accounting fields before cleanup; unknown usage remains unknown."""
+    events_path = Path(events_path)
+    saved = events_path.with_suffix(".usage.json")
+    if saved.exists():
+        data = store.read_json(saved)
+        if data.get("incarnation_id") != incarnation:
+            raise CaptainError("Saved usage belongs to another incarnation.")
+        return data.get("usage")
+    value = _live_usage(
+        events_path, provider=provider, transcripts=transcripts, native_root=native_root
+    )
+    if value is not None:
+        value = {key: value.get(key) for key in (*_FIELDS, "tokens", "cost", "model")}
+        value.update(context=None, limit=None, rate=None)
+    store.private_dir(saved.parent)
+    store.write_json(saved, {"incarnation_id": incarnation, "usage": value})
+    return value
+
+
+def _live_usage(
+    events_path, *, cached_only=True, provider=None, transcripts=None, native_root=None
+):
+    if provider == "pi":
+        return _pi_usage(transcripts or [])
+    if provider == "grok":
+        return None
+    if provider == "codex":
+        frames = [
+            _codex_usage(events_path, cached_only=cached_only, rollout=path)
+            for path in transcripts or []
+        ]
+        if frames:
+            return _combine(frames)
+        root = Path(native_root) / "sessions" if native_root else None
+        return _codex_usage(events_path, cached_only=cached_only, sessions_root=root)
+    return _claude_usage(events_path, cached_only=cached_only, transcripts=transcripts)
+
+
+def _combine(frames):
+    known = [frame for frame in frames if frame is not None]
+    if not known:
+        return None
+    result = dict(known[-1])
+    for key in (*_FIELDS, "tokens", "cost", "rate"):
+        values = [frame.get(key) if frame else None for frame in frames]
+        result[key] = sum(values) if all(value is not None for value in values) else None
+    return result
+
+
+def _pi_usage(transcripts):
+    frames = []
+    for path in transcripts:
+        totals = dict.fromkeys(_FIELDS, 0)
+        cost, model, found = 0.0, None, False
+        for record in records(path):
+            message = record.get("message", {})
+            data = (
+                message
+                if isinstance(message, dict) and message.get("role") == "assistant"
+                else record
+            )
+            counts = data.get("usage")
+            if not isinstance(counts, dict):
+                continue
+            found = True
+            model = data.get("model", model)
+            for key, field in (
+                ("input", "input"),
+                ("output", "output"),
+                ("cache_read", "cacheRead"),
+                ("cache_write", "cacheWrite"),
+            ):
+                totals[key] += _count(counts.get(field))
+            prices = counts.get("cost")
+            turn_cost = prices.get("total") if isinstance(prices, dict) else None
+            cost = (
+                cost + turn_cost if cost is not None and type(turn_cost) in (int, float) else None
+            )
+        frames.append(_frame(totals, None, None, model, cost, []) if found else None)
+    return _combine(frames)
+
+
+def _claude_usage(events_path, *, cached_only=True, transcripts=None):
     """Token totals, context, estimated cost and burn rate for one crew's native session.
 
     Cumulative over every transcript the events file has ever named, so a crew that runs
@@ -66,7 +178,9 @@ def usage_for_events(events_path, *, cached_only=True):
     """
     # ponytail: re-reads every transcript whole on each call, so a long session re-parses
     # a large file each refresh tick; carry byte offsets like read_cursor if it drags.
-    transcripts = _transcript_paths(events_path)
+    if transcripts == []:
+        return None
+    transcripts = _transcript_paths(events_path) if transcripts is None else transcripts
     if not transcripts:
         return _codex_usage(events_path, cached_only=cached_only)
 
@@ -75,7 +189,7 @@ def usage_for_events(events_path, *, cached_only=True):
     cost, spend, last = 0.0, [], None
     seen = set()
     for transcript in transcripts:
-        for record in _records(transcript):
+        for record in records(transcript):
             if record.get("type") != "assistant":
                 continue
             message = record.get("message")
@@ -117,16 +231,18 @@ def usage_for_events(events_path, *, cached_only=True):
     )
 
 
-def _codex_usage(events_path, *, cached_only=True):
+def _codex_usage(events_path, *, cached_only=True, rollout=None, sessions_root=None):
     """Token totals for the Codex rollout log the newest notification points at."""
-    rollout = _rollout_path(events_path)
+    rollout = (
+        _rollout_path(events_path, sessions_root=sessions_root) if rollout is None else rollout
+    )
     if rollout is None:
         return None
 
     prices = _prices(cached_only=cached_only)
     totals = last = model = limit = None
     cost, spend = 0.0, []
-    for record in _records(rollout):
+    for record in records(rollout):
         payload = record.get("payload")
         if not isinstance(payload, dict):
             continue
@@ -235,19 +351,20 @@ def _epoch(value):
         return None
 
 
-def _rollout_path(events_path):
+def _rollout_path(events_path, *, sessions_root=None):
     """The rollout log for the newest notification naming a thread that has one.
 
     Codex notifies for its own title-generation turns too, but those run on a throwaway
     thread that is never written to disk, so resolving the id filters them out. An id
     matching more than one log is ambiguous and is skipped rather than guessed at.
     """
-    for record in reversed(list(_records(events_path))):
+    for record in reversed(list(records(events_path))):
         thread = record.get("thread-id")
         if not isinstance(thread, str) or not _THREAD_ID.fullmatch(thread):
             continue
         try:
-            matches = list(CODEX_SESSIONS_ROOT.glob(f"*/*/*/rollout-*-{thread}.jsonl"))
+            root = CODEX_SESSIONS_ROOT if sessions_root is None else sessions_root
+            matches = list(root.glob(f"*/*/*/rollout-*-{thread}.jsonl"))
         except OSError:
             return None
         if len(matches) == 1:
@@ -263,7 +380,7 @@ def model_for_events(events_path):
     carries the model.
     """
     model = None
-    for record in _records(events_path):
+    for record in records(events_path):
         value = record.get("model")
         if isinstance(value, str) and value:
             model = value
@@ -386,14 +503,16 @@ def _transcript_paths(events_path):
     before it only exists in the earlier one, and the total must never shrink.
     """
     paths = {}
-    for record in _records(events_path):
+    for record in records(events_path):
+        if record.get("provider") not in {None, "claude"}:
+            continue
         path = record.get("transcript_path")
         if isinstance(path, str) and path:
             paths[path] = None
     return list(paths)
 
 
-def _records(path):
+def records(path):
     """Yield the JSON objects of a JSONL file, skipping anything unreadable."""
     try:
         with Path(path).open(encoding="utf-8", errors="replace") as handle:

@@ -40,6 +40,48 @@ class ProtocolTests(SessionCase):
         self.enterContext(patch.object(Pane, "nudge", create=True))
         self.assignment = protocol.begin(self.crew, self.project, "original", ["src"], ["edit"])
 
+    def test_isolated_ownership_uses_registered_root_and_identity(self):
+        from captain_barbossa import execution, worktrees
+
+        isolated = self.project.parent / "isolated"
+        isolated.mkdir()
+        record = {
+            "id": "will",
+            "name": "Will",
+            "incarnation_id": "isolated-incarnation",
+            "worktree_id": "isolated-incarnation",
+            "assignment_id": "isolated-assignment",
+        }
+        crew = Crew("will", record, self.current)
+        registered = {
+            "crew_id": "will",
+            "incarnation_id": record["incarnation_id"],
+            "assignment_id": record["assignment_id"],
+            "project": str(self.project),
+            "execution_root": str(isolated),
+        }
+        with patch.object(worktrees, "read", return_value=registered):
+            assignment = protocol.begin(
+                crew,
+                self.project,
+                "isolated edit",
+                ["src"],
+                ["edit"],
+                assignment_id=record["assignment_id"],
+            )
+            self.assertEqual(assignment["paths"], ["src"])
+            self.assertEqual(assignment["execution_root"], str(isolated))
+            protocol.check_action(
+                assignment, execution.root(self.current, record), "edit", ["src/a"]
+            )
+            with self.assertRaises(CaptainError):
+                protocol.check_action(assignment, isolated, "edit", [str(self.project / "src/a")])
+            with self.assertRaisesRegex(CaptainError, "worktree-handoff"):
+                protocol.begin(crew, self.project, "replacement", ["src"], ["edit"])
+            registered["incarnation_id"] = "someone-else"
+            with self.assertRaisesRegex(CaptainError, "worktree-identity"):
+                execution.root(self.current, record)
+
     def mail(self, message_id):
         crew_id, session = self.crew.crew_id, self.current
         return store.read_json(protocol.mail_dir(session.directory, crew_id) / f"{message_id}.json")

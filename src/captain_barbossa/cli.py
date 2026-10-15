@@ -20,6 +20,7 @@ from .agents import (
 )
 from .crew import Crew
 from .events import mail_context, receipt_for
+from .execution import artifact_command
 from .layout import HERDR_DIRECTIONS
 from .memory import REPO_RELATIONS, RULEBOOK_FILES, memory
 from .models import PROVIDERS, TIER_NAMES, models_for, tiers_for
@@ -51,6 +52,20 @@ def parser():
     commands = root.add_subparsers(dest="command")
     inspection.add_arguments(commands)
     do.add_arguments(commands)
+    result = commands.add_parser("result", help="review or transfer isolated crew work")
+    result_actions = result.add_subparsers(dest="result_command", required=True)
+    collect = result_actions.add_parser("collect")
+    collect.add_argument("worktree_id")
+    for action in ("show", "apply", "discard"):
+        command = result_actions.add_parser(action)
+        command.add_argument("result_id")
+        if action == "discard":
+            command.add_argument("--reason", required=True)
+    worktree = commands.add_parser("worktree", help="retained isolated crew checkouts")
+    worktree_actions = worktree.add_subparsers(dest="worktree_command", required=True)
+    worktree_actions.add_parser("list")
+    cleanup = worktree_actions.add_parser("cleanup")
+    cleanup.add_argument("worktree_id")
     crew = commands.add_parser("crew", help="create a native crew after agent and pane/tab choices")
     crew.add_argument(
         "name", nargs="?", help="Pirates character name (automatically assigned when omitted)"
@@ -63,6 +78,9 @@ def parser():
     )
     crew.add_argument("--task", required=True)
     crew.add_argument("--profile", help="recruitment preset from [profiles.NAME] settings")
+    crew.add_argument(
+        "--checkout", choices=("auto", "shared", "worktree"), help="crew checkout isolation"
+    )
     crew.add_argument("--owns", action="append", default=[], metavar="PATH")
     crew.add_argument("--allow", action="append", default=[], choices=protocol.ACTIONS)
     crew.add_argument("--handoff", metavar="ASSIGNMENT_ID", help="explicitly reuse a retired name")
@@ -376,6 +394,9 @@ def main(argv=None):
             return 0
         if args.command == "session":
             print_session(args)
+            return 0
+        if args.command in ("result", "worktree"):
+            print(json.dumps(artifact_command(args, read_session(project_root(), args.session))))
             return 0
         if args.command == "recover":
             project = project_root()

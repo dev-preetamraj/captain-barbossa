@@ -462,6 +462,34 @@ class ApprovalHookTests(SessionCase):
         logged = json.loads(self.crew.events.read_text().splitlines()[-1])
         return json.loads(output.getvalue() or "{}"), logged
 
+    def test_codex_session_start_observes_stamped_identity_without_claude_delivery(self):
+        from captain_barbossa import native_history
+
+        self.crew.record["provider"] = "codex"
+        store.write_json(self.current.meta_path, self.current.meta)
+        event = {"hook_event_name": "SessionStart", "session_id": "native-session"}
+        with (
+            patch.object(native_history, "observe") as observe,
+            patch.object(events, "deliver_mail") as deliver,
+            patch.object(events, "permission_decision") as permission,
+            patch.object(sys, "stdin", io.StringIO(json.dumps(event))),
+            contextlib.redirect_stdout(io.StringIO()) as output,
+        ):
+            events.append_event([str(self.crew.events)])
+        observe.assert_called_once()
+        self.assertEqual(observe.call_args.args[1]["incarnation_id"], "first")
+        self.assertEqual(observe.call_args.args[1]["provider"], "codex")
+        self.assertEqual(observe.call_args.args[1]["seq"], 1)
+        deliver.assert_not_called()
+        permission.assert_not_called()
+        self.assertEqual(output.getvalue(), "")
+
+    def test_unmanaged_hook_preserves_raw_event_without_inventing_provider(self):
+        path = self.root / "unmanaged.jsonl"
+        event = {"type": "agent-turn-complete", "timestamp": "original"}
+        events.append_event([str(path), json.dumps(event)])
+        self.assertEqual(json.loads(path.read_text()), event)
+
     def test_allow_once_uses_native_response_and_does_not_leave_an_approval_notice(self):
         output, event = self.hook("Edit", {"file_path": "src/a.py"})
         self.assertEqual(
@@ -471,6 +499,16 @@ class ApprovalHookTests(SessionCase):
         self.assertEqual(event["approval"], {"verdict": "allow-once", "code": "granted"})
         self.assertIsNone(event_status(event))
         self.assertEqual(self.crew.current_state().state, "working")
+
+    def test_revoked_lifetime_refuses_native_tool_grants(self):
+        from captain_barbossa import lifetime
+
+        self.crew.record["lifetime_id"] = "a" * 32
+        store.write_json(self.current.meta_path, self.current.meta)
+        with patch.object(lifetime, "read", return_value={"revoked": True}):
+            output, event = self.hook("Edit", {"file_path": "src/a.py"})
+        self.assertEqual(output["hookSpecificOutput"]["decision"]["behavior"], "deny")
+        self.assertEqual(event["approval"]["code"], "action-not-granted")
 
     def test_denied_action_refuses_the_tool(self):
         output, event = self.hook(inputs={"command": "git commit src/a.py -m fix"})

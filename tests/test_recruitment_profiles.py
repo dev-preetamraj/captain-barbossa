@@ -32,7 +32,10 @@ class RecruitmentProfilesTests(SessionCase):
             patch.object(
                 runtime,
                 "herdr",
-                return_value={"root_pane": {"pane_id": "w1:p9"}, "tab_id": "w1:t9"},
+                return_value={
+                    "root_pane": {"pane_id": "w1:p9", "terminal_id": "crew-terminal"},
+                    "tab_id": "w1:t9",
+                },
             )
         )
         self.enterContext(contextlib.redirect_stderr(io.StringIO()))
@@ -112,8 +115,17 @@ class RecruitmentProfilesTests(SessionCase):
 
         def herdr(*command, **_kwargs):
             if command[:2] == ("pane", "split"):
-                return {"pane": {"pane_id": "w1:p10", "tab_id": self.pane["tab_id"]}}
-            return {"root_pane": {"pane_id": "w1:p9"}, "tab_id": "w1:t9"}
+                return {
+                    "pane": {
+                        "pane_id": "w1:p10",
+                        "tab_id": self.pane["tab_id"],
+                        "terminal_id": "crew-terminal",
+                    }
+                }
+            return {
+                "root_pane": {"pane_id": "w1:p9", "terminal_id": "crew-terminal"},
+                "tab_id": "w1:t9",
+            }
 
         self.api.side_effect = herdr
         result, printed = self.recruit_with_stderr("--profile", "review", "--placement", "auto")
@@ -202,6 +214,20 @@ class RecruitmentProfilesTests(SessionCase):
         self.assertEqual(rec.placement, "pane")
         self.assertNotIn("placement", sources)
         self.assertEqual(rec.model, config.defaults()["models"]["codex"]["cheap"])
+
+    def test_checkout_profile_and_explicit_flag_precedence(self):
+        self.settings = {"profiles": {"review": {"checkout": "worktree"}}}
+        args, sources = profiles.apply(self.args("--profile", "review"))
+        self.assertEqual(args.checkout, "worktree")
+        self.assertIn("profiles.review", sources["checkout"])
+        args, sources = profiles.apply(self.args("--profile", "review", "--checkout", "shared"))
+        self.assertEqual(args.checkout, "shared")
+        self.assertNotIn("checkout", sources)
+        self.settings = {"profiles": {"review": {"checkout": "auto"}}}
+        self.assertEqual(profiles.apply(self.args("--profile", "review"))[0].checkout, "auto")
+        self.settings = {"profiles": {"review": {"checkout": "copy"}}}
+        with self.assertRaisesRegex(runtime.CaptainError, "invalid checkout"):
+            profiles.apply(self.args("--profile", "review"))
 
     def test_no_profile_does_not_read_profiles_or_change_arguments(self):
         self.settings = {"profiles": {"broken": 123}}

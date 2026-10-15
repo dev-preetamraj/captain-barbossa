@@ -94,6 +94,22 @@ class CliCommandTests(SessionCase):
                 self.assertEqual(self.run_cli("inbox", "Jack")[0], 1)
         self.assertIn("only on its own assignment", error.getvalue())
 
+    def test_result_mutations_and_worktree_cleanup_are_captain_only(self):
+        commands = [
+            ["result", "collect", "a" * 32],
+            ["result", "show", "b" * 32],
+            ["result", "apply", "b" * 32],
+            ["result", "discard", "b" * 32, "--reason", "user discarded"],
+            ["worktree", "cleanup", "a" * 32],
+        ]
+        with patch.dict(os.environ, {"CAPTAIN_ROLE": "crew"}):
+            for command in commands:
+                with (
+                    self.subTest(command=command),
+                    self.assertRaisesRegex(CaptainError, "captain-only"),
+                ):
+                    cli.guard_crew(cli.parser().parse_args(command))
+
     def test_launch_assignment_defaults_and_explicit_replacement(self):
         with patch.dict(
             os.environ,
@@ -605,7 +621,9 @@ class CliCommandTests(SessionCase):
 
         def herdr(*call, **kwargs):
             if call[:2] == ("pane", "split"):
-                return {"pane": {"pane_id": "w1:p2", "tab_id": "w1:t1"}}
+                return {
+                    "pane": {"pane_id": "w1:p2", "terminal_id": "crew-terminal", "tab_id": "w1:t1"}
+                }
             if call[:2] == ("pane", "run"):
                 self.fail("launcher was typed into an unsettled shell")
             return {}

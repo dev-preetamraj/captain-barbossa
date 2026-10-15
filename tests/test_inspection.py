@@ -176,6 +176,48 @@ class InspectionTests(unittest.TestCase):
             "initial",
         )
 
+    def test_registered_crew_worktree_and_original_checkout_remain_inspectable(self):
+        from captain_barbossa import sessions, worktrees
+
+        self.init_git()
+        current = sessions.session(
+            self.project,
+            {"workspace_id": "workspace", "pane_id": "pane", "tab_id": "tab"},
+            create=True,
+        )
+        registered = worktrees.reserve(current, "jack", "a" * 32, "b" * 32)
+        registered = worktrees.create(current, registered["id"])
+        current.meta["crew"]["jack"] = {
+            "id": "jack",
+            "incarnation_id": "a" * 32,
+            "assignment_id": "b" * 32,
+            "worktree_id": registered["id"],
+        }
+        store.write_json(current.meta_path, current.meta)
+        self.assertEqual(self.inspect("git", "status")["text"], "")
+        root = Path(registered["execution_root"])
+        (root / "file").write_text("crew change\n")
+        with patch.dict(
+            os.environ,
+            {
+                "CAPTAIN_ROLE": "crew",
+                "CAPTAIN_WORKTREE_ID": registered["id"],
+                "CAPTAIN_CREW": "jack",
+                "CAPTAIN_INCARNATION": "a" * 32,
+                "CAPTAIN_ASSIGNMENT": "b" * 32,
+            },
+        ):
+            self.assertEqual(
+                self.inspect("read", "file", session=current.meta["id"])["text"], "crew change\n"
+            )
+            self.assertIn("file", self.inspect("git", "status", session=current.meta["id"])["text"])
+            with self.assertRaises(CaptainError):
+                self.inspect("read", str(self.project / "file"), session=current.meta["id"])
+            with patch.dict(os.environ, {"CAPTAIN_INCARNATION": "c" * 32}):
+                with self.assertRaisesRegex(CaptainError, "worktree-identity"):
+                    self.inspect("read", "file", session=current.meta["id"])
+        self.assertEqual((self.project / "file").read_text(), "original\n")
+
     def test_fixed_git_queries_work_and_do_not_change_index(self):
         self.init_git()
         index = self.project / ".git/index"
@@ -257,7 +299,9 @@ class InspectionTests(unittest.TestCase):
         for metadata in (False, True):
             with self.subTest(metadata=metadata), self.assertRaises(FileNotFoundError):
                 list(
-                    inspection._walk(self.project, Path("missing"), float("inf"), metadata=metadata)
+                    inspection.walk_files(
+                        self.project, Path("missing"), float("inf"), metadata=metadata
+                    )
                 )
         lock = self.project / ".git/maintenance.lock"
         lock.touch()

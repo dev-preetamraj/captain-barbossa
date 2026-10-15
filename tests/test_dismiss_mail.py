@@ -171,7 +171,14 @@ class DismissCrewTests(SessionCase):
 
     def test_a_crew_holding_only_unread_mail_dismisses_cleanly(self):
         """Mail that never reached the crew cannot demand a done report from it."""
-        created = {"pane": {"pane_id": "w1:p2", "agent": "codex", "agent_status": "idle"}}
+        created = {
+            "pane": {
+                "pane_id": "w1:p2",
+                "terminal_id": "crew-terminal",
+                "agent": "codex",
+                "agent_status": "idle",
+            }
+        }
         with (
             patch.object(runtime, "herdr", side_effect=pane_stub(created)),
             patch.object(agents, "executable", return_value="/bin/codex"),

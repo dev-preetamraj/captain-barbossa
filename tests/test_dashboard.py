@@ -1,5 +1,7 @@
+import json
 import os
 import re
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -496,6 +498,21 @@ class FormattingTests(unittest.TestCase):
             self.assertEqual(dashboard._ctx(pct, frozenset()), expected)
         self.assertEqual(dashboard._ctx(None, frozenset()), "-")
         self.assertEqual(dashboard._ctx(7, frozenset({"bar"})), "  7%")
+
+
+class RetiredSavedUsageTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+
+    def test_saved_incarnation_without_events_is_counted_once(self):
+        old = self.root / "jack-old.usage.json"
+        old.write_text(json.dumps({"incarnation_id": "old", "usage": {"tokens": 17, "cost": None}}))
+        self.assertEqual(dashboard._orphaned(self.root, {"jack-new"}), [(17, None)])
+        (self.root / "jack-old.jsonl").touch()
+        self.assertEqual(dashboard._orphaned(self.root, {"jack-new"}), [(17, None)])
+        self.assertEqual(dashboard._orphaned(self.root, {"jack-old"}), [])
 
 
 if __name__ == "__main__":

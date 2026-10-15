@@ -7,6 +7,7 @@ import uuid
 from collections import namedtuple
 from contextlib import contextmanager
 
+from . import native_history
 from .runtime import HERDR_ERRORS, CaptainError, herdr
 from .store import (
     lock,
@@ -245,7 +246,25 @@ def unresolved(directory):
     """
     try:
         path = directory / "session.json"
-        roster = read_json(path).get("crew", {}) if path.exists() else {}
+        meta = read_json(path) if path.exists() else {}
+        roster = meta.get("crew", {})
+        # lifetime and results -> worktrees import sessions.
+        from . import lifetime, results, worktrees
+
+        current = Session(directory, meta)
+        lifetimes = directory / "lifetimes"
+        if (
+            (lifetimes.exists() or lifetimes.is_symlink()) and lifetime.pending(directory)
+        ) or native_history.pending(directory):
+            return True
+        records = worktrees.inventory(current)
+        if any(record["phase"] != "removed" for record in records):
+            return True
+        manifests = results.inventory(current)
+        if any(
+            item["worktree_id"] not in {record["id"] for record in records} for item in manifests
+        ):
+            return True
         path = directory / "protocol.json"
         state = read_json(path) if path.exists() else {}
         for crew_id, assignment_id in state.get("active", {}).items():
@@ -267,7 +286,7 @@ def unresolved(directory):
                 or assignment["ack_seq"] < len(assignment["notices"])
             ):
                 return True
-    except (CaptainError, AttributeError, KeyError, TypeError):
+    except (CaptainError, OSError, ValueError, AttributeError, KeyError, TypeError):
         return True
     return False
 

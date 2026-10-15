@@ -4,19 +4,15 @@ Claim and withdrawal are renames of one intent file, so exactly one wins without
 stopped process could hold. The owner holds its lock for the whole run and writes the
 outcome before exiting: a free lock with no outcome means the run was lost.
 
-The native CLI runs under a guard that leads its own process group, survives TERM and
-outlives the CLI; when the owner's lifeline pipe closes, however it died, the guard kills
-the group. Only the owner signals the group, and only before reaping the guard, so the id
-cannot have been recycled; anyone else asks through a cancel file. A process that leaves
-the group (setsid) is not contained.
+Lifetime owns native process-group shutdown and its evidence. The background owner
+also requires output readers to finish before publishing that receipt; an escaped pipe
+holder leaves cleanup pending. Cancellation is requested through a file.
 """
 
 import fcntl
 import json
 import math
 import os
-import select
-import signal
 import subprocess
 import sys
 import threading
@@ -24,10 +20,11 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
-from . import config, protocol
+from . import config, execution, lifetime, native_history, protocol
 from .do import QUIET_PROMPT
 from .models import headless_argv, headless_report
 from .runtime import CaptainError
+from .sessions import Session
 from .store import lock, private_dir, read_json, state_root, temp_root, write_json, write_text
 
 # Seconds `crew --background` waits for the owner's startup receipt.
@@ -36,8 +33,6 @@ STARTUP = 10
 LOCK_WAIT = 2
 # Seconds `interrupt` waits for the owner to confirm a cancellation.
 CANCEL_WAIT = 10
-# Seconds between SIGTERM and SIGKILL for the native CLI's process group.
-GRACE = 5
 POLL = 0.2
 # Disk bounds per run. A turn's result is one JSON document or a JSON-lines stream that
 # only parses whole, so output past the limit fails the run instead of being cut.
@@ -216,8 +211,20 @@ def prepare(crew, project, provider, binary, model, task, assignment_id):
         "CAPTAIN_STATE_ROOT": str(state_root()),
         "CAPTAIN_TEMP_ROOT": str(temp_root()),
     }
+    execution_root = execution.root(crew.session, crew.record)
+    environment["CAPTAIN_WORKTREE_ID"] = crew.record.get("worktree_id", "")
+    history = native_history.prepare(
+        crew, incarnation=crew.record["incarnation_id"], project=project, background=True
+    )
+    environment.update(history["env"])
+    argv = headless_argv(provider, binary, f"{QUIET_PROMPT}\n\n{task}", model=model, isolated=True)
+    argv[-1:-1] = history["argv"]
+    ref = lifetime.prepare(crew.session, crew.record, argv, environment, execution_root)
+    crew.record["lifetime_id"] = ref
+    write_json(crew.session.meta_path, crew.session.meta)
     record = {
         "state": "launching",
+        "lifetime_id": ref,
         "at": time.time(),
         "session": str(directory),
         "crew": crew.crew_id,
@@ -225,12 +232,10 @@ def prepare(crew, project, provider, binary, model, task, assignment_id):
         "message_id": message_id,
         "provider": provider,
         "model": model,
-        "cwd": str(Path(project).resolve()),
+        "cwd": str(execution_root),
         "timeout": timeout(),
         "env": environment,
-        "argv": headless_argv(
-            provider, binary, f"{QUIET_PROMPT}\n\n{task}", model=model, isolated=True
-        ),
+        "argv": argv,
     }
     write_json(files["record"], record)
     write_text(files["intent"], assignment_id)
@@ -306,33 +311,22 @@ def cancel(crew, reason):
     return "cancel requested; the owner has not confirmed it yet"
 
 
-def _copy(stream, path, limit, over):
-    """Keep at most `limit` bytes of a stream on disk, draining the rest so it never blocks."""
-    with os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "wb") as out:
-        written = 0
-        for chunk in iter(lambda: stream.read1(65536), b""):
-            room = max(limit - written, 0)
-            if len(chunk) > room:
-                over.set()
-            out.write(chunk[:room])
-            written += min(len(chunk), room)
-
-
-def _signal_group(child, sig):
+def _copy(stream, path, limit, over, failed):
+    """Keep bounded output, reporting read/write errors before any lifetime receipt."""
     try:
-        os.killpg(child.pid, sig)
-    except (ProcessLookupError, PermissionError):
-        pass
-
-
-def _stop(child, status, grace):
-    """TERM the group, give the CLI up to `grace` to report its exit, then KILL the whole
-    group and reap the guard. The guard survives TERM, so the group id stays ours until the
-    reap, and the KILL takes descendants that ignored TERM or still hold the output pipes."""
-    _signal_group(child, signal.SIGTERM)
-    select.select([status], [], [], grace)
-    _signal_group(child, signal.SIGKILL)
-    child.wait()
+        with (
+            stream,
+            os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "wb") as out,
+        ):
+            written = 0
+            for chunk in iter(lambda: stream.read1(65536), b""):
+                room = max(limit - written, 0)
+                if len(chunk) > room:
+                    over.set()
+                out.write(chunk[:room])
+                written += min(len(chunk), room)
+    except (OSError, ValueError):
+        failed.set()
 
 
 def _tail(path):
@@ -409,61 +403,72 @@ def run(path):
 
 
 def _execute(files, record):
+    if not record.get("lifetime_id"):
+        return (
+            "failed",
+            "[background-lifetime] Unmanaged legacy launch retained; recruit a new crew.",
+        )
+    directory = Path(record["session"])
+    current = Session(directory, read_json(directory / "session.json"))
+    with lifetime.claim(current, record["lifetime_id"]) as job:
+        return _execute_claimed(files, record, job)
+
+
+def _execute_claimed(files, record, job):
     stopped = None
     if files["cancel"].exists():
         return "cancelled", f"[background-cancelled] {files['cancel'].read_text().strip()}"
-    # The owner keeps the lifeline's write end and never writes; the guard sees EOF when
-    # it dies. The guard writes the CLI's exit status to `status` and keeps running.
-    lifeline, keep = os.pipe()
-    status, report = os.pipe()
-    try:
-        child = subprocess.Popen(
-            [sys.executable, "-m", "captain_barbossa.background", "--guard"]
-            + [str(lifeline), str(report), "--", *record["argv"]],
-            cwd=record["cwd"],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            env={**os.environ, **record["env"]},
-            start_new_session=True,
-            pass_fds=(lifeline, report),
-        )
-    except OSError as exc:
-        os.close(keep)
-        os.close(status)
-        return "failed", f"[background-failed] could not start {record['argv'][0]}: {exc}"
-    finally:
-        os.close(lifeline)
-        os.close(report)
-    over = threading.Event()
-    readers = [
-        threading.Thread(
-            target=_copy, args=(child.stdout, files["stdout"], STDOUT_LIMIT, over), daemon=True
-        ),
-        threading.Thread(
-            target=_copy, args=(child.stderr, files["stderr"], STDERR_LIMIT, over), daemon=True
-        ),
-    ]
-    for reader in readers:
-        reader.start()
+    reader_timeout = config.number("lifetime", "shutdown_timeout", below=float("inf"))
     deadline = time.monotonic() + record["timeout"]
-    # Readable once the CLI has exited, or at EOF if the guard itself died.
-    while not select.select([status], [], [], POLL)[0]:
-        if files["cancel"].exists():
-            stopped = "cancelled"
-        elif time.monotonic() >= deadline:
-            stopped = "timeout"
-        elif over.is_set():
-            stopped = "output"
-        if stopped:
-            break
-    _stop(child, status, GRACE if stopped else 0)
-    exit_code = os.read(status, 64).decode().strip() or "unknown"
-    os.close(status)
-    os.close(keep)
-    # Every process in the group is gone; only one that left it can still hold a pipe.
-    for reader in readers:
-        reader.join(timeout=GRACE)
+    job.start(
+        detached=True, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+    )
+    over, failed = threading.Event(), threading.Event()
+    readers = []
+    try:
+        for stream, path, limit in (
+            (job.stdout, files["stdout"], STDOUT_LIMIT),
+            (job.stderr, files["stderr"], STDERR_LIMIT),
+        ):
+            reader = threading.Thread(
+                target=_copy, args=(stream, path, limit, over, failed), daemon=True
+            )
+            reader.start()
+            readers.append(reader)
+        while job.poll() is None:
+            if files["cancel"].exists():
+                stopped = "cancelled"
+            elif time.monotonic() >= deadline:
+                stopped = "timeout"
+            elif over.is_set():
+                stopped = "output"
+            elif failed.is_set():
+                stopped = "reader"
+            if stopped:
+                break
+            time.sleep(POLL)
+    finally:
+        try:
+            verdict = job.shutdown()
+        finally:
+            # An escaped pipe holder must not hang the owner or authorize cleanup.
+            reader_deadline = time.monotonic() + reader_timeout
+            for reader in readers:
+                reader.join(timeout=max(0, reader_deadline - time.monotonic()))
+            if len(readers) != 2 or any(reader.is_alive() for reader in readers) or failed.is_set():
+                job.invalidate("background output readers did not complete safely")
+                stopped = "reader"
+    if stopped == "reader":
+        return (
+            "failed",
+            "[background-output] Output readers failed or remain active; artifacts retained.",
+        )
+    if not verdict.ok:
+        return "failed", f"[background-shutdown] {verdict.reason}"
+    verdict = job.finish()
+    if not verdict.ok:
+        return "failed", f"[background-shutdown] {verdict.reason}"
+    exit_code = job.native_returncode
     if stopped == "cancelled":
         return "cancelled", f"[background-cancelled] {files['cancel'].read_text().strip()}"
     if stopped == "timeout":
@@ -484,32 +489,7 @@ def _execute(files, record):
     return "done", text
 
 
-def guard(lifeline, status, argv):
-    """Run the native CLI in this process group and stay until the owner kills the group.
-
-    The lifeline watch starts before the CLI and outlives its exit and TERM, so the owner's
-    death always takes the group down. TERM gets a handler, not SIG_IGN: exec resets a
-    handler, so the CLI still gets TERM's default.
-    """
-    signal.signal(signal.SIGTERM, lambda *_: None)
-
-    def watch():
-        os.read(lifeline, 1)  # returns at EOF, when the owner's write end closes
-        os.killpg(os.getpgrp(), signal.SIGKILL)
-
-    threading.Thread(target=watch, daemon=True).start()
-    try:
-        code = subprocess.Popen(argv).wait()
-    except OSError:
-        code = 127
-    os.write(status, f"{code}\n".encode())
-    while True:
-        signal.pause()
-
-
 if __name__ == "__main__":
-    if sys.argv[1] == "--guard":
-        guard(int(sys.argv[2]), int(sys.argv[3]), sys.argv[5:])
     try:
         run(sys.argv[1])
     except Exception as exc:  # the log is the only witness an unwatched owner has

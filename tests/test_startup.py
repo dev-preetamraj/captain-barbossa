@@ -83,7 +83,7 @@ class StartupTests(SessionCase):
                 self.assertIn("build", body)
                 events.receipt_for(crew.events, ids)
                 delivered.extend(ids)
-            return {"pane": {"pane_id": "w1:p2"}}
+            return {"pane": {"pane_id": "w1:p2", "terminal_id": "crew-terminal"}}
 
         with (
             patch.object(runtime, "herdr", side_effect=pane_stub(api)),
@@ -118,7 +118,7 @@ class StartupTests(SessionCase):
                 raise runtime.CaptainError("agent_not_ready")
             if args[:2] == ("pane", "read"):
                 return SETTLED_SHELL_TEXT
-            return {"pane": {"pane_id": "w1:p2"}}
+            return {"pane": {"pane_id": "w1:p2", "terminal_id": "crew-terminal"}}
 
         with (
             patch.object(runtime, "herdr", side_effect=api) as calls,
@@ -227,15 +227,26 @@ class StartupTests(SessionCase):
                     "--split-pane",
                     "w1:p1",
                 )
-                created = {"pane": {"pane_id": "w1:p2", "agent": "codex", "agent_status": status}}
+                created = {
+                    "pane": {
+                        "pane_id": "w1:p2",
+                        "terminal_id": "crew-terminal",
+                        "agent": "codex",
+                        "agent_status": status,
+                    }
+                }
                 created["agent"] = {"name": f"c-{self.meta['id'][:8]}-{name}"}
+                elapsed = [0]
+
+                def advance(_seconds):
+                    elapsed[0] += 31
+
                 with (
                     patch.object(runtime, "herdr", side_effect=pane_stub(created)) as calls,
                     patch.object(agents, "executable", return_value="/bin/codex"),
-                    # One extra tick: shell_ready_for_input's own deadline check runs
-                    # (and settles at once) before wait_for_crew consumes [0, 1, 31].
-                    patch.object(panes.time, "monotonic", side_effect=[0, 0, 1, 31]),
-                    patch.object(panes.time, "sleep"),
+                    patch.object(agents, "shell_ready_for_input", return_value=True),
+                    patch.object(panes.time, "monotonic", side_effect=lambda: elapsed[0]),
+                    patch.object(panes.time, "sleep", side_effect=advance),
                 ):
                     message = "input or approval" if status == "blocked" else "did not become ready"
                     with self.assertRaisesRegex(runtime.CaptainError, message):
@@ -258,7 +269,12 @@ class StartupTests(SessionCase):
             if call[:2] == ("agent", "read"):
                 return self.EMPTY_COMPOSER
             return {
-                "pane": {"pane_id": "w1:p2", "agent": "claude", "agent_status": "idle"},
+                "pane": {
+                    "pane_id": "w1:p2",
+                    "terminal_id": "crew-terminal",
+                    "agent": "claude",
+                    "agent_status": "idle",
+                },
                 "agent": {"name": agent_name},
             }
 

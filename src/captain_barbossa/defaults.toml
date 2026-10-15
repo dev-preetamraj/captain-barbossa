@@ -7,6 +7,10 @@ agent = ""
 model = ""
 
 [crew]
+# auto: read-only crew and crew whose --owns are disjoint from every active assignment
+# share the checkout; overlapping owns, or a write grant without owns, get a detached
+# worktree. shared/worktree force one. Non-Git projects always stay shared.
+checkout = "auto"
 # The model new crew are recruited with, when `captain crew` gets no --model.
 model = "cheap"
 # Seconds `captain wait` watches before reporting a bare timeout. A timeout is not news,
@@ -17,6 +21,16 @@ wait_timeout = 86400
 # Seconds a `captain crew --background` turn may run before its owner stops it and
 # records a failure. Bounded so no unattended worker outlives its usefulness.
 background_timeout = 1800
+
+[lifetime]
+# Seconds allowed for the managed native group to start.
+startup_timeout = 5.0
+# Seconds between managed lifetime observations.
+poll_interval = 0.1
+# Seconds allowed for graceful group termination before escalation.
+terminate_timeout = 5.0
+# Seconds allowed to observe complete group shutdown after escalation.
+shutdown_timeout = 5.0
 
 [dashboard]
 # Open the crew token-usage pane below the captain at launch.

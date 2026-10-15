@@ -11,9 +11,25 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+from . import lifetime, native_history
 from .approval import Decision, Request, Verdict, decide
 from .runtime import CaptainError
+from .sessions import Session
 from .store import read_json
+
+
+def match_crew(stem, crews):
+    """(crew id, incarnation suffix or None) for a hook file stem, matching whole ids only.
+
+    Incarnations are hex without dashes, so `jack-1-<hex>` splits on its last dash and
+    cannot be taken for crew `jack`, even when `jack` also exists.
+    """
+    if stem in crews:
+        return stem, None
+    head, sep, tail = stem.rpartition("-")
+    if sep and head in crews:
+        return head, tail
+    return None, None
 
 
 def crew_for_events(events_path):
@@ -23,10 +39,11 @@ def crew_for_events(events_path):
     """
     directory = events_path.parent.parent
     state = read_json(directory / "protocol.json")
-    stem = events_path.name.removesuffix(".jsonl")
-    crew_id = next(c for c in state["active"] if stem == c or stem.startswith(f"{c}-"))
+    crew_id, suffix = match_crew(events_path.name.removesuffix(".jsonl"), state["active"])
+    if crew_id is None:
+        raise CaptainError("Unknown crew event path.")
     assignment = state["assignments"].get(state["active"][crew_id])
-    if assignment and stem != f"{crew_id}-{assignment['incarnation_id']}":
+    if assignment and suffix != assignment["incarnation_id"]:
         raise CaptainError("Stale crew incarnation.")
     return directory, crew_id, assignment
 
@@ -37,13 +54,13 @@ def event_incarnation(path):
     if path.stem == "captain" or not metadata.exists():
         return None
     roster = read_json(metadata).get("crew", {})
-    for crew_id, record in roster.items():
-        if path.stem == crew_id or path.stem.startswith(f"{crew_id}-"):
-            incarnation = record.get("incarnation_id")
-            if incarnation and path.stem != f"{crew_id}-{incarnation}":
-                raise CaptainError("Stale crew incarnation.")
-            return incarnation
-    raise CaptainError("Unknown crew event path.")
+    crew_id, suffix = match_crew(path.stem, roster)
+    if crew_id is None:
+        raise CaptainError("Unknown crew event path.")
+    incarnation = roster[crew_id].get("incarnation_id")
+    if incarnation and suffix != incarnation:
+        raise CaptainError("Stale crew incarnation.")
+    return incarnation
 
 
 def mail_context(events_path):
@@ -77,11 +94,25 @@ def stop_reason(events_path):
     return None
 
 
+def _incarnation_crew(directory, incarnation):
+    meta = read_json(directory / "session.json")
+    crew_id = next(
+        key for key, value in meta["crew"].items() if value.get("incarnation_id") == incarnation
+    )
+    return crew_id, meta["crew"][crew_id], Session(directory, meta)
+
+
 def permission_decision(events_path, event):
     """Bind one native tool request to this incarnation's active assignment grants."""
     try:
         directory, _, assignment = crew_for_events(events_path)
-        project = read_json(directory / "session.json")["project"]
+        # execution imports Crew, which imports events.
+        from .execution import root
+
+        _, record, current = _incarnation_crew(directory, assignment["incarnation_id"])
+        if lifetime.revoked(current, record):
+            return Decision("action-not-granted")
+        project = str(root(current, record))
         cwd, tool, inputs = event["cwd"], event["tool_name"], event["tool_input"]
         if not all(isinstance(value, str) and value for value in (project, cwd, tool)):
             return Decision("unparsed")
@@ -167,6 +198,23 @@ def append_event(args=None):
         return
     if incarnation and event.get("incarnation_id", incarnation) != incarnation:
         return
+    provider = "claude" if "hook_event_name" in event else "codex"
+    managed_provider = bool(incarnation)
+    if Path(events_path).stem == "captain":
+        metadata = Path(events_path).parent.parent / "session.json"
+        if metadata.exists():
+            captain_provider = read_json(metadata).get("captain_provider")
+            if captain_provider:
+                provider, managed_provider = captain_provider, True
+    if incarnation:
+        # crew imports event readers from this module.
+        from .crew import Crew
+
+        directory = Path(events_path).parent.parent
+        crew = Crew(*_incarnation_crew(directory, incarnation))
+        provider = crew.record.get("provider", provider)
+    if managed_provider:
+        event["provider"] = provider
     permission = None
     # O_NOFOLLOW rejects a symlink swapped in at this path; append never clobbers existing data.
     fd = os.open(events_path, os.O_NOFOLLOW | os.O_APPEND | os.O_CREAT | os.O_RDWR, 0o600)
@@ -193,7 +241,7 @@ def append_event(args=None):
                 return
             event["incarnation_id"] = incarnation
             event["seq"] = event.get("seq", seq + 1)
-        kind = event.get("hook_event_name")
+        kind = event.get("hook_event_name") if provider == "claude" else None
         if kind == "PreToolUse":
             permission = permission_decision(Path(events_path), event)
             if permission.code == "unknown-tool":
@@ -226,6 +274,13 @@ def append_event(args=None):
                 )
         file.write(json.dumps(event, ensure_ascii=False) + "\n")
         file.flush()
+    if incarnation:
+        try:
+            native_history.observe(crew, event)
+        except (CaptainError, OSError, ValueError, TypeError) as exc:
+            print(
+                f"captain: native history observation retained for review: {exc}", file=sys.stderr
+            )
     if permission is not None:
         output = permission_output(permission, kind)
         if output:

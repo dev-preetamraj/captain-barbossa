@@ -435,7 +435,17 @@ def pane_stub(base):
     def api(*call, **kwargs):
         if call[:2] == ("pane", "read"):
             return SETTLED_SHELL_TEXT
-        return base(*call, **kwargs) if callable(base) else base
+        result = base(*call, **kwargs) if callable(base) else base
+        if call[:2] in (("pane", "split"), ("tab", "create")):
+            result = dict(result)
+            key = "pane" if call[0] == "pane" else "root_pane"
+            if key in result:
+                result[key] = {
+                    "terminal_id": "crew-terminal",
+                    "tab_id": "w1:t1",
+                    **result[key],
+                }
+        return result
 
     return api
 
@@ -643,10 +653,22 @@ class PaneSplitTests(SessionCase):
 
     def test_pane_split_uses_the_chosen_pane_and_direction_in_any_tab(self):
         def api(*call, **_):
-            return self.listing(*call) or {
+            listed = self.listing(*call)
+            if listed is not None:
+                return listed
+            created = {
                 "pane": {"pane_id": "w1:p6", "agent": "codex", "agent_status": "idle"},
                 "agent": {"name": f"c-{self.meta['id'][:8]}-jack", "agent_status": "working"},
             }
+            if call[:2] == ("pane", "split"):
+                target = call[call.index("--pane") + 1]
+                target_tab = next(
+                    pane["tab_id"]
+                    for pane in self.pane_list()["panes"]
+                    if pane.get("pane_id") == target
+                )
+                created["pane"]["tab_id"] = target_tab
+            return created
 
         for direction, herdr_direction, flags, answers, target, tab in (
             (

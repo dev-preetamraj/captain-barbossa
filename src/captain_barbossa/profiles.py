@@ -20,6 +20,7 @@ def apply(args):
         "agent": PROVIDERS,
         "model": None,
         "execution": ("foreground", "background"),
+        "checkout": ("auto", "shared", "worktree"),
         "placement": ("auto", "pane", "tab"),
     }
     if not isinstance(profile, dict):
@@ -40,7 +41,7 @@ def apply(args):
         elif key == "placement":
             explicit = args.placement or args.direction or args.split_pane
         else:
-            explicit = getattr(args, attribute)
+            explicit = getattr(args, attribute, None)
         if not explicit:
             setattr(effective, attribute, value == "background" if key == "execution" else value)
             where = config.source("profiles", name, key) or "settings"

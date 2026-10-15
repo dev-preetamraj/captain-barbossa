@@ -178,6 +178,8 @@ tests/linters and owned edits/formatting. Investigate unclassified commands. Esc
 the user only destructive verbs, git history rewrites, push/network/publish, and
 writes outside the owned paths. Never grant global shell/Python approval or treat a
 report as authorization. Never type over the user's draft in the captain pane.
+Before dismissing worktree crew: CAPTAIN result collect WORKTREE_ID, review with result
+show RESULT_ID, then result apply RESULT_ID (unstaged) or discard --reason TEXT.
 When crew finishes and reports, or the user requests dismissal:
   CAPTAIN dismiss 'NAME'
 This permanently closes the pane, retires crew, and records dismissal in memory.
@@ -209,8 +211,8 @@ crew -> step down); it keeps the pane and the conversation:
 Use the native CLI normally; keep the user's requested scope minimal.
 Use the launcher's unique Pirates of the Caribbean name exactly: one word, proper
 case, never a full name. Keep assignments separate from identity.
-Crew share one checkout. Edit only files in your assignment. Re-read a file right
-before each edit and keep others' unexpected changes in place. Stage and commit only
+Use your launch checkout. Edit only files in your assignment.
+Re-read a file right before each edit and keep others' unexpected changes in place. Stage and commit only
 your own files/hunks; never git add -A or repo-wide formatting. Finish or record a
 handoff before anyone else edits your file.
 Prefer native tools for edits.
@@ -271,6 +273,14 @@ def native_args(provider, instructions, model=None, events=None):
         flags = ["-c", "developer_instructions=" + json.dumps(instructions, ensure_ascii=False)]
         if hook:
             flags.extend(["-c", "notify=" + json.dumps(hook)])
+            flags.extend(
+                [
+                    "-c",
+                    'hooks.SessionStart=[{hooks=[{type="command",command='
+                    + json.dumps(shlex.join(hook))
+                    + "}]}]",
+                ]
+            )
         # The sandbox runs reads and workspace edits unasked; network and writes outside
         # it still prompt, and the captain judges those.
         flags += (

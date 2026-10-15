@@ -100,6 +100,9 @@ class RecoveryDigestTests(SessionCase):
                 "questions": 1,
                 "deliveries": 1,
                 "mail": 0,
+                "lifetimes": 0,
+                "results": 0,
+                "worktrees": 0,
             },
         )
         self.assertEqual(digest["deliveries"], [])

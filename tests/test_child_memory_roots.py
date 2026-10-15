@@ -66,8 +66,13 @@ class ChildMemoryRootTests(unittest.TestCase):
 
     def test_create_crew_forwards_the_parents_distinct_state_and_temp_roots(self):
         created = {
-            "pane": {"pane_id": "w1:p2", "agent": "claude", "agent_status": "idle"},
-            "root_pane": {"pane_id": "w1:p3"},
+            "pane": {
+                "pane_id": "w1:p2",
+                "terminal_id": "crew-terminal",
+                "agent": "claude",
+                "agent_status": "idle",
+            },
+            "root_pane": {"pane_id": "w1:p3", "terminal_id": "crew-terminal"},
             "tab_id": "w1:t9",
             "agent": {"name": f"c-{self.meta['id'][:8]}-jack", "agent_status": "working"},
         }

@@ -6,6 +6,7 @@ import json
 import os
 import shlex
 import sys
+import tomllib
 import unittest
 from unittest.mock import patch
 
@@ -30,7 +31,13 @@ def pane_stub(base):
     def api(*call, **kwargs):
         if call[:2] == ("pane", "read"):
             return SETTLED_SHELL_TEXT
-        return base(*call, **kwargs) if callable(base) else base
+        result = base(*call, **kwargs) if callable(base) else base
+        if call[:2] in (("pane", "split"), ("tab", "create")):
+            result = dict(result)
+            key = "pane" if call[0] == "pane" else "root_pane"
+            if key in result:
+                result[key] = {"terminal_id": "crew-terminal", "tab_id": "w1:t1", **result[key]}
+        return result
 
     return api
 
@@ -226,14 +233,15 @@ class InstructionTests(SessionCase):
             self.assertIn(phrase, captain)
         self.assertNotIn("herdr agent wait", captain)
 
-    def test_instructions_give_every_role_the_shared_checkout_editing_contract(self):
+    def test_instructions_keep_every_role_in_its_launch_checkout(self):
         for role in ("Captain Barbossa", "crew member Gibbs"):
             with self.subTest(role=role):
                 instructions = " ".join(
                     instruction_prompts.agent_instructions(self.directory, role).split()
                 )
                 for phrase in (
-                    "Crew share one checkout. Edit only files in your assignment",
+                    "Use your launch checkout",
+                    "Edit only files in your assignment",
                     "Re-read a file right before each edit",
                     "keep others' unexpected changes in place",
                     "Stage and commit only your own files/hunks",
@@ -371,7 +379,14 @@ class InstructionTests(SessionCase):
                 script = launcher.read_text()
                 launcher_argv = shlex.split(script, comments=True)
                 argv = launcher_argv[launcher_argv.index("exec") :]
-                self.assertEqual(argv[:2], ["exec", f"/bin/{provider}"])
+                self.assertEqual(argv[:2], ["exec", sys.executable])
+                from captain_barbossa import lifetime
+
+                native = lifetime.read(
+                    sessions.Session(self.directory, self.meta), record["lifetime_id"]
+                )
+                argv = native["argv"]
+                self.assertEqual(argv[0], f"/bin/{provider}")
                 # A self-deleting launcher made a failed startup unrecoverable; it now
                 # survives on disk, and dismiss_crew is what eventually unlinks it.
                 self.assertNotIn('rm -f -- "$0"', script)
@@ -432,7 +447,17 @@ class InstructionTests(SessionCase):
                 ):
                     self.assertNotIn(phrase, prompt)
                     self.assertNotIn(phrase.casefold(), prompt.casefold())
-                self.assertNotIn("--extension", argv)
+                if provider == "pi":
+                    extension = (
+                        self.directory
+                        / "native-history"
+                        / (f"{record['id']}-{record['incarnation_id']}.ts")
+                    )
+                    self.assertEqual(argv.count("--extension"), 1)
+                    self.assertEqual(argv[argv.index("--extension") + 1], str(extension))
+                    self.assertNotIn("captain_wait", extension.read_text())
+                else:
+                    self.assertNotIn("--extension", argv)
                 # The initial task is mailed, not typed; the doorbell carries no content.
                 submit.assert_not_called()
                 (mail_path,) = (self.directory / "mail" / record["id"]).glob("*.json")
@@ -482,6 +507,12 @@ class InstructionTests(SessionCase):
         codex_args = instruction_prompts.native_args("codex", "instructions", events="/tmp/events")
         notify = next(arg for arg in codex_args if arg.startswith("notify="))
         self.assertEqual(json.loads(notify.removeprefix("notify=")), hook)
+        startup = next(arg for arg in codex_args if arg.startswith("hooks.SessionStart="))
+        self.assertEqual(
+            tomllib.loads(startup)["hooks"]["SessionStart"],
+            [{"hooks": [{"type": "command", "command": shlex.join(hook)}]}],
+        )
+        self.assertNotIn("dangerously-bypass-hook-trust", " ".join(codex_args))
         claude_args = instruction_prompts.native_args(
             "claude", "instructions", events="/tmp/events"
         )

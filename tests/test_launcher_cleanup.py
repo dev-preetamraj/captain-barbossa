@@ -28,7 +28,7 @@ class LauncherCleanupTests(SessionCase):
 
     def test_dismiss_deletes_the_crew_launcher_script(self):
         created = {
-            "root_pane": {"pane_id": "w1:p6"},
+            "root_pane": {"pane_id": "w1:p6", "terminal_id": "crew-terminal"},
             "tab_id": "w1:t9",
             "pane": {
                 "pane_id": "w1:p6",

@@ -29,7 +29,17 @@ def pane_stub(base):
     def api(*call, **kwargs):
         if call[:2] == ("pane", "read"):
             return SETTLED_SHELL_TEXT
-        return base(*call, **kwargs) if callable(base) else base
+        result = base(*call, **kwargs) if callable(base) else base
+        if call[:2] in (("pane", "split"), ("tab", "create")):
+            result = dict(result)
+            key = "pane" if call[0] == "pane" else "root_pane"
+            if key in result:
+                result[key] = {
+                    "terminal_id": "crew-terminal",
+                    "tab_id": "w1:t1",
+                    **result[key],
+                }
+        return result
 
     return api
 

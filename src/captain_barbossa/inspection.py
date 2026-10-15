@@ -1,6 +1,6 @@
 """Fixed, bounded local reads. This retains, and does not replace, the native sandbox.
 
-Git supports ordinary, stable local checkouts only: no linked worktrees, alternate
+Git supports ordinary checkouts and registered crew worktrees; no alternate
 object stores, partial clones, config includes, filters or executable configuration.
 Filesystem deadlines are cooperative; a stalled filesystem still needs OS isolation.
 """
@@ -84,7 +84,7 @@ def _fail(code, message):
     raise CaptainError(f"Inspection {code}: {message}")
 
 
-def _deadline(deadline):
+def check_deadline(deadline):
     if time.monotonic() >= deadline:
         _fail("timeout", f"read exceeded {TIMEOUT} seconds.")
 
@@ -119,7 +119,7 @@ def _open(root, path):
         os.close(fd)
 
 
-def _read(root, path, limit=MAX_BYTES):
+def read_bytes(root, path, limit=MAX_BYTES):
     with _open(root, path) as fd:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
             _fail("unsupported-file", "only regular files can be read.")
@@ -132,10 +132,10 @@ def _read(root, path, limit=MAX_BYTES):
     return bytes(data[:limit]), len(data) > limit
 
 
-def _walk(root, path, deadline, *, metadata=False):
+def walk_files(root, path, deadline, *, metadata=False):
     pending, scanned = [path], 0
     while pending:
-        _deadline(deadline)
+        check_deadline(deadline)
         current = pending.pop()
         if len(current.parts) > 64:
             _fail("limit", "directory nesting exceeds 64 levels.")
@@ -156,7 +156,7 @@ def _walk(root, path, deadline, *, metadata=False):
             entries = []
             with os.scandir(fd) as iterator:
                 for entry in iterator:
-                    _deadline(deadline)
+                    check_deadline(deadline)
                     scanned += 1
                     if scanned > MAX_ENTRIES:
                         _fail("limit", f"scan exceeds {MAX_ENTRIES} directory entries.")
@@ -179,7 +179,7 @@ def _walk(root, path, deadline, *, metadata=False):
             pending.extend(sorted(entries, reverse=True))
 
 
-def _text(data):
+def decode_text(data):
     try:
         if b"\0" in data:
             raise UnicodeError
@@ -190,7 +190,7 @@ def _text(data):
 
 def _files(root, path, deadline):
     paths = []
-    for item in _walk(root, path, deadline):
+    for item in walk_files(root, path, deadline):
         if len(paths) == MAX_RESULTS:
             return {"paths": paths, "truncated": True}
         paths.append(item.as_posix())
@@ -201,15 +201,15 @@ def _search(root, path, text, deadline):
     if not text or len(text.encode("utf-8")) > MAX_BYTES:
         _fail("invalid-text", "search text must be nonempty and at most 65536 bytes.")
     matches, scanned, truncated = [], 0, False
-    for item in _walk(root, path, deadline):
-        _deadline(deadline)
-        data, cut = _read(root, item)
+    for item in walk_files(root, path, deadline):
+        check_deadline(deadline)
+        data, cut = read_bytes(root, item)
         scanned += len(data)
         if scanned > MAX_SCAN_BYTES:
             _fail("limit", "search exceeds 8 MiB of file content.")
         truncated |= cut
         try:
-            content = _text(data)
+            content = decode_text(data)
         except CaptainError:
             continue
         for number, line in enumerate(content.splitlines(), 1):
@@ -228,8 +228,8 @@ def _state_root(project, scope, session_id):
     return sessions.read_session(project, session_id, max_bytes=MAX_BYTES).directory
 
 
-def _git_config(root):
-    data, cut = _read(root, Path(".git/config"))
+def validate_git_config(root):
+    data, cut = read_bytes(root, Path(".git/config"))
     if cut:
         _fail("unsupported-git", "Git config exceeds 65536 bytes.")
     # Accept a small literal subset; never ask Git to parse includes before validation.
@@ -247,7 +247,7 @@ def _git_config(root):
         "user": {"name", "email"},
     }
     section = None
-    for line in _text(data).splitlines():
+    for line in decode_text(data).splitlines():
         line = line.strip()
         if not line or line.startswith(("#", ";")):
             continue
@@ -272,7 +272,7 @@ def git_text(root, operation, *, staged=False):
     return _git(Path(root), operation, staged, time.monotonic() + TIMEOUT)["text"]
 
 
-def _git(root, operation, staged, deadline, text=None):
+def _git(root, operation, staged, deadline, text=None, registration=None):
     if staged and operation != "diff":
         _fail("invalid-option", "--staged applies only to git diff.")
     if operation == "grep":
@@ -280,15 +280,25 @@ def _git(root, operation, staged, deadline, text=None):
             _fail("invalid-text", f"git grep needs literal text of 1 to {MAX_PATTERN} bytes.")
     elif text is not None:
         _fail("invalid-option", "--text applies only to git grep.")
-    if (root / ".git").is_symlink() or not (root / ".git").is_dir():
-        _fail("unsupported-git", "an ordinary .git directory at the project root is required.")
-    for path in _walk(root, Path(".git"), deadline, metadata=True):
+    metadata_root = root
+    if registration is not None:
+        # worktrees imports bounded inspection helpers.
+        from .worktrees import validate_registration
+
+        validate_registration(registration, deadline=deadline)
+        if root != Path(registration["execution_root"]):
+            _fail("unsupported-git", "registered execution root does not match.")
+        metadata_root = Path(registration["project"])
+    elif (root / ".git").is_symlink() or not (root / ".git").is_dir():
+        _fail("unsupported-git", "an ordinary or registered .git directory is required.")
+    for path in walk_files(metadata_root, Path(".git"), deadline, metadata=True):
         if (
-            path.name in ("commondir", "gitdir", "config.worktree", "alternates", "http-alternates")
+            (path.name in ("commondir", "gitdir") and path.parts[:2] != (".git", "worktrees"))
+            or path.name in ("config.worktree", "alternates", "http-alternates")
             or path.suffix == ".promisor"
         ):
             _fail("unsupported-git", "linked, alternate and partial object stores are unsupported.")
-    _git_config(root)
+    validate_git_config(metadata_root)
     executable = GIT.resolve(strict=True)
     for item in (executable, *executable.parents):
         info = item.stat()
@@ -372,7 +382,7 @@ def _git(root, operation, staged, deadline, text=None):
                 for stream in output:
                     selector.register(stream, selectors.EVENT_READ)
                 while selector.get_map():
-                    _deadline(deadline)
+                    check_deadline(deadline)
                     for key, _ in selector.select(max(0, deadline - time.monotonic())):
                         chunk = os.read(key.fileobj.fileno(), 8192)
                         if not chunk:
@@ -402,8 +412,18 @@ def run(args, project):
     try:
         root = Path(project).resolve(strict=True)
         command = args.inspection_command
+        registration = None
+        if command != "state" and os.environ.get("CAPTAIN_WORKTREE_ID"):
+            # execution -> worktrees imports bounded inspection helpers.
+            from . import execution, worktrees
+
+            current = sessions.read_session(root, getattr(args, "session", None))
+            root = execution.current(root, current.meta["id"], deadline=deadline)
+            registration = worktrees.read(
+                current, os.environ["CAPTAIN_WORKTREE_ID"], validate=False, deadline=deadline
+            )
         if command == "git":
-            result = _git(root, args.operation, args.staged, deadline, args.text)
+            result = _git(root, args.operation, args.staged, deadline, args.text, registration)
         else:
             if command == "state":
                 if os.environ.get("CAPTAIN_ROLE") == "crew" and args.scope != "repo":
@@ -421,9 +441,13 @@ def run(args, project):
             elif command == "state" and (root / path).is_dir():
                 result = _files(root, path, deadline)
             else:
-                data, truncated = _read(root, path)
-                result = {"path": path.as_posix(), "text": _text(data), "truncated": truncated}
-        _deadline(deadline)
+                data, truncated = read_bytes(root, path)
+                result = {
+                    "path": path.as_posix(),
+                    "text": decode_text(data),
+                    "truncated": truncated,
+                }
+        check_deadline(deadline)
         encoded = json.dumps(result, sort_keys=True, ensure_ascii=True)
         if len(encoded) + 1 > MAX_BYTES:
             _fail("limit", "encoded output exceeds 65536 bytes; select a narrower path.")

@@ -10,6 +10,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from uuid import uuid4
 
+from . import lifetime
 from .models import HOOK_DELIVERED, HOOKLESS
 from .pane import DRAFT_GATE, HOLD_EXPIRY, UNREADABLE_EXPIRY, UNREADABLE_GATE
 from .runtime import HERDR_ERRORS, CaptainError, check_text, inside_project
@@ -17,6 +18,7 @@ from .sessions import session_directories
 from .store import lock, read_json, state_storage, write_json
 
 ACTIONS = ("read", "search", "edit", "test", "build", "format", "commit", "version", "delete")
+WRITE_ACTIONS = ("edit", "format", "commit", "version", "delete")
 # Our own ring is still painting for about this long, so a draft seen inside it is ours.
 ECHO_GRACE = 2
 # Native "working" is a wake, not news: it fires at recruit and at every crew turn end.
@@ -75,6 +77,31 @@ def overlaps(left, right):
     return a.is_relative_to(b) or b.is_relative_to(a)
 
 
+def project_assignments(project, state, directory):
+    """Every assignment of the project: this session's from state, the rest from disk."""
+    assignments = list(state["assignments"].values())
+    for other in session_directories(project):
+        path = other / "protocol.json"
+        if other != directory and path.exists():
+            assignments.extend(read_json(path)["assignments"].values())
+    return assignments
+
+
+def occupant(project, directory, paths):
+    """The first unfinished assignment, in any checkout, whose owned paths overlap paths.
+
+    Owned paths are root-relative, so a worktree crew's count too: a shared edit to the
+    same file would still collide when its result is applied.
+    """
+    path = directory / "protocol.json"
+    state = read_json(path) if path.exists() else {"assignments": {}}
+    mine = owned_paths(project, paths)
+    for other in project_assignments(project, state, directory):
+        if other["state"] != "done" and any(overlaps(a, b) for a in mine for b in other["paths"]):
+            return other
+    return None
+
+
 def active(state, crew, assignment_id=None, incarnation=None):
     key = state["active"].get(crew.crew_id)
     assignment = state["assignments"].get(key)
@@ -94,14 +121,22 @@ def active(state, crew, assignment_id=None, incarnation=None):
     return assignment
 
 
-def begin(crew, project, task, paths=(), actions=(), handoff=None):
+def begin(crew, project, task, paths=(), actions=(), handoff=None, *, assignment_id=None):
     if not isinstance(task, str) or not task.strip():
         raise CaptainError("[empty-goal] Assignment goal must not be empty.")
     check_text(task, "task")
     if PLACEHOLDER.search(task) or any(PATH_PLACEHOLDER.search(str(path)) for path in paths):
         raise CaptainError("[placeholder] Replace assignment placeholder text.")
+    # execution imports protocol for assignment lookup.
+    from .execution import root
+
+    execution_root = root(crew.session, crew.record)
+    if crew.record.get("worktree_id") and assignment_id != crew.record.get("assignment_id"):
+        raise CaptainError("[worktree-handoff] Isolated assignment identity is immutable.")
+    if handoff and crew.record.get("worktree_id"):
+        raise CaptainError("[worktree-handoff] Recruit a fresh isolated crew for a new assignment.")
     inherit_paths, inherit_actions = not paths, not actions
-    paths = owned_paths(project, paths)
+    paths = owned_paths(execution_root, paths)
     actions = sorted(set(actions) | {"read", "search"})
     if set(actions) - set(ACTIONS):
         raise CaptainError("Unknown assignment action.")
@@ -137,20 +172,19 @@ def begin(crew, project, task, paths=(), actions=(), handoff=None):
                 actions = inherited["actions"]
         if "edit" in actions and not paths:
             raise CaptainError("[missing-owned-paths] Edit actions require owned paths.")
-        assignments = list(state["assignments"].values())
-        for directory in session_directories(project):
-            path = directory / "protocol.json"
-            if directory != crew.session.directory and path.exists():
-                assignments.extend(read_json(path)["assignments"].values())
-        for other in assignments:
-            if other["state"] != "done" and any(
-                overlaps(a, b) for a in paths for b in other["paths"]
+        for other in project_assignments(project, state, crew.session.directory):
+            if (
+                other["state"] != "done"
+                and Path(other.get("execution_root", project)).resolve() == execution_root
+                and any(overlaps(a, b) for a in paths for b in other["paths"])
             ):
                 raise CaptainError(
                     f"[owned-path-conflict] Owned paths overlap active assignment {other['id']}."
                 )
         assignment = {
-            "id": uuid4().hex,
+            "id": assignment_id or uuid4().hex,
+            "execution_root": str(execution_root),
+            "worktree_id": crew.record.get("worktree_id"),
             "incarnation_id": crew.record["incarnation_id"],
             "crew": crew.display_name,
             "original_task": task,
@@ -196,7 +230,7 @@ def check_action(assignment, project, action, paths):
         raise CaptainError("Assignment is already done.")
     if action not in assignment["actions"]:
         raise CaptainError(f"[action-not-granted] Action {action!r} was not granted.")
-    if action in ("edit", "format", "commit", "version", "delete"):
+    if action in WRITE_ACTIONS:
         if not paths:
             raise CaptainError("This action requires explicit owned paths.")
         for path in owned_paths(project, paths):
@@ -275,7 +309,12 @@ def change(crew, args, project):
             state, crew, None if args.command == "ask" else assignment_id, incarnation
         )
         if args.command == "check":
-            check_action(assignment, project, args.action, args.path)
+            # execution imports protocol for assignment lookup.
+            from .execution import root
+
+            if lifetime.revoked(crew.session, crew.record):
+                raise CaptainError("[action-not-granted] Crew lifetime was revoked.")
+            check_action(assignment, root(crew.session, crew.record), args.action, args.path)
             return {"assignment_id": assignment["id"], "allowed": True}
         if assignment["state"] == "done":
             raise CaptainError("Assignment is already done.")

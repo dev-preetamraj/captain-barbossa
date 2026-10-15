@@ -15,7 +15,12 @@ from captain_barbossa.runtime import CaptainError
 from captain_barbossa.sessions import Session
 from tests.home_isolation import HERDR, SessionCase
 
-PANE = {"workspace_id": "w1", "tab_id": "w1:t1", "pane_id": "w1:p1"}
+PANE = {
+    "workspace_id": "w1",
+    "tab_id": "w1:t1",
+    "pane_id": "w1:p1",
+    "terminal_id": "captain-terminal",
+}
 
 
 class LaunchHarness(SessionCase):
@@ -44,9 +49,22 @@ class LaunchHarness(SessionCase):
         if args[:2] == ("pane", "split"):
             # The dashboard splits first, so it is always w1:p2; crew take later ids.
             self.splits += 1
-            return {"pane": {"pane_id": f"w1:p{self.splits + 1}", "tab_id": "w1:t1"}}
+            return {
+                "pane": {
+                    "pane_id": f"w1:p{self.splits + 1}",
+                    "tab_id": "w1:t1",
+                    "terminal_id": f"crew-terminal-{self.splits + 1}",
+                }
+            }
         if args[:2] == ("tab", "create"):
-            return {"root_pane": {"pane_id": "w1:p9", "tab_id": "w1:t2"}, "tab_id": "w1:t2"}
+            return {
+                "root_pane": {
+                    "pane_id": "w1:p9",
+                    "tab_id": "w1:t2",
+                    "terminal_id": "crew-terminal-9",
+                },
+                "tab_id": "w1:t2",
+            }
         # create_crew's shell_ready_for_input polls a raw `pane read`, which needs text.
         if args[:2] == ("pane", "read"):
             return "~/project $ "

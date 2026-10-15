@@ -15,7 +15,14 @@ and shared by the team:
     graph.json                    # this session's memory only
     protocol.json                 # assignments, questions, delivery acknowledgements
     events/<crew>-<incarnation>.jsonl  # native events; legacy crew omit incarnation
+    lifetimes/<incarnation>.*          # authoritative managed-writer ownership/exit receipts
+    native-history/<crew>-<incarnation>.json # crew-only native identity/cleanup journal
+    worktrees/<incarnation>.json       # isolated checkout identity and retention state
+    results/<result-id>/               # immutable result and transfer/discard receipts
     background/<crew>-<incarnation>.*  # background run record, lock, bounded output, report
+
+~/.local/state/captain-barbossa/<hash>/worktrees/<session-id>/<incarnation>/
+                                  # disposable detached crew execution root
 ```
 
 Sessions created by an older captain live under
@@ -82,9 +89,11 @@ enforces repo scope for crew. Only the captain reads session and project
 memory, which holds other crew's assignments.
 
 `$XDG_STATE_HOME` is honored in place of `~/.local/state` when set. Git
-repositories use their checkout root as project identity; other directories
-use the launch directory. Crew inherit their captain's project and session;
-only explicitly saved project facts carry into other sessions. Set
+repositories use the captain checkout root as project identity; other directories
+use the launch directory. A disposable worktree is only a crew execution root: it does
+not create another project namespace or redirect project/repo memory, and explicit
+result application targets the recorded captain checkout. Crew inherit their captain's
+project and session; only explicitly saved project facts carry into other sessions. Set
 `CAPTAIN_MEMORY_ROOT` before starting captain to redirect both roots at once
 (used for test isolation and custom retention); it must point outside the
 project.
@@ -153,9 +162,15 @@ default) and Herdr reports no live agent in their panes; when Herdr is
 unreachable, only directories twice that age are removed. Both the durable and
 the legacy temp root are pruned. A session that still holds unresolved work is
 kept at any age: an unfinished assignment or an unacknowledged outcome of a crew
-that is not dismissed, or protocol state that cannot be read. The current
-session, the durable project graph, and the committed repo graph are never
-removed.
+that is not dismissed, protocol state that cannot be read, a retained worktree/result,
+an unsettled managed lifetime, or native-history cleanup not recorded `complete`.
+Native cleanup first requires authoritative writer shutdown and freezes usage, then
+considers only session identities recorded for that crew incarnation—never captain or
+unrelated history. Missing manifests are reported unsupported and cause no deletion;
+missing hooks, unknown writers, ambiguous identity, unsupported/partial providers, and
+shared sidecar uncertainty leave non-complete journals that retain the session instead
+of triggering broad deletion. The current session, the durable project graph, and the
+committed repo graph are never removed.
 
 ```sh
 captain memory prune
