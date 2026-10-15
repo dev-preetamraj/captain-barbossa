@@ -10,7 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from captain_barbossa import execution, results, sessions, store, worktrees
+from captain_barbossa import execution, lifetime, results, sessions, store, worktrees
 from captain_barbossa.runtime import CaptainError
 from tests.home_isolation import SessionCase
 
@@ -28,6 +28,17 @@ class WorktreeLifecycleTests(SessionCase):
         directory = store.state_storage(self.project) / "sessions" / sid
         directory.mkdir(parents=True)
         self.session = sessions.Session(directory, {"id": sid, "project": str(self.project)})
+        # The Linux sweep fails closed on any unreadable same-user /proc entry; CI hosts
+        # have such unrelated processes, so a test sweeps only the processes it started.
+        self.swept = set()
+        listing = lifetime._pids
+        sweep = patch.object(
+            lifetime,
+            "_pids",
+            side_effect=lambda: [e for e in listing() if int(e.name) in self.swept],
+        )
+        sweep.start()
+        self.addCleanup(sweep.stop)
 
     def git(self, *args):
         return subprocess.check_output(["git", *args], cwd=self.project, stderr=subprocess.DEVNULL)
@@ -276,6 +287,7 @@ class WorktreeLifecycleTests(SessionCase):
         )
         self.addCleanup(holder.wait)
         self.addCleanup(holder.kill)
+        self.swept.add(holder.pid)
         state = self.retire(record)
         self.assertIn(str(holder.pid), state["worktree"])
         self.assertTrue(state["worktree"].startswith("retained:"))
