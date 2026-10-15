@@ -263,6 +263,38 @@ def _reap_group_zombies(pgid):
                 pass
 
 
+def _status(path):
+    """Linux: /proc status fields by name, as whitespace-split values."""
+    fields = {}
+    for line in path.read_text().splitlines():
+        key, _, value = line.partition(":")
+        fields[key] = value.split()
+    return fields
+
+
+def _foreign_credentials(entry):
+    """Linux: True when the kernel's ptrace read check denies the target's credentials.
+
+    Reading a cwd link needs the target's real/effective/saved uid and gid to equal
+    this process's fs uid/gid and its permitted capabilities to be within this effective
+    set. A same-owner /proc entry can still fail that (setgid, file capabilities). Any
+    other denial, or unreadable status, is not explained here and stays a failure.
+    FileNotFoundError propagates: the process exited.
+    """
+    try:
+        target = _status(entry / "status")
+        own = _status(_PROC / "self" / "status")
+        if set(target["Uid"][:3]) != {own["Uid"][3]}:
+            return True
+        if set(target["Gid"][:3]) != {own["Gid"][3]}:
+            return True
+        return bool(int(target["CapPrm"][0], 16) & ~int(own["CapEff"][0], 16))
+    except FileNotFoundError:
+        raise
+    except (OSError, KeyError, IndexError, ValueError):
+        return False
+
+
 def cwd_holders(root):
     """Live processes whose working directory is inside root; never signals them.
 
@@ -282,7 +314,9 @@ def cwd_holders(root):
                 continue  # exited during the sweep
             except OSError as exc:
                 try:
-                    foreign = link.parent.stat().st_uid != os.getuid()
+                    foreign = link.parent.stat().st_uid != os.getuid() or _foreign_credentials(
+                        link.parent
+                    )
                 except FileNotFoundError:
                     continue
                 if not foreign:

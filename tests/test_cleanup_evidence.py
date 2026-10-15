@@ -378,6 +378,50 @@ class CwdSweepTests(SessionCase):
         with patch.object(lifetime, "_LINUX", True), patch.object(lifetime, "_PROC", proc):
             self.assertEqual(lifetime.cwd_holders(self.tree), [123, 126])
 
+    def test_denied_cwd_is_skipped_only_for_credentials_the_user_does_not_hold(self):
+        proc = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        uid, gid = os.getuid(), os.getgid()
+
+        def status(path, uids=(uid,) * 4, gids=(gid,) * 4, caps="0", eff="0"):
+            path.mkdir(parents=True)
+            (path / "status").write_text(
+                f"Uid:\t{' '.join(map(str, uids))}\nGid:\t{' '.join(map(str, gids))}\n"
+                f"CapPrm:\t{caps}\nCapEff:\t{eff}\n"
+            )
+
+        status(proc / "self")
+        status(proc / "201", gids=(gid, gid + 1, gid + 1, gid + 1))  # setgid
+        status(proc / "202", caps="0000000000003000")  # file capabilities
+        status(proc / "203")  # same credentials: an unexplained denial
+        status(proc / "204", gids=(gid, gid + 1, gid + 1, gid + 1))
+        (proc / "204" / "status").write_text("garbled")  # unreadable evidence
+        (proc / "205").mkdir()  # exited before its status was read
+        real = os.readlink
+
+        def readlink(path):
+            if Path(path).parent.name.isdigit():
+                raise PermissionError(13, "Permission denied", str(path))
+            return real(path)
+
+        def sweep(*pids):
+            for pid in set("201 202 203 204 205".split()) - set(pids):
+                (proc / pid).rename(proc / f"hidden-{pid}")
+            try:
+                return lifetime.cwd_holders(self.tree)
+            finally:
+                for pid in set("201 202 203 204 205".split()) - set(pids):
+                    (proc / f"hidden-{pid}").rename(proc / pid)
+
+        with (
+            patch.object(lifetime, "_LINUX", True),
+            patch.object(lifetime, "_PROC", proc),
+            patch.object(lifetime.os, "readlink", readlink),
+        ):
+            self.assertEqual(sweep("201", "202", "205"), [])
+            for pid in ("203", "204"):
+                with self.subTest(pid=pid), self.assertRaisesRegex(CaptainError, "cleanup-pending"):
+                    sweep(pid)
+
     def test_unlistable_proc_retains(self):
         with (
             patch.object(lifetime, "_LINUX", True),
