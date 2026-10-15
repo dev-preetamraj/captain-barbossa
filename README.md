@@ -112,31 +112,20 @@ captain crew Gibbs --task "Review the current changes" --agent claude --model mi
 ```
 
 Omitted flags resolve in code: agent from `[crew] agent` or the captain's CLI,
-model from the configured crew tier (`cheap` as shipped), checkout from `[crew]
-checkout` (`auto` as shipped), and placement from `[crew] placement` or the
+model from the configured crew tier (`cheap` as shipped), and placement from
+`[crew] placement` or the
 next automatic slot. Explicit flags win; split flags
 imply a pane. Recruitment prints each choice's source. Only an agent absent from
 both settings and session metadata needs a picker (or an explicit `--agent` in a
 non-TTY). Only the captain recruits; crew forward delegation requests to it. See
 [crew-lifecycle.md](https://github.com/dev-preetamraj/captain-barbossa/blob/main/docs/crew-lifecycle.md)
-for naming, launch behavior, checkout isolation, failure handling, and editing guardrails.
+for naming, launch behavior, shared checkouts, failure handling, and editing guardrails.
 
-The shipped `auto` checkout shares the captain working tree with read-only crew and
-crew whose `--owns` are disjoint from every active assignment; overlapping owns, or a
-write grant without owns, get a disposable detached worktree at the captain checkout's
-current local `HEAD`, in a supported ordinary Git checkout. The reason is printed as the
-checkout source. The worktree is a separate
-execution root but keeps the captain checkout as the stable project/session identity.
-Dirty tracked changes, staged changes, and untracked files in the captain checkout are
-therefore absent; commit or explicitly transfer the needed inputs first. Use
-`--checkout shared` for a crew that must see the captain working tree, or
-`--checkout worktree` to require isolation. A linked-worktree captain checkout and
-other unsupported Git layouts are refused for isolation rather than guessed at.
-Non-Git projects fall back to shared unless isolation was explicitly requested.
+Crew share the captain working tree, including dirty, staged, and untracked files.
+Give simultaneous writers disjoint files and serialize edits to the same file.
 
 Use `--profile NAME` to select `[profiles.NAME]` from global/project settings,
-bundling agent, model, execution (`foreground` or `background`), checkout
-(`shared` or `worktree`), and placement. Flags override profile keys; omitted keys
+bundling agent, model, execution (`foreground` or `background`), and placement. Flags override profile keys; omitted keys
 retain existing defaults. `--foreground` overrides background execution. Profiles
 print and persist their effective choices and sources, and never grant assignment
 permissions. See
@@ -414,28 +403,9 @@ captain quiet --task "Correct the setup instructions" --write README.md
 Execution commands record runs in the session's `events/captain.jsonl` so work
 without a pane can be reviewed afterward. They are captain-only commands.
 
-### Reviewing isolated crew results
+### Crew session cleanup
 
-Isolated work never silently lands in the captain checkout. After the managed writer
-has stopped, use `captain result collect WORKTREE_ID`, inspect it with
-`captain result show RESULT_ID`, then explicitly choose `captain result apply RESULT_ID`
-or `captain result discard RESULT_ID --reason TEXT`. Apply copies the result's
-postimages into the captain checkout. Every touched file must still be at its recorded
-base preimage with no staged change against `HEAD`; otherwise, and on unfinished Git
-operations, unresolved/out-of-grant content, symlinks or submodules, it refuses,
-writes nothing and records nothing. Applied files remain **unstaged**; Captain neither
-commits nor stages them. A write interrupted by an external edit is journaled as
-partial and kept for manual recovery, never retried over the edit.
-
-`captain worktree list` reports retained records. `captain worktree cleanup WORKTREE_ID`
-removes one only after authoritative managed-writer lifetime evidence, a final
-non-provisional result, an unchanged inventory, and verified apply/discard settlement.
-Detached commits or distinct staged content require explicit discard. Missing or
-ambiguous evidence, concurrent changes, transfer conflicts, interrupted transfers, and
-unsupported repository layouts retain the result/worktree for review rather than
-broadly deleting or overwriting anything.
-
-Cleanup also freezes usage and considers only native session identities recorded for
+Cleanup freezes usage and considers only native session identities recorded for
 that crew incarnation. It never targets the captain's history or unrelated native
 sessions. Missing hooks/manifests, unobserved or ambiguous identities, partial provider
 coverage, unknown writers, and shared-history/sidecar uncertainty remain reported as
@@ -484,11 +454,9 @@ acknowledging the delivery only once it is there and never resending it.
   no Herdr pane when every crew they reach is a background crew. A session started by
   an older captain in temporary storage refuses `--background`.
 
-Background execution remains one read-only headless turn. A disposable worktree is
-checkout separation, not a security sandbox; provider-specific read-only controls still
-apply. There is no PTY, persistent daemon, worker pool, or automatic commit. This
-native-history/worktree implementation is in progress, so these passages describe the
-current source contract rather than released or live-verified behavior.
+Background execution remains one read-only headless turn in the shared checkout;
+provider-specific read-only controls still apply. There is no PTY, persistent daemon,
+worker pool, or automatic commit.
 
 ```sh
 captain crew --background --agent codex --task "Find why startup is slow; report the cause"
@@ -524,8 +492,7 @@ The default scope is session; project facts survive into future sessions. New
 sessions live in the durable state root, so a reopened session still holds its
 assignments and undelivered outcomes; one created by an older captain in OS temp
 storage is opened where it is. The durable project namespace is keyed by the captain
-checkout, not a disposable crew execution root, so isolated crew share the intended
-session/project memory while running elsewhere. Repo
+checkout. Crew share that session/project memory. Repo
 facts are shared with the team through version control, so the code fixes their
 shape: an explicit `--scope repo` only, a relation from the closed set
 `decided|method|convention`, a required `--because` rationale, deterministic
@@ -573,7 +540,7 @@ Read the affected pane before retrying or approving anything.
 | Command | Purpose |
 |---|---|
 | `captain [--agent claude\|codex\|pi\|grok] [--prompt TEXT] [--no-dashboard]` | Start a captain in this pane |
-| `captain crew [NAME] --task TEXT [--checkout auto\|shared\|worktree] [--owns PATH] [--allow ACTION] [--handoff ID] [--agent ...] [--placement pane\|tab] [--direction ...] [--split-pane ...] [--model ...]` | Recruit crew |
+| `captain crew [NAME] --task TEXT [--owns PATH] [--allow ACTION] [--handoff ID] [--agent ...] [--placement pane\|tab] [--direction ...] [--split-pane ...] [--model ...]` | Recruit crew |
 | `captain crew [NAME] --background --agent codex\|pi --task TEXT [--model ...]` | One read-only headless turn as a paneless crew |
 | `captain interrupt NAME [--reason TEXT]` | Stop a crew's current turn; cancels a background run |
 | `captain wait NAME [--timeout SECONDS] [--json] [--ack DELIVERY_ID]` | Read and acknowledge a crew notification |
@@ -590,12 +557,6 @@ Read the affected pane before retrying or approving anything.
 | `captain inspect files\|read\|search\|state\|git ...` | Bounded local inspection |
 | `captain do commit\|push\|branch\|switch\|fetch\|pull\|run ...` | Synchronous deterministic work without crew |
 | `captain quiet --task TEXT [--diff worktree\|staged] [--write PATH] [--model MODEL] [--timeout SECONDS]` | One headless model turn; repeat `--write` for multiple files |
-| `captain result collect WORKTREE_ID` | Snapshot an isolated crew checkout as a retained result |
-| `captain result show RESULT_ID` | Review a retained result and destination state |
-| `captain result apply RESULT_ID` | Copy a conflict-free result into the captain checkout, unstaged |
-| `captain result discard RESULT_ID --reason TEXT` | Explicitly record that a result may be discarded |
-| `captain worktree list` | List retained isolated crew checkouts |
-| `captain worktree cleanup WORKTREE_ID` | Remove a safely settled isolated checkout |
 | `captain status [--all]` | Print a table of this session's crew |
 | `captain dashboard [--interval SECONDS] [--refresh-prices]` | Refresh a crew token-usage table; optionally refresh prices |
 | `captain focus NAME` | Focus crew's pane and tab |

@@ -10,10 +10,9 @@ questions. The command resolves omitted flags, using:
 - **placement**: `[crew] placement`, or the next declared slot (auto), opening
   a new tab when the existing shapes are full
 - **model**: `[crew] model` (`cheap` as shipped), stepped up for harder work
-- **checkout**: `[crew] checkout` (`auto` as shipped: shared unless owned paths contend)
 
 Explicit flags win; split flags imply pane placement. The command prints the
-source of agent, model, checkout and placement. Only a missing agent in both settings and
+source of agent, model and placement. Only a missing agent in both settings and
 captain metadata needs a picker or `--agent` in a non-TTY.
 
 Every choice you do state is used as given; the captain asks at most one
@@ -56,69 +55,13 @@ Placement flags and tab shapes are documented in
 Model tiers and defaults are documented in
 [settings.md](https://github.com/dev-preetamraj/captain-barbossa/blob/main/docs/settings.md).
 
-## Checkout isolation and results
+## Shared checkout and session cleanup
 
-Recruitment defaults to `checkout = "auto"`, printing its reason as the source:
+Crew share the captain working tree, including dirty, staged, and untracked files.
+Give writers disjoint owned paths and serialize same-file work. Overlapping active
+assignments fail with `[owned-path-conflict]`.
 
-- read-only crew (no edit, format, commit, version or delete grant), background crew,
-  and `--handoff` share the captain checkout;
-- `--owns` disjoint from every unfinished assignment of the project, in any session or
-  worktree, share it; finished and dismissed assignments hold no paths;
-- `--owns` overlapping one, or a write grant without `--owns`, get a worktree.
-
-A crew never changes checkout after recruitment. A later crew overlapping an
-already-shared one gets the worktree; its result apply then refuses any conflict.
-A concurrent recruit from another session that claims the same paths first makes
-recruitment fail with `[owned-path-conflict]`; rerun to get a worktree.
-
-For a worktree in a supported ordinary Git project, Captain records local `HEAD`, then creates a disposable detached worktree at that commit.
-It does not copy the captain checkout's index or working tree, so dirty tracked changes,
-staged versions, and untracked files are absent. Commit or otherwise transfer required
-inputs first, or explicitly recruit with `--checkout shared`. Profiles may set
-`checkout = "auto"`, `"shared"` or `"worktree"`; a CLI flag wins, and an explicit
-`shared` or `worktree` (flag, profile or settings file) always overrides auto.
-
-The captain checkout remains the canonical project identity, session namespace, memory
-scope, and result destination. The worktree is only that crew incarnation's execution
-root, resolved from its recorded worktree, assignment, and incarnation IDs rather than
-an environment path. Non-Git projects use shared checkout by default, but an explicit
-`--checkout worktree` fails. A linked-worktree parent (`.git` is not an ordinary
-directory), symlinked roots, alternates, partial/promisor object stores, per-worktree
-config, and other unsupported layouts are refused. Use `--checkout shared` explicitly
-only if shared-root operation is acceptable.
-
-Results never land automatically:
-
-```sh
-captain result collect <worktree-id>
-captain result show <result-id>
-captain result apply <result-id>
-captain result discard <result-id> --reason "why it is safe to discard"
-captain worktree list
-captain worktree cleanup <worktree-id>
-```
-
-Collection snapshots base, detached `HEAD`, index, tracked/untracked files, grants, and
-unresolved content into an immutable manifest. It scans twice, but that is conflict
-detection, not writer-liveness proof. `show` reports destination and transfer state.
-`apply` requires the recorded captain checkout, no unfinished Git operation, and for
-every touched path a working file at its base preimage and an index entry equal to
-`HEAD`; it refuses symlinks, hardlinks, submodules, ignored/unknown/out-of-grant
-content, and overlaps, writing and recording nothing. It then journals `applying`,
-replaces each file atomically after rechecking its preimage, and records `applied`.
-An external edit mid-transfer stops it as `partial`, preserved for manual recovery.
-Files already at their postimages are recorded applied without writing. It copies only
-the result postimages, leaves them **unstaged**, and never commits.
-
-Cleanup independently rereads authoritative lifetime receipts; a caller's assertion that
-a writer stopped grants nothing. It requires revocation/verified exit or never-launch,
-a final non-provisional and unchanged result, and verified apply or explicit discard.
-Detached commits and staged content distinct from both base and working file require
-explicit discard. Missing evidence, a busy/unknown writer, a failed terminal close,
-conflicts, interrupted transfer, changed inventory, or unsupported content retain the
-worktree and journals for review rather than forcing removal.
-
-Before targeted native-history deletion, cleanup verifies the same lifetime and freezes
+Before targeted native-history deletion, cleanup verifies authoritative writer shutdown and freezes
 usage. The ownership manifest is crew-only and incarnation-scoped: only locally recorded
 session IDs/transcripts are candidates, never the captain's or unrelated histories.
 Missing manifests or hooks, unobserved/resumed/ambiguous identity, unknown writers,
@@ -131,8 +74,7 @@ no broad deletion; retained non-complete history journals block pruning.
 `crew --background` recruits a crew with no pane for one read-only headless turn.
 It has the same name, incarnation, assignment, read/search grants and acknowledged
 deliveries as any crew; only execution differs. Agent and model resolve as above,
-with placement skipped; Herdr is never called to launch it. Its checkout still resolves
-normally; under `auto` a read-only background crew shares the checkout. A worktree is not a security sandbox;
+with placement skipped; Herdr is never called to launch it. It shares the captain checkout;
 the provider-specific read-only gate remains authoritative. There is no PTY, persistent
 daemon, worker pool, or automatic staging/commit.
 
@@ -405,16 +347,11 @@ and have all notifications acknowledged; a refusal names whichever of those, or
 an unresolved delivery, is actually holding it. Any mail still unread at that
 point is bounced with a reason instead of being left queued, and the command
 names each bounced message. It is permanent, so handle unreported or
-uncommitted work first; commit only when the user explicitly requested it. For an
-isolated crew, retirement attempts a final result collection and conservative cleanup;
-any uncertainty retains the result/worktree and reports its state independently of the
-dismissed roster entry.
+uncommitted work first; commit only when the user explicitly requested it.
 
 ## Editing guardrails
 
-Shared-checkout crew can collide directly. Isolated crew have separate working files,
-but their results can still conflict when explicitly applied. Both modes carry the
-same contract:
+Shared-checkout crew can collide directly. Every crew carries this contract:
 
 - Edit only files in your own assignment; give simultaneous writers disjoint
   files and serialize same-file work.

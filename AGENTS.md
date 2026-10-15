@@ -26,9 +26,7 @@ src/captain_barbossa/
   defaults.toml   every shipped default, read as package data by config
   placement.py    recruitment defaults/sources, workspace discovery, and crew Spot
   profiles.py     explicit recruitment presets and flag precedence
-  execution.py    stable project identity to per-crew execution-root/artifact routing
-  worktrees.py    disposable detached checkouts, identities, validation, removal
-  results.py      immutable result snapshots and explicit unstaged transfer/discard
+  execution.py    crew launch roots and managed retirement
   lifetime.py     managed native-writer ownership, exit receipts, terminal closure
   native_history.py crew-incarnation native-history ownership and conservative cleanup
   pi_history.py   crew-only pi session-boundary/identity extension
@@ -134,19 +132,8 @@ Key facts:
   is written), `~/.captain/settings.toml`, the project's `.captain/settings.toml`, then
   CLI flags. Read a value with `config.lookup/text/flag/number` when the command needs
   it, never while `cli.parser()` is built.
-- Supported Git projects default new crew to a detached worktree at the captain
-  checkout's local `HEAD`; `--checkout shared` and profile `checkout = "shared"` are
-  explicit opt-ins to the old shared-root behavior. Dirty/staged/untracked parent state
-  is absent from an isolated root. The captain checkout remains the project/session and
-  result destination identity; `execution.root` resolves only the launch-bound crew
-  incarnation. Non-Git projects fall back to shared unless worktree isolation was
-  explicitly required. Linked-worktree parents and unsupported object-store/config
-  layouts are refused, never normalized.
-- Isolated output is collected into an immutable result and transferred only by an
-  explicit `result apply`; application leaves files unstaged and refuses destination
-  overlap or uncertainty. Worktree cleanup requires authoritative `lifetime` evidence,
-  a final unchanged result, and verified apply/discard settlement. Retain on every
-  unknown writer, partial transfer, conflict, or unsupported content case.
+- Crew share the captain checkout, including dirty/staged/untracked state.
+  Give simultaneous writers disjoint files and serialize same-file work.
 - Native-history cleanup is crew-incarnation-only. After authoritative writer shutdown
   it freezes usage, then targets only recorded local session identities; captain and
   unrelated histories are never candidates. Missing manifests/hooks, ambiguous or
@@ -154,8 +141,7 @@ Key facts:
   pending/partial/unsupported with no broad deletion; retained non-complete journals
   keep pruning conservative.
 - Shared-checkout crew still use the generated editing contract (disjoint files,
-  re-read before edit, stage only owned hunks). Nothing locks files. A worktree separates
-  working files but is not a security sandbox and does not authorize commits.
+  re-read before edit, stage only owned hunks). Nothing locks files or authorizes commits.
 - Generated instructions are token-budgeted. Every added line costs context in every
   captain and crew session; prefer short rules over explanations.
 - The version is defined once in `pyproject.toml` and read via `importlib.metadata`.

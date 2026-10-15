@@ -7,9 +7,7 @@ agent = ""
 model = ""
 
 [crew]
-# auto: read-only crew and crew whose --owns are disjoint from every active assignment
-# share the checkout; overlapping owns, or a write grant without owns, get a detached
-# worktree. shared/worktree force one. Non-Git projects always stay shared.
+isolation_enabled = false
 checkout = "auto"
 # The model new crew are recruited with, when `captain crew` gets no --model.
 model = "cheap"

@@ -11,7 +11,7 @@ import sys
 import unittest
 from unittest.mock import patch
 
-from captain_barbossa import agents, cli, models, runtime, sessions, store
+from captain_barbossa import agents, cli, config, models, runtime, sessions, store
 from captain_barbossa import instructions as instruction_prompts
 from captain_barbossa import pane as panes
 from captain_barbossa.crew import Crew
@@ -98,6 +98,7 @@ class RecruitTests(SessionCase):
         (self.project / ".git").write_text("gitdir: /unrelated/admin\n")
         with (
             patch.object(runtime, "herdr") as herdr,
+            patch.object(config, "flag", return_value=True),
             self.assertRaisesRegex(runtime.CaptainError, "unsupported-checkout.*--checkout shared"),
         ):
             agents.create_crew(
@@ -124,6 +125,7 @@ class RecruitTests(SessionCase):
             current,
         )
         with (
+            patch.object(config, "flag", return_value=True),
             patch.object(worktrees, "reserve", return_value={"id": "a" * 32}),
             patch.object(worktrees, "create", side_effect=runtime.CaptainError("creation failed")),
             patch.object(runtime, "herdr") as herdr,

@@ -6,23 +6,8 @@ The current implementation follows the native Herdr crew flow in [README.md](../
 - Recruit crew into deterministic declared tab shapes: `[placement] captain_tab` for the captain's tab and `crew_tab` for later tabs. Crew fill columns breadth first; explicit pane, tab, split, and direction flags override the grid for one recruit. See [placement.md](placement.md).
 - Read optional project and global `.captain/settings.toml` files one key at a time, with project settings above global settings above shipped defaults, and CLI flags above all three. `captain init [--global]` writes the commented template. See [settings.md](settings.md).
 - Use Herdr to create the selected topology and run a short session-local launcher there, then wait for the native agent to be ready before submitting its task.
-- `[crew] checkout = "auto"` (the default) shares the checkout with read-only crew and
-  crew whose `--owns` are disjoint from every active assignment; overlapping owns, or a
-  write grant without owns, get a detached worktree from the captain checkout's local
-  `HEAD`. `--checkout shared|worktree` (or a profile `checkout`) forces one; dirty,
-  staged, and untracked parent state is absent from an isolated root.
-  The captain checkout remains the stable project/session identity and transfer
-  destination. Non-Git projects fall back to shared unless isolation is explicitly
-  required; linked-worktree parents and unsupported Git layouts are refused.
-- Isolated results move only through explicit `result collect/show/apply/discard` and
-  `worktree list/cleanup` commands. Apply writes unstaged files and refuses overlap,
-  unfinished Git operations, unresolved content, or changed preconditions. Cleanup
-  retains work on conflicts, detached commits, distinct staged data, partial transfer,
-  unknown writers, or missing authoritative lifetime evidence. Removal also retains on
-  an escaped descendant (Linux: a subreaper owner proves none survive; macOS: a per-poll
-  descendant scan, best effort; elsewhere: always), on any process whose working
-  directory is inside the worktree (`/proc/*/cwd`, or `/usr/sbin/lsof`, retaining when
-  it is missing or fails), and on files left behind after removal. Nothing is killed.
+- Crew share the captain checkout, including dirty, staged, and untracked files.
+  Give writers disjoint owned paths and serialize same-file work.
 - Managed cleanup freezes usage before touching only crew-incarnation native identities
   recorded locally, gated only on the reaped native CLI's exit (escaped descendants do
   not write its history). It never targets captain or unrelated histories; missing hooks,
@@ -33,10 +18,8 @@ The current implementation follows the native Herdr crew flow in [README.md](../
 - Store graph memory in three scopes: session and project outside the repo, separated by canonical project path and Captain session, plus a curated `repo` scope committed as `.captain/graph.json` and shared by the team: an explicit `--scope repo` write only, with a closed relation vocabulary, a required `--because` rationale, deterministic sorted bytes that re-add as a no-op, and `--supersede` in place of newest-wins. `captain memory init [--from PATH] [--apply]` seeds it from the project rulebook (AGENTS.md, else CLAUDE.md) by a fixed markdown parse, previewing the facts until `--apply`. Query all three using the installed Graphify CLI.
 
 There is no custom terminal UI, tmux layer, chat server, or background orchestration daemon.
-The worktree is checkout separation, not a security sandbox. Background crew remain a
-single read-only headless turn with no PTY, persistent daemon, pooling, or automatic
-commit. Source writers are still active for this feature, so this plan records the
-current source contract, not released or live-tested behavior.
+Background crew remain a single read-only headless turn in the shared checkout with
+no PTY, persistent daemon, pooling, or automatic commit.
 
 **Done since**
 

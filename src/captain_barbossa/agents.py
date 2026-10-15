@@ -666,6 +666,11 @@ def dismiss_crew(args, pane, project):
 
 
 def begin_recruitment(crew, project, args):
+    if crew.record["checkout"] == "worktree" and not config.flag("crew", "isolation_enabled"):
+        raise CaptainError(
+            "[worktree-disabled] Crew isolation is disabled; use --checkout shared or "
+            "set [crew] isolation_enabled = true."
+        )
     try:
         if crew.record["checkout"] == "worktree":
             if args.handoff:
@@ -776,6 +781,13 @@ def choose_checkout(args, project, directory, profile_source=None):
     else:
         where = config.source("crew", "checkout")
         source = f"[crew] checkout from {where}" if where else "[crew] checkout"
+    if not config.flag("crew", "isolation_enabled"):
+        if checkout == "worktree":
+            raise CaptainError(
+                "[worktree-disabled] Crew isolation is disabled; use --checkout shared or "
+                "set [crew] isolation_enabled = true."
+            )
+        return "shared", f"{source}: isolation disabled"
     if not git.exists():
         if checkout == "worktree":
             raise CaptainError("[worktree-required] Isolated crew requires a Git checkout.")

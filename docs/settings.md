@@ -20,9 +20,8 @@ setting (an upgrade replaces it): write the key in one of the two files above.
 
 The project root is the stable identity the rest of the CLI uses: `$CAPTAIN_PROJECT`
 when a captain set it, otherwise the enclosing Git repository, otherwise the current
-directory. An isolated crew may execute in a disposable worktree elsewhere, but that
-does not change its project settings, session namespace, memory identity, or result
-destination.
+directory. Crew share that checkout, its project settings, session namespace, and
+memory identity.
 
 ## Precedence
 
@@ -64,19 +63,17 @@ Profiles live in the same global and project settings files:
 agent = "codex"
 model = "mid"
 execution = "foreground"
-checkout = "worktree"
 placement = "tab"
 
 [profiles.research]
 agent = "codex"
 model = "cheap"
 execution = "background"
-checkout = "shared"
 ```
 
-All five keys are optional. `agent` accepts the usual providers, `model` accepts
-a tier or model name, `execution` accepts `foreground` or `background`, `checkout`
-accepts `auto`, `shared` or `worktree`, and `placement` accepts `auto`, `pane`, or `tab`.
+All four keys are optional. `agent` accepts the usual providers, `model` accepts
+a tier or model name, `execution` accepts `foreground` or `background`, and
+`placement` accepts `auto`, `pane`, or `tab`.
 Project keys override global keys
 within the named profile. Explicit flags override that profile, then omitted
 fields use existing recruitment defaults. Model tiers resolve for the effective
@@ -88,19 +85,8 @@ Profiles are only selected by `--profile`; there is no implicit default profile.
 Unknown names, unknown keys and invalid values fail before crew allocation.
 Background execution still requires codex or pi, accepts only read/search grants,
 and rejects placement, ownership and handoff inputs, including profile placement.
-Checkout still resolves for background work; read-only, it shares the checkout under
-`auto`. Profiles cannot contain `owns`, `allow`, tasks or any other
-assignment grants.
-
-The shipped `[crew] checkout = "auto"` default shares the captain working tree with
-read-only crew and crew whose `--owns` are disjoint from every unfinished assignment in
-the project; overlapping owns, or a write grant without owns, get a fresh detached
-checkout at the captain checkout's local `HEAD` in supported ordinary Git projects,
-which excludes the captain checkout's dirty, staged, and untracked state. Recruitment
-prints the reason as the checkout source. `shared` or `worktree`, from a settings file,
-a profile, or `--checkout`, always wins over auto. The flag wins over a profile. Non-Git projects fall back to
-shared unless `worktree` was explicitly requested; linked-worktree parents and other
-unsupported Git layouts are refused for isolation.
+All crew share the captain checkout, including dirty, staged, and untracked files.
+Profiles cannot contain `owns`, `allow`, tasks or any other assignment grants.
 
 Profile recruits print and save `profile`, `effective`, and per-field `sources`
 in their crew record. Effective values include the resolved model ID and actual
@@ -132,7 +118,7 @@ The commented list of shipped keys and defaults is in
 and is exactly what `captain init` writes. The tables cover:
 
 - `[captain]`: the captain's CLI and optional starting model.
-- `[crew]`: checkout mode, default crew model, wait timeout, and background turn timeout.
+- `[crew]`: default crew model, wait timeout, and background turn timeout.
 - `[lifetime]`: managed-writer startup, termination and shutdown timeouts, plus polling interval.
 - `[dashboard]`: automatic launch, refresh interval, pane ratio, context limit,
   and price-file override. See

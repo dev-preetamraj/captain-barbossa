@@ -6,7 +6,8 @@ import os
 import unittest
 from unittest.mock import patch
 
-from captain_barbossa import agents, cli, config, runtime, sessions, store
+from captain_barbossa import agents, cli, config, runtime, sessions, store, worktrees
+from captain_barbossa.crew import Crew
 from tests.home_isolation import HERDR, SessionCase
 
 
@@ -14,6 +15,13 @@ class CheckoutChoiceTests(SessionCase):
     def setUp(self):
         super().setUp()
         self.enterContext(patch.dict(os.environ, HERDR))
+        self.enterContext(
+            patch.object(
+                config,
+                "settings",
+                return_value=config.merge(config.defaults(), {"crew": {"isolation_enabled": True}}),
+            )
+        )
         (self.project / ".git").mkdir()
         self.directory, self.meta = sessions.session(self.project, self.pane, create=True)
 
@@ -41,6 +49,60 @@ class CheckoutChoiceTests(SessionCase):
             "paths": list(paths),
         }
         store.write_json(path, protocol_state)
+
+    def test_isolation_ships_disabled(self):
+        self.assertFalse(config.defaults()["crew"]["isolation_enabled"])
+
+    def test_disabled_auto_and_shared_never_select_isolation(self):
+        self.occupy(self.directory, ["src"])
+        with patch.object(config, "flag", return_value=False):
+            for flags in (
+                (),
+                ("--allow", "commit"),
+                ("--allow", "edit", "--owns", "src"),
+                ("--checkout", "auto", "--allow", "commit"),
+                ("--checkout", "shared", "--allow", "commit"),
+            ):
+                with self.subTest(flags=flags):
+                    checkout, source = self.choose(*flags)
+                    self.assertEqual(checkout, "shared")
+                    self.assertIn("isolation disabled", source)
+
+    def test_disabled_worktree_flag_profile_and_settings_fail_before_launch(self):
+        for flags, settings in (
+            (("--checkout", "worktree"), {}),
+            (("--profile", "isolated"), {"profiles": {"isolated": {"checkout": "worktree"}}}),
+            ((), {"crew": {"checkout": "worktree"}}),
+        ):
+            with (
+                self.subTest(flags=flags),
+                patch.object(
+                    config, "settings", return_value=config.merge(config.defaults(), settings)
+                ),
+                patch.object(runtime, "herdr") as herdr,
+                patch.object(worktrees, "reserve") as reserve,
+                self.assertRaisesRegex(runtime.CaptainError, "worktree-disabled"),
+            ):
+                agents.create_crew(self.args(*flags), self.pane, self.project)
+            herdr.assert_not_called()
+            reserve.assert_not_called()
+        self.assertEqual(store.read_json(self.directory / "session.json")["crew"], {})
+
+    def test_disabled_direct_recruitment_cannot_bypass_selection(self):
+        crew = Crew(
+            "jack",
+            {"checkout": "worktree"},
+            sessions.Session(self.directory, self.meta),
+        )
+        with (
+            patch.object(config, "flag", return_value=False),
+            patch.object(worktrees, "reserve") as reserve,
+            patch.object(worktrees, "create") as create,
+            self.assertRaisesRegex(runtime.CaptainError, "worktree-disabled"),
+        ):
+            agents.begin_recruitment(crew, self.project, self.args())
+        reserve.assert_not_called()
+        create.assert_not_called()
 
     def test_read_only_crew_share(self):
         self.occupy(self.directory, ["src"])
