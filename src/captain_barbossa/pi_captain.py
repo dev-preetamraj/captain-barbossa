@@ -21,6 +21,30 @@ const STATUSES = new Set(["timeout", "working", "idle", "asked", "awaiting_appro
 // Background crew watches arm themselves: re-checked this often, each armed this long.
 const SWEEP = 5000;
 const AUTO = 3600;
+// The live background-jobs list. Disk is read only by the sweep and when a watch ends; the
+// spinner redraws from memory and runs only while a job is working and watched.
+const WIDGET = "captain-background";
+const TASK = 60;
+const ROWS = 8;
+const FRAME = 100;
+const FRAMES = ["\u280b", "\u2819", "\u2839", "\u2838", "\u283c", "\u2834", "\u2826", "\u2827",
+  "\u2807", "\u280f"];
+const FAILED = new Set(["failed", "cancelled", "lost"]);
+// Theme token and fixed mark per state; only a watched working job spins.
+const LOOK = { working: ["accent", "\u25cf"], asked: ["warning", "?"], done: ["success", "\u2713"],
+  failed: ["error", "\u2717"], stopped: ["warning", "!"] };
+// Conservative width for task text: anything from U+1100 up may be wide, so it counts as two.
+// Marks, names and states are single-width, so their length is their width.
+const cells = text => [...text].reduce((n, c) => n + (c.codePointAt(0) >= 0x1100 ? 2 : 1), 0);
+const fit = (text, width) => {
+  if (cells(text) <= width) return text;
+  let out = "";
+  for (const c of text) {
+    if (cells(out + c) > width - 1) break;
+    out += c;
+  }
+  return width > 0 ? out + "\u2026" : "";
+};
 
 export default function (pi) {
   const pending = new Map();
@@ -28,18 +52,37 @@ export default function (pi) {
   // rearm, so one uncertain delivery is reported once rather than on every sweep.
   const stopped = new Set();
   let sweeper;
+  // Set only while a session with a UI runs: json and print modes get no widget. RPC takes
+  // plain lines only; the terminal gets a themed, animated component.
+  let ui, terminal, board, spinner;
+  let shown = "";
+  let rows = [];
+  let frame = 0;
+  const reset = () => {
+    clearInterval(spinner);
+    spinner = board = undefined;
+    rows = [];
+    shown = "";
+  };
   pi.on("session_shutdown", () => {
     clearInterval(sweeper);
     for (const controller of pending.values()) controller.abort();
     pending.clear();
+    try { ui?.setWidget(WIDGET, undefined); } catch {}
+    ui = undefined;
+    reset();
   });
   // Nobody arms a background crew's wait, so its watch arms itself on every start, reload
   // or reconnect while its work is unresolved (pi docs: timers start in session_start).
   pi.on("session_start", (_event, ctx) => {
     clearInterval(sweeper);
     stopped.clear();
+    reset();
+    ui = ctx.hasUI ? ctx.ui : undefined;
+    terminal = ctx.mode === "tui";
     const sweep = () => {
       for (const name of unresolved()) if (!stopped.has(watchKey(name))) arm(name, AUTO, ctx, true);
+      show();
     };
     sweep();
     sweeper = setInterval(sweep, SWEEP);
@@ -91,7 +134,7 @@ export default function (pi) {
     }
   }
 
-  function unresolved() {
+  function jobs() {
     let roster, state;
     try {
       roster = JSON.parse(readFileSync(join(directory, "session.json"), "utf8")).crew ?? {};
@@ -100,13 +143,135 @@ export default function (pi) {
       return [];
     }
     // Mirrors protocol.wait_all: skip dismissed, stale, and done-and-acknowledged work.
-    return Object.entries(roster).filter(([id, record]) => {
-      const assignment = state.assignments?.[state.active?.[id]];
-      return record.execution === "background" && record.status !== "dismissed" &&
+    return Object.entries(roster).map(([id, record]) => {
+      const active = state.active?.[id];
+      return { id, record, active, assignment: state.assignments?.[active] };
+    }).filter(({ record, assignment }) =>
+      record.execution === "background" && record.status !== "dismissed" &&
         assignment?.incarnation_id === record.incarnation_id &&
         !(assignment.state === "done" && !assignment.pending &&
-          assignment.ack_seq === assignment.notices.length);
-    }).map(([id]) => id);
+          assignment.ack_seq === assignment.notices.length));
+  }
+
+  function unresolved() {
+    return jobs().map(({ id }) => id);
+  }
+
+  // Same precedence as background.describe; a lost owner reads working until its watch
+  // closes the assignment, which the next refresh shows.
+  function show() {
+    if (!ui) return;
+    try {
+      const next = jobs().map(({ id, record, active, assignment }) => {
+        const state = FAILED.has(assignment.outcome) ? assignment.outcome
+          : assignment.state === "done" ? "done"
+          : assignment.state === "asked" || assignment.question ? "asked" : "working";
+        const halted = stopped.has(`${id}:${active}`);
+        // C1 controls too: U+009B is an 8-bit CSI some terminals still execute.
+        const task = String(assignment.original_task ?? "")
+          .replace(/[\s\x00-\x1f\x7f-\x9f]+/g, " ").trim();
+        return { name: String(record.name || id), state, task,
+          label: halted ? `${state} (watch stopped)` : state,
+          look: halted ? "stopped" : FAILED.has(state) ? "failed" : state };
+      });
+      const key = JSON.stringify(next);
+      if (key === shown) return;
+      shown = key;
+      rows = next;
+      if (!rows.length) {
+        ui.setWidget(WIDGET, undefined);
+        board = undefined;
+      } else if (!terminal) {
+        ui.setWidget(WIDGET, plain());
+      } else if (board) {
+        board.tui.requestRender();
+      } else {
+        ui.setWidget(WIDGET, (tui, theme) => {
+          const component = { tui, render: width => draw(width, theme), invalidate() {},
+            dispose() { if (board === component) { board = undefined; animate(); } } };
+          return (board = component);
+        });
+      }
+      animate();
+    } catch {}
+  }
+
+  // Activity, not progress: the frame only shows that a watched job is still running.
+  function animate() {
+    const live = board && rows.some(row => row.look === "working");
+    if (live && !spinner) {
+      spinner = setInterval(() => { frame++; board?.tui.requestRender(); }, FRAME);
+      spinner.unref?.();
+    } else if (!live && spinner) {
+      clearInterval(spinner);
+      spinner = undefined;
+    }
+  }
+
+  // Crew Tree: groups by state (working first), one tree row per job. Lines are lists of
+  // [theme token, text, bold?] so plain and themed output share one layout.
+  const ORDER = ["working", "asked", "done", "failed", "cancelled", "lost"];
+  function tree(spin, limit) {
+    const rank = row => ORDER.indexOf(row.state) * 2 + (row.look === "stopped" ? 1 : 0);
+    const shownRows = rows.slice().sort((x, y) => rank(x) - rank(y)).slice(0, ROWS);
+    const more = rows.length - shownRows.length;
+    const groups = new Map();
+    for (const row of shownRows) {
+      const key = row.label;
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(row);
+    }
+    const sorted = [...groups];
+    const lines = [[["accent", "\u2693 ", false, true], ["accent", "Background crew", true]]];
+    sorted.forEach(([label, members], g) => {
+      const final = g === sorted.length - 1 && !more;
+      const color = LOOK[members[0].look][0];
+      const text = members[0].look === "stopped" ? `${members[0].state} \u00b7 watch stopped` : label;
+      lines.push([["muted", final ? "\u2514\u2500 " : "\u251c\u2500 ", false],
+        [color, `${text} (${members.length})`, false]]);
+      members.forEach((row, i) => {
+        const stem = (final ? "   " : "\u2502  ") + (i === members.length - 1 ? "\u2514 " : "\u251c ");
+        const [rowColor, mark] = LOOK[row.look];
+        lines.push([["muted", stem, false],
+          [rowColor, `${row.look === "working" && spin ? FRAMES[frame % FRAMES.length] : mark} `, false],
+          [null, row.name, true], ["muted", "  ", false],
+          ["muted", limit ? fit(row.task, limit) : row.task, false, true]]);
+      });
+    });
+    if (more) lines.push([["muted", `\u2514\u2500 +${more} more`, false]]);
+    return lines;
+  }
+
+  // Cut a line of segments to width; the first segment that overflows ends it with an ellipsis.
+  // Only segments flagged wide (task text, the emoji-width anchor) use the conservative width;
+  // box-drawing and status marks are one cell.
+  function clip(line, width) {
+    const out = [];
+    let left = width;
+    for (const [token, text, bold, wide] of line) {
+      if (left <= 0) break;
+      const part = wide ? fit(text, left)
+        : text.length <= left ? text : left > 0 ? text.slice(0, left - 1) + "\u2026" : "";
+      out.push([token, part, bold]);
+      left -= wide ? cells(part) : part.length;
+      if (part !== text) break;
+    }
+    return out;
+  }
+
+  const plain = () => tree(false, TASK).map(line => line.map(([, text]) => text).join(""));
+
+  // One leading space matches pi's own widget padding; every line fits the given width.
+  function draw(width, theme) {
+    if (!rows.length) return [];
+    return tree(true, 0).map(line => {
+      const parts = clip([[null, " ", false], ...line], width);
+      return parts.map(([token, text, bold]) => {
+        let out = token ? theme.fg(token, text) : text;
+        if (bold) out = theme.bold(out);
+        return out;
+      }).join("");
+    });
   }
 
   function arm(name, timeout, ctx, auto) {
@@ -227,6 +392,7 @@ export default function (pi) {
             "rearm captain_wait after resolving the error. Unacknowledged events are retained.", "error");
         }).finally(() => {
           if (pending.get(key) === controller) pending.delete(key);
+          show();
         });
       }
   }

@@ -38,7 +38,9 @@ degrades to `-` instead of breaking the frame.
 - `AGENT` is `provider/model`, with a trailing `-YYYYMMDD` and the provider's
   own prefix dropped (`claude-opus-5` reads `claude/opus-5`). It follows a
   model switched mid-session, not the one recruited with.
-- `STATUS` comes from Herdr in one call per frame, like `captain status`.
+- `STATUS` comes from Herdr in one call per frame, like `captain status`. A
+  background crew has no pane, so its `STATUS` is the state `captain status`
+  reports for it (`working`, `done` or `failed`), never its record's `started`.
 - `CTX NOW` is the context the last API call actually carried, as a percent of
   the model's window, with a five-cell bar rounded to the nearest fifth. Small
   usage stays visibly small: `.....   7%` is 7%, not an empty reading. It is a
@@ -114,6 +116,46 @@ Codex crew are read from their own rollout log, which states tokens, the model
 actually in use, and the context window the CLI enforces, so they carry the
 same columns Claude crew do. pi installs no hooks and writes nothing we can
 read, so a pi crew shows its name, agent and status with `-` for usage.
+
+## Background jobs in a pi captain
+
+A pi captain also shows its unfinished background crew in a list above the
+editor, with no extra pane or process. The background-watch sweep that
+already runs every 5 seconds refreshes it:
+
+```text
+ ⚓ Background crew
+ ├─ working (1)
+ │  └ ⠹ Jack  Find the slow path in the session prune loop
+ └─ done (1)
+    └ ✓ Will  Summarise the open review comments on the dashboard
+```
+
+Jobs are grouped by state as a tree, working first, then asked, done, failed,
+cancelled and lost. A job whose watch stopped sits in its own
+`working · watch stopped` group. Each group header carries its count; each row
+shows a mark, the crew name and its task, cut with `…` to fit the terminal
+width. Lines are cut to the terminal width, never wrapped.
+
+| Mark | State | Color |
+|---|---|---|
+| spinner | `working` | accent |
+| `?` | `asked` | warning |
+| `✓` | `done` (finished, not yet delivered to you) | success |
+| `✗` | `failed`, `cancelled` or `lost` | error |
+| `!` | `working · watch stopped` group: the watch stopped on an error | warning |
+
+The spinner only means a job is running with a live watch. It does not show
+progress. Every other mark stays still, and the spinner timer runs only while
+some job is working. Each frame is drawn from memory, so the job files are
+still read only once per sweep. Colors come from the active pi theme.
+
+A job leaves the list once its result is delivered and acknowledged. The list
+and its timer go away when no jobs are left or the session shuts down. It
+shows at most 8 jobs, working first, followed by `└─ +N more`. RPC clients get the same rows as
+plain text, with a static `●` for working jobs and the task cut at 60
+characters. In print and JSON modes, which have no UI, no list is shown and
+watches still run.
 
 ## Pane layout
 

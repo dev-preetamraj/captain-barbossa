@@ -113,7 +113,9 @@ Key facts:
   concrete request authorizes only its stated scope. Every run appends a `{"type": "quiet", ...}` record to
   `events/captain.jsonl`, raised if it cannot be written, because work with no pane is
   reviewable only through that record.
-- `crew --background` is opt-in and read-only: a crew record with `execution:
+- `crew --background` is read-only and the generated-instructions default for
+  all delegated read-only work, even one bounded turn (`quiet` or foreground only on explicit request; writable work and
+  unsupported requested providers never switch): a crew record with `execution:
   "background"` and no pane, running `models.headless_argv(isolated=True)` (codex
   and pi only; claude and grok refused; quiet never passes `isolated`) under a
   detached `background.py` owner. The roster entry precedes `protocol.begin`, which runs

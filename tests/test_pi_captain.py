@@ -62,6 +62,36 @@ const ack = async () => { calls.at(-1).resolve(result("", "timeout", null)); awa
 """
 
 
+# Background crew in each state, and a fake pi widget host that disposes replaced content.
+JOBS = r"""
+const { writeFileSync } = await import("node:fs");
+const widgets = [];
+let component, renders = 0;
+const host = { requestRender() { renders++; } };
+const theme = { fg: (color, text) => `<${color}>${text}</>`, bold: text => `*${text}*` };
+const strip = line => line.replace(/<[a-z]+>|<\/>|\*/g, "");
+const ctx = { hasUI: true, ui: { notify: (...args) => notices.push(args),
+  setWidget(key, content) {
+    widgets.push([key, content]);
+    component?.dispose?.();
+    component = typeof content === "function" ? content(host, theme) : undefined;
+  } }, sessionManager: { getBranch: () => history } };
+const crew = name => ({ name, incarnation_id: "i1", execution: "background", status: "started" });
+const job = (state, extra = {}) => ({ incarnation_id: "i1", state, pending: null, ack_seq: 0,
+  notices: [], original_task: "Find the\nslow path " + "x".repeat(80), ...extra });
+const save = assignments => {
+  writeFileSync(join(dirname(path), "session.json"), JSON.stringify({ crew: {
+    jack: crew("Jack"), will: crew("Will"), gibbs: crew("Gibbs"), cotton: crew("Cotton"),
+    elizabeth: { ...crew("Elizabeth"), execution: undefined } } }));
+  writeFileSync(join(dirname(path), "protocol.json"), JSON.stringify({
+    active: Object.fromEntries(Object.keys(assignments).map(id => [id, id])), assignments }));
+};
+save({ jack: job("working"), will: job("done", { notices: [{}] }),
+  gibbs: job("done", { outcome: "lost", notices: [{}] }), cotton: job("done", { ack_seq: 1,
+    notices: [{}] }), elizabeth: job("working") });
+"""
+
+
 @unittest.skipUnless(shutil.which("node"), "Node is required to execute pi extensions")
 class PiCaptainTests(unittest.TestCase):
     def setUp(self):
@@ -379,6 +409,155 @@ await tick(5000);
 assert.equal(calls.length, 3);
 shutdown();
 """)
+
+    def test_background_jobs_widget_lists_live_jobs_and_clears(self):
+        # RPC takes plain lines only, so it gets aligned text with fixed marks.
+        self.run_js(
+            JOBS
+            + r"""
+start({}, { ...ctx, mode: "rpc" });
+const [key, lines] = widgets.at(-1);
+assert.equal(key, "captain-background");
+// Acknowledged-done and pane crew are not jobs; a failure outranks its done state.
+assert.deepEqual(lines.map(line => line.slice(0, 12)), ["\u2693 Background",
+  "\u251c\u2500 working (", "\u2502  \u2514 \u25cf Jack ", "\u251c\u2500 done (1)",
+  "\u2502  \u2514 \u2713 Will ", "\u2514\u2500 lost (1)", "   \u2514 \u2717 Gibbs"]);
+assert.match(lines[2], /Jack  Find the slow path x+\u2026$/);
+assert.equal(lines[2].length, "\u2502  \u2514 \u25cf Jack  ".length + 60);
+// Unchanged state does not re-render; a stopped watch is shown on its job.
+await tick(5000);
+assert.equal(widgets.length, 1);
+calls[0].resolve({ stdout: "", stderr: "boom", code: 1 });
+await flush();
+assert.equal(widgets.at(-1)[1][1], "\u251c\u2500 working \u00b7 watch stopped (1)");
+assert.match(widgets.at(-1)[1][2], /^\u2502  \u2514 ! Jack  Find/);
+// Once everything is acknowledged the list clears itself.
+save({ jack: job("done", { ack_seq: 1, notices: [{}] }) });
+await tick(5000);
+assert.deepEqual(widgets.at(-1), ["captain-background", undefined]);
+save({ jack: job("working") });
+await tick(5000);
+assert.equal(widgets.at(-1)[1].length, 3);
+const count = widgets.length;
+shutdown();
+assert.deepEqual(widgets.at(-1), ["captain-background", undefined]);
+await tick(5000);
+assert.equal(widgets.length, count + 1);
+// Headless modes have no UI: no widget is ever set, but watches still arm.
+extension(pi);
+const before = calls.length;
+start({}, { ...ctx, hasUI: false, mode: "print",
+  ui: { ...ctx.ui, setWidget() { throw new Error("no UI"); } } });
+await tick(5000);
+assert.ok(calls.length > before);
+assert.equal(widgets.length, count + 1);
+shutdown();
+"""
+        )
+
+    def test_terminal_jobs_widget_animates_only_running_jobs_and_stops_its_timer(self):
+        self.run_js(
+            JOBS
+            + r"""
+start({}, { ...ctx, mode: "tui" });
+assert.equal(typeof widgets.at(-1)[1], "function");
+const frame = (width = 80) => component.render(width).map(strip);
+let lines = frame();
+assert.equal(lines[0], " \u2693 Background crew");
+assert.equal(lines[1], " \u251c\u2500 working (1)");
+assert.match(lines[2], /^ \u2502  \u2514 \u280b Jack  Find the slow path x+\u2026$/);
+assert.equal(lines[2].length, 80);
+assert.equal(lines[3], " \u251c\u2500 done (1)");
+assert.match(lines[4], /^ \u2502  \u2514 \u2713 Will  Find/);
+assert.equal(lines[5], " \u2514\u2500 lost (1)");
+assert.match(lines[6], /^ {4}\u2514 \u2717 Gibbs  Find/);
+// Theme tokens carry the state: accent spinner/header, success done, error failure, muted task.
+const raw = component.render(80);
+assert.match(raw[0], /^ <accent>\u2693 <\/>\*<accent>Background crew<\/>\*$/);
+assert.match(raw[1], /^ <muted>\u251c\u2500 <\/><accent>working \(1\)<\/>$/);
+assert.match(raw[2], /^ <muted>\u2502  \u2514 <\/><accent>\u280b <\/>\*Jack\*<muted>  <\/><muted>Find/);
+assert.match(raw[3], /^ <muted>\u251c\u2500 <\/><success>done \(1\)<\/>$/);
+assert.match(raw[4], /<success>\u2713 <\/>/);
+assert.match(raw[5], /<error>lost \(1\)<\/>$/);
+assert.match(raw[6], /<error>\u2717 <\/>/);
+// The spinner advances from memory with no disk reads; terminal marks never move.
+await tick(100);
+assert.ok(renders >= 1);
+lines = frame();
+assert.match(lines[2], /^ \u2502  \u2514 \u2819 Jack/);
+assert.match(lines[4], /^ \u2502  \u2514 \u2713 Will/);
+for (const width of [80, 30, 12, 3, 1]) {
+  for (const line of frame(width)) assert.ok(line.length <= width, `${width}: ${line}`);
+}
+// A stopped watch is not activity: the spinner stops with it.
+calls[0].resolve({ stdout: "", stderr: "boom", code: 1 });
+await flush();
+assert.equal(frame()[1], " \u251c\u2500 working \u00b7 watch stopped (1)");
+assert.match(frame()[2], /^ \u2502  \u2514 ! Jack  Find/);
+let quiet = renders;
+await tick(1000);
+assert.equal(renders, quiet);
+// The component is reused across refreshes; an empty list disposes it.
+save({ jack: job("working") });
+await tick(5000);
+assert.equal(widgets.filter(([, content]) => typeof content === "function").length, 1);
+assert.equal(frame().length, 3);
+save({});
+await tick(5000);
+assert.deepEqual(widgets.at(-1), ["captain-background", undefined]);
+quiet = renders;
+await tick(1000);
+assert.equal(renders, quiet);
+// Shutdown clears the widget and its timer even while a job is running.
+save({ jack: job("working") });
+await tick(5000);
+assert.equal(frame().length, 3);
+shutdown();
+assert.deepEqual(widgets.at(-1), ["captain-background", undefined]);
+quiet = renders;
+await tick(1000);
+assert.equal(renders, quiet);
+"""
+        )
+
+    def test_jobs_widget_caps_rows_and_orders_groups_working_first(self):
+        self.run_js(
+            JOBS
+            + r"""
+const many = {};
+for (let i = 0; i < 6; i++) many["w" + i] = job("done", { notices: [{}] });
+for (let i = 0; i < 5; i++) many["k" + i] = job("working");
+writeFileSync(join(dirname(path), "session.json"), JSON.stringify({ crew: Object.fromEntries(
+  Object.keys(many).map(id => [id, crew(id)])) }));
+writeFileSync(join(dirname(path), "protocol.json"), JSON.stringify({
+  active: Object.fromEntries(Object.keys(many).map(id => [id, id])), assignments: many }));
+start({}, { ...ctx, mode: "tui" });
+const lines = component.render(40).map(strip);
+// 11 jobs, 8 rows: working jobs are never pushed out by finished ones.
+assert.equal(lines[1], " \u251c\u2500 working (5)");
+assert.equal(lines.filter(line => line.includes("\u25cf") || line.includes("\u280b")).length, 5);
+assert.equal(lines.at(-1), " \u2514\u2500 +3 more");
+assert.ok(lines.every(line => line.length <= 40));
+shutdown();
+"""
+        )
+
+    def test_jobs_widget_never_passes_terminal_controls_from_task_text(self):
+        # U+009B is an 8-bit CSI: left in, "a\u009b31mb" would recolor the terminal.
+        self.run_js(
+            JOBS
+            + r"""
+save({ jack: job("working", { original_task: "a\u009b31mb\u0085c\x1b[1md\x07e\u0090f" }) });
+for (const mode of ["tui", "rpc"]) {
+  start({}, { ...ctx, mode });
+  const lines = mode === "tui" ? component.render(80).map(strip) : widgets.at(-1)[1];
+  assert.match(lines[2], /Jack  a 31mb c \[1md e f$/);
+  for (const line of lines) assert.doesNotMatch(line, /[\x00-\x1f\x7f-\x9f]/);
+  shutdown();
+  extension(pi);
+}
+"""
+        )
 
     def test_background_auto_sweep_uses_persisted_profile_effective_execution(self):
         self.run_js(r"""

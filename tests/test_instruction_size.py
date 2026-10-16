@@ -26,7 +26,7 @@ class InstructionSizeTests(unittest.TestCase):
     def test_operation_routing_uses_the_resolver_without_a_semantic_paragraph(self):
         text = instruction_prompts.agent_instructions(self.directory, "Captain Barbossa")
         routing = text.split("Pass operation requests verbatim to:", 1)[1].split(
-            "One model turn", 1
+            "Read-only model work", 1
         )[0]
         self.assertIn("CAPTAIN do resolve --intent 'verbatim user request'", routing)
         self.assertIn("surface unresolved results", routing)
@@ -174,9 +174,9 @@ class InstructionSizeTests(unittest.TestCase):
         )
         self.assertIn(
             "Answer from what you have already read. Any question that means opening files "
-            "you have not read goes to CAPTAIN quiet, whatever you could answer by reading "
-            "them yourself: the captain's context is the scarce resource, and a quiet turn "
-            "spends a throwaway one.",
+            "you have not read goes to a background crew, whatever you could answer by reading "
+            "them yourself: the captain's context is the scarce resource, and a background "
+            "turn spends a throwaway one.",
             captain,
         )
         # The old line blessed direct reads and direct answers, so a question never reached
@@ -220,9 +220,10 @@ class InstructionSizeTests(unittest.TestCase):
             captain,
         )
         self.assertIn(
-            "Self-check first, in this order: No model needed? CAPTAIN do. A model, and "
-            "you can write the whole instruction now and one answer ends it? CAPTAIN quiet. "
-            "A model, and you will learn the next instruction from what it does? Recruit crew.",
+            "Self-check first, in this order: No model needed? CAPTAIN do. "
+            "Read-only model work, even one bounded turn? Background crew; CAPTAIN quiet only "
+            "if asked. One bounded edit you can write whole now? CAPTAIN quiet --write. "
+            "Other writable work? Foreground crew.",
             captain,
         )
         self.assertIn(

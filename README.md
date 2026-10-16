@@ -43,7 +43,7 @@ Run these in an interactive Herdr workspace:
 
 ```sh
 captain --agent codex
-# Ask the captain: "Recruit crew to review the current changes."
+# Ask the captain: "Review the current changes." (read-only: runs as a background crew)
 # Then ask: "Wait for Jack."
 ```
 
@@ -396,6 +396,7 @@ unstaged. `--diff worktree|staged` appends the selected Git diff to the task;
 ```sh
 captain do resolve --intent "do the release"
 captain do run test
+# Explicit synchronous opt-in; the captain defaults read-only work to a background crew:
 captain quiet --task "Review the current changes" --diff worktree
 captain quiet --task "Correct the setup instructions" --write README.md
 ```
@@ -417,7 +418,11 @@ usage freeze happen before any targeted native deletion.
 
 `captain crew --background --agent codex|pi --task TEXT [NAME] [--model ...]` runs
 the same read-only headless turn as `quiet`, without blocking the captain: a crew
-with a name, assignment and report, but no pane. Its report or failure arrives
+with a name, assignment and report, but no pane. The captain defaults all delegated
+read-only work (research, exploration, review, code questions), even one bounded turn, to it;
+synchronous `quiet` or a visible read-only crew only when you ask, and writable work
+stays foreground. A requested provider that cannot run it (claude, grok) is never silently
+switched. Its report or failure arrives
 through `wait` like any crew's, and a pi captain watches it automatically. pi takes a
 steered message in only once its current turn ends, so a delivery can reach its history
 late; the watch warns after 30 seconds and keeps checking history until it expires,

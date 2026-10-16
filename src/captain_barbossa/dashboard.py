@@ -205,6 +205,14 @@ def _header(current, crew_count):
     return f"session {current.meta.get('id', '-')}  crew {crew_count}  {time.strftime('%H:%M:%S')}"
 
 
+def _background_status(crew):
+    """A paneless crew has no Herdr status and its record only says it started."""
+    try:
+        return crew.current_state().state
+    except Exception:
+        return "-"
+
+
 def _roster(current, agents):
     """(current rows, dismissed crew's (tokens, cost), current crew count)."""
     live = _crew_status(agents)
@@ -218,7 +226,10 @@ def _roster(current, agents):
         if crew.is_dismissed:
             retired.append(_retired(crew.events))
             continue
-        status = live.get(crew.record.get("agent")) or crew.record.get("status") or "-"
+        if crew.is_background:
+            status = _background_status(crew)
+        else:
+            status = live.get(crew.record.get("agent")) or crew.record.get("status") or "-"
         rows.append(_safe_row(crew, name, status))
     retired.extend(_orphaned(current.directory / "events", claimed))
     crew_count = len(rows)

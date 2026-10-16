@@ -208,6 +208,51 @@ class InstructionTests(SessionCase):
         ):
             self.assertIn(phrase, codex)
 
+    def test_readonly_work_defaults_to_background_before_quiet_on_every_provider(self):
+        for provider in (None, "codex", "pi", "claude", "grok"):
+            args = (self.directory, "Captain Barbossa") + ((provider,) if provider else ())
+            text = " ".join(instruction_prompts.agent_instructions(*args).split())
+            for phrase in (
+                "Read-only model work - research, exploration, review, triage, a question "
+                "about unread code, even one bounded turn - defaults to a background crew",
+                "Synchronous CAPTAIN quiet or a visible read-only crew only when the user "
+                "explicitly asks; a complete prompt is no reason.",
+                "Read-only model work, even one bounded turn? Background crew; CAPTAIN quiet "
+                "only if asked. One bounded edit you can write whole now? CAPTAIN quiet "
+                "--write. Other writable work? Foreground crew.",
+                "Run, for writable or explicitly foreground crew: CAPTAIN crew --agent "
+                "codex|claude|pi|grok --task 'assignment' --placement pane|tab",
+                "CAPTAIN quiet --task 'instruction'",
+                "CAPTAIN crew --background --agent codex|pi",
+                "writable work stays foreground crew",
+                "Otherwise quiet is for one bounded edit with --write",
+                "CAPTAIN do resolve --intent 'verbatim user request'",
+                "No model needed? CAPTAIN do.",
+                "Background is codex or pi only: if the user names another provider, say so "
+                "and ask; never switch it",
+            ):
+                self.assertIn(phrase, text, provider)
+            for stale in (
+                "short inline answers CAPTAIN quiet",
+                "you can write the whole instruction now and one answer ends it",
+                "you will learn the next instruction from what it does",
+                "goes to CAPTAIN quiet, whatever",
+                "a drafted commit message",
+            ):
+                self.assertNotIn(stale, text, provider)
+            self.assertNotIn("\nRun:\n", text)
+        crew = " ".join(
+            instruction_prompts.agent_instructions(self.directory, "crew member Gibbs").split()
+        )
+        for phrase in (
+            "Recruit crew",
+            "defaults to a background crew",
+            "CAPTAIN crew --background",
+            "CAPTAIN quiet",
+            "Foreground crew.",
+        ):
+            self.assertNotIn(phrase, crew)
+
     def test_instructions_give_crew_a_report_and_the_captain_a_completion_signal(self):
         crew = " ".join(
             instruction_prompts.agent_instructions(self.directory, "crew member Gibbs").split()

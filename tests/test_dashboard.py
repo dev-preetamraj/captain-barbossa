@@ -155,6 +155,36 @@ class DashboardRenderTests(DashboardCase):
         output = self.render(herdr=boom)
         self.assertIn("working", self.line(output, "Jack"))
 
+    def test_background_status_is_the_authoritative_crew_state_not_started(self):
+        """A paneless crew's record only says `started`; its assignment says the rest."""
+        cases = {
+            "done": {"state": "done", "report": "ok"},
+            "failed": {"state": "done", "outcome": "cancelled", "report": "x"},
+            "working": {"state": "working"},
+        }
+        for expected, fields in cases.items():
+            with self.subTest(expected=expected):
+                self.meta["crew"]["elizabeth"] = {
+                    "id": "elizabeth",
+                    "name": "Elizabeth",
+                    "provider": "codex",
+                    "status": "started",
+                    "execution": "background",
+                    "incarnation_id": "i1",
+                }
+                store.write_json(self.directory / "session.json", self.meta)
+                store.write_json(
+                    self.directory / "protocol.json",
+                    {
+                        "active": {"elizabeth": "a1"},
+                        "assignments": {"a1": {"incarnation_id": "i1", **fields}},
+                    },
+                )
+                with patch("captain_barbossa.background.alive", return_value=True):
+                    row = self.line(self.render(), "Elizabeth")
+                self.assertIn(expected, row.split())
+                self.assertNotIn("started", row)
+
     def test_bad_crew_degrades_to_dashes_instead_of_crashing(self):
         def explode(events):
             raise RuntimeError("boom")

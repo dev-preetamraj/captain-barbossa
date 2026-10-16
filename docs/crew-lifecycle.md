@@ -72,6 +72,11 @@ no broad deletion; retained non-complete history journals block pruning.
 ## Background crew
 
 `crew --background` recruits a crew with no pane for one read-only headless turn.
+Generated captain instructions make it the default for all delegated read-only work
+(research, exploration, review, code questions), even one bounded turn. Synchronous `quiet`
+or a visible read-only crew only on explicit user request; `quiet --write` stays for one
+bounded edit and writable work stays foreground. An unsupported requested provider is
+asked about, never switched. No runtime auto-conversion: explicit `quiet` is unchanged.
 It has the same name, incarnation, assignment, read/search grants and acknowledged
 deliveries as any crew; only execution differs. Agent and model resolve as above,
 with placement skipped; Herdr is never called to launch it. It shares the captain checkout;
