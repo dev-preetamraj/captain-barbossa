@@ -31,10 +31,11 @@ const { default: extension } = await import(pathToFileURL(path));
 const calls = [], messages = [], notices = [];
 const history = [];
 let recordMessages = true;
-let tool, shutdown, start;
+let tool, shutdown, start, toolResult;
 const pi = {
   on(event, handler) {
     if (event === "session_start") start = handler;
+    else if (event === "tool_result") toolResult = handler;
     else { assert.equal(event, "session_shutdown"); shutdown = handler; }
   },
   registerTool(value) { tool = value; },
@@ -292,6 +293,30 @@ assert.equal(readdirSync(dirname(path)).some(name => name.startsWith("pi-wait-")
 assert.deepEqual(notices, []);
 """)
 
+    def test_bounced_and_held_notices_are_delivered_and_acknowledged(self):
+        self.run_js(r"""
+await arm();
+calls[0].resolve(result("Mail to Jack bounced (m1): no route", "bounced", "d1"));
+await flush();
+assert.equal(messages.length, 1);
+assert.match(messages[0].message.content, /Captain wait for Jack \(bounced\)/);
+assert.deepEqual(calls.at(-1).args.slice(-2), ["--ack", "d1"]);
+await ack();
+await tick();
+calls.at(-1).resolve(result("Mail to Jack (m2) has waited about 5 min", "held", "d2"));
+await flush();
+assert.equal(messages.length, 2);
+assert.match(messages[1].message.content, /Captain wait for Jack \(held\)/);
+assert.deepEqual(calls.at(-1).args.slice(-2), ["--ack", "d2"]);
+await ack();
+assert.deepEqual(notices, []);
+await tick();
+calls.at(-1).resolve(result("unknown", "bogus", "d3"));
+await flush();
+assert.match(notices.at(-1)[0], /Invalid wait envelope/);
+assert.equal(messages.length, 2);
+""")
+
     def test_unknown_send_is_retained_without_resend_or_ack(self):
         self.run_js(r"""
 recordMessages = false;
@@ -363,7 +388,7 @@ assert.equal(messages.length, 1);
 assert.match(notices.at(-1)[0], /uncertain/);
 """)
 
-    def test_background_crew_watches_arm_themselves_and_survive_reconnect(self):
+    def test_all_crew_watches_arm_themselves_and_survive_reconnect(self):
         self.run_js(r"""
 const { writeFileSync } = await import("node:fs");
 const ctx = { ui: { notify: (...args) => notices.push(args) },
@@ -381,34 +406,221 @@ save({ jack: crew("background"), will: crew(undefined), gibbs: crew("background"
   { jack: assignment("working"), will: assignment("working"), gibbs: assignment("working"),
     cotton: assignment("done", 1, [{}]) });
 start({ type: "session_start", reason: "startup" }, ctx);
-// Only the unresolved, live background crew is watched; nothing was asked of the model.
-assert.equal(calls.length, 1);
+// Both pane and background assignments are watched without model intervention.
+assert.equal(calls.length, 2);
+assert.equal(calls[1].args.at(-4), "will");
 assert.deepEqual(calls[0].args.slice(-5), ["wait", "jack", "--json", "--timeout", "60"]);
 calls[0].resolve(result("found the slow path", "done", "d1", "Jack"));
 await flush();
 assert.match(messages[0].message.content, /found the slow path/);
-assert.deepEqual(calls[1].args.slice(-2), ["--ack", "d1"]);
-calls[1].resolve(result("", "idle", null, "Jack"));
+assert.deepEqual(calls[2].args.slice(-2), ["--ack", "d1"]);
+calls[2].resolve(result("", "idle", null, "Jack"));
 await flush();
 // Acknowledged done ends the watch; the next sweep finds nothing left to arm.
 save({ jack: crew("background") }, { jack: assignment("done", 1, [{}]) });
 await tick(5000);
-assert.equal(calls.length, 2);
+assert.equal(calls.length, 3);
+assert.equal(calls[1].options.signal.aborted, true);
 assert.deepEqual(notices, []);
 // Reconnect: a new extension runtime restores the watch for an unresolved assignment.
 shutdown();
 save({ jack: crew("background") }, { jack: assignment("done", 0, [{}]) });
 extension(pi);
 start({ type: "session_start", reason: "resume" }, ctx);
-assert.equal(calls.length, 3);
-calls[2].resolve({ stdout: "", stderr: "boom", code: 1 });
+assert.equal(calls.length, 4);
+calls[3].resolve({ stdout: "", stderr: "boom", code: 1 });
 await flush();
 assert.match(notices.at(-1)[0], /boom/);
 // A failed auto watch is reported once, not rearmed on every sweep.
 await tick(5000);
-assert.equal(calls.length, 3);
+assert.equal(calls.length, 4);
+assert.equal(messages.filter(x => x.message.customType === "captain-supervision").length, 1);
 shutdown();
 """)
+
+    def test_pane_coverage_reconciles_recruit_answer_expiry_and_reassignment(self):
+        self.run_js(r"""
+const { writeFileSync } = await import("node:fs");
+const ctx = { ui: { notify: (...args) => notices.push(args) },
+  sessionManager: { getBranch: () => history } };
+const save = (id, state = "working") => {
+  writeFileSync(join(dirname(path), "session.json"), JSON.stringify({ crew: {
+    jack: { incarnation_id: "i1", status: "started" } } }));
+  writeFileSync(join(dirname(path), "protocol.json"), JSON.stringify({ active: { jack: id },
+    assignments: { [id]: { incarnation_id: "i1", state, pending: null,
+      ack_seq: 0, notices: [] } } }));
+};
+start({}, ctx);
+assert.equal(calls.length, 0);
+save("a1");
+toolResult(); // Recruiting through any native tool registers coverage immediately.
+assert.equal(calls.length, 1);
+toolResult();
+await arm("Jack");
+assert.equal(calls.length, 1); // No duplicate owner, including manual requests.
+save("a1", "asked");
+calls[0].resolve(result("question", "asked", "question"));
+await flush();
+calls[1].resolve(result("", "timeout", null));
+await flush();
+save("a1"); // Answering does not drop coverage or require an arming tool.
+toolResult();
+await tick();
+assert.equal(calls.length, 3);
+await tick(3600000);
+calls[2].resolve(result("", "timeout", null));
+await flush();
+await tick(5000);
+await tick(5000);
+assert.equal(calls.length, 4); // Expiry renews without a model turn.
+assert.equal(messages.length, 1);
+save("a2");
+toolResult();
+assert.equal(calls[3].options.signal.aborted, true);
+assert.equal(calls.length, 5);
+calls[3].resolve(result("obsolete", "done", "obsolete"));
+await flush();
+assert.equal(messages.length, 1); // Late old-owner result is not delivered or acked.
+shutdown();
+assert.equal(calls[4].options.signal.aborted, true);
+""")
+
+    def test_pane_failure_has_persistent_degraded_status_and_one_model_notice(self):
+        self.run_js(
+            JOBS
+            + r"""
+save({ elizabeth: job("working") });
+const statuses = [];
+start({}, { ...ctx, ui: { ...ctx.ui, setStatus: (...args) => statuses.push(args) } });
+calls[0].reject(new Error("watcher failed"));
+await flush();
+assert.match(statuses.at(-1)[1], /Supervision degraded: elizabeth/);
+assert.equal(messages.length, 1);
+assert.equal(messages[0].message.customType, "captain-supervision");
+await tick(10000);
+toolResult();
+assert.equal(calls.length, 1);
+assert.equal(messages.length, 1);
+await arm("Elizabeth");
+assert.equal(statuses.at(-1)[1], undefined);
+assert.equal(calls.length, 2);
+shutdown();
+"""
+        )
+
+    def test_discovery_failure_is_visible_once_even_without_a_ui(self):
+        self.run_js(r"""
+const { writeFileSync } = await import("node:fs");
+writeFileSync(join(dirname(path), "session.json"), "invalid JSON");
+start({}, { hasUI: false, ui: { notify() {} },
+  sessionManager: { getBranch: () => history } });
+await tick(10000);
+assert.equal(messages.length, 1);
+assert.match(messages[0].message.content, /supervision degraded.*assignment discovery/);
+writeFileSync(join(dirname(path), "session.json"), JSON.stringify({ crew: {} }));
+writeFileSync(join(dirname(path), "protocol.json"), JSON.stringify({}));
+toolResult();
+assert.equal(calls.length, 0);
+shutdown();
+""")
+
+    def test_initial_absent_discovery_state_is_silent_until_recruitment(self):
+        for initial in ("neither", "session.json", "protocol.json"):
+            with self.subTest(initial=initial):
+                self.run_js(
+                    f"const initial = {json.dumps(initial)};\n"
+                    + JOBS
+                    + r"""
+const { unlinkSync } = await import("node:fs");
+for (const file of ["session.json", "protocol.json"]) {
+  if (file === initial) writeFileSync(join(dirname(path), file), "{}");
+  else unlinkSync(join(dirname(path), file));
+}
+start({}, ctx);
+await tick(10000);
+toolResult();
+assert.equal(calls.length, 0);
+assert.deepEqual(messages, []);
+assert.deepEqual(notices, []);
+save({ jack: job("working") });
+toolResult();
+assert.equal(calls.length, 1);
+shutdown();
+"""
+                )
+
+    def test_missing_established_discovery_preserves_watch_and_recovers(self):
+        for missing in ("session.json", "protocol.json"):
+            with self.subTest(missing=missing):
+                self.run_js(
+                    f"const missing = {json.dumps(missing)};\n"
+                    + JOBS
+                    + r"""
+const { unlinkSync } = await import("node:fs");
+save({ jack: job("working") });
+const statuses = [];
+start({}, { ...ctx, ui: { ...ctx.ui, setStatus: (...args) => statuses.push(args) } });
+const file = join(dirname(path), missing);
+const original = readFileSync(file, "utf8");
+unlinkSync(file);
+toolResult();
+await tick(10000);
+assert.equal(calls.length, 1);
+assert.equal(calls[0].options.signal.aborted, false);
+assert.equal(widgets.length, 1); // Keep the last known fleet, not an empty widget.
+assert.equal(messages.length, 1);
+assert.equal(notices.length, 1);
+assert.equal(messages[0].message.details.identity, "discovery");
+assert.match(statuses.at(-1)[1], /assignment discovery/);
+assert.equal(calls.some(call => call.args.includes("--ack")), false);
+writeFileSync(file, original);
+toolResult();
+assert.equal(statuses.at(-1)[1], undefined);
+assert.equal(calls.length, 1); // Recovery retains the existing owner.
+recordMessages = false;
+calls[0].resolve(result("retained notice", "done", missing));
+await flush();
+assert.equal(messages.length, 2);
+assert.equal(calls.length, 1); // No acknowledgement before ingestion.
+history.push({ type: "custom_message", ...messages[1].message });
+await tick(100);
+assert.deepEqual(calls.at(-1).args.slice(-2), ["--ack", missing]);
+await ack();
+// A later outage is a new degradation, not suppressed by the earlier warning.
+unlinkSync(file);
+toolResult();
+assert.equal(messages.filter(x => x.message.customType === "captain-supervision").length, 2);
+writeFileSync(file, original);
+shutdown();
+"""
+                )
+
+    def test_missing_protocol_during_wait_retains_notice_for_recovery(self):
+        self.run_js(
+            JOBS
+            + r"""
+const { unlinkSync } = await import("node:fs");
+save({ jack: job("done", { notices: [{}] }) });
+start({}, ctx);
+const file = join(dirname(path), "protocol.json");
+const original = readFileSync(file, "utf8");
+unlinkSync(file);
+toolResult();
+calls[0].resolve(result("retained", "done", "retained"));
+await flush();
+assert.equal(calls.length, 1);
+assert.equal(messages.length, 1); // Only discovery degradation; no unverified delivery.
+assert.equal(calls.some(call => call.args.includes("--ack")), false);
+writeFileSync(file, original);
+toolResult();
+assert.equal(calls.length, 2); // The interrupted watch rearms automatically.
+calls[1].resolve(result("retained", "done", "retained"));
+await flush();
+assert.equal(messages.length, 2);
+assert.deepEqual(calls.at(-1).args.slice(-2), ["--ack", "retained"]);
+shutdown();
+"""
+        )
 
     def test_background_jobs_widget_lists_live_jobs_and_clears(self):
         # RPC takes plain lines only, so it gets aligned text with fixed marks.
@@ -643,8 +855,9 @@ assert.equal(calls.length, 2);
 assert.deepEqual(calls[1].args.slice(-5), ["wait", "jack", "--json", "--timeout", "60"]);
 calls[1].resolve(result("new report", "done", `new-${stop}`, "Jack", "new"));
 await flush();
-assert.equal(messages.length, 1);
-assert.equal(messages[0].message.details.assignment_id, "new");
+const deliveries = messages.filter(x => x.message.customType === "captain-wait");
+assert.equal(deliveries.length, 1);
+assert.equal(deliveries[0].message.details.assignment_id, "new");
 assert.deepEqual(calls.at(-1).args.slice(-2), ["--ack", `new-${stop}`]);
 calls.at(-1).resolve(result("", "idle", null));
 await flush();
@@ -818,7 +1031,7 @@ class PiCaptainLaunchTests(SessionCase):
     def args(self, *args):
         return cli.parser().parse_args(["--session", self.meta["id"], *args])
 
-    def test_pi_captain_loads_private_extension_and_rearming_guidance(self):
+    def test_pi_captain_loads_private_extension_and_automatic_coverage_guidance(self):
         with (
             patch.object(runtime, "herdr"),
             patch.object(agents, "executable", return_value="/bin/pi"),
@@ -836,8 +1049,8 @@ class PiCaptainLaunchTests(SessionCase):
         self.assertEqual(extension.stat().st_mode & 0o777, 0o600)
         self.assertIn(env["CAPTAIN_SESSION"], extension.read_text())
         text = argv[argv.index("--append-system-prompt") + 1]
-        self.assertIn("Use the captain_wait tool", text)
-        self.assertIn("rearm pane watches after answers", text)
+        self.assertIn("All unresolved assignments are watched automatically", text)
+        self.assertNotIn("rearm pane watches after answers", text)
         self.assertNotIn("Run every\nwait in the background", text)
         self.assertEqual(list(self.project.iterdir()), [])
 

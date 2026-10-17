@@ -29,6 +29,8 @@ MODAL_PROVIDERS = ("codex", *HOOKLESS)
 MODAL_INTERVAL = 30
 # No daemon drains held mail; the wait loop already polls, so it retries the doorbell instead.
 DRAIN_INTERVAL = 30
+# Native startup can await hook trust before Herdr registers the crew.
+REGISTRATION_GRACE = 300
 # A ring that landed needs no retry for the crew's sake; this only exists so a pane that died
 # after the nudge eventually bounces its mail instead of sitting on it forever.
 DRAIN_LANDED_INTERVAL = 600
@@ -489,11 +491,38 @@ def echoing(prior):
     return bool(prior) and prior.get("landed") and time.time() - prior["at"] < ECHO_GRACE
 
 
+def awaiting_registration(crew, message_id, prior, error, assignment=None):
+    """Only an unread initial task may wait for a missing startup registration."""
+    if not isinstance(error, CaptainError) or not (
+        re.search(r"\bagent_not_found\b", str(error))
+        or str(error) == f"{crew.record['agent']} is not registered."
+    ):
+        return False
+    if prior and prior["id"] == message_id and prior["landed"]:
+        return False
+    message = next((m for m in unread(crew) if m["id"] == message_id), None)
+    assignment = assignment if assignment is not None else active_assignment(crew)
+    return bool(
+        message
+        and message["kind"] == "assignment"
+        and message.get("incarnation_id") == crew.record.get("incarnation_id")
+        and assignment
+        and assignment["id"] == message["assignment_id"]
+        and assignment["incarnation_id"] == crew.record.get("incarnation_id")
+        and not assignment.get("turn_started")
+        and 0 <= time.time() - message["queued_at"] < REGISTRATION_GRACE
+        and not any(
+            turn_event(event)
+            for event in native_events(crew.events, assignment.get("offset", 0))[0]
+        )
+    )
+
+
 def ring(crew, message_id):
     """Best-effort doorbell: a held gate or a broken doorbell waits for the next drain.
 
-    Only a confirmed herdr failure means the crew is unreachable and bounces the mail;
-    a missing or misbehaving nudge is the harness, not the crew, so it holds instead.
+    Missing startup registration gets a bounded grace; other confirmed Herdr failures
+    bounce the mail. A broken nudge is the harness, not the crew, so it holds instead.
     Mail is already durable, so no outcome here can lose the message.
     """
     prior = last_ring(crew)
@@ -526,7 +555,10 @@ def ring(crew, message_id):
             pane.nudge(crew, text)
             landed = True
     except HERDR_ERRORS as exc:
-        unreachable = str(exc)
+        if awaiting_registration(crew, message_id, prior, exc):
+            gate = "awaiting registration"
+        else:
+            unreachable = str(exc)
     except Exception:
         pass
     # The one record of a ring, so drain can tell a held doorbell from one the crew already got.
@@ -656,7 +688,13 @@ def drain(crew):
             interval = UNREADABLE_EXPIRY
         else:
             interval = DRAIN_INTERVAL
-        if time.time() - record["at"] < interval:
+        registration_expired = (
+            messages
+            and record["id"] == message_id
+            and record.get("gate") == "awaiting registration"
+            and time.time() - messages[0]["queued_at"] >= REGISTRATION_GRACE
+        )
+        if not registration_expired and time.time() - record["at"] < interval:
             return
     ring(crew, message_id)
 
@@ -765,6 +803,20 @@ def result(crew, assignment, status, summary="", delivery_id=None):
         "assignment_id": assignment["id"] if assignment else None,
         "summary": summary,
     }
+
+
+def modal_summary(crew, assignment):
+    """Guard both modal reads; an unreadable pane is otherwise conservatively a modal."""
+    try:
+        if crew.pane.choice_modal():
+            return "Native permission prompt (no policy verdict):\n" + "\n".join(crew.pane.lines())
+    except HERDR_ERRORS as exc:
+        messages = unread(crew)
+        if not messages or not awaiting_registration(
+            crew, messages[0]["id"], last_ring(crew), exc, assignment
+        ):
+            raise
+    return None
 
 
 def poll(crew, ack=None, modal=True):
@@ -892,11 +944,8 @@ def poll(crew, ack=None, modal=True):
                         "error",
                         "Crew startup failed; inspect before explicit done/handoff.",
                     )
-                elif read_pane and crew.pane.choice_modal():
+                elif read_pane and (summary := modal_summary(crew, assignment)) is not None:
                     status = "awaiting_approval"
-                    summary = "Native permission prompt (no policy verdict):\n" + "\n".join(
-                        crew.pane.lines()
-                    )
                 elif not paneless and stalled(crew, assignment):
                     status, summary = "error", STALLED_SUMMARY
                 else:

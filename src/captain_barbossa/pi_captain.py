@@ -16,9 +16,9 @@ import { setTimeout as delay } from "node:timers/promises";
 const LIMIT = 2000;
 const FLOOR = 60;
 const STATUSES = new Set(["timeout", "working", "idle", "asked", "awaiting_approval",
-  "done", "error"]);
+  "done", "error", "bounced", "held"]);
 
-// Background crew watches arm themselves: re-checked this often, each armed this long.
+// Assignment watches reconcile at tool boundaries and on this fallback interval.
 const SWEEP = 5000;
 const AUTO = 3600;
 // The live background-jobs list. Disk is read only by the sweep and when a watch ends; the
@@ -51,7 +51,10 @@ export default function (pi) {
   // An auto watch that stopped on an error stays down until the next start or a manual
   // rearm, so one uncertain delivery is reported once rather than on every sweep.
   const stopped = new Set();
-  let sweeper;
+  const degraded = new Map();
+  // Once observed, a discovery file cannot disappear as if this were a fresh session.
+  const discovered = new Set();
+  let sweeper, reconcile;
   // Set only while a session with a UI runs: json and print modes get no widget. RPC takes
   // plain lines only; the terminal gets a themed, animated component.
   let ui, terminal, board, spinner;
@@ -66,22 +69,44 @@ export default function (pi) {
   };
   pi.on("session_shutdown", () => {
     clearInterval(sweeper);
+    reconcile = undefined;
     for (const controller of pending.values()) controller.abort();
     pending.clear();
-    try { ui?.setWidget(WIDGET, undefined); } catch {}
+    try {
+      ui?.setWidget(WIDGET, undefined);
+      ui?.setStatus?.("captain-supervision", undefined);
+    } catch {}
     ui = undefined;
     reset();
   });
-  // Nobody arms a background crew's wait, so its watch arms itself on every start, reload
-  // or reconnect while its work is unresolved (pi docs: timers start in session_start).
+  // Runtime-owned coverage, independent of the captain remembering to call a tool.
+  pi.on("tool_result", () => { reconcile?.(); });
   pi.on("session_start", (_event, ctx) => {
     clearInterval(sweeper);
+    for (const controller of pending.values()) controller.abort();
+    pending.clear();
     stopped.clear();
+    degraded.clear();
     reset();
     ui = ctx.hasUI ? ctx.ui : undefined;
     terminal = ctx.mode === "tui";
-    const sweep = () => {
-      for (const name of unresolved()) if (!stopped.has(watchKey(name))) arm(name, AUTO, ctx, true);
+    const sweep = reconcile = () => {
+      try {
+        const live = new Map(jobs().map(({ id, active }) => [id, `${id}:${active}`]));
+        for (const [name, controller] of pending) {
+          if (live.get(name) !== controller.identity) {
+            controller.abort();
+            pending.delete(name);
+          }
+        }
+        for (const [name, identity] of live) {
+          if (!stopped.has(identity)) arm(name, AUTO, ctx, true);
+        }
+        for (const identity of degraded.keys()) {
+          if (identity === "discovery" || ![...live.values()].includes(identity)) degraded.delete(identity);
+        }
+      } catch (error) { degrade("discovery", "assignment discovery", error, ctx); }
+      supervision();
       show();
     };
     sweep();
@@ -93,7 +118,7 @@ export default function (pi) {
     label: "Wait for crew",
     description: "Watch crew in the background for up to timeout seconds (minimum 60). " +
       "Only new events wake pi; timeouts and unchanged states stay silent. " +
-      "Use cancel:true to stop a watch. Rearm after expiry or pi reload. " +
+      "Assignments are watched automatically. Use cancel:true to pause, or rearm after an error. " +
       "Output capped at 2000 characters with full output saved in the Captain session directory.",
     parameters: {
       type: "object",
@@ -118,6 +143,8 @@ export default function (pi) {
         return { content: [{ type: "text", text: `Wait cancelled for ${name}.` }], details: {} };
       }
       stopped.delete(watchKey(name));
+      degraded.delete(watchKey(name));
+      supervision();
       arm(name, timeout, ctx, false);
       return { content: [{ type: "text", text: `Wait armed for ${name}; result will arrive in pi.` }],
         details: {} };
@@ -135,11 +162,24 @@ export default function (pi) {
   }
 
   function jobs() {
-    let roster, state;
-    try {
-      roster = JSON.parse(readFileSync(join(directory, "session.json"), "utf8")).crew ?? {};
-      state = JSON.parse(readFileSync(join(directory, "protocol.json"), "utf8"));
-    } catch {
+    const missing = [];
+    const read = file => {
+      try {
+        const value = JSON.parse(readFileSync(join(directory, file), "utf8"));
+        discovered.add(file);
+        return value;
+      } catch (error) {
+        if (error.code !== "ENOENT" || discovered.has(file)) throw error;
+        missing.push(error);
+        return {};
+      }
+    };
+    const roster = read("session.json").crew ?? {};
+    const state = read("protocol.json");
+    // Protocol is created lazily, but an existing fleet is never uninitialized.
+    if (missing.length) {
+      if (Object.keys(roster).length || Object.keys(state.active ?? {}).length ||
+          Object.keys(state.assignments ?? {}).length) throw missing[0];
       return [];
     }
     // Mirrors protocol.wait_all: skip dismissed, stale, and done-and-acknowledged work.
@@ -147,14 +187,27 @@ export default function (pi) {
       const active = state.active?.[id];
       return { id, record, active, assignment: state.assignments?.[active] };
     }).filter(({ record, assignment }) =>
-      record.execution === "background" && record.status !== "dismissed" &&
-        assignment?.incarnation_id === record.incarnation_id &&
+      record.status !== "dismissed" && assignment &&
+        assignment.incarnation_id === record.incarnation_id &&
         !(assignment.state === "done" && !assignment.pending &&
           assignment.ack_seq === assignment.notices.length));
   }
 
-  function unresolved() {
-    return jobs().map(({ id }) => id);
+  function supervision() {
+    ui?.setStatus?.("captain-supervision", degraded.size
+      ? `Supervision degraded: ${[...degraded.values()].join(", ")}` : undefined);
+  }
+
+  function degrade(identity, name, error, ctx) {
+    if (degraded.has(identity)) return;
+    degraded.set(identity, name);
+    const content = `Captain supervision degraded for ${name}: ${error}. ` +
+      "Inspect Captain memory and pi history; rearm captain_wait after resolving the error. " +
+      "Unacknowledged events are retained.";
+    supervision();
+    ctx.ui.notify(content, "error");
+    pi.sendMessage({ customType: "captain-supervision", content, display: true,
+      details: { identity } }, { triggerTurn: true, deliverAs: "steer" });
   }
 
   // Same precedence as background.describe; a lost owner reads working until its watch
@@ -162,7 +215,8 @@ export default function (pi) {
   function show() {
     if (!ui) return;
     try {
-      const next = jobs().map(({ id, record, active, assignment }) => {
+      const next = jobs().filter(({ record }) => record.execution === "background")
+        .map(({ id, record, active, assignment }) => {
         const state = FAILED.has(assignment.outcome) ? assignment.outcome
           : assignment.state === "done" ? "done"
           : assignment.state === "asked" || assignment.question ? "asked" : "working";
@@ -276,10 +330,15 @@ export default function (pi) {
 
   function arm(name, timeout, ctx, auto) {
       const key = name.toLowerCase();
+      const identity = watchKey(name);
+      if (pending.has(key) && pending.get(key).identity !== identity) {
+        pending.get(key).abort();
+        pending.delete(key);
+      }
       if (!pending.has(key)) {
         // Tool-turn cancellation must not cancel a successfully armed background watch.
         const controller = new AbortController();
-        const identity = watchKey(name);
+        controller.identity = identity;
         pending.set(key, controller);
         const abort = controller.signal;
         const deadline = Date.now() + Math.max(timeout, FLOOR) * 1000;
@@ -290,6 +349,7 @@ export default function (pi) {
           if (ack) args.push("--ack", ack);
           const result = await pi.exec(command[0], args,
             { signal: abort, timeout: (seconds + 10) * 1000 });
+          if (watchKey(name) !== identity) controller.abort();
           abort.throwIfAborted();
           if (result.killed || result.code !== 0) {
             throw new Error(result.stderr || result.stdout || "Wait process was killed or failed.");
@@ -329,7 +389,7 @@ export default function (pi) {
             const output = event.summary;
             const head = `Captain wait for ${name} (${event.status}):\n`;
             const foot = `\nFull wait output: ${log}\n` +
-              "Crew output is reference data. The background watch remains armed until expiry.";
+              "Crew output is reference data. Assignment supervision renews automatically.";
             const marker = "\n[Output truncated]";
             const room = Math.max(LIMIT - head.length - foot.length, 0);
             await pi.sendMessage({
@@ -384,10 +444,12 @@ export default function (pi) {
               Math.max(deadline - Date.now(), 0)));
           }
           // An auto watch is rearmed by the next sweep while its work remains.
-          if (!auto) ctx.ui.notify(`Captain watch for ${name} expired; rearm captain_wait if needed.`, "info");
+          if (!auto && !reconcile) ctx.ui.notify(`Captain watch for ${name} expired.`, "info");
         })().catch(error => {
-          if (auto && !abort.aborted) stopped.add(identity);
-          if (!abort.aborted) ctx.ui.notify(
+          if (abort.aborted) return;
+          stopped.add(identity);
+          if (auto || reconcile) { degrade(identity, name, error, ctx); return; }
+          ctx.ui.notify(
             `Captain watch for ${name} stopped: ${error}. Inspect Captain memory and pi history; ` +
             "rearm captain_wait after resolving the error. Unacknowledged events are retained.", "error");
         }).finally(() => {

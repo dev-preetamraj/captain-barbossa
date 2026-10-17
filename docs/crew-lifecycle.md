@@ -140,13 +140,25 @@ crew they still need Herdr and fail clearly without it. `tell`, `answer`,
 `assign --handoff`, `focus` and `model` are refused as `[background-unsupported]`.
 `dismiss` needs the outcome acknowledged, like any crew, and closes no pane.
 
-A pi captain arms a watch for every unresolved background crew when its session
-starts, reloads or is reopened, rechecks every 5 seconds, and stops once the
-outcome is acknowledged. A watch cancelled with `captain_wait` `cancel:true`, or one
-that stopped on an error, is not rearmed by that sweep until it is armed again by
-hand or the session starts again. Delivery is the existing bridge: written to the session
-journal before sending and acknowledged only after it appears in pi's history.
-Other captains arm `wait` as they do for any crew.
+A pi captain owns one watch per unresolved assignment, for pane and background
+crew alike. It reconciles on startup/reload, after tool results (including recruit
+and answer), and every 5 seconds for changes outside pi. Expiry renews silently;
+acknowledged completion or dismissal removes coverage. A replacement assignment
+cancels its predecessor's watch; late results cannot deliver or acknowledge it.
+No model arming or rearming step is needed.
+
+`captain_wait` with `cancel:true` pauses that assignment until manual rearm or
+session restart. A watcher failure similarly pauses coverage, emits one degraded
+supervision message, and leaves a persistent UI status until retry or retirement.
+Discovery failures also report once instead of silently hiding missing coverage.
+Delivery still uses the session journal and acknowledges only after pi history
+proves ingestion; uncertain deliveries are never automatically resent.
+
+Other captain providers still require native background `wait`: Claude hooks run
+only at native lifecycle boundaries, Codex notify is an outbound event hook, and
+Grok has no installed delivery bridge. None currently owns a continuous automatic
+watch or can restore one on reload. Their native crew hooks and retained protocol
+notices continue to feed `wait`; automatic captain-side coverage remains pi-only.
 
 ## Assignments and questions
 
@@ -261,11 +273,12 @@ each delivery short. Read the file when the status and report leave you
 unsure. Claude Code and Codex crew, which do have hooks, still print the tail
 inline on the rare legacy wait that has no event.
 
-The pi captain's `captain_wait` tool instead arms a background JSON watch
-(minimum 60 seconds) and returns immediately. It records delivery receipts and
+The pi captain's automatic bridge uses background JSON watches. Its optional
+`captain_wait` tool retries or pauses coverage (minimum watch length 60 seconds)
+and returns immediately. It records delivery receipts and
 checks pi session history before acknowledging ingestion; uncertain ingestion
 stops the watch without resend or acknowledgement. Idle/working updates do not
-trigger a new turn, and the watch remains armed until expiry or explicit cancel.
+trigger a new turn; unresolved assignments renew automatically after expiry.
 This is a local bridge, not a guarantee of exactly-once provider execution.
 
 ## Sending a follow-up

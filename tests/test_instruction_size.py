@@ -160,9 +160,9 @@ class InstructionSizeTests(unittest.TestCase):
     def test_a_quiet_wait_result_is_rearmed_without_spending_a_captain_turn(self):
         """Quiet results must not need a model turn to rearm."""
         text = instruction_prompts.agent_instructions(self.directory, "Captain Barbossa", "pi")
-        block = text.split("Use the captain_wait tool")[1].split(" For more detail")[0]
-        self.assertIn("Quiet results rearm without a model turn", block)
-        self.assertIn("Acknowledge delivery IDs only after receipt", block)
+        block = text.split("All unresolved assignments")[1].split(" For more detail")[0]
+        self.assertIn("quiet renewals cost no model turn", block)
+        self.assertIn("The bridge acknowledges only received deliveries", block)
         # The old rule made every delivery, timeout included, a full working turn.
         self.assertNotIn("Rearm after a timeout if work remains", block)
         # Token-budgeted: rewording the rule must not buy itself more lines.

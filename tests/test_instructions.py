@@ -174,14 +174,13 @@ class InstructionTests(SessionCase):
         ):
             self.assertIn(phrase, instructions)
 
-    def test_pi_instructions_separate_pane_watches_from_automatic_background_watches(self):
+    def test_pi_instructions_make_all_assignment_watches_automatic(self):
         pi = " ".join(
             instruction_prompts.agent_instructions(self.directory, "Captain Barbossa", "pi").split()
         )
         for phrase in (
-            "Use the captain_wait tool with a pane crew's display name after recruiting",
-            "Effective background crew, including profile-selected execution=background, "
-            "are watched automatically; never arm another watcher for them",
+            "All unresolved assignments are watched automatically, including after answers/reload",
+            "Use captain_wait only to pause coverage or retry a reported supervision error",
             "crew, reported by its automatic watch; no tell, answer, focus or model",
             "For an explicit nonblocking check or acknowledgement only",
             "CAPTAIN wait 'NAME' --json --timeout 0 [--ack DELIVERY_ID]",
