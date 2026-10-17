@@ -2,6 +2,7 @@ import contextlib
 import io
 import json
 import shlex
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -28,6 +29,93 @@ class ApprovalTests(unittest.TestCase):
             with self.subTest(value=value):
                 self.assertEqual(run(value).code, code)
 
+    def test_special_command_redirections_require_owned_edit_grants(self):
+        protocol_call = f"{shlex.quote(sys.executable)} -m captain_barbossa inbox Will"
+        for command in ("cd .", protocol_call, "git status", "mystery"):
+            with self.subTest(command=command):
+                self.assertEqual(
+                    bash(command + " > src/mine.py", actions=()).code, "action-not-granted"
+                )
+                self.assertEqual(bash(command + " > other").code, "outside-grant")
+        self.assertEqual(bash("cd . > src/mine.py").code, "granted")
+        self.assertEqual(bash(protocol_call + " > /dev/null", actions=()).code, "granted")
+
+    def test_shell_cd_failure_and_pipeline_never_authorize_parent_writes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            (root / "owned").mkdir()
+            for command in (
+                "cd owned | cat; echo marker > victim",
+                "cd owned/missing || echo marker > victim",
+                "cd owned/missing; echo marker > victim",
+                "false && cd owned; echo marker > victim",
+            ):
+                with self.subTest(command=command):
+                    request = Request(
+                        "Bash", str(root), str(root), ("owned",), ("edit",), command=command
+                    )
+                    self.assertNotEqual(decide(request).verdict, Verdict.ALLOW_ONCE)
+                    subprocess.run(
+                        ["/bin/sh", "-c", command],
+                        cwd=root,
+                        check=True,
+                        capture_output=True,
+                        timeout=10,
+                    )
+                    self.assertEqual((root / "victim").read_text(), "marker\n")
+            command = "cd ./owned && echo safe > safe"
+            self.assertEqual(
+                decide(
+                    Request("Bash", str(root), str(root), ("owned",), ("edit",), command=command)
+                ).code,
+                "granted",
+            )
+
+    def test_bare_cd_is_searched_under_cdpath_so_it_never_authorizes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            (root / "owned").mkdir()
+            (root / "decoy" / "owned").mkdir(parents=True)
+            env = {"PATH": "/usr/bin:/bin", "CDPATH": str(root / "decoy")}
+
+            def run(command):
+                subprocess.run(
+                    ["/bin/bash", "-c", command],
+                    cwd=root,
+                    env=env,
+                    check=True,
+                    capture_output=True,
+                    timeout=10,
+                )
+
+            def request(command):
+                return Request("Bash", str(root), str(root), ("owned",), ("edit",), command=command)
+
+            bare = "cd owned && echo marker > victim"
+            self.assertEqual(decide(request(bare)).code, "unsupported-syntax")
+            run(bare)
+            self.assertTrue((root / "decoy" / "owned" / "victim").exists())
+            self.assertFalse((root / "owned" / "victim").exists())
+            explicit = "cd ./owned && echo marker > victim"
+            self.assertEqual(decide(request(explicit)).code, "granted")
+            run(explicit)
+            self.assertTrue((root / "owned" / "victim").exists())
+            self.assertEqual(decide(request(f"cd {root}/owned && echo x > y")).code, "granted")
+
+    def test_git_executable_read_options_are_not_read_grants(self):
+        for command in (
+            "git grep --open-files-in-pager=helper needle",
+            "git grep --open-files=helper needle",
+            "git grep -Ohelper needle",
+            "git grep -nOhelper needle",
+            "git log --textconv",
+            "git diff --ext-diff",
+            "git show --ext",
+        ):
+            with self.subTest(command=command):
+                self.assertNotEqual(bash(command, actions=()).verdict, Verdict.ALLOW_ONCE)
+        self.assertEqual(bash("git grep needle -- --open-files-in-pager").code, "granted")
+
     def test_every_code_has_one_closed_verdict(self):
         self.assertEqual({verdict for verdict, _ in REASONS.values()}, set(Verdict))
         self.assertEqual(Decision("granted").verdict, Verdict.ALLOW_ONCE)
@@ -50,7 +138,8 @@ class ApprovalTests(unittest.TestCase):
                 ("ls > /dev/null 2>&1", "granted"),
                 ("cp src/other.py docs/notes/", "granted"),
                 ("git add src/mine.py && git commit -m 'fix: x; y' -- src/mine.py", "granted"),
-                ("cd src && cat mine.py", "granted"),
+                ("cd ./src && cat mine.py", "granted"),
+                ("cd src && cat mine.py", "unsupported-syntax"),
                 ("find src -name x.py", "granted"),
             ],
             bash,
@@ -452,6 +541,8 @@ class ApprovalHookTests(SessionCase):
     def hook(self, tool="Bash", inputs=None, **extra):
         event = {
             "hook_event_name": "PermissionRequest",
+            "session_id": "native-session",
+            "tool_use_id": "toolu_1",
             "cwd": str(self.project),
             "tool_name": tool,
             "tool_input": inputs or {"command": "git status"},
@@ -628,16 +719,13 @@ class ApprovalHookTests(SessionCase):
         self.assertEqual([event["hook_event_name"] for event in recorded], ["PreToolUse"])
         self.assertNotIn("approval", recorded[0])
 
-    def test_a_pretooluse_ask_is_not_decided_or_logged_again_by_permissionrequest(self):
+    def test_a_pretooluse_ask_is_revalidated_without_duplicate_notice(self):
         inputs = {"command": "rm -rf beta.txt"}
         self.pretool(inputs)
-        with patch.object(events, "decide", side_effect=AssertionError("decided twice")):
-            with contextlib.redirect_stdout(io.StringIO()) as output:
-                events.append_event([str(self.crew.events), json.dumps({
-                    "hook_event_name": "PermissionRequest", "cwd": str(self.project),
-                    "tool_name": "Bash", "tool_input": inputs,
-                })])  # fmt: skip
-        self.assertEqual(output.getvalue(), "")
+        with patch.object(events, "decide", wraps=decide) as fresh:
+            output, _ = self.hook(inputs=inputs)
+        fresh.assert_called_once()
+        self.assertEqual(output, {})
         logged = [json.loads(line) for line in self.crew.events.read_text().splitlines()]
         self.assertEqual(
             [e["hook_event_name"] for e in logged], ["PreToolUse", "PermissionRequest"]
@@ -650,13 +738,36 @@ class ApprovalHookTests(SessionCase):
         self.assertIn("User approval required", output["systemMessage"])
         self.assertNotIn("pretool", event["approval"])
 
-    def test_a_reprompted_pretooluse_allow_is_answered_without_a_second_record(self):
+    def test_a_reprompted_allow_is_revalidated_logged_and_consumed(self):
         inputs = {"file_path": "src/a.py"}
         self.pretool(inputs, "Edit")
-        with patch.object(events, "decide", side_effect=AssertionError("decided twice")):
-            output, _ = self.hook("Edit", inputs)
+        with patch.object(events, "decide", wraps=decide) as fresh:
+            output, event = self.hook("Edit", inputs)
+        fresh.assert_called_once()
         self.assertEqual(output["hookSpecificOutput"]["decision"], {"behavior": "allow"})
-        self.assertEqual(len(self.crew.events.read_text().splitlines()), 1)
+        self.assertEqual(event["approval"]["pretool"], "toolu_1")
+        self.assertEqual(len(self.crew.events.read_text().splitlines()), 2)
+        _, event = self.hook("Edit", inputs)
+        self.assertNotIn("pretool", event["approval"])
+
+    def test_cached_allow_cannot_survive_revocation_or_grant_changes(self):
+        inputs = {"file_path": "src/a.py"}
+        for change in ("revoked", "done", "actions", "paths"):
+            with self.subTest(change=change):
+                self.pretool(inputs, "Edit")
+                state_path = self.current.directory / "protocol.json"
+                original = store.read_json(state_path)
+                state = store.read_json(state_path)
+                assignment = state["assignments"][state["active"]["jack"]]
+                if change == "done":
+                    assignment["state"] = "done"
+                elif change in ("actions", "paths"):
+                    assignment[change] = []
+                store.write_json(state_path, state)
+                with patch.object(events.lifetime, "revoked", return_value=change == "revoked"):
+                    output, event = self.hook("Edit", inputs)
+                self.assertNotEqual(event["approval"]["verdict"], "allow-once")
+                store.write_json(state_path, original)
 
 
 if __name__ == "__main__":

@@ -94,6 +94,22 @@ def state_storage(project):
     return rooted_storage(state_root(), project)
 
 
+def _check_existing_dir(path):
+    # Read-only provenance check; a missing directory is fine and nothing is repaired.
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise CaptainError(f"Cannot inspect memory directory {path}: {exc}") from exc
+    if not stat.S_ISDIR(info.st_mode):
+        raise CaptainError(f"Memory path is not a directory: {path}")
+    if info.st_uid != os.getuid():
+        raise CaptainError(f"Memory directory belongs to another user: {path}")
+    if info.st_mode & 0o022:
+        raise CaptainError(f"Memory directory is writable by others: {path}")
+
+
 def read_storage(root, project):
     """Resolve an existing storage namespace without mkdir, chmod, locks or migration."""
     project = project.resolve()
@@ -103,6 +119,7 @@ def read_storage(root, project):
     for item in (root, path):
         if item.is_symlink():
             raise CaptainError(f"Memory directory must not be a symlink: {item}")
+        _check_existing_dir(item)
     return root.resolve() / path.name
 
 

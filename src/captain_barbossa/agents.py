@@ -109,15 +109,26 @@ def close_session_panes(session_id, project):
         if board:
             closing.append((board, None))
         for pane_id, record in closing:
+            stopped = False
             try:
                 if record is not None and record.get("lifetime_id"):
                     crew = Crew(record["id"], record, current._replace(meta=meta))
                     record["cleanup"] = execution.retire(crew)
+                    stopped = record["cleanup"]["lifetime"]["ok"]
                 else:
                     runtime.herdr("pane", "close", pane_id)
+                    stopped = True
             except HERDR_ERRORS:
                 pass
             if record is not None:
+                crew = Crew(record["id"], record, current._replace(meta=meta))
+                for message in protocol.unread(crew):
+                    protocol.bounce(crew, message["id"], "Captain exited before mail was read.")
+                if stopped:
+                    with protocol.checkpoint(current.directory) as state:
+                        assignment = state["assignments"].get(state["active"].get(crew.crew_id))
+                        if assignment and assignment["state"] != "done":
+                            assignment.update(state="done", report="Crew stopped at captain exit.")
                 # Recorded as the pane goes: a resumed --session must not find ghost crew
                 # holding slots no pane backs any more.
                 record["status"] = "dismissed"

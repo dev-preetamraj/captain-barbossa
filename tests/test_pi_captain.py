@@ -339,6 +339,33 @@ assert.equal(JSON.parse(readFileSync(join(dirname(path), log), "utf8")).delivery
 assert.match(notices.at(-1)[0], /not resent or acknowledged/);
 """)
 
+    def test_an_ack_returning_the_next_error_delivery_is_delivered_and_acknowledged(self):
+        self.run_js(r"""
+await arm("Jack", 60);
+calls[0].resolve(result("first", "done", "d1"));
+await flush();
+assert.deepEqual(calls.at(-1).args.slice(-2), ["--ack", "d1"]);
+calls.at(-1).resolve(result("queued question", "error", "d2"));
+await flush();
+assert.equal(messages.length, 2);
+assert.match(messages[1].message.content, /Captain wait for Jack \(error\):\nqueued question/);
+assert.deepEqual(calls.at(-1).args.slice(-2), ["--ack", "d2"]);
+await ack();
+assert.equal(notices.filter(([, level]) => level === "error").length, 0);
+""")
+
+    def test_an_error_ack_without_a_delivery_still_stops_the_watch(self):
+        self.run_js(r"""
+await arm("Jack", 60);
+calls[0].resolve(result("first", "done", "d1"));
+await flush();
+calls.at(-1).resolve(result("ack broke", "error", null));
+await flush();
+assert.equal(messages.length, 1);
+assert.match(notices.at(-1)[0], /Acknowledgement failed: ack broke/);
+assert.equal(notices.at(-1)[1], "error");
+""")
+
     def test_send_throw_and_ack_failure_do_not_cause_redelivery(self):
         self.run_js(r"""
 pi.sendMessage = () => { throw new Error("notification failed"); };

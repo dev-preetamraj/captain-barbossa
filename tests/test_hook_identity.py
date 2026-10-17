@@ -65,6 +65,24 @@ class HookIdentityTests(SessionCase):
         with self.assertRaisesRegex(CaptainError, "Stale crew incarnation"):
             events.event_incarnation(self.path("jack-1-aaa"))
 
+    def test_cached_approval_requires_complete_matching_call_context(self):
+        event = {
+            "session_id": "native",
+            "tool_use_id": "call",
+            "cwd": "/project",
+            "incarnation_id": "aaa",
+            "tool_name": "Edit",
+            "tool_input": {"file_path": "relative"},
+        }
+        prior = {**event, "approval": {"source": "PreToolUse", "code": "granted"}}
+        self.assertIs(events.pretool_decision([prior], event), prior)
+        for key in event:
+            for value in (None, "different"):
+                with self.subTest(key=key, value=value):
+                    self.assertIsNone(events.pretool_decision([prior], {**event, key: value}))
+        consumed = {"approval": {"pretool": "call"}}
+        self.assertIsNone(events.pretool_decision([prior, consumed], event))
+
     def test_unknown_crew_path_is_refused(self):
         with self.assertRaisesRegex(CaptainError, "Unknown crew event path"):
             events.event_incarnation(self.path("zed-ccc"))

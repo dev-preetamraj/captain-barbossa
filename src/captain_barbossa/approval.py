@@ -256,20 +256,35 @@ def _decide_text(request, text):
     segments = _segments(tokens)
     if segments is None:
         return Decision("unsupported-syntax")
+    # Only an AND chain guarantees that a later command sees a successful cd.
+    if any(words[:1] == ["cd"] for words, _ in segments) and any(
+        token in SEPARATORS - {"&&"} for token in tokens
+    ):
+        return Decision("unsupported-syntax")
     uses, cwd = [], request.cwd
     for words, redirects in segments:
+        # Redirections happen before the command, including cd and protocol calls.
+        writes = tuple(target for op, target in redirects if op in WRITE_REDIRECTS | {">&"})
+        if writes:
+            uses.append((cwd, _Use(action="read", writes=writes)))
         if words[:1] == ["cd"]:
-            if len(words) != 2 or words[1] == "-":
+            if (
+                len(words) != 2
+                or words[1].startswith(("-", "~"))
+                or set(words[1]) & (GLOB | {"{", "}"})
+                # A bare name is searched under shell CDPATH; only explicit forms are safe.
+                or not (
+                    os.path.isabs(words[1])
+                    or words[1] in {".", ".."}
+                    or words[1].startswith(("./", "../"))
+                )
+                or _resolve(cwd, words[1]) != os.path.abspath(os.path.join(cwd, words[1]))
+            ):
                 return Decision("unsupported-syntax")
             uses.append((cwd, _Use(action="read", reads=(words[1],))))
             cwd = _resolve(cwd, words[1])
             continue
         use = _command(words)
-        for op, target in redirects:
-            if op in WRITE_REDIRECTS or op == ">&":
-                use.writes += (target,)
-            elif op == "<":
-                use.reads += (target,)
         uses.append((cwd, use))
     return _judge(request, uses)
 
@@ -454,8 +469,20 @@ def _git(args):
         return _Use("wrapper")
     sub, rest = args[0], args[1:]
     if sub in GIT_READ:
-        if any(arg.startswith(("--output", "--ext-diff")) for arg in rest):
-            return _Use("unknown-command")
+        options = rest[: rest.index("--")] if "--" in rest else rest
+        executable = {"--ext-diff", "--textconv", "--open-files-in-pager"}
+        for arg in options:
+            flag = arg.split("=", 1)[0]
+            if arg.startswith("--output"):
+                return _Use("unknown-command")
+            if (
+                flag.startswith("--")
+                and len(flag) > 2
+                and any(option.startswith(flag) for option in executable)
+            ) or (
+                sub == "grep" and arg.startswith("-") and not arg.startswith("--") and "O" in arg
+            ):
+                return _Use("shell")
         return _Use(action="read", reads=_path_like(rest))
     if sub == "reflog":
         if rest[:1] in (["expire"], ["delete"], ["drop"], ["write"]):

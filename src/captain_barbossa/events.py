@@ -144,7 +144,10 @@ def permission_decision(events_path, event):
 
 
 def pretool_decision(records, event):
-    """The PreToolUse decision this PermissionRequest prompts for, so one call is decided once."""
+    """Find an unconsumed decision for this exact native call and execution context."""
+    identity = ("session_id", "tool_use_id", "cwd", "incarnation_id")
+    if not all(event.get(key) for key in identity[:3]):
+        return None
     answered = {
         r["approval"].get("pretool") for r in records if isinstance(r.get("approval"), dict)
     }
@@ -152,7 +155,9 @@ def pretool_decision(records, event):
         approval = record.get("approval")
         if not isinstance(approval, dict) or approval.get("source") != "PreToolUse":
             continue
-        if record.get("tool_use_id") in answered:
+        if record.get("tool_use_id") in answered or any(
+            record.get(key) != event.get(key) for key in identity
+        ):
             continue
         if (record.get("tool_name"), record.get("tool_input")) == (
             event.get("tool_name"),
@@ -247,20 +252,20 @@ def append_event(args=None):
             if permission.code == "unknown-tool":
                 permission = None  # Keep activity evidence without changing native permissions.
         prior = pretool_decision(records, event) if kind == "PermissionRequest" else None
-        if prior:
-            permission = Decision(prior["approval"]["code"])
-            if permission.verdict in (Verdict.ALLOW_ONCE, Verdict.DENY):
-                # Already decided and logged; a native ask rule re-prompted the same call.
-                print(json.dumps(permission_output(permission)))
-                return
+        if kind == "PermissionRequest":
+            # Grants, lifetime and filesystem paths may have changed since PreToolUse.
+            permission = permission_decision(Path(events_path), event)
+        if prior and permission.code != prior["approval"]["code"]:
+            prior = None
+        if prior and permission.verdict in (Verdict.ESCALATE, Verdict.DEFER):
             # The PreToolUse ask already carries the reason; this record is the pending prompt.
             approval = {key: prior["approval"][key] for key in ("verdict", "code")}
             event["approval"] = {**approval, "pretool": prior.get("tool_use_id")}
             permission = None
         elif kind == "PermissionRequest" or (kind == "PreToolUse" and permission is not None):
-            if kind == "PermissionRequest":
-                permission = permission_decision(Path(events_path), event)
             event["approval"] = {"verdict": permission.verdict.value, "code": permission.code}
+            if prior:
+                event["approval"]["pretool"] = prior["tool_use_id"]
             if kind == "PreToolUse":
                 event["approval"]["source"] = kind
             # A deferred PermissionRequest is the native mode's own prompt, still pending.

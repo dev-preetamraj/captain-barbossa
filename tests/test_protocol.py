@@ -40,6 +40,24 @@ class ProtocolTests(SessionCase):
         self.enterContext(patch.object(Pane, "nudge", create=True))
         self.assignment = protocol.begin(self.crew, self.project, "original", ["src"], ["edit"])
 
+    def test_reused_name_cannot_receive_previous_incarnation_mail(self):
+        old = protocol.deliver(self.crew, "old task", initial=True, queue_only=True)
+        self.crew.record.update(incarnation_id="second", status="started")
+        store.write_json(self.current.meta_path, self.current.meta)
+        protocol.begin(self.crew, self.project, "new task")
+        new = protocol.deliver(self.crew, "new task", initial=True, queue_only=True)
+        self.assertEqual([m["id"] for m in protocol.queued(self.directory, "jack")], [new])
+        self.assertEqual(self.mail(old)["state"], "queued")  # retained for audit, never delivered
+        with patch.object(Pane, "nudge") as nudge:
+            protocol.drain(self.crew)
+        self.assertNotIn("old task", nudge.call_args.args[1])
+
+    def test_dismissed_incarnation_mail_is_not_deliverable(self):
+        protocol.deliver(self.crew, "old task", initial=True, queue_only=True)
+        self.crew.record["status"] = "dismissed"
+        store.write_json(self.current.meta_path, self.current.meta)
+        self.assertEqual(protocol.queued(self.directory, "jack"), [])
+
     def test_isolated_ownership_uses_registered_root_and_identity(self):
         from captain_barbossa import execution, worktrees
 
@@ -794,7 +812,7 @@ class UnreadableComposerTests(unittest.TestCase):
                     # Still fail-closed: an unreadable composer is never typed into blind.
                     self.assertEqual(self.crew.pane.draft_pending("claude"), gate is not None)
 
-    def test_an_unreadable_composer_ages_out_on_its_own_expiry(self):
+    def test_an_unreadable_composer_never_expires_into_a_prompt(self):
         clock = [1000.0]
         with (
             patch.object(protocol.time, "time", side_effect=lambda: clock[0]),
@@ -812,13 +830,16 @@ class UnreadableComposerTests(unittest.TestCase):
             nudge.assert_not_called()
             clock[0] += UNREADABLE_EXPIRY + 1
             protocol.ring(self.crew, message_id)
-        nudge.assert_called_once()
-        # Expired means ringable, not fusable: the inbox line alone, never the mail body.
-        self.assertIsNone(nudge.call_args.args[1])
-        self.assertTrue(store.read_json(protocol.drain_stamp(self.crew))["landed"])
+        nudge.assert_not_called()
+        self.assertFalse(store.read_json(protocol.drain_stamp(self.crew))["landed"])
+        with (
+            patch.object(Pane, "nudge_block", return_value=None),
+            patch.object(Pane, "nudge") as clear,
+        ):
+            protocol.ring(self.crew, message_id)
+        clear.assert_called_once()
 
-    def test_a_human_draft_still_holds_past_the_unreadable_expiry(self):
-        """The two gates age on their own clocks; a sentence someone is typing keeps its own."""
+    def test_a_human_draft_still_holds_after_half_an_hour(self):
         clock = [1000.0]
         with (
             patch.object(protocol.time, "time", side_effect=lambda: clock[0]),
@@ -827,7 +848,7 @@ class UnreadableComposerTests(unittest.TestCase):
             patch.object(Pane, "nudge") as nudge,
         ):
             message_id = protocol.deliver(self.crew, "original", initial=True)
-            clock[0] += UNREADABLE_EXPIRY + 1
+            clock[0] += 3600
             protocol.ring(self.crew, message_id)
         nudge.assert_not_called()
         self.assertEqual(store.read_json(protocol.drain_stamp(self.crew))["gate"], DRAFT_GATE)

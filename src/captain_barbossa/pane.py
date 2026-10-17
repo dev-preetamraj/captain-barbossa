@@ -88,16 +88,11 @@ DRAFT_GATE = "user draft"
 # still painting at launch reads exactly like a human mid-sentence, and calling it a draft
 # held one crew's whole task behind DRAFT_EXPIRY.
 UNREADABLE_GATE = "unreadable composer"
-# How long one unchanged draft may hold mail before the gate stops holding, from
-# munder-difflin's STALE_INPUT_MS (terminalAutomation.ts:50). Without it an occupied
-# composer holds mail for the rest of the session; protocol rings content-free once it
-# expires, so an expiry never fuses a body onto a human's half-written sentence.
+# Hold-age thresholds are diagnostic only; a blocked composer never expires.
 DRAFT_EXPIRY = 1800
-# An unreadable composer only has to outlast the paint; an unrecognised composer shape
-# never resolves at all, so waiting out DRAFT_EXPIRY for it buys nothing. Short enough
-# that the next drain rings, long enough that a launching TUI is not typed over.
+# Recheck an unreadable composer frequently while a launching TUI paints.
 UNREADABLE_EXPIRY = 15
-# Each gate protocol may age out, with how long it holds first.
+# Composer gates tracked by protocol.
 HOLD_EXPIRY = {DRAFT_GATE: DRAFT_EXPIRY, UNREADABLE_GATE: UNREADABLE_EXPIRY}
 
 
@@ -254,8 +249,7 @@ class Pane:
         """Which gate holds the composer, or None when it is provably safe to type.
 
         Empty and unreadable are different facts: an empty composer is no gate at all, and
-        an unreadable one gets its own, which ages out on UNREADABLE_EXPIRY rather than
-        posing as a human's draft for half an hour.
+        an unreadable one gets its own. Both hold until the composer is provably clear.
         """
         text, styled = self._composer(provider)
         if text is None:
@@ -406,10 +400,9 @@ class Pane:
         return self._gate(crew.record.get("provider"), echo=inbox_line(crew))
 
     def draft(self, provider=None):
-        """What a reported gate is holding, for the stamp that ages it out.
+        """What a reported gate is holding, for diagnostics.
 
-        None when the screen cannot prove the composer's contents; that is the unreadable
-        gate's own hold, aged on its own expiry, never a draft an editing human owns.
+        None when the screen cannot prove the composer's contents.
         """
         try:
             return self._composer(provider)[0]

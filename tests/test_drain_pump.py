@@ -10,6 +10,7 @@ from unittest.mock import patch
 from captain_barbossa import cli, protocol, sessions, store
 from captain_barbossa.crew import Crew
 from captain_barbossa.pane import DRAFT_EXPIRY, DRAFT_GATE, Pane
+from captain_barbossa.protocol import DRAIN_INTERVAL
 from captain_barbossa.runtime import CaptainError
 from tests.home_isolation import SessionCase
 
@@ -327,8 +328,8 @@ class DrainPumpTests(SessionCase):
         self.assertIn('"allowed": true', output)
         self.nudge.assert_called_once()
 
-    def test_a_draft_stops_holding_once_it_outlives_the_expiry(self):
-        """One unchanged draft holds mail only up to DRAFT_EXPIRY, and never fuses the body."""
+    def test_a_human_draft_stays_protected_after_the_old_expiry(self):
+        """A human draft never expires into a prompt; delivery resumes only once it is empty."""
         self.hold_mail()
         self.nudge_block.return_value = DRAFT_GATE
         stamp = protocol.drain_stamp(self.crew)
@@ -341,9 +342,16 @@ class DrainPumpTests(SessionCase):
         store.write_json(stamp, record)
         code, _ = self.captain_command()
         self.assertEqual(code, 0)
+        self.nudge.assert_not_called()  # the old expiry no longer releases a draft
+        self.assertFalse(store.read_json(stamp)["landed"])
+        self.nudge_block.return_value = None
+        self.draft.return_value = ""
+        record = store.read_json(stamp)
+        record["at"] = time.time() - DRAIN_INTERVAL - 1
+        store.write_json(stamp, record)
+        code, _ = self.captain_command()
+        self.assertEqual(code, 0)
         self.nudge.assert_called_once()
-        # Expired means ringable, not fusable: the inbox line alone, never the mail body.
-        self.assertIsNone(self.nudge.call_args.args[1])
         self.assertTrue(store.read_json(stamp)["landed"])
 
     def test_an_edited_draft_starts_the_expiry_clock_over(self):

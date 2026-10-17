@@ -80,8 +80,9 @@ Key facts:
   `approval.decide`. PreToolUse is the gate, registered for crew only: it fires on every
   tool call, so a deny blocks and an escalation returns `ask`, which reaches the user even
   in auto mode. PermissionRequest alone could not enforce, because the native CLI only
-  raises it when it already decided to prompt. One call is decided once: PermissionRequest
-  reuses the matching PreToolUse verdict under the events lock. Crew reach the captain CLI
+  raises it when it already decided to prompt. PermissionRequest revalidates the
+  current grant and may reuse the matching PreToolUse verdict only from a call-bound
+  cache entry, consumed once under the events lock. Crew reach the captain CLI
   through the gate, limited to the protocol verbs and to the exact interpreter captain
   wrote into their instructions; `do`, `crew` and any other interpreter escalate. Resolved
   requests are logged as PermissionDecision, so wait does not announce an approval that is

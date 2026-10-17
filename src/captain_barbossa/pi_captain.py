@@ -425,14 +425,18 @@ export default function (pi) {
           appendFileSync(log, '{"delivered":true}\n');
         };
         void (async () => {
-          while (Date.now() < deadline) {
+          // A successful ack may return the next delivery, which is processed as the next event.
+          let next = null;
+          while (next || Date.now() < deadline) {
             const started = Date.now();
             const seconds = Math.min(FLOOR, Math.max(1, Math.ceil((deadline - started) / 1000)));
-            const event = await wait(seconds);
+            const event = next ?? await wait(seconds);
+            next = null;
             if (event.delivery_id !== null && event.status !== "timeout") {
               // Native activity is already retained by Captain; it is not model context.
               if (!["idle", "working"].includes(event.status)) await deliver(event);
               const ack = await wait(0, event.delivery_id);
+              if (ack.delivery_id !== null) { next = ack; continue; }
               if (ack.status === "error") throw new Error(`Acknowledgement failed: ${ack.summary}`);
               // An acknowledged done or failure leaves nothing more to watch.
               if (ack.status === "idle" && ack.delivery_id === null) return;

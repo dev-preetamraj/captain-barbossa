@@ -400,8 +400,18 @@ def queued(session_directory, crew_id):
     directory = mail_dir(session_directory, crew_id)
     if not directory.exists():
         return []
+    record = read_json(session_directory / "session.json").get("crew", {}).get(crew_id)
+    if not record or record.get("status") == "dismissed":
+        return []
     messages = (read_json(path) for path in directory.glob("*.json"))
-    return sorted((m for m in messages if m["state"] == "queued"), key=lambda m: m["queued_at"])
+    return sorted(
+        (
+            m
+            for m in messages
+            if m["state"] == "queued" and m.get("incarnation_id") == record.get("incarnation_id")
+        ),
+        key=lambda m: m["queued_at"],
+    )
 
 
 def unread(crew):
@@ -474,12 +484,7 @@ def bounce(crew, message_id, reason):
 
 
 def stale_draft(prior, gate, draft):
-    """Whether this same gate and composer have already held the doorbell past its expiry.
-
-    A hold that never ends is its own failure: before this, one unreadable composer kept a
-    crew's mail for the rest of the session and a human had to clear it by hand. Each gate
-    ages on its own clock, so a composer nobody is typing in is not held like a draft.
-    """
+    """Whether a composer hold is old; age never authorizes typing into it."""
     if not prior or prior.get("draft_gate") != gate or prior.get("draft") != draft:
         return False
     since = prior.get("draft_since")
@@ -547,10 +552,6 @@ def ring(crew, message_id):
             return
         if gate in HOLD_EXPIRY:
             held, draft = gate, pane.draft(provider)
-            if stale_draft(prior, held, draft):
-                # An expired draft stops holding, but the body never joins a human's
-                # half-written sentence: ring the inbox line alone, which is a valid ring.
-                gate, text = None, None
         if gate is None:
             pane.nudge(crew, text)
             landed = True
@@ -565,10 +566,7 @@ def ring(crew, message_id):
     now = time.time()
     record = {"id": message_id, "at": now, "landed": landed, "gate": gate}
     if held is not None:
-        # Age the composer itself, not the message: a human who edits their line starts the
-        # clock over, and only an unchanged one expires. The clock belongs to the gate that
-        # held, so an unreadable composer (the same None every read) ages on its own expiry
-        # instead of borrowing a draft's.
+        # Preserve hold age for diagnostics, never as permission to type.
         carried = (
             prior.get("draft_since")
             if prior and prior.get("draft_gate") == held and prior.get("draft") == draft
@@ -581,7 +579,7 @@ def ring(crew, message_id):
         record["held_since"] = (prior.get("held_since") or prior["at"]) if held_over else now
         record["noticed"] = bool(held_over and prior.get("noticed"))
         if (
-            gate == DRAFT_GATE
+            gate in HOLD_EXPIRY
             and not record["noticed"]
             and now - record["held_since"] >= HELD_NOTICE_INTERVAL
         ):
@@ -684,7 +682,7 @@ def drain(crew):
         if landed:
             interval = DRAIN_LANDED_INTERVAL
         elif record.get("gate") == UNREADABLE_GATE:
-            # Its hold ages out on UNREADABLE_EXPIRY; waiting the full cooldown doubled it.
+            # Recheck painting editors promptly, without bypassing their gate.
             interval = UNREADABLE_EXPIRY
         else:
             interval = DRAIN_INTERVAL

@@ -1,8 +1,10 @@
 """Regression tests for the state/temp root split (durable project-scope memory)."""
 
 import contextlib
+import hashlib
 import io
 import os
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -172,6 +174,59 @@ class MemoryRootTests(unittest.TestCase):
             with memory.memory_snapshot(other_directory) as snapshot:
                 graph = store.read_json(snapshot / "graph.json")
         self.assertEqual(len(graph["links"]), 1)
+
+    def legacy_graph(self, mode=0o700, root_mode=0o700):
+        legacy = self.root / "legacy"
+        legacy.mkdir()
+        namespace = legacy / hashlib.sha256(os.fsencode(self.project)).hexdigest()
+        namespace.mkdir()
+        (namespace / "graph.json").write_text('{"nodes":[],"links":[]}', encoding="utf-8")
+        namespace.chmod(mode)
+        legacy.chmod(root_mode)
+        return legacy, namespace
+
+    def read_project(self, legacy):
+        durable = self.root / "durable"
+        with self.clean_env(CAPTAIN_STATE_ROOT=str(durable), CAPTAIN_TEMP_ROOT=str(legacy)):
+            return memory.read_scoped_graphs(None, self.project, "project")
+
+    def test_safe_legacy_root_is_read_and_missing_roots_are_empty(self):
+        legacy, _ = self.legacy_graph()
+        self.assertEqual(self.read_project(legacy)["project"]["nodes"], [])
+        graphs = self.read_project(self.root / "absent")
+        self.assertEqual(graphs["project"], memory.empty_graph())
+
+    def test_read_rejects_foreign_owned_legacy_dirs_without_side_effects(self):
+        legacy, namespace = self.legacy_graph()
+        for bad in (legacy, namespace):
+            with (
+                self.subTest(bad=bad.name),
+                patch.object(store.os, "getuid", return_value=os.getuid() + 1),
+                self.assertRaisesRegex(CaptainError, "another user"),
+            ):
+                self.read_project(legacy)
+
+    def test_read_rejects_writable_legacy_dirs_and_does_not_chmod(self):
+        for root_mode, mode in ((0o777, 0o700), (0o700, 0o770), (0o700, 0o707)):
+            with self.subTest(root=oct(root_mode), ns=oct(mode)):
+                legacy, namespace = self.legacy_graph(mode, root_mode)
+                try:
+                    with self.assertRaisesRegex(CaptainError, "writable by others"):
+                        self.read_project(legacy)
+                    self.assertEqual(legacy.stat().st_mode & 0o777, root_mode)
+                    self.assertEqual(namespace.stat().st_mode & 0o777, mode)
+                finally:
+                    legacy.chmod(0o700)
+                    namespace.chmod(0o700)
+                    shutil.rmtree(legacy)
+
+    def test_read_rejects_symlinked_legacy_namespace(self):
+        legacy, namespace = self.legacy_graph()
+        target = self.root / "elsewhere"
+        namespace.rename(target)
+        namespace.symlink_to(target)
+        with self.assertRaisesRegex(CaptainError, "symlink"):
+            self.read_project(legacy)
 
 
 if __name__ == "__main__":

@@ -86,6 +86,38 @@ class CloseSessionPanesTests(SessionCase):
         self.assertEqual(crew["jack"]["status"], "dismissed")
         self.assertEqual(crew["gibbs"]["status"], "starting")
 
+    def test_clean_exit_releases_ownership_and_bounces_queued_mail(self):
+        for name in ("jack", "gibbs"):
+            self.current.meta["crew"][name]["incarnation_id"] = name
+        store.write_json(self.current.meta_path, self.current.meta)
+        crew = Crew("jack", self.current.meta["crew"]["jack"], self.current)
+        assignment = protocol.begin(crew, self.project, "edit", ["src"], ["edit"])
+        message = protocol.deliver(crew, "edit", initial=True, queue_only=True)
+        with patch.object(protocol, "unlanded", return_value=[]):
+            self.close(lambda *args, **_: {})
+        saved = store.read_json(self.current.directory / "protocol.json")
+        self.assertEqual(saved["assignments"][assignment["id"]]["state"], "done")
+        mail = store.read_json(
+            protocol.mail_dir(self.current.directory, "jack") / f"{message}.json"
+        )
+        self.assertEqual(mail["state"], "bounced")
+        other = Crew("gibbs", self.current.meta["crew"]["gibbs"], self.current)
+        protocol.begin(other, self.project, "new edit", ["src"], ["edit"])
+
+    def test_uncertain_shutdown_keeps_ownership_reserved(self):
+        record = self.current.meta["crew"]["jack"]
+        record.update(lifetime_id="managed", incarnation_id="jack")
+        store.write_json(self.current.meta_path, self.current.meta)
+        crew = Crew("jack", record, self.current)
+        assignment = protocol.begin(crew, self.project, "edit", ["src"], ["edit"])
+        with (
+            patch.object(protocol, "unlanded", return_value=[]),
+            patch.object(agents.execution, "retire", return_value={"lifetime": {"ok": False}}),
+        ):
+            self.close(lambda *args, **_: {})
+        saved = store.read_json(self.current.directory / "protocol.json")
+        self.assertNotEqual(saved["assignments"][assignment["id"]]["state"], "done")
+
     def await_marker(self, marker):
         deadline = time.monotonic() + 15
         while not marker.exists() and time.monotonic() < deadline:
