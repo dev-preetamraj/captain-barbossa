@@ -63,7 +63,16 @@ class SessionResumeTests(unittest.TestCase):
         self.assertEqual([row[2] for row in rows], [near.meta["id"], far.meta["id"]])
         self.assertEqual(rows[1][0], "-")
         _, out, launch = self.run_main("resume")
-        self.assertLess(out.index(str(self.here)), out.index("-\n"))
+        self.assertIn(str(self.here), out)
+        self.assertNotIn(str(self.other), out)
+        self.assertNotIn("-\n", out)
+        launch.assert_not_called()
+
+    def test_resume_reports_when_current_project_has_no_sessions(self):
+        self.make(self.other)
+        code, out, launch = self.run_main("resume")
+        self.assertEqual(code, 1)
+        self.assertEqual(out, "")
         launch.assert_not_called()
 
     def test_resume_by_name_launches_from_that_project(self):
@@ -91,9 +100,10 @@ class SessionResumeTests(unittest.TestCase):
         with self.assertRaisesRegex(CaptainError, "ambiguous-session"):
             cli.find_session(self.here, "twin")
 
-    def test_tty_picks_with_the_selector(self):
-        far = self.make(self.other)
-        with patch.object(cli, "choose", return_value=far.meta["id"]) as choose:
+    def test_tty_picks_only_from_the_current_project(self):
+        self.make(self.other)
+        near = self.make(self.here)
+        with patch.object(cli, "choose", return_value=near.meta["id"]) as choose:
             _, _, launch = self.run_main("resume", tty=True)
-        self.assertEqual(choose.call_args.args[1], [far.meta["id"]])
-        self.assertEqual(launch.call_args.args[0].session, far.meta["id"])
+        self.assertEqual(choose.call_args.args[1], [near.meta["id"]])
+        self.assertEqual(launch.call_args.args[0].session, near.meta["id"])

@@ -110,6 +110,14 @@ def all_sessions(current):
     return rows
 
 
+def project_sessions(project):
+    """Every readable session belonging to the current project, newest first."""
+    current = str(project.resolve())
+    rows = [row for row in all_sessions(project) if row[0] == current]
+    rows.sort(key=lambda row: -row[3])
+    return rows
+
+
 def session_name(directory):
     """The name given by `captain rename`, or None."""
     try:

@@ -29,7 +29,13 @@ from .models import PROVIDERS, TIER_NAMES, models_for, tiers_for
 from .onboarding import bootstrap
 from .prompts import PLACEMENTS, choose
 from .runtime import HERDR_ERRORS, CaptainError, current_pane
-from .sessions import PRUNE_DAYS, all_sessions, find_session, read_session, rename_session
+from .sessions import (
+    PRUNE_DAYS,
+    find_session,
+    project_sessions,
+    read_session,
+    rename_session,
+)
 from .store import project_root
 from .update_check import upgrade
 
@@ -317,7 +323,7 @@ def resume_target(args):
     if args.target:
         row = find_session(current, args.target)
     else:
-        rows = all_sessions(current)
+        rows = project_sessions(current)
         if not rows:
             raise CaptainError("No sessions to resume.")
         when = lambda row: time.strftime("%Y-%m-%d %H:%M", time.localtime(row[3]))  # noqa: E731
