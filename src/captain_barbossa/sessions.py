@@ -73,6 +73,72 @@ def session_directories(project):
                     yield directory
 
 
+def all_sessions(current):
+    """Every session of every project in both roots, current project first, newest first.
+
+    Rows are (project, name, id, last activity, directory). The project comes from
+    session.json, and a directory without a readable one still lists under "-".
+    """
+    rows, seen = [], set()
+    for root in (state_root(), temp_root()):
+        if root.is_symlink() or not root.is_dir():
+            continue
+        for sessions in sorted(root.glob("*/sessions")):
+            if sessions.is_symlink() or not sessions.is_dir():
+                continue
+            for directory in sorted(sessions.iterdir()):
+                if not (SESSION_ID.fullmatch(directory.name) and directory.is_dir()):
+                    continue
+                if directory.is_symlink() or directory.name in seen:
+                    continue
+                seen.add(directory.name)
+                try:
+                    meta = read_json(directory / "session.json")
+                    project = str(meta["project"])
+                except (CaptainError, OSError, KeyError, TypeError):
+                    project = "-"
+                rows.append(
+                    (
+                        project,
+                        session_name(directory),
+                        directory.name,
+                        newest_mtime(directory),
+                        directory,
+                    )
+                )
+    rows.sort(key=lambda row: (row[0] != str(current), row[0], -row[3]))
+    return rows
+
+
+def session_name(directory):
+    """The name given by `captain rename`, or None."""
+    try:
+        return read_json(directory / "name.json").get("name")
+    except (CaptainError, OSError, AttributeError):
+        return None
+
+
+def rename_session(directory, name):
+    name = name.strip()
+    if not name or len(name) > 60 or SESSION_ID.fullmatch(name):
+        raise CaptainError("A session name is 1-60 characters and not a session id.")
+    write_json(directory / "name.json", {"name": name})
+
+
+def find_session(current, target):
+    """The one session whose id or name is target; an ambiguous name is an error."""
+    rows = all_sessions(current)
+    found = [row for row in rows if target == row[2]] or [row for row in rows if target == row[1]]
+    if not found:
+        raise CaptainError(f"No session named or numbered {target}.")
+    if len(found) > 1:
+        ids = ", ".join(f"{row[2]} ({row[0]})" for row in found)
+        raise CaptainError(
+            f"[ambiguous-session] {target} names several sessions: {ids}. Use an id."
+        )
+    return found[0]
+
+
 def read_session(project, session_id, pane=None, *, max_bytes=None):
     """Open only the selected session's metadata; never initialize or repair state."""
     if not session_id:

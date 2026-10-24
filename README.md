@@ -66,6 +66,13 @@ to print the ID; `--session ID` selects it when restarting. See
 [memory.md](https://github.com/dev-preetamraj/captain-barbossa/blob/main/docs/memory.md)
 for what persists.
 
+`captain rename NAME` names the current session (`--session ID` targets another).
+`captain resume` lists every session grouped by project (current project first)
+with name, id and last activity; in a terminal it opens a picker and resumes the
+choice from that project root, exactly like `captain --session ID`.
+`captain resume NAME|ID` skips the picker; a name shared by several sessions is
+an error, so use the id.
+
 ## Starting a captain
 
 Launch `captain` from an interactive terminal inside a Herdr workspace:
@@ -571,6 +578,8 @@ Read the affected pane before retrying or approving anything.
 | `captain dashboard [--interval SECONDS] [--refresh-prices]` | Refresh a crew token-usage table; optionally refresh prices |
 | `captain focus NAME` | Focus crew's pane and tab |
 | `captain session` | Print the current session id |
+| `captain rename NAME` | Name the current session |
+| `captain resume [NAME\|ID]` | List sessions by project, or resume one from its project |
 | `captain update` | Upgrade the installed tool |
 | `captain init [--global]` | Write a commented `.captain/settings.toml` template |
 | `captain dismiss NAME` | Close and retire crew |

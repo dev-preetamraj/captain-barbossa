@@ -4,6 +4,8 @@ import argparse
 import json
 import os
 import sys
+import time
+from pathlib import Path
 
 from . import __version__, config, dashboard, do, events, inspection, protocol, recovery
 from .agents import (
@@ -25,9 +27,9 @@ from .layout import HERDR_DIRECTIONS
 from .memory import REPO_RELATIONS, RULEBOOK_FILES, memory
 from .models import PROVIDERS, TIER_NAMES, models_for, tiers_for
 from .onboarding import bootstrap
-from .prompts import PLACEMENTS
+from .prompts import PLACEMENTS, choose
 from .runtime import HERDR_ERRORS, CaptainError, current_pane
-from .sessions import PRUNE_DAYS, read_session
+from .sessions import PRUNE_DAYS, all_sessions, find_session, read_session, rename_session
 from .store import project_root
 from .update_check import upgrade
 
@@ -176,6 +178,10 @@ def parser():
     stop.add_argument("name", help="crew name or ID (case-insensitive)")
     stop.add_argument("--reason", help="why, recorded in session memory")
     commands.add_parser("session", help="print the current session id")
+    rename = commands.add_parser("rename", help="name the current session")
+    rename.add_argument("name")
+    resume = commands.add_parser("resume", help="list sessions, or resume one by name or id")
+    resume.add_argument("target", nargs="?", help="session name or id (lists when omitted)")
     commands.add_parser("recover", help="JSON digest of memory, assignments and pending deliveries")
     commands.add_parser("update", help="upgrade the installed captain-barbossa tool")
     start = commands.add_parser(
@@ -305,6 +311,33 @@ def print_session(args):
     print(args.session)
 
 
+def resume_target(args):
+    """Choose the session to resume and chdir to its project; None after only listing."""
+    current = project_root()
+    if args.target:
+        row = find_session(current, args.target)
+    else:
+        rows = all_sessions(current)
+        if not rows:
+            raise CaptainError("No sessions to resume.")
+        when = lambda row: time.strftime("%Y-%m-%d %H:%M", time.localtime(row[3]))  # noqa: E731
+        labels = {row[2]: f"{row[1] or '-'}  {row[2]}  {when(row)}" for row in rows}
+        projects = list(dict.fromkeys(row[0] for row in rows))
+        if not sys.stdin.isatty():
+            for project in projects:
+                print(project)
+                print(*(f"  {labels[row[2]]}" for row in rows if row[0] == project), sep="\n")
+            return None
+        groups = [(p, [row[2] for row in rows if row[0] == p]) for p in projects]
+        chosen = choose(None, [row[2] for row in rows], "Resume which session?", "", labels, groups)
+        row = next(row for row in rows if row[2] == chosen)
+    if not os.path.isdir(row[0]):
+        raise CaptainError(f"Project {row[0]} of session {row[2]} is not a directory here.")
+    os.chdir(row[0])
+    args.session = row[2]
+    return Path(row[0])
+
+
 def print_inbox(args, pane, project):
     """Mail for a crew with no delivery hook, and a manual re-read for one that has.
 
@@ -394,6 +427,16 @@ def main(argv=None):
             return 0
         if args.command == "session":
             print_session(args)
+            return 0
+        if args.command == "rename":
+            project = project_root()
+            rename_session(read_session(project, args.session).directory, args.name)
+            return 0
+        if args.command == "resume":
+            project = resume_target(args)
+            if project is None:
+                return 0
+            launch(args, current_pane(), project)
             return 0
         if args.command in ("result", "worktree"):
             print(json.dumps(artifact_command(args, read_session(project_root(), args.session))))
