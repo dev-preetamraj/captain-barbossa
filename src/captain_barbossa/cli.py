@@ -9,11 +9,13 @@ from pathlib import Path
 
 from . import __version__, config, dashboard, do, events, inspection, protocol, recovery
 from .agents import (
+    LaunchPlanError,
     create_crew,
     dismiss_crew,
     focus_crew,
     interrupt_crew,
     launch,
+    launch_plan,
     protocol_command,
     status_crew,
     switch_model,
@@ -40,15 +42,20 @@ from .store import project_root
 from .update_check import upgrade
 
 
-def parser():
-    root = argparse.ArgumentParser(
+class PlanParser(argparse.ArgumentParser):
+    def error(self, message):
+        raise LaunchPlanError("invalid-arguments", message)
+
+
+def parser(*, plan=False):
+    root = (PlanParser if plan else argparse.ArgumentParser)(
         prog="captain", description="Native captain and crew for Herdr workspaces."
     )
     root.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     root.add_argument("--agent", choices=PROVIDERS, help="captain CLI (asks when omitted)")
     root.add_argument(
         "--session",
-        default=os.environ.get("CAPTAIN_SESSION"),
+        default=None if plan else os.environ.get("CAPTAIN_SESSION"),
         help="reuse graph memory for this session",
     )
     root.add_argument("--prompt", help="initial captain prompt")
@@ -58,6 +65,11 @@ def parser():
         help="skip the crew token-usage pane even when [dashboard] enabled is set",
     )
     commands = root.add_subparsers(dest="command")
+    plan_command = commands.add_parser("launch-plan", help="prepare a pane-free pi RPC captain")
+    plan_command.add_argument("--agent", default=argparse.SUPPRESS)
+    plan_command.add_argument("--model")
+    plan_command.add_argument("--effort")
+    plan_command.add_argument("--session", default=argparse.SUPPRESS)
     inspection.add_arguments(commands)
     do.add_arguments(commands)
     result = commands.add_parser("result", help="review or transfer isolated crew work")
@@ -417,15 +429,36 @@ def paneless_target(args):
     return bool(crews) and all(crew.is_background for crew in crews)
 
 
+def is_launch_plan(argv):
+    """Inspect only the subcommand, skipping root options and their values."""
+    index = 0
+    while index < len(argv) and argv[index].startswith("-"):
+        option = argv[index]
+        index += 1
+        if "=" not in option and any(
+            name.startswith(option) for name in ("--agent", "--session", "--prompt")
+        ):
+            index += 1
+    return argv[index : index + 1] == ["launch-plan"]
+
+
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
     if argv[:1] == ["hook"]:
         # Native hooks fire per event: skip the parser, update check and Herdr pane lookup.
         events.append_event(argv[1:])
         return 0
-    args = parser().parse_args(argv)
+    is_plan = is_launch_plan(argv)
+    try:
+        args = parser(plan=is_plan).parse_args(argv)
+    except LaunchPlanError as exc:
+        print(json.dumps({"version": 1, "error": {"code": exc.code, "message": str(exc)}}))
+        return 1
     try:
         guard_crew(args)
+        if args.command == "launch-plan":
+            print(json.dumps(launch_plan(args, project_root())))
+            return 0
         if args.command is None:
             bootstrap(args)
         if args.command == "init":
@@ -504,6 +537,19 @@ def main(argv=None):
         else:
             launch(args, pane, project)
     except (*HERDR_ERRORS, EOFError) as exc:
+        if args.command == "launch-plan":
+            print(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "error": {
+                            "code": getattr(exc, "code", "launch-failed"),
+                            "message": str(exc),
+                        },
+                    }
+                )
+            )
+            return 1
         if args.command == "wait" and args.json:
             if args.all:
                 print(json.dumps({"status": "error", "deliveries": [], "summary": str(exc)}))

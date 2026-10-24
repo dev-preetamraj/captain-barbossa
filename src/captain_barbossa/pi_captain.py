@@ -8,7 +8,7 @@ from pathlib import Path
 # Pi 0.85.1 docs/extensions.md: registerTool, exec, sendMessage, session_shutdown.
 EXTENSION = r"""
 import { createHash } from "node:crypto";
-import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 
@@ -82,6 +82,11 @@ export default function (pi) {
   // Runtime-owned coverage, independent of the captain remembering to call a tool.
   pi.on("tool_result", () => { reconcile?.(); });
   pi.on("session_start", (_event, ctx) => {
+    const identity = join(directory, "pi-session.json");
+    const temporary = `${identity}.${process.pid}.tmp`;
+    writeFileSync(temporary, JSON.stringify({ sessionFile: ctx.sessionManager.getSessionFile?.() ?? null }),
+      { mode: 0o600 });
+    renameSync(temporary, identity);
     clearInterval(sweeper);
     for (const controller of pending.values()) controller.abort();
     pending.clear();

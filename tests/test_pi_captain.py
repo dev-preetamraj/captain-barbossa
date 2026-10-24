@@ -110,6 +110,18 @@ class PiCaptainTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    def test_session_start_records_exact_native_identity_and_replacement(self):
+        self.run_js(r"""
+const identity = join(dirname(path), "pi-session.json");
+for (const sessionFile of ["/tmp/first.jsonl", "/tmp/resumed.jsonl", undefined]) {
+  start({}, { hasUI: false, sessionManager: { getSessionFile: () => sessionFile } });
+  assert.deepEqual(JSON.parse(readFileSync(identity, "utf8")),
+    { sessionFile: sessionFile ?? null });
+  assert.equal(statSync(identity).mode & 0o777, 0o600);
+  shutdown();
+}
+""")
+
     def test_wait_returns_immediately_deduplicates_and_delivers_to_pi(self):
         self.run_js(r"""
 const armed = await arm();

@@ -266,7 +266,8 @@ def session(project, pane, session_id=None, create=False, *, allow_dead_workspac
         if meta_path.exists():
             meta = read_json(meta_path)
             if meta["project"] != str(project) or (
-                meta["workspace"] != pane["workspace_id"]
+                pane is not None
+                and meta["workspace"] != pane["workspace_id"]
                 and not (allow_dead_workspace and workspace_gone(meta["workspace"]))
             ):
                 raise CaptainError("This session belongs to another project or Herdr workspace.")
@@ -274,11 +275,11 @@ def session(project, pane, session_id=None, create=False, *, allow_dead_workspac
             meta = {
                 "id": session_id,
                 "project": str(project),
-                "workspace": pane["workspace_id"],
+                "workspace": pane["workspace_id"] if pane is not None else None,
                 "crew": {},
             }
             write_json(meta_path, meta)
-        if meta["workspace"] == pane["workspace_id"]:
+        if pane is not None and meta["workspace"] == pane["workspace_id"]:
             backfill_terminal_id(directory, pane)
     try:
         migrate_project_graph(project)

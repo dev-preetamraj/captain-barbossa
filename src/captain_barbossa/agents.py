@@ -166,6 +166,91 @@ def close_panes_on_exit(session_id, project):
         os._exit(0)
 
 
+def prepare_launch(current, project, provider, binary, model):
+    """Build the native captain command and environment overlay for either transport."""
+    model = resolve_model(provider, model) if model else None
+    with crew_meta(current.directory) as meta:
+        meta["captain_provider"] = provider
+    instruction_text = instructions.agent_instructions(
+        current.directory, "Captain Barbossa", provider
+    )
+    add_memory(current.graph, f"session:{meta['id']}", "captain", provider)
+    events = current.events("captain")
+    private_dir(events.parent)
+    command = [binary, *instructions.native_args(provider, instruction_text, model, events=events)]
+    if provider == "pi":
+        command.extend(["--extension", str(captain_extension(current.directory))])
+    env = {
+        "CAPTAIN_SESSION": meta["id"],
+        "CAPTAIN_PROJECT": str(project.resolve()),
+        "CAPTAIN_STATE_ROOT": str(state_root()),
+        "CAPTAIN_TEMP_ROOT": str(temp_root()),
+    }
+    return command, env
+
+
+class LaunchPlanError(CaptainError):
+    def __init__(self, code, message):
+        super().__init__(message)
+        self.code = code
+
+
+def launch_plan(args, project):
+    provider = args.agent or config.text("captain", "agent")
+    if not provider:
+        raise LaunchPlanError("missing-choice", "Choose --agent.")
+    if provider != "pi":
+        raise LaunchPlanError("unsupported-transport", "Only pi RPC is supported.")
+    identity = None
+    current = None
+    if args.session:
+        try:
+            current = session(project, None, args.session)
+        except CaptainError as exc:
+            raise LaunchPlanError("invalid-session", str(exc)) from exc
+        if current.meta.get("captain_provider") != provider:
+            raise LaunchPlanError("session-provider-mismatch", "Session provider is not pi.")
+        path = current.directory / "pi-session.json"
+        recorded = read_json(path) if path.is_file() else {}
+        identity = recorded.get("sessionFile") if isinstance(recorded, dict) else None
+        if (
+            not isinstance(identity, str)
+            or not identity
+            or not Path(identity).is_absolute()
+            or not Path(identity).is_file()
+        ):
+            raise LaunchPlanError(
+                "resume-unavailable", "No exact existing pi session file recorded."
+            )
+    model = args.model or (None if current else config.text("captain", "model"))
+    if not model and current is None:
+        raise LaunchPlanError("missing-choice", "Choose --model.")
+    binary = executable(provider)
+    current = current or session(project, None, create=True)
+    command, env = prepare_launch(current, project, provider, binary, model)
+    command[1:1] = ["--mode", "rpc"]
+    if args.effort:
+        command.extend(["--thinking", args.effort])
+    if identity:
+        command.extend(["--session", identity])
+    # Values are an overlay, never a copy of the caller's credentials or crew identity.
+    for key in os.environ:
+        if key.startswith("CAPTAIN_") and key not in (*env, "CAPTAIN_MEMORY_ROOT"):
+            env[key] = None
+    if "CAPTAIN_MEMORY_ROOT" in os.environ:
+        env["CAPTAIN_MEMORY_ROOT"] = os.environ["CAPTAIN_MEMORY_ROOT"]
+    return {
+        "version": 1,
+        "provider": provider,
+        "transport": "rpc",
+        "argv": command,
+        "cwd": str(project.resolve()),
+        "env": env,
+        "captainSessionId": current.meta["id"],
+        "nativeResumeIdentity": identity,
+    }
+
+
 def launch(args, pane, project):
     if not sys.stdin.isatty():
         raise CaptainError("Launch captain from an interactive Herdr terminal.")
@@ -180,34 +265,15 @@ def launch(args, pane, project):
     provider = choose(wanted, PROVIDERS, "Choose your captain", "--agent")
     binary = executable(provider)
     current = session(project, pane, args.session, create=args.session is None)
-    # Under the crew lock, so a concurrent recruit or dismiss is not overwritten.
-    with crew_meta(current.directory) as meta:
-        meta["captain_provider"] = provider
+    meta = current.meta
     try:
         prune_sessions(project, current=meta["id"])
     except HERDR_ERRORS:
         pass  # retention is housekeeping; never block a launch on it
-    instruction_text = instructions.agent_instructions(
-        current.directory, "Captain Barbossa", provider
-    )
-    add_memory(current.graph, f"session:{meta['id']}", "captain", provider)
+    model = config.text("captain", "model")
+    command, overrides = prepare_launch(current, project, provider, binary, model)
     runtime.herdr("tab", "rename", pane["tab_id"], "Captain Barbossa")
-    env = dict(
-        os.environ,
-        CAPTAIN_SESSION=meta["id"],
-        CAPTAIN_PROJECT=str(project.resolve()),
-        CAPTAIN_STATE_ROOT=str(state_root()),
-        CAPTAIN_TEMP_ROOT=str(temp_root()),
-    )
-    # The captain's own hooks write the same lifecycle events crew do, so the dashboard
-    # can find its transcript. Nothing reads this file as a roster entry.
-    events = current.events("captain")
-    private_dir(events.parent)
-    wanted = config.text("captain", "model")
-    model = resolve_model(provider, wanted) if wanted else None
-    command = [binary, *instructions.native_args(provider, instruction_text, model, events=events)]
-    if provider == "pi":
-        command.extend(["--extension", str(captain_extension(current.directory))])
+    env = dict(os.environ, **overrides)
     if args.prompt:
         command.extend(["--", args.prompt])
     board = None

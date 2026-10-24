@@ -73,6 +73,22 @@ root, exactly like `captain --session ID`. It reports cleanly when none exist he
 `captain resume NAME|ID` skips the picker; a name shared by several sessions is
 an error, so use the id.
 
+## Pane-free launch plans
+
+`captain launch-plan --agent pi --model MODEL [--effort LEVEL] [--session ID]`
+returns one versioned JSON object for a desktop host to start `pi --mode rpc`
+over pipes. It needs no TTY or Herdr pane and does not start the CLI. Only pi RPC
+is supported; missing choices and failures return structured errors and a nonzero
+exit status. Agent/model settings may supply new-chat choices; no picker opens.
+
+Preparation may create Captain session and extension files outside the checkout.
+The `env` field contains overrides only (`null` means unset), never inherited
+credentials. The host applies these to its own environment. `--session ID`
+requires the exact existing pi session file recorded by the captain extension;
+unlike terminal restarts, it resumes that native chat or fails, never starts a
+fresh one. An omitted model on resume preserves pi's saved model. This does not
+make Herdr-backed crew recruitment pane-free.
+
 ## Starting a captain
 
 Launch `captain` from an interactive terminal inside a Herdr workspace:
