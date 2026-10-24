@@ -130,6 +130,15 @@ class CheckoutChoiceTests(SessionCase):
         self.assertEqual(checkout, "worktree")
         self.assertIn("b" * 32, source)
 
+    def test_owns_outside_the_checkout_share_because_a_worktree_cannot_hold_them(self):
+        outside = str(self.root / "elsewhere" / "notes.md")
+        self.occupy(self.directory, ["src"])
+        checkout, source = self.choose("--allow", "edit", "--owns", outside, "--owns", "src")
+        self.assertEqual(checkout, "shared")
+        self.assertIn("outside the checkout", source)
+        with self.assertRaisesRegex(runtime.CaptainError, "worktree-outside"):
+            self.choose("--allow", "edit", "--owns", outside, "--checkout", "worktree")
+
     def test_done_assignments_release_their_paths(self):
         self.occupy(self.directory, ["src"], state="done")
         self.assertEqual(self.choose("--allow", "edit", "--owns", "src")[0], "shared")

@@ -82,7 +82,10 @@ class LauncherCleanupTests(SessionCase):
         )
         delivery = protocol.poll(crew)
         protocol.poll(crew, delivery["delivery_id"])
-        with patch.object(runtime, "herdr", return_value={}):
+        with (
+            patch.object(runtime, "herdr", return_value={}),
+            patch.object(agents.execution, "retire", return_value={"lifetime": {"ok": True}}),
+        ):
             agents.dismiss_crew(self.args("dismiss", "jack"), self.pane, self.project)
         self.assertFalse(launcher.exists())
 

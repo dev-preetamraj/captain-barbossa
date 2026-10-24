@@ -81,6 +81,28 @@ class DismissMailTests(SessionCase):
         self.assertEqual(self.mail(message_id), mail)
         self.assertEqual(store.read_json(self.current.meta_path), roster)
         self.assertEqual(store.read_json(self.directory / "protocol.json"), state)
+        self.assertIn("Dismissed Jack.", self.dismiss())
+
+    def test_failed_managed_shutdown_preserves_reservation_and_mail_until_retry(self):
+        self.crew.record["lifetime_id"] = "managed"
+        store.write_json(self.current.meta_path, self.current.meta)
+        message = protocol.deliver(self.crew, "original", initial=True, queue_only=True)
+        args = SimpleNamespace(session=self.current.meta["id"], name="Jack")
+        with (
+            patch.object(runtime, "herdr", return_value={}),
+            patch.object(agents.execution, "retire", return_value={"lifetime": {"ok": False}}),
+            self.assertRaisesRegex(runtime.CaptainError, "cleanup-pending"),
+        ):
+            agents.dismiss_crew(args, self.pane, self.project)
+        self.assertEqual(protocol.active_assignment(self.crew)["state"], "working")
+        self.assertEqual(self.mail(message)["state"], "queued")
+        self.assertEqual(
+            store.read_json(self.current.meta_path)["crew"]["jack"]["status"], "cleanup_pending"
+        )
+        with patch.object(agents.execution, "retire", return_value={"lifetime": {"ok": True}}):
+            self.assertIn("Dismissed Jack.", self.dismiss())
+        self.assertEqual(protocol.active_assignment(self.crew)["state"], "done")
+        self.assertEqual(self.mail(message)["state"], "bounced")
 
     def test_dismiss_with_no_mail_prints_no_bounce_line(self):
         with protocol.checkpoint(self.directory) as state:
@@ -207,6 +229,7 @@ class DismissCrewTests(SessionCase):
         crew = Crew("jack", record, sessions.Session(self.directory, self.meta))
         self.assertTrue(protocol.unread(crew))
         with (
+            patch.object(agents.execution, "retire", return_value={"lifetime": {"ok": True}}),
             patch.object(runtime, "herdr", return_value={}),
             contextlib.redirect_stdout(io.StringIO()) as output,
         ):
@@ -356,6 +379,17 @@ class DismissUnlandedTests(SessionCase):
         (self.project / "src" / "new.py").write_text("")
         self.report("Done; all good.")
         self.assert_refused("[uncommitted] src/a.py, src/new.py")
+
+    def test_owned_paths_outside_the_checkout_are_named_not_handed_to_git(self):
+        outside = (self.root / "elsewhere" / "notes.md").resolve().as_posix()
+        with protocol.checkpoint(self.current.directory) as state:
+            protocol.active(state, self.crew)["paths"] = ["src", outside]
+        self.assertEqual(protocol.unlanded(self.project, protocol.active_assignment(self.crew)), [])
+        self.report("Done.")
+        with patch("builtins.print") as printed:
+            self.assertIn(("pane", "close", "w1:p2"), self.dismiss())
+        lines = [str(call.args[0]) for call in printed.call_args_list if call.args]
+        self.assertIn(f"Owned paths outside the checkout, not Git-tracked: {outside}", lines)
 
     def test_user_confirmation_is_the_only_override(self):
         (self.project / "src" / "a.py").write_text("a = 2\n")

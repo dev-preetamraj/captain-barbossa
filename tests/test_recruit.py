@@ -90,6 +90,7 @@ class RecruitTests(SessionCase):
         prepare.assert_not_called()
         saved = store.read_json(self.directory / "session.json")["crew"]["jack"]
         self.assertEqual(saved["execution_root"], str(self.project))
+        self.assertEqual(saved["outside_dirs"], [])
         self.assertNotIn("lifetime_id", saved)
         self.assertIn("cleanup is unavailable", error.getvalue())
         self.assertIn("exec /bin/codex", (self.directory / "crew-jack.sh").read_text())

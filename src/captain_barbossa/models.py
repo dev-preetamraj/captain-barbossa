@@ -246,14 +246,16 @@ def native_model_args(provider, model):
 
 
 def headless_argv(
-    provider, binary, task, *, writable=False, add_dir=None, model=None, isolated=False
+    provider, binary, task, *, writable=False, add_dirs=(), model=None, isolated=False
 ):
     """The whole literal argv for one paneless turn, built per provider, never composed.
 
     Each CLI gets the strongest gate it actually has rather than one forced shape, and
     every element here is written by this function: nothing a caller passes becomes a flag.
     `isolated` (background crew, pi only) also drops pi's extensions, MCP and other
-    executable resources; quiet leaves it off and is unchanged.
+    executable resources; quiet leaves it off and is unchanged. `add_dirs` are extra read
+    directories for a read-only turn and, for a writable one, the writable directories
+    outside the checkout.
     """
     if provider == "claude":
         argv = [binary, "-p", task, "--output-format", "json", "--permission-mode", "dontAsk"]
@@ -262,14 +264,17 @@ def headless_argv(
             argv += ["Edit", "Write"]
         else:
             argv += ["--disallowedTools", "Bash", "Write", "Edit"]
-            # Claude path-checks reads against its working directories; the others read the
-            # filesystem already, so this is the one provider that has to be told.
-            argv += ["--add-dir", add_dir] if add_dir else []
+        # Claude path-checks reads and writes against its working directories; the others
+        # read the filesystem already, so this is the one provider told about reads.
+        for directory in add_dirs:
+            argv += ["--add-dir", directory]
         return argv + native_model_args(provider, model)
     if provider == "codex":
         # --ignore-user-config because a trusted project or approvals_reviewer in the user's
-        # own config.toml silently defeats --sandbox; auth still comes from CODEX_HOME. No
-        # --add-dir: for Codex that flag grants writes, and its sandbox already reads freely.
+        # own config.toml silently defeats --sandbox; auth still comes from CODEX_HOME. For
+        # Codex --add-dir grants writes, so only a writable turn gets it; its sandbox
+        # already reads freely.
+        extra = [arg for directory in add_dirs for arg in ("--add-dir", directory)]
         return [
             binary,
             "exec",
@@ -279,6 +284,7 @@ def headless_argv(
             "--ephemeral",
             "--sandbox",
             "workspace-write" if writable else "read-only",
+            *(extra if writable else []),
             *native_model_args(provider, model),
             task,
         ]

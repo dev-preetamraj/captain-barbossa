@@ -323,6 +323,23 @@ class Pane:
             borders = [
                 index for index, line in enumerate(lines) if re.fullmatch(r"─{3,}|── .+─+", line)
             ]
+            # The startup update notice has two rulers of its own, before the editor.
+            if len(borders) == 4:
+                start, end = borders[:2]
+                if (
+                    end == start + 4
+                    and re.fullmatch(r"─{3,}", lines[start])
+                    and lines[start] == lines[end]
+                    and lines[start + 1] == "Update Available"
+                    and re.fullmatch(
+                        r"New version \d+\.\d+\.\d+ is available\. Run pi update",
+                        lines[start + 2],
+                    )
+                    and lines[start + 3] == "Changelog: https://pi.dev/changelog"
+                    and end < len(lines) - 5
+                    and not any(lines[end + 1 : -5])
+                ):
+                    borders = borders[2:]
             if (
                 len(lines) >= 5
                 and lines[-2].startswith(("/", "~"))

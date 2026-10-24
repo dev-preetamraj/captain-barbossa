@@ -121,9 +121,9 @@ Synchronous CAPTAIN quiet or a visible read-only crew only when the user explici
 a complete prompt is no reason. Otherwise quiet is for one bounded edit with --write. One
 headless turn, result printed and recorded, no assignment and no wait:
   CAPTAIN quiet --task 'instruction' [--diff worktree|staged] [--write PATH...]
-    [--model cheap|mid|strong]
-It reads the checkout and this session's own state itself; --diff hands it Git, which it
-cannot read. Paste nothing you can name instead. If the turn reports no answer, relay
+    [--read DIR...] [--model cheap|mid|strong]
+It reads the checkout, this session's own state and each --read DIR itself; --diff hands it
+Git, which it cannot read. Paste nothing you can name instead. If the turn reports no answer, relay
 its own words; never present an answer of your own in their place.
 The default is the same read-only turn as a paneless background crew; writable work stays
 foreground crew. Background is codex or pi only: if the user names another provider, say so
@@ -135,7 +135,8 @@ not read goes to a background crew, whatever you could answer by reading them yo
 captain's context is the scarce resource, and a background turn spends a throwaway one.
 Allowed bounded reads: CAPTAIN inspect files|read PATH|search TEXT|state session|project|repo|git
 status|log|current-branch|root|diff [--staged]|branches|ls-files|grep --text TEXT, plus memory
-reads and the coordination commands below.
+reads and the coordination commands below; files/read/search also take absolute paths
+outside the checkout.
 Self-check first, in this order:
 No model needed? CAPTAIN do.
 Read-only model work, even one bounded turn? Background crew; CAPTAIN quiet only if asked.
@@ -233,7 +234,8 @@ the work in the working tree and report the diff.
 CLAUDE_NO_ATTRIBUTION = json.dumps({"attribution": {"commit": "", "pr": "", "sessionUrl": False}})
 
 
-def native_args(provider, instructions, model=None, events=None):
+def native_args(provider, instructions, model=None, events=None, add_dirs=()):
+    """add_dirs: directories of crew-owned paths outside the checkout, made writable."""
     hook = (
         [sys.executable, "-m", "captain_barbossa", "hook", str(events)]
         if events is not None
@@ -256,6 +258,9 @@ def native_args(provider, instructions, model=None, events=None):
                 settings["hooks"]["PreToolUse"] = settings["hooks"]["Stop"]
                 settings["hooks"]["PostToolUse"] = settings["hooks"]["Stop"]
                 settings["hooks"]["PostToolUseFailure"] = settings["hooks"]["Stop"]
+        if add_dirs:
+            # PreToolUse still gates every call; this only lifts the working-directory check.
+            settings["permissions"] = {"additionalDirectories": list(add_dirs)}
         flags = [
             "--append-system-prompt",
             instructions,
@@ -284,8 +289,10 @@ def native_args(provider, instructions, model=None, events=None):
                 ]
             )
         # The sandbox runs reads and workspace edits unasked; network and writes outside
-        # it still prompt, and the captain judges those.
+        # it still prompt, and the captain judges those. --add-dir makes owned outside
+        # directories writable too; .git stays read-only.
         flags += (
             ["--sandbox", "workspace-write", "--ask-for-approval", "on-request"] if crew else []
         )
+        flags += [arg for directory in add_dirs for arg in ("--add-dir", directory)] if crew else []
     return [*flags, *native_model_args(provider, model)]

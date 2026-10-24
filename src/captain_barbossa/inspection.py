@@ -16,7 +16,7 @@ import time
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
 
-from . import memory, sessions, store
+from . import memory, protocol, sessions, store
 from .runtime import CaptainError
 
 MAX_BYTES = 64 * 1024
@@ -101,22 +101,60 @@ def _relative(root, value):
     return path
 
 
+def _outside(target):
+    """An absolute path outside the project as its own canonical root and relative path."""
+    if "\0" in str(target) or ".." in target.parts:
+        _fail("outside-root", "parent traversal and NUL bytes are not allowed.")
+    # Only the parent is resolved; the leaf is still opened without following a symlink.
+    root, leaf = target.parent.resolve(strict=True), Path(target.name or ".")
+    if os.environ.get("CAPTAIN_ROLE") == "crew":
+        target = root / leaf
+        for stored in (store.state_root(), store.temp_root()):
+            if protocol.overlaps(target, stored.resolve()):
+                _fail("forbidden-scope", "crew may inspect only repo state.")
+    return root, leaf
+
+
 @contextmanager
-def _open(root, path):
-    """Walk from an authorized canonical root without following swapped-in symlinks."""
-    path = _relative(root, path)
-    fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+def _open_root(root):
+    """Open an absolute directory without following a symlink in any component."""
+    root = Path(root)
+    if not root.is_absolute():
+        _fail("outside-root", "inspection roots must be absolute.")
+    fd = os.open(root.anchor, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
-        for index, part in enumerate(path.parts):
-            flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
-            if index < len(path.parts) - 1:
-                flags |= os.O_DIRECTORY
-            next_fd = os.open(part, flags, dir_fd=fd)
+        for part in root.parts[1:]:
+            next_fd = os.open(
+                part,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                dir_fd=fd,
+            )
             os.close(fd)
             fd = next_fd
         yield fd
     finally:
         os.close(fd)
+
+
+@contextmanager
+def _open(root, path):
+    """Walk from an authorized canonical root without following swapped-in symlinks."""
+    path = _relative(root, path)
+    with _open_root(root) as root_fd:
+        fd = root_fd
+        try:
+            for index, part in enumerate(path.parts):
+                flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+                if index < len(path.parts) - 1:
+                    flags |= os.O_DIRECTORY
+                next_fd = os.open(part, flags, dir_fd=fd)
+                if fd != root_fd:
+                    os.close(fd)
+                fd = next_fd
+            yield fd
+        finally:
+            if fd != root_fd:
+                os.close(fd)
 
 
 def read_bytes(root, path, limit=MAX_BYTES):
@@ -433,7 +471,11 @@ def run(args, project):
                     _fail("missing", "selected state scope does not exist.")
                 if root.resolve() != root.absolute():
                     _fail("outside-root", "stored scope must not contain symlinks.")
-            path = _relative(root, args.path)
+            target = Path(args.path)
+            if command != "state" and target.is_absolute() and not target.is_relative_to(root):
+                root, path = _outside(target)
+            else:
+                path = _relative(root, args.path)
             if command == "files":
                 result = _files(root, path, deadline)
             elif command == "search":

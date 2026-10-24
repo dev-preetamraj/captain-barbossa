@@ -157,18 +157,16 @@ for slot order, split ratios, dismissal behavior, and validation.
 | `mid`    | claude-sonnet-5-5 | gpt-5.6-sol          | grok-4.6             |
 | `strong` | claude-opus-5-5   | gpt-6-astra          | grok-4.7             |
 
-**`cheap` is the default**: omitting `--model` recruits a `cheap` crew rather
-than falling through to whatever the native CLI is configured to use, so
-routine work never silently lands on an expensive model. `cheap` covers
-commits, tests, lint, formatting, docs, chores, renames, and mechanical
-edits. `mid` is for a normal feature or a change inside one area, `strong`
-for design, debugging, or multi-file and long-context work.
+**`cheap` is the configured default** when `--model` is omitted, rather than
+falling through to whatever the native CLI uses. When recruiting, the captain
+chooses a tier by task complexity: `cheap` for a focused fix or established
+pattern, `mid` for a normal feature or change inside one area, and `strong` for
+design, debugging, or multi-file and long-context work. Risk or importance
+alone does not call for a stronger model.
 
-The captain is instructed not to step up just because a task feels ambiguous,
-risky, or important: it steps up only when you ask for a stronger model, or
-after a cheap crew has already failed or stalled. Retier a running crew in
-place with `captain model <name> mid|strong` rather than recruiting high
-up front.
+Retier a running crew with `captain model <name> cheap|mid|strong` when its
+model stops fitting the work, such as a cheap crew that is stuck or a
+mechanical follow-up on a strong crew.
 
 Free text also works and is matched to the closest model the chosen CLI
 offers (exact IDs and aliases first, then prefixes, substrings, and close
@@ -228,7 +226,8 @@ captain tell Jack "also update the changelog" --assignment <assignment-id>
 
 `tell` appends to an active assignment while keeping the pane, model, and
 conversation; it does not replace the original task. New assignments declare
-owned paths with repeated `--owns PATH` and grants with repeated `--allow ACTION`.
+owned paths with repeated `--owns PATH` (absolute paths outside the checkout are
+allowed) and grants with repeated `--allow ACTION`.
 Use `ask`/`answer` for a question, `done --report` for completion, and
 `assign --handoff` to reuse a finished assignment's crew. Dismissed crew are refused.
 
@@ -330,7 +329,11 @@ captain dismiss Jack
 `dismiss` has no flags. It permanently closes the pane, records the dismissal,
 and permits name reuse with an explicit handoff; handle unreported or uncommitted work first.
 Unread mail is bounced, not delivered, and the command reports which messages
-bounced. See
+bounced. After a Herdr workspace disappears, `captain --session ID dismiss Jack`
+from a new workspace releases that session's crew once Herdr confirms the old
+workspace gone: no done report is needed, no pane is closed, unlanded work is
+still refused, and a managed writer stays `cleanup_pending` until its shutdown is
+confirmed. See
 [crew-lifecycle.md](https://github.com/dev-preetamraj/captain-barbossa/blob/main/docs/crew-lifecycle.md)
 for dismissal and shared-checkout guardrails.
 
@@ -344,7 +347,9 @@ captain inspect state repo graph.json
 captain inspect git diff --staged
 ```
 
-`inspect` runs without Herdr lookup. Paths are literal and project-bounded;
+`inspect` runs without Herdr lookup. Paths are literal and project-bounded,
+except that `files`, `read` and `search` accept an absolute path outside the
+checkout (crew: never captain state);
 `state` selects only `session`, `project`, or `repo` storage (crew: repo only).
 Git operations are fixed: `status`, `log`, `current-branch`, `root`, and `diff`.
 No shell, arbitrary flags, or external helpers are accepted. Results are JSON,
@@ -389,7 +394,7 @@ There is no fuzzy matching, model fallback, execution or approval in resolution.
 `captain quiet` runs one headless model turn using the session captain's native
 CLI, prints its report, and needs no crew assignment or wait. It is read-only
 by default; repeat `--write PATH` to name files it may edit, leaving edits
-unstaged. `--diff worktree|staged` appends the selected Git diff to the task;
+unstaged, or `--read DIR` to let a read-only turn read outside the checkout. `--diff worktree|staged` appends the selected Git diff to the task;
 `--model` selects a tier or model (the configured crew tier by default), and
 `--timeout SECONDS` overrides the 900-second limit.
 
@@ -561,7 +566,7 @@ Read the affected pane before retrying or approving anything.
 | `captain check NAME ACTION [PATH ...] [--assignment ID]` | Check grants; ID may default for newly launched crew; executes nothing |
 | `captain inspect files\|read\|search\|state\|git ...` | Bounded local inspection |
 | `captain do commit\|push\|branch\|switch\|fetch\|pull\|run ...` | Synchronous deterministic work without crew |
-| `captain quiet --task TEXT [--diff worktree\|staged] [--write PATH] [--model MODEL] [--timeout SECONDS]` | One headless model turn; repeat `--write` for multiple files |
+| `captain quiet --task TEXT [--diff worktree\|staged] [--write PATH] [--read DIR] [--model MODEL] [--timeout SECONDS]` | One headless model turn; repeat `--write` for multiple files |
 | `captain status [--all]` | Print a table of this session's crew |
 | `captain dashboard [--interval SECONDS] [--refresh-prices]` | Refresh a crew token-usage table; optionally refresh prices |
 | `captain focus NAME` | Focus crew's pane and tab |

@@ -5,8 +5,11 @@ import fcntl
 import io
 import json
 import os
+import signal
 import subprocess
+import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -100,6 +103,7 @@ class DoTests(unittest.TestCase):
             **{
                 "task": "what does do.py do?",
                 "write": [],
+                "read": [],
                 "model": "cheap",
                 "timeout": None,
                 "diff": None,
@@ -422,6 +426,114 @@ class DoTests(unittest.TestCase):
         self.assertEqual((entry["action"], entry["exit"]), ("run", 0))
         self.assertIn("ran the suite", entry["output"])
 
+    def test_a_timed_out_command_terminates_then_kills_its_process_group(self):
+        pid_path = self.root / "descendant.pid"
+        term_path = self.root / "descendant.terminated"
+        child = """
+import os
+import signal
+import sys
+import time
+
+def term(*_):
+    open(sys.argv[2], "w").write("terminated")
+
+signal.signal(signal.SIGTERM, term)
+open(sys.argv[1], "w").write(str(os.getpid()))
+time.sleep(30)
+"""
+        parent = """
+import pathlib
+import subprocess
+import sys
+import time
+
+subprocess.Popen([sys.executable, "-c", sys.argv[1], sys.argv[2], sys.argv[3]])
+while not pathlib.Path(sys.argv[2]).exists():
+    time.sleep(0.01)
+time.sleep(30)
+"""
+        try:
+            with (
+                mock.patch.object(do, "GROUP_TERMINATE_TIMEOUT", 0.1),
+                self.assertRaisesRegex(CaptainError, "exceeded"),
+            ):
+                do._capture(
+                    self.project,
+                    [sys.executable, "-c", parent, child, str(pid_path), str(term_path)],
+                    timeout=0.2,
+                )
+            self.assertEqual(term_path.read_text(encoding="utf-8"), "terminated")
+            pid = int(pid_path.read_text(encoding="utf-8"))
+            deadline = time.monotonic() + 2
+            while time.monotonic() < deadline:
+                try:
+                    os.kill(pid, 0)
+                except ProcessLookupError:
+                    break
+                time.sleep(0.02)
+            else:
+                self.fail("timed-out descendant remained alive")
+        finally:
+            if pid_path.exists():
+                try:
+                    os.kill(int(pid_path.read_text(encoding="utf-8")), signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+
+    def test_a_setsid_descendant_cannot_hold_timeout_capture_pipes_open(self):
+        pid_path = self.root / "escaped.pid"
+        child = """
+import os
+import sys
+import time
+
+os.setsid()
+open(sys.argv[1], "w").write(str(os.getpid()))
+time.sleep(30)
+"""
+        parent = """
+import pathlib
+import subprocess
+import sys
+import time
+
+subprocess.Popen([sys.executable, "-c", sys.argv[1], sys.argv[2]])
+while not pathlib.Path(sys.argv[2]).exists():
+    time.sleep(0.01)
+time.sleep(30)
+"""
+        started = time.monotonic()
+        try:
+            with (
+                mock.patch.object(do, "GROUP_TERMINATE_TIMEOUT", 0.1),
+                self.assertRaisesRegex(CaptainError, "exceeded"),
+            ):
+                do._capture(
+                    self.project,
+                    [sys.executable, "-c", parent, child, str(pid_path)],
+                    timeout=0.2,
+                )
+            self.assertLess(time.monotonic() - started, 2)
+        finally:
+            if pid_path.exists():
+                try:
+                    os.kill(int(pid_path.read_text(encoding="utf-8")), signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+
+    def test_an_interrupt_cleans_up_the_process_group_before_propagating(self):
+        process = mock.Mock()
+        process.communicate.side_effect = KeyboardInterrupt
+        with (
+            mock.patch.object(do.subprocess, "Popen", return_value=process) as popen,
+            mock.patch.object(do, "_terminate_process_group") as terminate,
+            self.assertRaises(KeyboardInterrupt),
+        ):
+            do._capture(self.project, ["command"])
+        self.assertTrue(popen.call_args.kwargs["start_new_session"])
+        terminate.assert_called_once_with(process)
+
     def test_a_failing_target_is_loud_and_recorded_before_it_is_raised(self):
         (self.project / "Makefile").write_text(
             "test:\n\t@echo boom >&2; exit 3\n", encoding="utf-8"
@@ -623,15 +735,33 @@ class DoTests(unittest.TestCase):
         self.assertEqual(self.allowed(argv), ["Read", "Grep", "Glob", "Edit", "Write"])
         self.assertNotIn("--disallowedTools", argv.read_text(encoding="utf-8").splitlines())
 
-    def test_quiet_refuses_a_write_path_outside_the_project_or_inside_dot_git(self):
+    def test_quiet_refuses_a_write_path_inside_dot_git(self):
         self.fake_claude(SUCCESS)
-        for path in ("../elsewhere", ".git/config"):
-            with (
-                self.subTest(path=path),
-                self.assertRaisesRegex(CaptainError, "inside the project"),
-            ):
-                self.run_quiet(write=[path])
-        self.assert_refused("quiet", 2, "inside the project")
+        with self.assertRaisesRegex(CaptainError, "protected-path"):
+            self.run_quiet(write=[".git/config"])
+        self.assert_refused("quiet", 1, "protected-path")
+        with self.assertRaisesRegex(CaptainError, "protected-path"):
+            self.run_quiet(write=[str(Path.home())])
+
+    def test_quiet_refuses_an_outside_file_instead_of_granting_its_parent(self):
+        argv = self.fake_claude(SUCCESS)
+        elsewhere = self.project.parent / "elsewhere"
+        elsewhere.mkdir()
+        file = elsewhere / "notes.md"
+        file.write_text("notes", encoding="utf-8")
+        with self.assertRaisesRegex(CaptainError, "outside file"):
+            self.run_quiet(write=[str(file)])
+        self.assert_refused("quiet", 1, "outside-file")
+        self.assertFalse(argv.exists())
+
+    def test_a_read_only_turn_may_read_named_directories_outside_the_project(self):
+        argv = self.fake_claude(SUCCESS)
+        self.run_quiet(read=["/opt/elsewhere"])
+        written = argv.read_text(encoding="utf-8").splitlines()
+        self.assertIn(str(Path("/opt/elsewhere").resolve()), written)
+        self.assertIn("Write", written[written.index("--disallowedTools") :])
+        with self.assertRaisesRegex(CaptainError, "read-only turn"):
+            self.run_quiet(read=["/opt/elsewhere"], write=["README.md"])
 
     def test_quiet_refuses_a_turn_that_did_not_complete(self):
         self.fake_claude({**SUCCESS, "is_error": True, "subtype": "error_during_execution"})
@@ -888,14 +1018,19 @@ class HeadlessProviderTests(unittest.TestCase):
 
     def test_only_claude_is_told_about_the_session_directory(self):
         # The others read the filesystem already; for codex --add-dir grants writes, so it
-        # must never appear.
+        # must never appear on a read-only turn.
         for provider in models.PROVIDERS:
             with self.subTest(provider=provider):
-                argv = models.headless_argv(provider, provider, "task", add_dir="/tmp/session")
+                argv = models.headless_argv(provider, provider, "task", add_dirs=["/tmp/session"])
                 self.assertEqual("/tmp/session" in argv, provider == "claude")
-        self.assertNotIn(
-            "--add-dir", models.headless_argv("claude", "claude", "t", writable=True, add_dir="/x")
-        )
+
+    def test_a_writable_turn_gets_its_outside_directories_where_the_cli_confines_writes(self):
+        for provider in models.PROVIDERS:
+            with self.subTest(provider=provider):
+                argv = models.headless_argv(
+                    provider, provider, "task", writable=True, add_dirs=["/elsewhere"]
+                )
+                self.assertEqual("/elsewhere" in argv, provider in ("claude", "codex"))
 
     def test_background_pi_drops_user_extensions_while_quiet_is_unchanged(self):
         pi = models.headless_argv("pi", "pi", "task", isolated=True)

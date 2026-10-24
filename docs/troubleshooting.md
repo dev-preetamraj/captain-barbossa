@@ -41,7 +41,11 @@
   session and retry only after fixing the stated cause.
 - **"This session belongs to another project or Herdr workspace."** — a
   session ID is tied to the captain checkout/project and workspace it was created in. Start a new captain
-  or pass the matching `--session`.
+  or pass the matching `--session`. The one exception is `captain --session ID dismiss NAME` once
+  Herdr's workspace list proves the old workspace gone: it releases that session's
+  crew without a done report, closes no pane, and still refuses unlanded work. A
+  managed writer stays `cleanup_pending` until its exit receipt confirms shutdown;
+  retry `dismiss` then. An unverifiable listing keeps the refusal.
 - **"durable memory root ... is inside the OS temp directory"** — a captain
   started before the state/temp split is still exporting one root to its
   children; restart it so project-scope memory survives temp cleanup.

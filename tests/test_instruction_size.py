@@ -187,7 +187,7 @@ class InstructionSizeTests(unittest.TestCase):
             "Allowed bounded reads: CAPTAIN inspect files|read PATH|search TEXT|"
             "state session|project|repo|git status|log|current-branch|root|diff [--staged]|"
             "branches|ls-files|grep --text TEXT, plus memory reads and the coordination "
-            "commands below.",
+            "commands below; files/read/search also take absolute paths outside the checkout.",
             captain,
         )
         crew = instruction_prompts.agent_instructions(self.directory, "crew member Jack")

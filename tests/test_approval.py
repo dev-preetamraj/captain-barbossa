@@ -12,6 +12,7 @@ from unittest.mock import patch
 from captain_barbossa import events, protocol, sessions, store
 from captain_barbossa.approval import REASONS, Decision, Request, Verdict, decide
 from captain_barbossa.crew import Crew, event_status
+from captain_barbossa.runtime import CaptainError
 from tests.home_isolation import SessionCase
 
 PROJECT = "/repo"
@@ -424,6 +425,42 @@ class ApprovalTests(unittest.TestCase):
         self.assertEqual(tool("Edit", ()), "unparsed")
         self.assertEqual(tool("WebFetch", ()), "unknown-tool")
         self.assertEqual(Decision(tool("mcp__x__write", ())).verdict, Verdict.ESCALATE)
+
+    def test_an_owned_path_outside_the_project_is_writable_but_never_its_git(self):
+        owned = (*OWNED, "/elsewhere/site")
+
+        def tool(paths):
+            return decide(Request("Edit", PROJECT, PROJECT, owned, ALL_ACTIONS, paths=paths)).code
+
+        def shell(command):
+            return decide(
+                Request("Bash", PROJECT, PROJECT, owned, ALL_ACTIONS, command=command)
+            ).code
+
+        self.assertEqual(tool(("/elsewhere/site/index.md",)), "granted")
+        self.assertEqual(shell("echo x > /elsewhere/site/index.md"), "granted")
+        self.assertEqual(tool(("/elsewhere/other.md",)), "outside-grant")
+        self.assertEqual(tool(("/elsewhere/site/.git/config",)), "outside-grant")
+        self.assertEqual(tool(("/elsewhere/site/.GIT/config",)), "outside-grant")
+        self.assertEqual(tool(("/elsewhere/site/.captain/config",)), "outside-grant")
+        self.assertEqual(tool(("/elsewhere/site/.CAPTAIN/config",)), "outside-grant")
+        self.assertEqual(shell("echo x > /elsewhere/site/.git/HEAD"), "outside-grant")
+        self.assertEqual(shell("echo x > /elsewhere/site/.Git/HEAD"), "outside-grant")
+        self.assertEqual(shell("echo x > /elsewhere/site/.captain/settings.toml"), "outside-grant")
+        # The gates that never depended on ownership stay where they were.
+        self.assertEqual(shell("rm /elsewhere/site/index.md"), "destructive")
+
+    def test_project_captain_settings_are_refused_like_assignment_ownership(self):
+        for owned, path in (
+            ((".captain",), f"{PROJECT}/.captain/settings.toml"),
+            ((".",), f"{PROJECT}/.captain/graph.json"),
+            (("src",), f"{PROJECT}/src/.Captain/x"),
+        ):
+            request = Request("Edit", PROJECT, PROJECT, owned, ALL_ACTIONS, paths=(path,))
+            with self.subTest(path=path):
+                self.assertEqual(decide(request).code, "outside-grant")
+                with self.assertRaisesRegex(CaptainError, "protected-path"):
+                    protocol.owned_path(Path(PROJECT), path)
 
     def test_crew_protocol_verbs_pass_but_captain_cannot_launder_other_work(self):
         captain = shlex.join([sys.executable, "-m", "captain_barbossa", "--session", "s1"])

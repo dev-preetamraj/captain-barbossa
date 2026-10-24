@@ -902,7 +902,17 @@ def close(session, ref):
         ):
             _close_state(session, ref, "failed")
             return Verdict(False, "unverified-terminal")
-        actual = runtime.herdr("pane", "get", expected["pane_id"], timeout=5).get("pane", {})
+        try:
+            actual = runtime.herdr("pane", "get", expected["pane_id"], timeout=5).get("pane", {})
+        except runtime.HERDR_ERRORS as exc:
+            # The group is already confirmed stopped; a Herdr listing without the bound
+            # workspace proves its terminal went with it, so nothing is left to close.
+            if not re.search(r"\bpane_not_found\b", str(exc)) or not sessions.workspace_gone(
+                expected["workspace_id"]
+            ):
+                raise
+            _close_state(session, ref, "closed")
+            return check(session, ref, **identity)
         if any(actual.get(key) != value for key, value in expected.items()):
             _close_state(session, ref, "failed")
             return Verdict(False, "terminal-mismatch")

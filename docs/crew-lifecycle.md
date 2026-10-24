@@ -167,6 +167,11 @@ New recruits receive separate crew-incarnation, assignment, and message IDs.
 flag as needed. `read` and `search` are always granted. Other actions are `edit`,
 `test`, `build`, `format`, `commit`, `version`, and `delete`. Overlapping active
 ownership is refused, and `check` requires owned paths for mutation actions.
+An owned path may be absolute, outside the checkout: it is recorded resolved, runs
+shared (never in a worktree), is passed to Codex as `--add-dir` and to Claude as an
+additional directory, and is left out of Git's unlanded check. `.git` anywhere, `/`,
+home, a project ancestor, captain state, `~/.captain` and native CLI config homes are
+refused.
 These checks do not intercept all native tools. Claude PermissionRequest hooks
 add assignment-scoped approval decisions; other providers retain native permissions.
 
@@ -366,6 +371,15 @@ an unresolved delivery, is actually holding it. Any mail still unread at that
 point is bounced with a reason instead of being left queued, and the command
 names each bounced message. It is permanent, so handle unreported or
 uncommitted work first; commit only when the user explicitly requested it.
+
+A crew whose Herdr workspace is gone (captain or Herdr exited) can still be
+dismissed from a new workspace with `captain --session ID dismiss Jack`, but only
+when a well-formed Herdr workspace list omits the old workspace. No done report or
+acknowledgement is required and no pane is closed, since its ID may be recycled;
+unlanded work is still refused. A managed writer is released only once its exit
+receipt confirms shutdown; until then the crew stays `cleanup_pending` and
+`dismiss` can be retried. A real done report is kept; otherwise the assignment
+closes as "Dismissed after Herdr workspace disappeared."
 
 ## Editing guardrails
 

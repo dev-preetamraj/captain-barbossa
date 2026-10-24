@@ -143,6 +143,7 @@ class CrewTabLabelTests(SessionCase):
         protocol.poll(crew, delivery["delivery_id"])
         with (
             patch.object(runtime, "herdr", side_effect=track_dismiss),
+            patch.object(agents.execution, "retire", return_value={"lifetime": {"ok": True}}),
             contextlib.redirect_stdout(io.StringIO()),
         ):
             agents.dismiss_crew(args_dismiss, self.pane, self.project)

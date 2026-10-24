@@ -15,7 +15,7 @@ from .models import HOOK_DELIVERED, HOOKLESS
 from .pane import DRAFT_GATE, HOLD_EXPIRY, UNREADABLE_EXPIRY, UNREADABLE_GATE
 from .runtime import HERDR_ERRORS, CaptainError, check_text, inside_project
 from .sessions import session_directories
-from .store import lock, read_json, state_storage, write_json
+from .store import lock, read_json, state_root, state_storage, temp_root, write_json
 
 ACTIONS = ("read", "search", "edit", "test", "build", "format", "commit", "version", "delete")
 WRITE_ACTIONS = ("edit", "format", "commit", "version", "delete")
@@ -69,13 +69,70 @@ def checkpoint(directory, timeout=None):
         write_json(path, state)
 
 
+def protected_paths():
+    """Captain state and settings and native CLI config homes: owning one could rewrite
+    grants, hooks or allow rules."""
+    home = Path.home()
+    homes = {
+        "CLAUDE_CONFIG_DIR": home / ".claude",
+        "CODEX_HOME": home / ".codex",
+        "PI_CODING_AGENT_DIR": home / ".pi",
+        "GROK_HOME": home / ".grok",
+    }
+    paths = [state_root(), temp_root(), home / ".captain", home / ".claude.json"]
+    for variable, default in homes.items():
+        paths += [default, Path(os.environ.get(variable) or default).expanduser()]
+    return [path.resolve() for path in paths]
+
+
+def _case_path(value):
+    return Path(*(part.casefold() for part in Path(value).parts))
+
+
+def owned_path(root, value):
+    """Root-relative inside root, else the resolved absolute path; never .git, /, home,
+    an ancestor of root, captain state or a native CLI config home."""
+    path = (root / value).resolve()
+    if any(part.casefold() in {".git", ".captain"} for part in path.parts):
+        raise CaptainError(
+            f"[protected-path] Owned path must not be .git, .captain, /, home or a project "
+            f"ancestor: {value}"
+        )
+    if path.is_relative_to(root):
+        return inside_project(root, value, "Owned path")
+    if _case_path(root).is_relative_to(_case_path(path)) or _case_path(
+        Path.home().resolve()
+    ).is_relative_to(_case_path(path)):
+        raise CaptainError(
+            f"[protected-path] Owned path must not be .git, /, home or a project ancestor: {value}"
+        )
+    if any(overlaps(path, protected) for protected in protected_paths()):
+        raise CaptainError(
+            f"[protected-path] Owned path must not touch captain state or a native CLI home: {value}"
+        )
+    return path.as_posix()
+
+
 def owned_paths(project, paths):
     root = Path(project).resolve()
-    return sorted({inside_project(root, value, "Owned path") for value in paths})
+    return sorted({owned_path(root, value) for value in paths})
+
+
+def outside_dirs(root, paths):
+    """Owned outside directories safe for native --add-dir flags."""
+    allowed = []
+    for directory in {Path(path) for path in paths}:
+        if not directory.is_absolute() or not directory.is_dir():
+            continue
+        try:
+            allowed.append(owned_path(Path(root).resolve(), directory))
+        except CaptainError:
+            pass
+    return sorted(allowed)
 
 
 def overlaps(left, right):
-    a, b = Path(left), Path(right)
+    a, b = _case_path(left), _case_path(right)
     return a.is_relative_to(b) or b.is_relative_to(a)
 
 
@@ -139,6 +196,8 @@ def begin(crew, project, task, paths=(), actions=(), handoff=None, *, assignment
         raise CaptainError("[worktree-handoff] Recruit a fresh isolated crew for a new assignment.")
     inherit_paths, inherit_actions = not paths, not actions
     paths = owned_paths(execution_root, paths)
+    if crew.record.get("worktree_id") and any(Path(path).is_absolute() for path in paths):
+        raise CaptainError("[worktree-outside] A worktree cannot isolate paths outside it.")
     actions = sorted(set(actions) | {"read", "search"})
     if set(actions) - set(ACTIONS):
         raise CaptainError("Unknown assignment action.")
@@ -172,13 +231,22 @@ def begin(crew, project, task, paths=(), actions=(), handoff=None, *, assignment
                 paths = inherited["paths"]
             if inherit_actions:
                 actions = inherited["actions"]
+        launched_dirs = crew.record.get("outside_dirs")
+        if launched_dirs is not None and outside_dirs(execution_root, paths) != launched_dirs:
+            raise CaptainError(
+                "[launch-directories] Assignment outside directories differ from crew launch; "
+                "recruit fresh crew."
+            )
         if "edit" in actions and not paths:
             raise CaptainError("[missing-owned-paths] Edit actions require owned paths.")
         for other in project_assignments(project, state, crew.session.directory):
-            if (
-                other["state"] != "done"
-                and Path(other.get("execution_root", project)).resolve() == execution_root
-                and any(overlaps(a, b) for a in paths for b in other["paths"])
+            if other["state"] != "done" and any(
+                overlaps(a, b)
+                for a in paths
+                for b in other["paths"]
+                # Absolute paths are the same file from every execution root.
+                if Path(a).is_absolute()
+                or Path(other.get("execution_root", project)).resolve() == execution_root
             ):
                 raise CaptainError(
                     f"[owned-path-conflict] Owned paths overlap active assignment {other['id']}."
@@ -262,7 +330,8 @@ def unlanded(project, assignment):
     A report is evidence, not proof: every commit it names must be reachable from a ref,
     and the owned paths must hold no uncommitted or untracked change.
     """
-    paths = assignment["paths"]
+    # Paths outside the checkout are not Git's to vouch for; dismiss names them instead.
+    paths = [path for path in assignment["paths"] if not Path(path).is_absolute()]
     if not paths:
         return []
     inside = _git(project, "rev-parse", "--is-inside-work-tree")

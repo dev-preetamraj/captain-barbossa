@@ -75,6 +75,9 @@ class CloseSessionPanesTests(SessionCase):
 
         self.close(herdr)
         self.assertEqual(calls[-1], ("pane", "close", "w1:p9"))
+        self.assertEqual(
+            store.read_json(self.current.meta_path)["crew"]["jack"]["status"], "dismissed"
+        )
 
     def test_each_crew_is_recorded_dismissed_as_its_pane_closes(self):
         """A resumed --session must not find a crew holding a slot no pane backs; a crew
@@ -117,6 +120,46 @@ class CloseSessionPanesTests(SessionCase):
             self.close(lambda *args, **_: {})
         saved = store.read_json(self.current.directory / "protocol.json")
         self.assertNotEqual(saved["assignments"][assignment["id"]]["state"], "done")
+        self.assertEqual(
+            store.read_json(self.current.meta_path)["crew"]["jack"]["status"], "cleanup_pending"
+        )
+        with (
+            patch.object(protocol, "unlanded", return_value=[]),
+            patch.object(
+                agents.execution, "retire", return_value={"lifetime": {"ok": True}}
+            ) as retire,
+        ):
+            self.close(lambda *args, **_: {})
+        retire.assert_called_once()
+        self.assertEqual(
+            store.read_json(self.current.meta_path)["crew"]["jack"]["status"], "dismissed"
+        )
+        saved = store.read_json(self.current.directory / "protocol.json")
+        self.assertEqual(saved["assignments"][assignment["id"]]["state"], "done")
+
+    def test_failed_herdr_close_preserves_mail_and_can_be_retried(self):
+        record = self.current.meta["crew"]["jack"]
+        record["incarnation_id"] = "jack"
+        store.write_json(self.current.meta_path, self.current.meta)
+        crew = Crew("jack", record, self.current)
+        assignment = protocol.begin(crew, self.project, "edit", ["src"], ["edit"])
+        message = protocol.deliver(crew, "edit", initial=True, queue_only=True)
+        with (
+            patch.object(protocol, "unlanded", return_value=[]),
+            patch.object(agents.runtime, "herdr", side_effect=CaptainError("close failed")),
+        ):
+            agents.close_session_panes(self.current.meta["id"], self.project)
+        self.assertEqual(
+            store.read_json(self.current.meta_path)["crew"]["jack"]["status"], "cleanup_pending"
+        )
+        self.assertEqual(protocol.active_assignment(crew)["state"], "working")
+        mail = protocol.mail_dir(self.current.directory, "jack") / f"{message}.json"
+        self.assertEqual(store.read_json(mail)["state"], "queued")
+        with patch.object(protocol, "unlanded", return_value=[]):
+            self.close(lambda *args, **_: {})
+        self.assertEqual(protocol.active_assignment(crew)["id"], assignment["id"])
+        self.assertEqual(protocol.active_assignment(crew)["state"], "done")
+        self.assertEqual(store.read_json(mail)["state"], "bounced")
 
     def await_marker(self, marker):
         deadline = time.monotonic() + 15

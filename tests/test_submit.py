@@ -515,6 +515,48 @@ class SubmitTaskTests(unittest.TestCase):
                 with patch.object(runtime, "herdr", return_value=screen):
                     self.assertEqual(Pane("builder").draft_pending("pi"), bool(draft))
 
+    def test_pi_startup_update_notice_is_not_an_editor_boundary(self):
+        rule = "─" * 83
+        warning = (
+            " Warning: Anthropic subscription auth is active. Third-party harness usage draws\n"
+            " from extra usage and is billed per token, not your Claude plan limits. Manage\n"
+            " extra usage at https://claude.ai/settings/usage. Disable this warning in\n"
+            " /settings.\n\n"
+        )
+        notice = (
+            f"{rule}\n Update Available\n"
+            " New version 1.4.0 is available. Run pi update\n"
+            f" Changelog: https://pi.dev/changelog\n{rule}\n"
+        )
+        footer = (
+            "~/code/projects/captain-barbossa (fix/outside-repo-access)\n"
+            "$0.000 (sub) 0.0%/1.0M (auto)                  "
+            "(anthropic) claude-opus-5-5 • medium"
+        )
+        for prefix in ("", warning):
+            for draft in ("", "user draft", "multiline\ndraft", f"draft\n{rule}\n"):
+                with self.subTest(warning=bool(prefix), draft=draft):
+                    screen = f"{prefix}{notice}" + "\n" * 15
+                    screen += f"{rule}\n{draft}\n{rule}\n{footer}"
+                    with patch.object(runtime, "herdr", return_value=screen):
+                        self.assertEqual(Pane("builder").draft_pending("pi"), bool(draft))
+                        for provider in (None, "claude", "codex", "grok"):
+                            self.assertTrue(Pane("builder").draft_pending(provider))
+
+        # An incomplete or edited notice, or a notice inside a draft, is not chrome.
+        for banner in (
+            notice.replace("Update Available", "Update"),
+            notice.replace("https://pi.dev/changelog", "https://example.com"),
+            notice.replace("Run pi update", "Run something else"),
+            notice.replace(f"{rule}\n", "", 1),
+            f"{rule}\nuser draft\n{notice}",
+            f"{notice}user draft\n",
+        ):
+            with self.subTest(banner=banner):
+                screen = f"{banner}\n{rule}\n\n{rule}\n{footer}"
+                with patch.object(runtime, "herdr", return_value=screen):
+                    self.assertTrue(Pane("builder").draft_pending("pi"))
+
     def test_pi_markdown_and_ambiguous_borders_preserve_drafts_without_input(self):
         rule = "─" * 40
         footer = "~/project\n0.0%/272k (auto)"

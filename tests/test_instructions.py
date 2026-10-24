@@ -605,6 +605,27 @@ class InstructionTests(SessionCase):
                 self.assertNotIn("--sandbox", captain)
                 self.assertNotIn("--permission-mode", captain)
 
+    def test_owned_directories_outside_the_checkout_reach_the_native_write_boundary(self):
+        dirs = ["/elsewhere/site"]
+        codex = instruction_prompts.native_args(
+            "codex", "instructions", events="/tmp/jack.jsonl", add_dirs=dirs
+        )
+        self.assertEqual(codex[codex.index("--add-dir") :][:2], ["--add-dir", "/elsewhere/site"])
+        claude = instruction_prompts.native_args(
+            "claude", "instructions", events="/tmp/jack.jsonl", add_dirs=dirs
+        )
+        settings = json.loads(claude[claude.index("--settings") + 1])
+        self.assertEqual(settings["permissions"], {"additionalDirectories": dirs})
+        # PreToolUse still gates every call into them.
+        self.assertIn("PreToolUse", settings["hooks"])
+        for provider in ("codex", "claude"):
+            with self.subTest(provider=provider):
+                plain = instruction_prompts.native_args(
+                    provider, "instructions", events="/tmp/jack.jsonl"
+                )
+                self.assertNotIn("--add-dir", plain)
+                self.assertNotIn("additionalDirectories", " ".join(plain))
+
 
 if __name__ == "__main__":
     unittest.main()

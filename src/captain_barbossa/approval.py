@@ -127,7 +127,8 @@ CAPTAIN_MODULE = ("captain_barbossa", "captain_barbossa.py")
 
 @dataclass(frozen=True)
 class Request:
-    """One native approval prompt; project and cwd are canonical, owned is project-relative."""
+    """One native approval prompt; project and cwd are canonical, owned is project-relative
+    or absolute outside the project."""
 
     tool: str
     project: str
@@ -710,24 +711,19 @@ def _inside(path, base):
     return path == base or path.startswith(base.rstrip("/") + "/")
 
 
-def _readable(request, cwd, value):
-    path = _resolve(cwd, value)
-    if path == NULL_DEVICE:
-        return True
-    project = posixpath.normpath(request.project)
-    if not _inside(path, project):
-        return False
-    return ".git" not in posixpath.relpath(path, project).split("/")
-
-
 def _writable(request, cwd, value):
     path = _resolve(cwd, value)
     if path == NULL_DEVICE:
         return True
     project = posixpath.normpath(request.project)
-    # Ownership was canonicalized at assignment time; a new symlink cannot move it.
+    # Ownership was canonicalized at assignment time; a new symlink cannot move it. Owned
+    # paths may be absolute, outside the project. As in protocol.owned_path, no .git or
+    # .captain anywhere is ever writable: .captain holds settings and the repo rulebook.
     owned = (posixpath.normpath(posixpath.join(project, item)) for item in request.owned)
-    return _readable(request, cwd, value) and any(_inside(path, item) for item in owned)
+    parts = {part.casefold() for part in path.split("/")}
+    if not path or ".git" in parts or ".captain" in parts:
+        return False
+    return any(_inside(path, item) for item in owned)
 
 
 def _judge(request, uses):

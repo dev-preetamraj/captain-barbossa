@@ -160,7 +160,20 @@ def crew_meta(directory):
         write_json(directory / "session.json", meta)
 
 
-def session(project, pane, session_id=None, create=False):
+def workspace_gone(workspace):
+    """Only a successful, well-formed Herdr listing proves a workspace is gone."""
+    try:
+        rows = herdr("workspace", "list", timeout=10).get("workspaces")
+    except HERDR_ERRORS:
+        return False
+    if not isinstance(rows, list) or any(
+        not isinstance(row, dict) or not row.get("workspace_id") for row in rows
+    ):
+        return False
+    return all(row["workspace_id"] != workspace for row in rows)
+
+
+def session(project, pane, session_id=None, create=False, *, allow_dead_workspace=False):
     project = project.resolve()
     if session_id is None:
         if not create:
@@ -178,7 +191,10 @@ def session(project, pane, session_id=None, create=False):
         meta_path = directory / "session.json"
         if meta_path.exists():
             meta = read_json(meta_path)
-            if meta["project"] != str(project) or meta["workspace"] != pane["workspace_id"]:
+            if meta["project"] != str(project) or (
+                meta["workspace"] != pane["workspace_id"]
+                and not (allow_dead_workspace and workspace_gone(meta["workspace"]))
+            ):
                 raise CaptainError("This session belongs to another project or Herdr workspace.")
         else:
             meta = {
@@ -188,7 +204,8 @@ def session(project, pane, session_id=None, create=False):
                 "crew": {},
             }
             write_json(meta_path, meta)
-        backfill_terminal_id(directory, pane)
+        if meta["workspace"] == pane["workspace_id"]:
+            backfill_terminal_id(directory, pane)
     try:
         migrate_project_graph(project)
     except (CaptainError, OSError):

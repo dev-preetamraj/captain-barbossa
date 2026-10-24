@@ -4,6 +4,7 @@ import os
 import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -549,6 +550,66 @@ class ProtocolTests(SessionCase):
             with self.subTest(code=code), self.assertRaisesRegex(CaptainError, rf"^\[{code}\]"):
                 self.command("check", action=action, path=path)
 
+    def test_an_owned_path_may_lie_outside_the_project_but_never_somewhere_protected(self):
+        outside = (self.root / "elsewhere" / "notes.md").resolve()
+        self.assertEqual(protocol.owned_paths(self.project, [str(outside)]), [outside.as_posix()])
+        home = Path.home()
+        with patch.dict(os.environ, {"CODEX_HOME": str(self.root / "codex-home")}):
+            for value in (
+                "/",
+                str(home),
+                str(self.project.parent),
+                str(self.root / "elsewhere" / ".git" / "config"),
+                str(self.root / "elsewhere" / ".GIT" / "config"),
+                str(self.project / ".CAPTAIN" / "settings.toml"),
+                str(store.state_root() / "x"),
+                str(store.state_root()).upper() + "/x",
+                str(store.temp_root()),
+                str(home / ".captain" / "settings.toml"),
+                str(home / ".claude" / "settings.json"),
+                str(home / ".claude.json"),
+                str(home / ".codex"),
+                str(self.root / "codex-home" / "config.toml"),
+                str(home / ".pi" / "agent"),
+                str(home / ".grok"),
+            ):
+                with (
+                    self.subTest(value=value),
+                    self.assertRaisesRegex(CaptainError, "protected-path"),
+                ):
+                    protocol.owned_paths(self.project, [value])
+
+    def test_outside_dirs_never_widen_a_file_grant_to_its_parent(self):
+        home_file = (Path.home() / "notes.md").resolve()
+        self.assertEqual(protocol.owned_paths(self.project, [home_file]), [home_file.as_posix()])
+        self.assertEqual(protocol.outside_dirs(self.project, [home_file.as_posix()]), [])
+        directory = self.root / "elsewhere"
+        directory.mkdir()
+        file = directory / "notes.md"
+        file.write_text("notes", encoding="utf-8")
+        self.assertEqual(protocol.outside_dirs(self.project, [file.as_posix()]), [])
+        self.assertEqual(
+            protocol.outside_dirs(self.project, [directory.as_posix()]), [directory.as_posix()]
+        )
+
+    def test_an_outside_owned_path_is_checked_and_contended_from_any_root(self):
+        outside = (self.root / "elsewhere").resolve()
+        with protocol.checkpoint(self.directory) as state:
+            protocol.active(state, self.crew)["paths"] = ["src", outside.as_posix()]
+        self.command("check", action="edit", path=[str(outside / "a.md")])
+        with self.assertRaisesRegex(CaptainError, "outside-grant"):
+            self.command("check", action="edit", path=[str(self.root / "other.md")])
+        other = Crew(
+            "will", {"name": "Will", "agent": "will", "incarnation_id": "second"}, self.current
+        )
+        # Another execution root still writes the same absolute file.
+        self.enterContext(patch("captain_barbossa.execution.root", return_value=self.root / "wt"))
+        with self.assertRaisesRegex(CaptainError, "owned-path-conflict"):
+            protocol.begin(other, self.project, "task", [str(outside / "a.md")], ["edit"])
+        other.record["worktree_id"] = "w"
+        with self.assertRaisesRegex(CaptainError, "worktree-outside"):
+            protocol.begin(other, self.project, "task", [str(outside / "a.md")], ["edit"])
+
     def test_placeholder_catches_unfilled_slots_not_prose_about_code(self):
         for task in (
             "Fix TBD",
@@ -593,14 +654,30 @@ class ProtocolTests(SessionCase):
             protocol.begin(self.crew, self.project, "new task", handoff=self.assignment["id"])
         response = protocol.poll(self.crew)
         protocol.poll(self.crew, response["delivery_id"])
+        self.crew.record["outside_dirs"] = []
+        outside = self.root / "elsewhere"
+        outside.mkdir()
+        with self.assertRaisesRegex(CaptainError, "launch-directories"):
+            protocol.begin(
+                self.crew,
+                self.project,
+                "new task",
+                [str(outside)],
+                ["edit"],
+                handoff=self.assignment["id"],
+            )
         new = protocol.begin(self.crew, self.project, "new task", handoff=self.assignment["id"])
         self.assertNotEqual(new["id"], self.assignment["id"])
         self.assertEqual(self.saved()["original_task"], "original")
 
     def test_symlink_escape_legacy_and_event_bounds(self):
         (self.project / "escape").symlink_to(self.root, target_is_directory=True)
-        with self.assertRaises(CaptainError):
-            protocol.owned_paths(self.project, ["escape/x"])
+        # A symlink out of the project is recorded as where it resolves, never as itself.
+        self.assertEqual(
+            protocol.owned_paths(self.project, ["escape/x"]), [(self.root / "x").as_posix()]
+        )
+        with self.assertRaisesRegex(CaptainError, "protected-path"):
+            protocol.owned_paths(self.project, ["escape"])
         legacy = Crew("old", {"name": "Old", "agent": "old"}, self.crew.session)
         with self.assertRaisesRegex(CaptainError, "Legacy"):
             protocol.poll(legacy)

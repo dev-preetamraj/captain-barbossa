@@ -118,17 +118,21 @@ def close_session_panes(session_id, project):
                 else:
                     runtime.herdr("pane", "close", pane_id)
                     stopped = True
-            except HERDR_ERRORS:
-                pass
+            except HERDR_ERRORS as exc:
+                stopped = not (record and record.get("lifetime_id")) and bool(
+                    re.search(r"\bpane_not_found\b", str(exc))
+                )
             if record is not None:
+                if not stopped:
+                    record["status"] = "cleanup_pending"
+                    continue
                 crew = Crew(record["id"], record, current._replace(meta=meta))
                 for message in protocol.unread(crew):
                     protocol.bounce(crew, message["id"], "Captain exited before mail was read.")
-                if stopped:
-                    with protocol.checkpoint(current.directory) as state:
-                        assignment = state["assignments"].get(state["active"].get(crew.crew_id))
-                        if assignment and assignment["state"] != "done":
-                            assignment.update(state="done", report="Crew stopped at captain exit.")
+                with protocol.checkpoint(current.directory) as state:
+                    assignment = state["assignments"].get(state["active"].get(crew.crew_id))
+                    if assignment and assignment["state"] != "done":
+                        assignment.update(state="done", report="Crew stopped at captain exit.")
                 # Recorded as the pane goes: a resumed --session must not find ghost crew
                 # holding slots no pane backs any more.
                 record["status"] = "dismissed"
@@ -435,7 +439,9 @@ def status_crew(args, pane, project):
                 except HERDR_ERRORS:
                     pass
         current_state = (
-            CrewState("failed", "process", background.UNRESERVED)
+            CrewState("cleanup_pending", "cleanup", "shutdown unconfirmed; retry dismiss")
+            if crew.record.get("status") == "cleanup_pending"
+            else CrewState("failed", "process", background.UNRESERVED)
             if orphan
             else crew.current_state()
         )
@@ -571,14 +577,14 @@ def never_read(assignment):
     return not any(message["delivery"] == "read" for message in assignment["messages"])
 
 
-def dismiss_blocker(crew, assignment, project, confirmed=False):
+def dismiss_blocker(crew, assignment, project, confirmed=False, *, allow_unreported=False):
     """Name the one thing that actually holds the dismissal, not both at once."""
     if never_read(assignment):
         # A launch that failed before its first delivery, or mail the crew never read:
         # nothing reached it, so there is nothing to report and no crew process alive to
         # run done. Refusing here would reserve the name forever.
         return
-    if assignment["state"] != "done":
+    if assignment["state"] != "done" and not allow_unreported:
         raise CaptainError(
             f"{crew.display_name} has no done report; finish with a report before dismissal."
         )
@@ -586,7 +592,7 @@ def dismiss_blocker(crew, assignment, project, confirmed=False):
     if assignment["pending"]:
         # A notification returned but never acked; a native one has no notice behind it to count.
         unacked = max(unacked, 1)
-    if unacked:
+    if unacked and not allow_unreported:
         raise CaptainError(
             f"{crew.display_name} has {unacked} unacknowledged notification(s); "
             "acknowledge them with wait --ack before dismissal."
@@ -604,17 +610,19 @@ def dismiss_blocker(crew, assignment, project, confirmed=False):
 
 
 def dismiss_crew(args, pane, project):
-    current = session(project, pane, args.session)
+    current = session(project, pane, args.session, allow_dead_workspace=True)
+    dead_workspace = current.meta["workspace"] != pane["workspace_id"]
     bounced, undelivered = [], False
     with crew_meta(current.directory) as meta:
         current = current._replace(meta=meta)
         crew = Crew.resolve(current, args.name)
         if crew.is_dismissed:
             raise CaptainError(f"{crew.display_name} was already dismissed.")
+        retrying = crew.record.get("status") == "cleanup_pending"
         # Read while the crew still holds its slot; applied once Herdr has closed the pane.
         placement = Placement(pane, current, dashboard_pane(current))
         try:
-            evening = placement.even_after_close(crew.record)
+            evening = [] if dead_workspace else placement.even_after_close(crew.record)
         except HERDR_ERRORS as exc:  # geometry is cosmetic; never lose the dismissal over it
             print(f"captain: tab not re-evened: {exc}", file=sys.stderr)
             evening = []
@@ -625,17 +633,38 @@ def dismiss_crew(args, pane, project):
                 # Same question the blocker asks: an assignment nothing reached must not keep
                 # its paths reserved by lingering in "working" after the crew is gone.
                 undelivered = never_read(assignment)
-                dismiss_blocker(crew, assignment, project, getattr(args, "confirm_unlanded", False))
+                dismiss_blocker(
+                    crew,
+                    assignment,
+                    project,
+                    getattr(args, "confirm_unlanded", False),
+                    allow_unreported=dead_workspace or retrying,
+                )
+                untracked = [path for path in assignment["paths"] if Path(path).is_absolute()]
+                if untracked:
+                    print(
+                        f"Owned paths outside the checkout, not Git-tracked: {', '.join(untracked)}"
+                    )
         if not crew.record.get("pane") and not crew.record.get("incarnation_id"):
             raise CaptainError(f"{crew.display_name} has no recorded pane to close.")
         try:
             if crew.record.get("lifetime_id"):
                 crew.record["cleanup"] = execution.retire(crew)
-            elif crew.record.get("pane"):
+                if not crew.record["cleanup"]["lifetime"]["ok"]:
+                    raise CaptainError("shutdown unconfirmed")
+            elif crew.is_background and dead_workspace:
+                raise CaptainError("background writer has no managed lifetime")
+            elif crew.record.get("pane") and not dead_workspace:
                 runtime.herdr("pane", "close", crew.record["pane"])
-        except CaptainError as exc:
-            if not re.search(r"\bpane_not_found\b", str(exc)):
-                raise CaptainError(f"Could not dismiss {crew.display_name}: {exc}") from exc
+        except HERDR_ERRORS as exc:
+            if crew.record.get("lifetime_id") or not re.search(r"\bpane_not_found\b", str(exc)):
+                if crew.record.get("lifetime_id"):
+                    crew.record["status"] = "cleanup_pending"
+                    # crew_meta does not save on exceptions; retain retry evidence first.
+                    write_json(current.meta_path, meta)
+                raise CaptainError(
+                    f"Could not dismiss {crew.display_name}: {exc} [cleanup-pending]"
+                ) from exc
             # The pane was already gone, so Herdr rebalanced the tab without this close.
             evening = []
         if crew.record.get("incarnation_id"):
@@ -649,12 +678,24 @@ def dismiss_crew(args, pane, project):
                 placement.resize(source, towards, amount)
         except HERDR_ERRORS as exc:  # geometry is cosmetic; never lose the dismissal over it
             print(f"captain: tab not re-evened: {exc}", file=sys.stderr)
-        if undelivered:
-            # Close the reservation with its reason; a working assignment would linger forever.
+        if undelivered or (
+            (dead_workspace or retrying)
+            and crew.record.get("incarnation_id")
+            and not unreserved(crew)
+        ):
+            # Release only after confirmed shutdown, including a retried exit cleanup; a
+            # real done report already released it and must survive.
             with protocol.checkpoint(current.directory) as state:
                 assignment = protocol.active(state, crew)
-                assignment["state"] = "done"
-                assignment["report"] = "Dismissed before any message was read."
+                if assignment["state"] != "done":
+                    assignment["state"] = "done"
+                    assignment["report"] = (
+                        "Dismissed after Herdr workspace disappeared."
+                        if dead_workspace
+                        else "Dismissed after shutdown retry."
+                        if retrying
+                        else "Dismissed before any message was read."
+                    )
         if crew.record.get("worktree_id") and not crew.record.get("lifetime_id"):
             assignment = protocol.active_assignment(crew)
             results.collect(
@@ -666,7 +707,11 @@ def dismiss_crew(args, pane, project):
         (current.directory / f"crew-{crew.crew_id}.sh").unlink(missing_ok=True)
         crew.record["status"] = "dismissed"
         tab_id = crew.record.get("tab")
-        label = Crew.tab_label(current, tab_id) if tab_id and tab_id != pane["tab_id"] else None
+        label = (
+            Crew.tab_label(current, tab_id)
+            if not dead_workspace and tab_id and tab_id != pane["tab_id"]
+            else None
+        )
     # Rename after the roster write: a stale tab id must not cost the dismissal record.
     if label:
         runtime.herdr("tab", "rename", tab_id, label)
@@ -792,6 +837,14 @@ def choose_checkout(args, project, directory, profile_source=None):
     else:
         where = config.source("crew", "checkout")
         source = f"[crew] checkout from {where}" if where else "[crew] checkout"
+    owns = protocol.owned_paths(project, args.owns or ())
+    if any(Path(path).is_absolute() for path in owns):
+        if checkout == "worktree":
+            raise CaptainError(
+                "[worktree-outside] A worktree cannot isolate owned paths outside the checkout; "
+                "use --checkout shared."
+            )
+        return "shared", f"{source}: owns paths outside the checkout"
     if not config.flag("crew", "isolation_enabled"):
         if checkout == "worktree":
             raise CaptainError(
@@ -932,6 +985,7 @@ def create_crew(args, pane, project):
             provider=provider,
             task=args.task,
             status="needs_attention",
+            outside_dirs=protocol.outside_dirs(assignment["execution_root"], assignment["paths"]),
         )
         meta["crew"][name] = crew.record
         write_json(current.meta_path, meta)
@@ -980,7 +1034,13 @@ def create_crew(args, pane, project):
             write_json(crew.report_cursor, len(crew.reports))
             native_argv = [
                 binary,
-                *instructions.native_args(provider, instruction_text, model, events),
+                *instructions.native_args(
+                    provider,
+                    instruction_text,
+                    model,
+                    events,
+                    add_dirs=crew.record["outside_dirs"],
+                ),
                 *history["argv"],
             ]
             command = shlex.join(native_argv)

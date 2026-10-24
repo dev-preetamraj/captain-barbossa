@@ -60,10 +60,50 @@ class InspectionTests(unittest.TestCase):
         outside.write_text("secret", encoding="utf-8")
         (self.project / "link").symlink_to(outside)
         (self.project / "dir").symlink_to(self.root, target_is_directory=True)
-        for path in (str(outside), "../secret", "link", "dir/secret"):
+        for path in ("../secret", "link", "dir/secret"):
             with self.subTest(path=path), self.assertRaises(CaptainError):
                 self.inspect("read", path)
         self.assertEqual(self.inspect("files")["paths"], [])
+
+    def test_an_absolute_path_outside_the_project_is_its_own_bounded_root(self):
+        elsewhere = self.root / "elsewhere"
+        elsewhere.mkdir()
+        (elsewhere / "notes.md").write_text("needle\n", encoding="utf-8")
+        (elsewhere / "link").symlink_to(elsewhere / "notes.md")
+        self.assertEqual(self.inspect("read", str(elsewhere / "notes.md"))["text"], "needle\n")
+        self.assertIn("elsewhere/notes.md", self.inspect("files", str(elsewhere))["paths"])
+        self.assertEqual(
+            self.inspect("search", "needle", str(elsewhere))["matches"][0]["path"],
+            "elsewhere/notes.md",
+        )
+        # A symlinked leaf is opened from its parent with O_NOFOLLOW, as inside the project.
+        with self.assertRaises(CaptainError):
+            self.inspect("read", str(elsewhere / "link"))
+        with self.assertRaisesRegex(CaptainError, "outside-root"):
+            self.inspect("read", str(elsewhere / ".." / "elsewhere" / "notes.md"))
+
+    def test_an_outside_root_ancestor_cannot_be_swapped_into_crew_state(self):
+        public = self.root / "public"
+        (public / "nested").mkdir(parents=True)
+        target = public / "nested" / "notes.md"
+        target.write_text("public", encoding="utf-8")
+        private = self.root / "state" / "nested"
+        private.mkdir(parents=True)
+        (private / "notes.md").write_text("private", encoding="utf-8")
+        original_outside = inspection._outside
+
+        def swap_after_check(path):
+            result = original_outside(path)
+            public.rename(self.root / "moved-public")
+            public.symlink_to(self.root / "state", target_is_directory=True)
+            return result
+
+        with (
+            patch.dict(os.environ, {"CAPTAIN_ROLE": "crew"}),
+            patch.object(inspection, "_outside", side_effect=swap_after_check),
+            self.assertRaisesRegex(CaptainError, "unreadable"),
+        ):
+            self.inspect("read", str(target))
 
     def test_fifo_and_binary_are_rejected_without_blocking(self):
         os.mkfifo(self.project / "pipe")
@@ -143,8 +183,21 @@ class InspectionTests(unittest.TestCase):
                     self.inspect("state", scope)
             self.assertEqual(self.inspect("state", "repo", "graph.json")["text"], "{}")
             self.assertEqual(self.inspect("read", "source")["text"], "source")
-            with self.assertRaisesRegex(CaptainError, "outside-root"):
-                self.inspect("read", str(self.root / "secret"))
+            (self.root / "secret").write_text("secret", encoding="utf-8")
+            self.assertEqual(self.inspect("read", str(self.root / "secret"))["text"], "secret")
+            # The absolute form must not reach the state scopes crew may not inspect.
+            stored = self.root / "state" / "graph.json"
+            stored.parent.mkdir()
+            stored.write_text("{}")
+            for path in (stored, self.root / "state", self.root):
+                with self.subTest(path=path), self.assertRaisesRegex(CaptainError, "forbidden"):
+                    self.inspect("read" if path == stored else "files", str(path))
+            # A case variant names the state only on a case-insensitive filesystem (macOS);
+            # on Linux it is simply missing. Either way it must never be read.
+            variant = Path(str(stored.parent).upper()) / "graph.json"
+            refusal = "forbidden" if variant.exists() else "missing"
+            with self.assertRaisesRegex(CaptainError, refusal):
+                self.inspect("files", str(variant))
 
     def git(self, *args):
         env = {
@@ -211,8 +264,13 @@ class InspectionTests(unittest.TestCase):
                 self.inspect("read", "file", session=current.meta["id"])["text"], "crew change\n"
             )
             self.assertIn("file", self.inspect("git", "status", session=current.meta["id"])["text"])
-            with self.assertRaises(CaptainError):
-                self.inspect("read", str(self.project / "file"), session=current.meta["id"])
+            # Reads go anywhere: the original checkout is outside the worktree root.
+            self.assertEqual(
+                self.inspect("read", str(self.project / "file"), session=current.meta["id"])[
+                    "text"
+                ],
+                "original\n",
+            )
             with patch.dict(os.environ, {"CAPTAIN_INCARNATION": "c" * 32}):
                 with self.assertRaisesRegex(CaptainError, "worktree-identity"):
                     self.inspect("read", "file", session=current.meta["id"])

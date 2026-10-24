@@ -12,18 +12,21 @@ watch-your-crew rule only by being reviewable afterwards.
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 import time
 from pathlib import Path
 
-from . import config, inspection
+from . import config, inspection, protocol
 from .models import PROVIDERS, headless_argv, headless_report, resolve_model
 from .runtime import CaptainError, check_text, executable, inside_project
 from .store import lock, read_json, state_storage
 
 # A declared target may run a whole test suite.
 TIMEOUT = 900
+# Let commands flush or clean up before a stuck process group is killed.
+GROUP_TERMINATE_TIMEOUT = 1.0
 # Enough tail to diagnose a failure without putting a build log in the record.
 TAIL = 4000
 # A headless turn reads Git through the task text, which `check_text` caps at 8000.
@@ -111,6 +114,13 @@ def add_arguments(subparsers):
         metavar="PATH",
         help="a file the turn may edit; read-only when omitted",
     )
+    quiet.add_argument(
+        "--read",
+        action="append",
+        default=[],
+        metavar="DIR",
+        help="an extra directory a read-only turn may read, outside the checkout",
+    )
     quiet.add_argument("--model", help="tier or model name ([crew] model when omitted)")
     quiet.add_argument(
         "--timeout", type=float, metavar="SECONDS", help=f"seconds to allow (default {TIMEOUT})"
@@ -121,6 +131,36 @@ def _git(root, *arguments, check=True):
     return _spawn(root, ["git", *arguments], check=check)
 
 
+def _terminate_process_group(process):
+    """Stop and reap the command and every descendant still in its process group."""
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except (ProcessLookupError, PermissionError):
+        pass
+    deadline = time.monotonic() + GROUP_TERMINATE_TIMEOUT
+    while time.monotonic() < deadline:
+        try:
+            os.killpg(process.pid, 0)
+        except (ProcessLookupError, PermissionError):
+            break
+        time.sleep(min(0.02, max(0, deadline - time.monotonic())))
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
+    try:
+        process.communicate(timeout=GROUP_TERMINATE_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        # A descendant may have escaped with setsid while retaining these pipe descriptors.
+        for pipe in (process.stdout, process.stderr):
+            if pipe is not None:
+                pipe.close()
+        try:
+            process.wait(timeout=GROUP_TERMINATE_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            pass
+
+
 def _capture(root, command, timeout=TIMEOUT, *, text=True):
     """Run a bounded command, raising only when it could not run at all.
 
@@ -128,19 +168,27 @@ def _capture(root, command, timeout=TIMEOUT, *, text=True):
     JSON, which anything the tool writes to stderr would make unparseable.
     """
     try:
-        return subprocess.run(
+        process = subprocess.Popen(
             command,
             cwd=root,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=text,
-            timeout=timeout,
             stdin=subprocess.DEVNULL,
             env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+            start_new_session=True,
         )
     except FileNotFoundError as exc:
         raise CaptainError(f"{command[0]} is not installed.") from exc
+    try:
+        stdout, stderr = process.communicate(timeout=timeout)
     except subprocess.TimeoutExpired as exc:
+        _terminate_process_group(process)
         raise CaptainError(f"{command[0]} exceeded {timeout}s.") from exc
+    except KeyboardInterrupt:
+        _terminate_process_group(process)
+        raise
+    return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
 
 
 def _spawn(root, command, check=True):
@@ -266,7 +314,16 @@ def _quiet(args, root, session_directory):
             f"{provider or 'This captain'} has no headless turn to spend, so there is no way "
             "to bound what an unwatched one could do. Recruit crew instead."
         )
-    paths = [inside_project(root, value, "Path") for value in args.write]
+    paths = protocol.owned_paths(root, args.write)
+    outside_files = [path for path in paths if Path(path).is_absolute() and not Path(path).is_dir()]
+    if outside_files:
+        raise CaptainError(
+            "[outside-file] quiet --write cannot grant an outside file without granting its "
+            "unowned parent directory; recruit crew with an owned outside directory instead."
+        )
+    if paths and args.read:
+        raise CaptainError("--read is for a read-only turn; drop it or --write.")
+    reads = [str((root / value).resolve()) for value in args.read]
     wanted = args.model or config.text("crew", "model")
     # The prompt leads the task instead of riding a per-provider system-prompt flag: three
     # sentences in front of a one-shot turn behave the same and need no fourth code path.
@@ -287,8 +344,11 @@ def _quiet(args, root, session_directory):
         writable=bool(paths),
         # A read-only turn may also read this session's own state: the event log, mail and
         # assignment records it is asked to triage or check a report against. A writing turn
-        # is never handed the directory, so it cannot edit them.
-        add_dir=None if paths else str(session_directory),
+        # is never handed the directory, so it cannot edit them; it gets only the
+        # directories of its write paths outside the checkout.
+        add_dirs=(
+            protocol.outside_dirs(root, paths) if paths else [str(session_directory), *reads]
+        ),
         model=model,
     )
     done = _capture(root, command, args.timeout or TIMEOUT)
