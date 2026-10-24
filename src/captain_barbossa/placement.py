@@ -16,7 +16,7 @@ from .layout import (
     split_for,
 )
 from .models import PROVIDERS, capabilities, chosen_model
-from .prompts import LABELS, PLACEMENTS, choose
+from .prompts import PLACEMENTS, choose
 from .runtime import CaptainError
 from .store import read_json
 
@@ -91,7 +91,6 @@ def crew_placement(args):
         return "pane", "--direction/--split-pane"
     wanted = config.text("crew", "placement")
     if not wanted:
-        # ponytail: built-in until defaults.toml carries [crew] placement = "auto".
         return "auto", "built-in default"
     where = config.source("crew", "placement") or "defaults.toml"
     if wanted not in (*PLACEMENTS, "auto"):
@@ -282,12 +281,18 @@ class Placement:
     def grid_spot(self, direction=None):
         """The first free slot in the declared shapes, or a new tab when all are full.
 
-        Reads the roster only and moves nothing: the Spot carries the chain to even, and
-        even_new_pane resizes it once the pane exists.
+        Ignore vanished roster panes; the Spot carries the live chain to even once
+        even_new_pane has created the pane.
         """
+        groups = self.workspace_panes()
+        self.active = [
+            crew
+            for crew in self.active
+            if crew.get("pane") in groups.get(crew.get("tab"), (None, {}))[1]
+        ]
         captain_tab = self.pane["tab_id"]
         for tab in self.tab_order():
-            if self.unmapped(tab):
+            if tab not in groups or self.unmapped(tab):
                 continue
             captain = tab == captain_tab
             columns = shape("captain_tab" if captain else "crew_tab")
@@ -382,47 +387,3 @@ class Placement:
         if free is None:
             return self.auto_split(None, split_pane, tab_id)
         return Spot(free, split_pane, tab_id)
-
-    def choose_split(self, args, placement):
-        """The Spot a crew opens in; a None pane with a reason means a new tab."""
-        if placement != "pane":
-            if args.direction or args.split_pane:
-                raise CaptainError("--direction and --split-pane apply only to --placement pane.")
-            return Spot()
-
-        if args.split_pane == "auto":
-            return self.auto_split(None if args.direction == "auto" else args.direction)
-        direction = choose(
-            args.direction, (*HERDR_DIRECTIONS, "auto"), "Split direction?", "--direction"
-        )
-        free = None if direction == "auto" else direction
-        if args.split_pane == self.pane["pane_id"]:
-            split_pane, tab_id = args.split_pane, self.pane["tab_id"]
-        else:
-            groups = self.workspace_panes()
-            labels = {"auto": LABELS["auto"]}
-            labels.update(
-                (pane_id, title) for _, panes in groups.values() for pane_id, title in panes.items()
-            )
-            if args.split_pane and args.split_pane not in labels:
-                raise CaptainError(
-                    f"Pane {args.split_pane} is not in this workspace (closed or mistyped). "
-                    f"Panes: {', '.join(labels)}. Ask the user again."
-                )
-            split_pane = choose(
-                args.split_pane,
-                tuple(labels),
-                "Which pane should be split?",
-                "--split-pane",
-                labels=labels,
-                groups=[
-                    (None, ("auto",)),
-                    *((name, tuple(panes)) for name, panes in groups.values()),
-                ],
-            )
-            if split_pane == "auto":
-                return self.auto_split(free)
-            tab_id = next(tab for tab, (_, panes) in groups.items() if split_pane in panes)
-        if direction == "auto":
-            return self.auto_split(None, split_pane, tab_id)
-        return Spot(direction, split_pane, tab_id)

@@ -6,7 +6,7 @@
 Captain Barbossa launches a native agent CLI (Claude Code, Codex, pi, Grok) as a
 **captain** inside a [Herdr](https://herdr.dev) workspace. The captain recruits
 further native agents as **crew** in new Herdr panes or tabs, so a team of
-native agent sessions can work on the same checkout at once. There is no
+native agent sessions can work on the same project at once. There is no
 daemon, custom UI, or tmux layer: everything runs through Herdr, plus a small
 graph memory stored outside the repo and a curated repo scope committed with it.
 
@@ -118,22 +118,29 @@ captain crew Gibbs --task "Review the current changes" --agent claude --model mi
   --placement pane --split-pane auto --direction auto
 ```
 
-Omitted flags resolve in code: agent from `[crew] agent` or the captain's CLI,
-model from the configured crew tier (`cheap` as shipped), and placement from
-`[crew] placement` or the
-next automatic slot. Explicit flags win; split flags
-imply a pane. Recruitment prints each choice's source. Only an agent absent from
-both settings and session metadata needs a picker (or an explicit `--agent` in a
-non-TTY). Only the captain recruits; crew forward delegation requests to it. See
+Omitted flags resolve in code: `[crew] agent` is empty as shipped and follows the
+captain's CLI, model uses the configured crew tier (`cheap` as shipped), and
+`[crew] placement = "auto"` selects the next slot and reports `defaults.toml` as
+its source. Explicit flags win; split flags imply a pane. Recruitment prints each
+choice's source. Only an empty crew agent with no captain metadata needs a picker
+(or explicit `--agent` in a non-TTY). Only the captain recruits; crew forward
+delegation requests to it. See
 [crew-lifecycle.md](https://github.com/dev-preetamraj/captain-barbossa/blob/main/docs/crew-lifecycle.md)
-for naming, launch behavior, shared checkouts, failure handling, and editing guardrails.
+for naming, launch behavior, checkout modes, failure handling, and editing guardrails.
 
-Crew share the captain working tree, including dirty, staged, and untracked files.
-Give simultaneous writers disjoint files and serialize edits to the same file.
+Crew use the captain working tree by default, including its dirty, staged, and
+untracked files. Give simultaneous shared-checkout writers disjoint files and
+serialize edits to the same file. When `[crew] isolation_enabled = true`,
+`--checkout auto|shared|worktree` selects shared work or a detached Git worktree;
+`auto` isolates writable recruits with no owned paths or overlapping ownership.
+Isolated results include only owned paths. Review them with `captain result show`,
+then use `result apply` to copy them into the captain checkout unstaged or
+`result discard --reason TEXT`; retained checkouts appear under `captain worktree`.
 
 Use `--profile NAME` to select `[profiles.NAME]` from global/project settings,
-bundling agent, model, execution (`foreground` or `background`), and placement. Flags override profile keys; omitted keys
-retain existing defaults. `--foreground` overrides background execution. Profiles
+bundling agent, model, execution (`foreground` or `background`), checkout, and
+placement. Flags override profile keys; omitted keys retain existing defaults.
+`--foreground` overrides background execution. Profiles
 print and persist their effective choices and sources, and never grant assignment
 permissions. See
 [settings.md](docs/settings.md#explicit-recruitment-profiles) for examples and restrictions.
@@ -242,8 +249,9 @@ Use `ask`/`answer` for a question, `done --report` for completion, and
 every ring is the fixed wake line; native hooks deliver the body as
 `additionalContext` and write its receipt after flushing it. For other providers,
 the first ring prompts the assignment plus a line to run `captain inbox NAME`;
-a later ring after that landed is the inbox line alone. Their inbox read proves
-delivery and writes the receipt. `done` refuses while mail is unread.
+a landed body already counts as delivered, and a later ring is the inbox line alone.
+`inbox` remains a manual re-read and receipt writer. `done` receipts landed mail;
+undelivered mail is served in its refusal.
 Newly launched crew may omit `--assignment` on `ask`, `done`, and `check`: their
 launch-bound `CAPTAIN_ASSIGNMENT` is validated against crew identity, incarnation,
 and the active assignment. Missing or stale context fails; captain calls and
@@ -333,8 +341,9 @@ for provider-specific effects and failure behavior.
 captain dismiss Jack
 ```
 
-`dismiss` has no flags. It permanently closes the pane, records the dismissal,
-and permits name reuse with an explicit handoff; handle unreported or uncommitted work first.
+`dismiss` permanently closes the pane, records the dismissal, and permits name
+reuse with an explicit handoff; handle unreported or uncommitted work first.
+`--confirm-unlanded` proceeds only when the user accepts Git-reported unlanded work.
 Unread mail is bounced, not delivered, and the command reports which messages
 bounced. After a Herdr workspace disappears, `captain --session ID dismiss Jack`
 from a new workspace releases that session's crew once Herdr confirms the old
@@ -358,7 +367,8 @@ captain inspect git diff --staged
 except that `files`, `read` and `search` accept an absolute path outside the
 checkout (crew: never captain state);
 `state` selects only `session`, `project`, or `repo` storage (crew: repo only).
-Git operations are fixed: `status`, `log`, `current-branch`, `root`, and `diff`.
+Git operations are fixed: `status`, `log`, `current-branch`, `root`, `diff`,
+`branches`, `ls-files`, and `grep --text TEXT`.
 No shell, arbitrary flags, or external helpers are accepted. Results are JSON,
 bounded to 64 KiB, 200 results, 10,000 entries, 8 MiB searched, and five seconds;
 limits produce truncation markers or explicit errors. Filesystem deadlines are
@@ -373,8 +383,9 @@ not used. Reads accept regular UTF-8 text files; enumeration skips symlinks and
 ## Running work without a crew pane
 
 `captain do` runs synchronous, deterministic work without recruiting crew:
-`commit --message TEXT [PATH ...]` stages named paths and commits everything
-staged (omit paths to commit the existing index); `push` pushes the current
+`commit --message TEXT [PATH ...]` stages named paths, refuses staged entries
+outside that scope or files mixing staged and unstaged changes, then commits the
+verified index (omit paths to commit the existing index); `push` pushes the current
 branch and sets its upstream on the first push; `branch NAME` creates and
 switches to a branch; `switch NAME` switches to an existing branch; `fetch`
 fetches from the remote; `pull` is fast-forward only.
@@ -471,7 +482,7 @@ acknowledging the delivery only once it is there and never resending it.
   no Herdr pane when every crew they reach is a background crew. A session started by
   an older captain in temporary storage refuses `--background`.
 
-Background execution remains one read-only headless turn in the shared checkout;
+Background execution remains one read-only headless turn in its selected checkout;
 provider-specific read-only controls still apply. There is no PTY, persistent daemon,
 worker pool, or automatic commit.
 
@@ -557,13 +568,14 @@ Read the affected pane before retrying or approving anything.
 | Command | Purpose |
 |---|---|
 | `captain [--agent claude\|codex\|pi\|grok] [--prompt TEXT] [--no-dashboard]` | Start a captain in this pane |
-| `captain crew [NAME] --task TEXT [--owns PATH] [--allow ACTION] [--handoff ID] [--agent ...] [--placement pane\|tab] [--direction ...] [--split-pane ...] [--model ...]` | Recruit crew |
+| `captain crew [NAME] --task TEXT [--profile NAME] [--checkout auto\|shared\|worktree] [--owns PATH] [--allow ACTION] [--handoff ID] [--agent ...] [--placement pane\|tab] [--direction ...] [--split-pane ...] [--model ...]` | Recruit crew |
 | `captain crew [NAME] --background --agent codex\|pi --task TEXT [--model ...]` | One read-only headless turn as a paneless crew |
 | `captain interrupt NAME [--reason TEXT]` | Stop a crew's current turn; cancels a background run |
 | `captain wait NAME [--timeout SECONDS] [--json] [--ack DELIVERY_ID]` | Read and acknowledge a crew notification |
 | `captain wait --all [--timeout SECONDS] [--json]` | Read all crew's pending deliveries; acknowledge per name/ID |
 | `captain recover` | JSON recovery digest with explicit omission counts; no acknowledgements |
 | `captain model NAME cheap\|mid\|strong\|<model>` | Switch a running crew's model |
+| `captain models [--agent claude\|codex\|pi\|grok]` | List model IDs, aliases, and tier resolutions |
 | `captain tell NAME MESSAGE [--assignment ID]` | Append a follow-up to an active assignment |
 | `captain inbox NAME` | Print a crew's queued mail oldest first and write the read receipt |
 | `captain assign NAME --task TEXT --handoff ID [--owns PATH] [--allow ACTION]` | Start the next assignment after acknowledged completion |
@@ -572,17 +584,22 @@ Read the affected pane before retrying or approving anything.
 | `captain done NAME [--assignment ID] --report TEXT` | Record explicit completion; ID may default for newly launched crew |
 | `captain check NAME ACTION [PATH ...] [--assignment ID]` | Check grants; ID may default for newly launched crew; executes nothing |
 | `captain inspect files\|read\|search\|state\|git ...` | Bounded local inspection |
-| `captain do commit\|push\|branch\|switch\|fetch\|pull\|run ...` | Synchronous deterministic work without crew |
+| `captain do resolve\|commit\|push\|branch\|switch\|fetch\|pull\|run ...` | Resolve or run deterministic work without crew |
 | `captain quiet --task TEXT [--diff worktree\|staged] [--write PATH] [--read DIR] [--model MODEL] [--timeout SECONDS]` | One headless model turn; repeat `--write` for multiple files |
 | `captain status [--all]` | Print a table of this session's crew |
-| `captain dashboard [--interval SECONDS] [--refresh-prices]` | Refresh a crew token-usage table; optionally refresh prices |
+| `captain dashboard [--interval SECONDS] [--refresh-prices] [--once]` | Refresh a crew token-usage table, or print one frame |
 | `captain focus NAME` | Focus crew's pane and tab |
 | `captain session` | Print the current session id |
 | `captain rename NAME` | Name the current session |
 | `captain resume [NAME\|ID]` | List current-project sessions, or resume one from its project |
 | `captain update` | Upgrade the installed tool |
 | `captain init [--global]` | Write a commented `.captain/settings.toml` template |
-| `captain dismiss NAME` | Close and retire crew |
+| `captain dismiss NAME [--confirm-unlanded]` | Close and retire crew; confirmation permits known unlanded shared work |
+| `captain result collect WORKTREE_ID` | Snapshot an isolated crew's owned paths |
+| `captain result show\|apply RESULT_ID` | Review or apply an isolated result unstaged |
+| `captain result discard RESULT_ID --reason TEXT` | Explicitly discard an isolated result |
+| `captain worktree list` | List retained isolated checkouts |
+| `captain worktree cleanup WORKTREE_ID` | Clean up a retained isolated checkout |
 | `captain memory add SUBJECT RELATION TARGET [--scope session\|project\|repo] [--because WHY] [--supersede]` | Save a memory relationship |
 | `captain memory init [--from PATH] [--apply]` | Seed repo memory from the project rulebook |
 | `captain memory query QUESTION` | Search memory with Graphify |

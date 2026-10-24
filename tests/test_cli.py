@@ -568,7 +568,9 @@ class CliCommandTests(SessionCase):
         """Mail the crew never read cannot demand a done report; an enqueue is not a read."""
         self.crew.record.update(pane="w1:p2", assignment_id=self.assignment["id"])
         store.write_json(self.current.meta_path, self.current.meta)
-        protocol.deliver(self.crew, "original", initial=True)
+        # A held ring: a landed body would count as delivered.
+        with patch.object(Pane, "nudge_block", return_value="agent not idle"):
+            protocol.deliver(self.crew, "original", initial=True)
         args = SimpleNamespace(session=self.current.meta["id"], name="Jack")
         with patch.object(agents.runtime, "herdr", return_value={}):
             agents.dismiss_crew(args, self.pane, self.project)

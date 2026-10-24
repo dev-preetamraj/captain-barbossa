@@ -351,7 +351,12 @@ def _quiet(args, root, session_directory):
         ),
         model=model,
     )
-    done = _capture(root, command, args.timeout or TIMEOUT)
+    timeout = (
+        TIMEOUT
+        if args.timeout is None
+        else config.in_range(args.timeout, "--timeout", below=float("inf"))
+    )
+    done = _capture(root, command, timeout)
     report, note = headless_report(provider, done.stdout, model)
     record(session_directory, "quiet", command, done.returncode, report)
     print(report)
@@ -539,7 +544,9 @@ def _dispatch(args, session_directory, project):
         tracked, _ = _git(root, "rev-parse", "--abbrev-ref", f"{current}@{{upstream}}", check=False)
         command = ["git", "push"]
         if tracked != 0:
-            command += ["--set-upstream", "origin", current]
+            _, remotes = _git(root, "remote")
+            names = remotes.splitlines()
+            command += ["--set-upstream", names[0] if len(names) == 1 else "origin", current]
         output = _act(root, command, session_directory, action)
         summary = f"Pushed {current}."
     else:

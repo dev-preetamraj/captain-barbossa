@@ -6,14 +6,15 @@ Ask the captain to spin up a crew in plain language; its startup instructions
 carry a recruiting ruleset. When you state no preference it recruits with no
 questions. The command resolves omitted flags, using:
 
-- **agent**: `[crew] agent`, or the CLI the captain itself runs as
-- **placement**: `[crew] placement`, or the next declared slot (auto), opening
-  a new tab when the existing shapes are full
+- **agent**: `[crew] agent` (empty as shipped, so it follows the captain's CLI)
+- **placement**: `[crew] placement` (`auto` as shipped, so it uses the next slot),
+  opening a new tab when the existing shapes are full
 - **model**: `[crew] model` (`cheap` as shipped), stepped up for harder work
 
 Explicit flags win; split flags imply pane placement. The command prints the
-source of agent, model and placement. Only a missing agent in both settings and
-captain metadata needs a picker or `--agent` in a non-TTY.
+source of agent, model and placement; shipped placement reports `defaults.toml`.
+Only an empty crew agent with no captain metadata needs a picker or explicit
+`--agent` in a non-TTY.
 
 Every choice you do state is used as given; the captain asks at most one
 question, and only when you hand a choice back to it ("ask me where to put
@@ -192,23 +193,23 @@ New launches export `CAPTAIN_ASSIGNMENT`, letting crew omit `--assignment` on
 must match; missing or stale context fails. Captain calls still require explicit
 IDs, and replacement assignments require their new explicit `--assignment ID`.
 Crew commands also validate `--incarnation`, defaulting to the launcher's
-`CAPTAIN_INCARNATION`. Only one question may be pending. `done` requires a report,
-an answered question, and no unread mail.
+`CAPTAIN_INCARNATION`. Only one question may be pending. `done` requires a report
+and an answered question; it receipts landed mail and serves any undelivered body.
 Reassignment requires `done`, acknowledgement of prior notifications, and the
 exact handoff ID. Stale assignment, incarnation, and question IDs are refused.
 
 `assign`, `tell`, and `answer` reach a crew as mail.
-Each writes the message to a durable file, then rings the pane. The first ring
-for that message is a Herdr agent prompt carrying the mail body plus one line
-to run `captain inbox NAME`. A later ring after that first one landed is the
-inbox line alone. `captain inbox NAME` prints that crew's queued mail oldest
-first and writes the read receipt, which is what proves delivery and moves that
-message from `sent` to `read` on its own assignment. `done` refuses while mail
-is unread. For Claude Code crew that reading is also
-enforced by the CLI's own `Stop` hook, which blocks the end of a turn while mail
-is unread, or while the active assignment is unfinished with no question pending;
-a crew waiting on an answer to `ask` may still stop. Codex and pi cannot block, so
-for them reading mail and finishing with `done` remain instructions. See
+Each writes the message to a durable file, then rings the pane. Claude hooks deliver
+and receipt the body. For other providers, the first ring carries the body plus a
+line to run `captain inbox NAME`; once that body lands, it counts as delivered even
+without an inbox read. Dismissal therefore keeps the report and unlanded-work checks.
+A later ring is the inbox line alone. `captain inbox NAME` remains a manual re-read
+and writes the receipt. If `done` follows a landed body, it writes that receipt and
+continues; otherwise it returns the undelivered body and refuses the report. Claude's
+`Stop` hook also blocks while mail is unread, or while the active assignment is
+unfinished with no question pending; a crew waiting on an answer to `ask` may still
+stop. Codex and pi cannot block, so acting on delivered mail and finishing with
+`done` remain instructions. See
 [crew-mail.md](crew-mail.md) for the doorbell's gates and bounce handling.
 
 ## Waiting for crew to finish

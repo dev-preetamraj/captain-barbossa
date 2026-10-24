@@ -64,6 +64,12 @@ class PruneTests(SessionCase):
         self.assertTrue(current.is_dir())
         self.assertTrue(project_graph.is_file())
 
+    def test_prune_queries_herdr_once_for_multiple_stale_sessions(self):
+        stale = [self.make_session(letter * 32, 30) for letter in ("a", "b")]
+        with patch.object(sessions, "herdr", return_value=agent_list()) as api:
+            self.assertEqual(sessions.prune_sessions(self.project), stale)
+        api.assert_called_once_with("agent", "list", timeout=10)
+
     def test_keeps_stale_sessions_that_still_hold_a_live_agent(self):
         by_name = self.make_session("a" * 32, 30, crew_pane="w1:p9")
         by_terminal = self.make_session(
@@ -103,6 +109,25 @@ class PruneTests(SessionCase):
         with patch.object(sessions, "herdr", return_value=live):
             removed = sessions.prune_sessions(self.project, days=7)
         self.assertEqual(removed, [recycled_a, recycled_b, no_terminal_recorded])
+
+    def test_prune_rechecks_session_activity_after_acquiring_the_startup_lock(self):
+        resumed = self.make_session("a" * 32, 30)
+        real_lock = sessions.lock
+
+        @contextlib.contextmanager
+        def resumed_before_prune(path):
+            with real_lock(path):
+                (resumed / "captain.json").write_text('{"provider": "claude"}')
+            with real_lock(path):
+                yield
+
+        with (
+            patch.object(sessions, "lock", side_effect=resumed_before_prune) as acquire,
+            patch.object(sessions, "herdr", return_value=agent_list()),
+        ):
+            self.assertEqual(sessions.prune_sessions(self.project), [])
+        acquire.assert_called_once_with(resumed / "session.lock")
+        self.assertTrue(resumed.is_dir())
 
     def test_unreachable_herdr_only_prunes_beyond_twice_the_cutoff(self):
         young = self.make_session("a" * 32, 10)
@@ -227,6 +252,19 @@ class PruneTests(SessionCase):
             self.assertTrue(recent.is_dir())
             self.assertEqual(cli.main(["memory", "prune", "--older-than", "1"]), 0)
         self.assertFalse(recent.exists())
+
+    def test_command_refuses_negative_and_nonfinite_retention_without_deleting(self):
+        recent = self.make_session("a" * 32, 1)
+        for value in ("-1", "nan", "inf"):
+            with (
+                self.subTest(value=value),
+                patch.object(cli, "current_pane", return_value=self.pane),
+                patch.object(cli, "project_root", return_value=self.project),
+                patch.object(sessions, "herdr", return_value=agent_list()),
+                contextlib.redirect_stderr(io.StringIO()),
+            ):
+                self.assertEqual(cli.main(["memory", "prune", "--older-than", value]), 1)
+                self.assertTrue(recent.exists())
 
     def test_launch_prunes_once_and_never_fails_on_retention(self):
         stale = self.make_session("a" * 32, 30)

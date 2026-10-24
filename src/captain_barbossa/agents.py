@@ -180,9 +180,9 @@ def launch(args, pane, project):
     provider = choose(wanted, PROVIDERS, "Choose your captain", "--agent")
     binary = executable(provider)
     current = session(project, pane, args.session, create=args.session is None)
-    meta = current.meta
-    meta["captain_provider"] = provider
-    write_json(current.meta_path, meta)
+    # Under the crew lock, so a concurrent recruit or dismiss is not overwritten.
+    with crew_meta(current.directory) as meta:
+        meta["captain_provider"] = provider
     try:
         prune_sessions(project, current=meta["id"])
     except HERDR_ERRORS:
@@ -266,7 +266,8 @@ def wait_crew(args, pane, project):
             for crew in Crew.members(current)
             if not crew.is_dismissed and unreserved(crew)
         ]
-        response = protocol.wait_all(current, 0 if orphans else timeout)
+        # Never unackable, so an orphan rides along a real wait rather than ending it at once.
+        response = protocol.wait_all(current, timeout)
         if orphans:
             response["status"] = "ready"
             response["deliveries"].extend(orphans)
@@ -430,9 +431,9 @@ def status_crew(args, pane, project):
             try:
                 task = protocol.active(state, crew)["original_task"].splitlines()
             except CaptainError:
-                if not crew.is_background:
-                    raise
-                orphan = True
+                # A recruiter can die between the roster write and begin; one such
+                # record must not cost the whole table. Foreground state reads evidence.
+                orphan = crew.is_background
             if crew.record.get("pane") and protocol.unread(crew):
                 try:
                     held = crew.pane.nudge_block(crew)
@@ -572,14 +573,19 @@ def switch_model(args, pane, project):
     print(f"{crew.display_name} switched to {model}.")
 
 
-def never_read(assignment):
+def never_read(crew, assignment):
     """Whether any message ever reached the crew. An enqueue is not a delivery."""
-    return not any(message["delivery"] == "read" for message in assignment["messages"])
+    # A body the ring typed reached the crew even if it never ran inbox.
+    landed = protocol.landed_bodies(crew)
+    return not any(
+        message["delivery"] == "read" or message["id"] in landed
+        for message in assignment["messages"]
+    )
 
 
 def dismiss_blocker(crew, assignment, project, confirmed=False, *, allow_unreported=False):
     """Name the one thing that actually holds the dismissal, not both at once."""
-    if never_read(assignment):
+    if never_read(crew, assignment):
         # A launch that failed before its first delivery, or mail the crew never read:
         # nothing reached it, so there is nothing to report and no crew process alive to
         # run done. Refusing here would reserve the name forever.
@@ -632,7 +638,7 @@ def dismiss_crew(args, pane, project):
                 assignment = protocol.active(state, crew)
                 # Same question the blocker asks: an assignment nothing reached must not keep
                 # its paths reserved by lingering in "working" after the crew is gone.
-                undelivered = never_read(assignment)
+                undelivered = never_read(crew, assignment)
                 dismiss_blocker(
                     crew,
                     assignment,

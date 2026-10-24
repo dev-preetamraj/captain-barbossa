@@ -347,6 +347,27 @@ class DoTests(unittest.TestCase):
             "main",
         )
 
+    def test_first_push_uses_the_only_remote_even_when_not_named_origin(self):
+        remote = self.root / "upstream.git"
+        git(self.root, "init", "--bare", "--initial-branch=main", "upstream.git")
+        git(self.project, "remote", "add", "upstream", str(remote))
+        self.run_do("push")
+        self.assertEqual(
+            self.recorded()[-1]["command"],
+            ["git", "push", "--set-upstream", "upstream", "main"],
+        )
+
+    def test_first_push_with_multiple_remotes_still_uses_origin(self):
+        git(self.root, "init", "--bare", "--initial-branch=main", "origin.git")
+        git(self.root, "init", "--bare", "--initial-branch=main", "backup.git")
+        git(self.project, "remote", "add", "origin", str(self.root / "origin.git"))
+        git(self.project, "remote", "add", "backup", str(self.root / "backup.git"))
+        self.run_do("push")
+        self.assertEqual(
+            self.recorded()[-1]["command"],
+            ["git", "push", "--set-upstream", "origin", "main"],
+        )
+
     def test_fetch_moves_the_remote_ref_and_no_worktree_file(self):
         self.advance_remote()
         self.run_do("fetch")
@@ -704,6 +725,17 @@ time.sleep(30)
         (entry,) = self.recorded()
         self.assertEqual((entry["type"], entry["action"]), ("quiet", "quiet"))
         self.assertEqual(entry["output"], "the answer")
+
+    def test_quiet_refuses_zero_negative_and_nonfinite_timeouts_before_launch(self):
+        argv = self.fake_claude(SUCCESS)
+        for timeout in (0, -5, float("nan"), float("inf")):
+            with (
+                self.subTest(timeout=timeout),
+                self.assertRaisesRegex(CaptainError, "--timeout must be a number"),
+            ):
+                self.run_quiet(timeout=timeout)
+        self.assertFalse(argv.exists())
+        self.assertEqual(len(self.recorded()), 4)
 
     def test_the_quiet_prompt_forbids_nothing_the_turn_reads_with(self):
         """Codex reads through the shell alone, and a live turn refused the task over it."""

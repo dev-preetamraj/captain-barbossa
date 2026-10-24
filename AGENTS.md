@@ -27,6 +27,8 @@ src/captain_barbossa/
   placement.py    recruitment defaults/sources, workspace discovery, and crew Spot
   profiles.py     explicit recruitment presets and flag precedence
   execution.py    crew launch roots and managed retirement
+  worktrees.py    isolated crew checkout identity, creation and cleanup
+  results.py      isolated result snapshots, preview, apply and discard
   lifetime.py     managed native-writer ownership, exit receipts, terminal closure
   native_history.py crew-incarnation native-history ownership and conservative cleanup
   pi_history.py   crew-only pi session-boundary/identity extension
@@ -74,8 +76,8 @@ Key facts:
   `memory init` seeds it from AGENTS.md/CLAUDE.md by a fixed markdown parse (bullets
   under Rules/Key facts sections), previewing until `--apply`; it only ever adds.
 - Recruitment resolves flags/settings/session defaults through `Placement.resolve` under
-  the crew metadata lock. `status` uses `Crew.current_state` and prints state/source/detail;
-  missing evidence is unknown, not inferred completion.
+  the crew metadata lock. Shipped crew agent follows the captain;
+  `[crew] placement = "auto"` reports `defaults.toml`. `status` prints evidence only.
 - Claude PreToolUse and PermissionRequest hooks pass active incarnation grants to
   `approval.decide`. PreToolUse is the gate, registered for crew only: it fires on every
   tool call, so a deny blocks and an escalation returns `ask`, which reaches the user even
@@ -99,14 +101,14 @@ Key facts:
 - A provider in `models.HOOK_DELIVERED` (claude) is handed its mail by its own hook on
   `SessionStart`/`UserPromptSubmit`/`Stop` as `additionalContext`, stamped only after
   the body is flushed. Its doorbell is payload-free (`pane.WAKE_LINE`) and it is never
-  told to fetch mail. Everyone else gets the rendered body on the first ring and writes
-  the receipt by running `captain inbox NAME`, which stays for every provider as a
-  manual re-read; a landed retry is content-free.
-- A busy crew holds the ring, so mail sent mid-turn lands at the turn boundary: the
-  `done` refusal carries the body when the crew reports, the `Stop` hook when it does
-  not. Dismissing a crew with unread mail bounces it with a reason.
-- `captain do` is the write side of `captain inspect`: `commit`, `push`, `branch`, and
-  `run <target>` for a literal target declared in the root Makefile. Not built on `inspection`'s
+  told to fetch mail. Everyone else gets the rendered body on the first ring; landing
+  counts as delivery before `inbox`, which remains a manual re-read and receipt writer.
+  A landed retry is content-free.
+- A busy crew holds the ring, so mail sent mid-turn lands at the turn boundary. `done`
+  receipts landed bodies and refuses with any body not yet served; Claude uses `Stop`.
+  Dismissing delivered work still requires its report and unlanded checks.
+- `captain do` is the write side of `captain inspect`: `commit`, `push`, `branch`,
+  `switch`, `fetch`, `pull`, and `run <target>`. Not built on `inspection`'s
   hardened Git, which strips the user config, hooks and credentials a write needs;
   `do resolve --intent TEXT` uses ordered full-input rules in `do.py`, without executing
   or granting approval. Unresolved requests report reason codes and accepted shapes. Outward-facing,
@@ -135,8 +137,8 @@ Key facts:
   is written), `~/.captain/settings.toml`, the project's `.captain/settings.toml`, then
   CLI flags. Read a value with `config.lookup/text/flag/number` when the command needs
   it, never while `cli.parser()` is built.
-- Crew share the captain checkout, including dirty/staged/untracked state.
-  Give simultaneous writers disjoint files and serialize same-file work.
+- Crew use the captain checkout unless enabled checkout isolation selects a detached
+  worktree. Shared writers need disjoint files; isolated results transfer owned paths only.
 - Native-history cleanup is crew-incarnation-only. After authoritative writer shutdown
   it freezes usage, then targets only recorded local session identities; captain and
   unrelated histories are never candidates. Missing manifests/hooks, ambiguous or

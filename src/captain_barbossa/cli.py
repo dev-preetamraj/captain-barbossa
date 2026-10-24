@@ -468,6 +468,8 @@ def main(argv=None):
         if args.command == "do" and args.do_command == "resolve" and not args.session:
             do.run(args, None, project_root())
             return 0
+        if args.command == "memory" and args.memory_command == "prune":
+            config.in_range(args.older_than, "--older-than", below=float("inf"))
         pane = None if paneless_target(args) else current_pane()
         project = project_root()
         if pane is not None:

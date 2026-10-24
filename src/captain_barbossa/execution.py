@@ -156,4 +156,5 @@ def stop(session, ref):
         incarnation_id=record["incarnation_id"],
         root=record["root"],
         worktree=record["worktree_id"],
+        scope="worktree" if record["worktree_id"] else "group",
     )

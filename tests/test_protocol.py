@@ -226,7 +226,13 @@ class ProtocolTests(SessionCase):
             nudge.assert_called_once_with(self.crew, body)
             self.assertEqual(
                 store.read_json(protocol.drain_stamp(self.crew)),
-                {"id": message_id, "at": 1000.0, "landed": True, "gate": None},
+                {
+                    "id": message_id,
+                    "at": 1000.0,
+                    "landed": True,
+                    "gate": None,
+                    "bodies": [message_id],
+                },
             )
             clock[0] += protocol.DRAIN_INTERVAL + 1
             protocol.poll(self.crew)
@@ -522,7 +528,9 @@ class ProtocolTests(SessionCase):
     def test_done_hands_over_unread_mail_in_the_refusal_itself(self):
         """`done` pre-empts Stop delivery, so its refusal carries the body itself."""
         asked = self.command("ask", question="Which path?")
-        protocol.deliver(self.crew, "src", question_id=asked["question_id"])
+        # Mid-turn, so the busy crew holds the ring and the body has not landed.
+        with patch.object(Pane, "nudge_block", return_value="agent not idle"):
+            protocol.deliver(self.crew, "src", question_id=asked["question_id"])
         with self.assertRaises(CaptainError) as refusal:
             self.command("done", report="src/a.py changed; tests pass; nothing left")
         self.assertIn("src", str(refusal.exception))

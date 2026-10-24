@@ -59,7 +59,7 @@ class Row:
 
 
 class EvenRatioTests(unittest.TestCase):
-    """A roster the test owns; Herdr may only ever be asked to resize."""
+    """A roster the test owns; Herdr lists live panes and records resizes."""
 
     def setUp(self):
         self.pane = {"workspace_id": "w1", "tab_id": "captain", "pane_id": "captain"}
@@ -70,6 +70,15 @@ class EvenRatioTests(unittest.TestCase):
         self.enterContext(patch.object(runtime, "herdr", side_effect=self._herdr))
 
     def _herdr(self, *args, **_):
+        panes = [self.pane] + [
+            {"pane_id": crew["pane"], "tab_id": crew["tab"]} for crew in self.meta["crew"].values()
+        ]
+        if self.board:
+            panes.append({"pane_id": self.board, "tab_id": "captain"})
+        if args[:2] == ("tab", "list"):
+            return {"tabs": [{"tab_id": pane["tab_id"]} for pane in panes]}
+        if args[:2] == ("pane", "list"):
+            return {"panes": panes}
         if args[:2] != ("pane", "resize"):
             raise AssertionError(f"placement asked Herdr: {args}")
         self.resizes.append((args[3], args[5], args[7]))
@@ -93,8 +102,7 @@ class EvenRatioTests(unittest.TestCase):
         return Placement(self.pane, Session(None, self.meta), self.board)
 
     def recruit(self):
-        args = SimpleNamespace(direction=None, split_pane="auto")
-        return self.placement().choose_split(args, "pane")
+        return self.placement().fixed_split(None, "auto")
 
     def plan(self, name):
         return self.placement().even_after_close(self.meta["crew"][name])

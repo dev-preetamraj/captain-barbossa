@@ -145,7 +145,16 @@ class RecruitTests(SessionCase):
         store.write_json(self.directory / "session.json", self.meta)
         base = ("crew", "--agent", "claude", "--task", "x", "--placement", "pane")
         with (
-            patch.object(runtime, "herdr", side_effect=pane_stub({})),
+            patch.object(
+                runtime,
+                "herdr",
+                side_effect=pane_stub(
+                    {
+                        "tabs": [{"tab_id": self.pane["tab_id"]}],
+                        "panes": [self.pane],
+                    }
+                ),
+            ),
             patch.object(agents, "executable", side_effect=lambda name: f"/bin/{name}"),
         ):
             with self.assertRaisesRegex(runtime.CaptainError, "'Jack' already exists"):

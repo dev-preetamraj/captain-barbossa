@@ -143,17 +143,24 @@ class StaleReservationsTests(SessionCase):
         self.assertEqual(store.read_json(self.old.meta_path)["crew"]["jack"]["status"], "dismissed")
         self.recruit()
 
-    def test_live_workspace_without_the_pane_never_counts_as_closed(self):
+    def test_live_workspace_without_the_pane_requires_shutdown_proof(self):
         ref = self.managed()
-        self.exited(ref)
         with (
             patch.object(sessions, "herdr", return_value={"workspaces": [{"workspace_id": "w1"}]}),
             patch.object(
                 lifetime.runtime, "herdr", side_effect=runtime.CaptainError("pane_not_found")
-            ),
+            ) as api,
+            patch.object(lifetime, "_duration", return_value=0),
         ):
             self.assertFalse(execution.stop(self.old, ref).ok)
-        self.assertEqual(lifetime.read(self.old, ref)["close_state"], "failed")
+            self.assertEqual(lifetime.read(self.old, ref)["close_state"], "failed")
+            api.assert_not_called()
+            with self.assertRaisesRegex(runtime.CaptainError, "owned-path-conflict"):
+                self.recruit()
+            self.exited(ref)
+            self.assertTrue(execution.stop(self.old, ref).ok)
+            api.assert_called_once_with("pane", "get", "w1:p2", timeout=5)
+        self.assertEqual(lifetime.read(self.old, ref)["close_state"], "closed")
 
     def test_dead_workspace_dismissal_keeps_a_real_done_report(self):
         with protocol.checkpoint(self.old.directory) as state:

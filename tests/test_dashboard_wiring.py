@@ -5,7 +5,6 @@ import os
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import patch
 
 from captain_barbossa import agents, cli, dashboard, runtime, sessions, store
@@ -323,10 +322,9 @@ class DashboardSplitTargetTests(unittest.TestCase):
         self.assertEqual(set(groups["w1:t1"][1]), {"w1:p1"})
 
     def test_asking_for_the_dashboard_by_id_is_refused(self):
-        args = SimpleNamespace(direction="vertical", split_pane="w1:p2")
         with patch.object(runtime, "herdr", self.herdr):
             with self.assertRaises(CaptainError):
-                self.placement().choose_split(args, "pane")
+                self.placement().fixed_split("vertical", "w1:p2")
 
 
 if __name__ == "__main__":

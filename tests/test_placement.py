@@ -29,9 +29,7 @@ def pinned(**keys):
 
 
 class GridHarness(unittest.TestCase):
-    """A roster the test owns. Choosing a slot reads the roster alone, so any Herdr call
-    is a bug and fails the test.
-    """
+    """A roster and matching live workspace the test owns."""
 
     def setUp(self):
         self.pane = {"workspace_id": "w1", "tab_id": "captain", "pane_id": "captain"}
@@ -41,11 +39,19 @@ class GridHarness(unittest.TestCase):
         self.api = self.enterContext(patch.object(runtime, "herdr", side_effect=self._herdr))
 
     def _herdr(self, *args, **_):
+        panes = [self.pane] + [
+            {"pane_id": crew["pane"], "tab_id": crew["tab"]}
+            for crew in self.meta["crew"].values()
+            if crew.get("pane") and crew.get("tab")
+        ]
+        if args == ("pane", "list", "--workspace", "w1"):
+            return {"panes": panes}
+        if args == ("tab", "list", "--workspace", "w1"):
+            return {"tabs": [{"tab_id": pane["tab_id"]} for pane in panes]}
         raise AssertionError(f"placement asked Herdr: {args}")
 
-    def choose(self, direction=None, target="auto", placement="pane"):
-        args = SimpleNamespace(direction=direction, split_pane=target)
-        return Placement(self.pane, Session(None, self.meta)).choose_split(args, placement)
+    def choose(self, direction=None, target="auto"):
+        return Placement(self.pane, Session(None, self.meta)).fixed_split(direction, target)
 
     def recruit(self, direction=None, name=None):
         """Place one crew and record it the way create_crew does."""
@@ -88,6 +94,17 @@ class GridHarness(unittest.TestCase):
 class FillOrderTests(GridHarness):
     """Breadth first: a new column opens before anything stacks."""
 
+    def test_vanished_roster_panes_do_not_hold_slots_or_become_split_targets(self):
+        self.place("gone", "captain", 2, 1)
+        self.place("gone-tab", "vanished", 1, 1)
+        groups = {"captain": ("Captain", {"captain": "Captain"})}
+        with patch.object(Placement, "workspace_panes", return_value=groups):
+            with pinned(captain_tab=[1, 2]):
+                spot = self.choose()
+                self.assertEqual((spot.pane, spot.column, spot.row), ("captain", 2, 1))
+            with pinned(captain_tab=[1], crew_tab=[2]):
+                self.assertIsNone(self.choose().pane)
+
     def test_the_captain_tab_fills_its_declared_shape(self):
         placed = self.walk(5, captain_tab=[1, 2, 2])
         self.assertEqual(
@@ -128,7 +145,7 @@ class FillOrderTests(GridHarness):
             second = self.recruit()[0]
         self.assertEqual(first.chain, ("captain",))
         self.assertEqual(second.chain, ("captain", "crew1"))
-        self.api.assert_not_called()
+        self.assertTrue(all(call.args[1] == "list" for call in self.api.call_args_list))
 
 
 class DeterminismTests(GridHarness):
@@ -169,13 +186,12 @@ class DeterminismTests(GridHarness):
             (first.column, first.row, first.pane), (later.column, later.row, later.pane)
         )
 
-    def test_placement_never_asks_herdr_anything(self):
-        """Deciding a slot reads the roster alone: the harness fails the test on any call."""
+    def test_placement_only_lists_live_panes_without_measuring_or_mutating(self):
         self.roster()
         with pinned(captain_tab=[1, 2, 2]):
             self.choose()
             self.walk(3, captain_tab=[1, 2, 2])
-        self.api.assert_not_called()
+        self.assertTrue(all(call.args[1] == "list" for call in self.api.call_args_list))
 
 
 class DismissalTests(GridHarness):
@@ -259,7 +275,11 @@ class HandPlacementTests(GridHarness):
     """Explicit flags win, and what they place holds no slot."""
 
     def test_an_explicit_tab_takes_no_slot_and_asks_nothing(self):
-        spot = self.choose(target=None, placement="tab")
+        args = SimpleNamespace(
+            crew_agent="codex", placement="tab", direction=None, split_pane=None, model=None
+        )
+        placement = Placement(self.pane, Session(None, self.meta))
+        spot = placement.resolve(args, None).spot
         self.assertEqual((spot.pane, spot.tab, spot.column), (None, None, None))
         self.api.assert_not_called()
 
@@ -501,51 +521,31 @@ class PaneSplitTests(SessionCase):
 
     LISTING_CALLS = (("tab", "list", "--workspace", "w1"), ("pane", "list", "--workspace", "w1"))
 
-    LISTED_PANES = (
-        "auto Auto (next slot in the tab shape); Captain Barbossa: w1:p1 zsh (captain) / w1:p5 Will; "
-        "Tab 2: w1:p9 vim; w1:t3: w1:p8 w1:p8"
-    )
-
-    def test_pane_split_lists_workspace_panes_by_tab_and_requires_a_split_pane(self):
+    def test_a_named_pane_outside_the_workspace_lists_the_real_ones(self):
         for direction in ("vertical", "horizontal"):
-            args = self.args(
-                "crew",
-                "--agent",
-                "codex",
-                "--task",
-                "build",
-                "--placement",
-                "pane",
-                "--direction",
-                direction,
-            )
             with (
                 self.subTest(direction=direction),
-                patch.object(sys.stdin, "isatty", return_value=False),
                 patch.object(runtime, "herdr", side_effect=self.listing) as api,
             ):
-                with self.assertRaisesRegex(runtime.CaptainError, "Ask the user") as error:
-                    Placement(self.pane, Session(self.directory, self.meta)).choose_split(
-                        args, "pane"
+                with self.assertRaisesRegex(runtime.CaptainError, "not in this workspace") as error:
+                    Placement(self.pane, Session(self.directory, self.meta)).fixed_split(
+                        direction, "w1:p7"
                     )
                 self.assertEqual(
                     [call.args for call in api.call_args_list], list(self.LISTING_CALLS)
                 )
                 message = str(error.exception)
-                self.assertIn("Which pane should be split?", message)
-                self.assertIn(f"({self.LISTED_PANES})", message)
-                self.assertNotIn("w1:p7", message)
-                self.assertIn("--split-pane <choice>", message)
+                self.assertIn("Panes: w1:p1, w1:p5, w1:p9, w1:p8.", message)
+                self.assertIn("Omit --split-pane", message)
                 self.assertEqual(store.read_json(self.directory / "session.json")["crew"], {})
         for response in ({}, {"tabs": [], "panes": []}, {"tabs": [], "panes": ["x"]}):
             with (
                 self.subTest(response=response),
-                patch.object(sys.stdin, "isatty", return_value=False),
                 patch.object(runtime, "herdr", return_value=response),
             ):
                 with self.assertRaisesRegex(runtime.CaptainError, "no (tab or pane list|panes)"):
-                    Placement(self.pane, Session(self.directory, self.meta)).choose_split(
-                        args, "pane"
+                    Placement(self.pane, Session(self.directory, self.meta)).fixed_split(
+                        "vertical", "w1:p9"
                     )
 
     def test_split_flags_are_rejected_with_tab_placement_before_any_herdr_call(self):
@@ -752,7 +752,7 @@ class PaneSplitTests(SessionCase):
         self.assertEqual(result["direction"], "vertical")
         self.assertEqual(result["model"], "claude-haiku-5-5")
         self.assertIn("captain.json", errors.getvalue())
-        self.assertIn("built-in default", errors.getvalue())
+        self.assertIn("[crew] placement from defaults.toml", errors.getvalue())
 
     def test_a_refused_recruit_leaves_the_tab_untouched(self):
         will = {"pane": "w1:p5", "tab": "w1:t1", "status": "started", "column": 2, "row": 1}
@@ -837,6 +837,14 @@ class PaneSplitTests(SessionCase):
             store.write_json(self.directory / "protocol.json", {"active": {}, "assignments": {}})
 
             def api(*call, **_):
+                if call[:2] == ("pane", "list"):
+                    return {
+                        "panes": [self.pane]
+                        + [
+                            {"pane_id": crew["pane"], "tab_id": crew["tab"]}
+                            for crew in roster.values()
+                        ]
+                    }
                 return self.listing(*call) or created
 
             with (
@@ -849,7 +857,9 @@ class PaneSplitTests(SessionCase):
             ):
                 agents.create_crew(self.args(*base, *flags), self.pane, self.project)
             made = [call.args for call in calls.call_args_list]
-            creation = made[0]
+            creation = next(
+                call for call in made if call[:2] in (("pane", "split"), ("tab", "create"))
+            )
             result = json.loads(output.getvalue())
             if expected[0] == "split":
                 self.assertEqual(creation[:2], ("pane", "split"))
@@ -892,6 +902,14 @@ class PaneSplitTests(SessionCase):
         store.write_json(self.directory / "session.json", meta)
 
         def api(*call, **_):
+            if call[:2] == ("pane", "list"):
+                return {
+                    "panes": [self.pane]
+                    + [
+                        {"pane_id": crew["pane"], "tab_id": crew["tab"]}
+                        for crew in meta["crew"].values()
+                    ]
+                }
             return self.listing(*call) or created
 
         base = ("crew", "--agent", "claude", "--task", "review code", "--placement", "pane")

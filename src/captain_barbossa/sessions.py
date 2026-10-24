@@ -290,9 +290,11 @@ def session(project, pane, session_id=None, create=False, *, allow_dead_workspac
 PRUNE_DAYS = 7
 
 
-def newest_mtime(directory):
-    newest = directory.stat().st_mtime
+def newest_mtime(directory, *, ignore_lock=False):
+    newest = 0 if ignore_lock else directory.stat().st_mtime
     for path in directory.rglob("*"):
+        if ignore_lock and path == directory / "session.lock":
+            continue
         try:
             newest = max(newest, path.lstat().st_mtime)
         except OSError:
@@ -396,17 +398,21 @@ def prune_sessions(project, days=PRUNE_DAYS, current=None):
     cutoff = time.time() - days * 86400 * (2 if agents is None else 1)
     removed = []
     for directory in directories:
-        if newest_mtime(directory) >= cutoff or unresolved(directory):
+        if newest_mtime(directory, ignore_lock=True) >= time.time() - days * 86400:
             continue
-        if agents is not None:
-            terminal_ids, names = agents
-            prefix = crew_prefix(directory.name)
-            terminal_id = session_terminal_id(directory)
-            if (terminal_id and terminal_id in terminal_ids) or any(
-                name.startswith(prefix) for name in names
-            ):
+        with lock(directory / "session.lock"):
+            activity = newest_mtime(directory, ignore_lock=True)
+            if activity >= cutoff or unresolved(directory):
                 continue
-        shutil.rmtree(directory, ignore_errors=True)
-        if not directory.exists():
-            removed.append(directory)
+            if agents is not None:
+                terminal_ids, names = agents
+                prefix = crew_prefix(directory.name)
+                terminal_id = session_terminal_id(directory)
+                if (terminal_id and terminal_id in terminal_ids) or any(
+                    name.startswith(prefix) for name in names
+                ):
+                    continue
+            shutil.rmtree(directory, ignore_errors=True)
+            if not directory.exists():
+                removed.append(directory)
     return removed

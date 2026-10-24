@@ -33,6 +33,8 @@ class RecruitmentProfilesTests(SessionCase):
                 runtime,
                 "herdr",
                 return_value={
+                    "tabs": [{"tab_id": self.pane["tab_id"]}],
+                    "panes": [self.pane],
                     "root_pane": {"pane_id": "w1:p9", "terminal_id": "crew-terminal"},
                     "tab_id": "w1:t9",
                 },
@@ -114,6 +116,10 @@ class RecruitmentProfilesTests(SessionCase):
         self.settings = {"profiles": {"review": {"agent": "codex", "placement": "tab"}}}
 
         def herdr(*command, **_kwargs):
+            if command[:2] == ("tab", "list"):
+                return {"tabs": [{"tab_id": self.pane["tab_id"]}]}
+            if command[:2] == ("pane", "list"):
+                return {"panes": [self.pane]}
             if command[:2] == ("pane", "split"):
                 return {
                     "pane": {

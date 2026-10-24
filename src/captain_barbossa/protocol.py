@@ -426,8 +426,13 @@ def deliver_before_done(crew):
     messages = unread(crew)
     if not messages:
         return
-    body = render(crew.session.directory, messages)
+    # A body the ring already typed reached the crew; receipt it rather than re-serve it.
+    landed = landed_bodies(crew)
+    pending = [message for message in messages if message["id"] not in landed]
+    body = render(crew.session.directory, pending)
     receipt(crew.session.directory, crew.crew_id, [message["id"] for message in messages])
+    if not pending:
+        return
     raise CaptainError(
         f"{body}\n\nThat mail arrived before this report. Act on it, then run done again."
     )
@@ -634,6 +639,12 @@ def ring(crew, message_id):
     # The one record of a ring, so drain can tell a held doorbell from one the crew already got.
     now = time.time()
     record = {"id": message_id, "at": now, "landed": landed, "gate": gate}
+    # Every body that landed, carried forward so a later held ring cannot erase one.
+    bodies = list(prior.get("bodies", ())) if prior else []
+    if landed and text and message_id not in bodies:
+        bodies.append(message_id)
+    if bodies:
+        record["bodies"] = bodies
     if held is not None:
         # Preserve hold age for diagnostics, never as permission to type.
         carried = (
@@ -722,6 +733,21 @@ def last_ring(crew):
         return None
     record = read_json(stamp)
     return record if isinstance(record, dict) else {"id": None, "at": record, "landed": False}
+
+
+def landed_bodies(crew):
+    """The messages whose body a ring landed in the pane.
+
+    Only a provider outside HOOK_DELIVERED is rung with the body, and a ring repeated after
+    landing goes content-free only because an earlier one carried it.
+    """
+    if crew.record.get("provider") in HOOK_DELIVERED:
+        return set()
+    record = last_ring(crew)
+    if not record:
+        return set()
+    # A stamp written before bodies were carried names only its own landing.
+    return set(record.get("bodies", ())) | ({record["id"]} if record["landed"] else set())
 
 
 def drain(crew):

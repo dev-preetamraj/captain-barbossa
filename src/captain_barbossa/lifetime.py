@@ -869,9 +869,10 @@ def close(session, ref):
             "root": record["root"],
             "worktree": record["worktree_id"],
         }
+        scope = "worktree" if record["worktree_id"] else "group"
         if record.get("close_state") == "closed":
             # A verified close is final; its pane is gone and its name may be reused.
-            return check(session, ref, **identity)
+            return check(session, ref, **identity, scope=scope)
         _close_state(session, ref, "pending")
         deadline = (
             time.monotonic()
@@ -905,20 +906,17 @@ def close(session, ref):
         try:
             actual = runtime.herdr("pane", "get", expected["pane_id"], timeout=5).get("pane", {})
         except runtime.HERDR_ERRORS as exc:
-            # The group is already confirmed stopped; a Herdr listing without the bound
-            # workspace proves its terminal went with it, so nothing is left to close.
-            if not re.search(r"\bpane_not_found\b", str(exc)) or not sessions.workspace_gone(
-                expected["workspace_id"]
-            ):
+            # Shutdown is proven already; a missing exact pane needs no close.
+            if not re.search(r"\bpane_not_found\b", str(exc)):
                 raise
             _close_state(session, ref, "closed")
-            return check(session, ref, **identity)
+            return check(session, ref, **identity, scope=scope)
         if any(actual.get(key) != value for key, value in expected.items()):
             _close_state(session, ref, "failed")
             return Verdict(False, "terminal-mismatch")
         runtime.herdr("pane", "close", expected["pane_id"], timeout=5)
         _close_state(session, ref, "closed")
-        return check(session, ref, **identity)
+        return check(session, ref, **identity, scope=scope)
     except (*runtime.HERDR_ERRORS, KeyError, TypeError, ValueError, AttributeError):
         # Leaving pending also retains when the failure itself cannot be recorded.
         try:

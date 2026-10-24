@@ -7,6 +7,10 @@ agent = ""
 model = ""
 
 [crew]
+# Which CLI new crew run. Empty follows the captain's own CLI. --agent still wins.
+agent = ""
+# Where new crew open: pane, tab, or auto (the next free slot, a new tab once all are taken).
+placement = "auto"
 isolation_enabled = false
 checkout = "auto"
 # The model new crew are recruited with, when `captain crew` gets no --model.

@@ -277,6 +277,41 @@ class CleanupEvidenceTests(SessionCase):
                     ).ok
                 )
 
+    def test_shared_dismissal_uses_group_proof_but_worktree_keeps_escape_check(self):
+        lifetime.bind(self.session, self.ref, self.crew)
+        self.stopped()
+        path = self.session.directory / "lifetimes" / f"{self.ref}.json"
+        record = store.read_json(path)
+        record["shutdown"]["escape_state"] = "observed"
+        store.write_json(path, record)
+        with patch.object(lifetime.runtime, "herdr", side_effect=CaptainError("pane_not_found")):
+            self.assertTrue(execution.stop(self.session, self.ref).ok)
+            self.assertTrue(execution.stop(self.session, self.ref).ok)
+        record = store.read_json(path)
+        record["worktree_id"] = self.ref
+        store.write_json(path, record)
+        self.assertEqual(
+            execution.stop(self.session, self.ref).reason, "descendant-escape-unexcluded"
+        )
+
+    def test_vanished_pane_requires_shutdown_receipt_and_can_retry(self):
+        lifetime.bind(self.session, self.ref, self.crew)
+        with lifetime.claim(self.session, self.ref):
+            pass
+        with (
+            patch.object(
+                lifetime.runtime, "herdr", side_effect=CaptainError("pane_not_found")
+            ) as herdr,
+            patch.object(lifetime.time, "monotonic", side_effect=[0, 100]),
+        ):
+            self.assertFalse(execution.stop(self.session, self.ref).ok)
+            herdr.assert_not_called()
+        self.assertEqual(lifetime.read(self.session, self.ref)["state"], "claimed")
+        self.stopped()
+        with patch.object(lifetime.runtime, "herdr", side_effect=CaptainError("pane_not_found")):
+            self.assertTrue(execution.stop(self.session, self.ref).ok)
+        self.assertEqual(lifetime.read(self.session, self.ref)["close_state"], "closed")
+
     def test_native_history_needs_the_reaped_native_exit(self):
         lifetime.revoke(self.session, self.ref)
         identity = {

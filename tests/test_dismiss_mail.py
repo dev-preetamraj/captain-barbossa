@@ -55,7 +55,9 @@ class DismissMailTests(SessionCase):
 
     def test_dismiss_bounces_mail_the_crew_never_read(self):
         """A sent message the crew never read leaves its mail file queued; dismiss must bounce it."""
-        message_id = protocol.deliver(self.crew, "original", initial=True)
+        # A held ring: a landed body would count as delivered.
+        with patch.object(Pane, "nudge_block", return_value="agent not idle"):
+            message_id = protocol.deliver(self.crew, "original", initial=True)
         with protocol.checkpoint(self.directory) as state:
             assignment = protocol.active(state, self.crew, self.assignment["id"])
             assignment["state"] = "done"
@@ -68,7 +70,8 @@ class DismissMailTests(SessionCase):
         self.assertIn("dismiss", mail["reason"].lower())
 
     def test_dismiss_close_failure_preserves_queued_mail(self):
-        message_id = protocol.deliver(self.crew, "original", initial=True)
+        with patch.object(Pane, "nudge_block", return_value="agent not idle"):
+            message_id = protocol.deliver(self.crew, "original", initial=True)
         mail = self.mail(message_id)
         roster = store.read_json(self.current.meta_path)
         state = store.read_json(self.directory / "protocol.json")
@@ -206,6 +209,8 @@ class DismissCrewTests(SessionCase):
             patch.object(agents, "executable", return_value="/bin/codex"),
             patch.object(Pane, "wait_for_crew"),
             patch.object(Pane, "submit_task"),
+            # The doorbell is held, so the task body never reaches the crew.
+            patch.object(Pane, "nudge_block", return_value="agent not idle"),
         ):
             agents.create_crew(
                 self.args(

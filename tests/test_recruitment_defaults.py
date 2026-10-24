@@ -33,9 +33,9 @@ class RecruitmentDefaultsTests(unittest.TestCase):
         if call[:2] == ("pane", "resize"):
             return {"resize": {"changed": True}}
         if call[:2] == ("tab", "list"):
-            return {"tabs": [{"tab_id": "t2", "number": 2}]}
+            return {"tabs": [{"tab_id": "captain", "number": 1}, {"tab_id": "t2", "number": 2}]}
         if call[:2] == ("pane", "list"):
-            return {"panes": [{"pane_id": "p9", "tab_id": "t2"}]}
+            return {"panes": [self.pane, {"pane_id": "p9", "tab_id": "t2"}]}
         raise AssertionError(f"resolution asked Herdr: {call}")
 
     def resolve(self, **flags):
@@ -55,7 +55,12 @@ class RecruitmentDefaultsTests(unittest.TestCase):
         self.assertEqual(recruit.capabilities, ("hooks",))
         self.assertIn("captain.json", recruit.sources["agent"])
         self.assertIn("[crew] model = 'cheap'", recruit.sources["model"])
-        self.assertEqual(recruit.sources["placement"], "built-in default")
+        self.assertEqual(recruit.sources["placement"], "[crew] placement from defaults.toml")
+
+    def test_crew_agent_and_placement_are_shipped_defaults(self):
+        self.assertEqual(config.defaults()["crew"]["agent"], "")
+        self.assertEqual(config.defaults()["crew"]["placement"], "auto")
+        self.assertIn('# placement = "auto"', config.template())
 
     def test_settings_beat_captain_json_and_flags_beat_settings(self):
         self.settings = {"crew": {"agent": "claude", "model": "mid", "placement": "tab"}}
