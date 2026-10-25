@@ -294,10 +294,12 @@ def session(project, pane, session_id=None, create=False, *, allow_dead_workspac
 PRUNE_DAYS = 7
 
 
-def newest_mtime(directory, *, ignore_lock=False):
-    newest = 0 if ignore_lock else directory.stat().st_mtime
+def newest_mtime(directory):
+    """Last activity under a session. Naming is not activity: a rename writes name.json,
+    may create session.lock and bumps the directory's own mtime, so none of them count."""
+    newest = 0
     for path in directory.rglob("*"):
-        if ignore_lock and path == directory / "session.lock":
+        if path in (directory / "session.lock", directory / "name.json"):
             continue
         try:
             newest = max(newest, path.lstat().st_mtime)
@@ -402,10 +404,10 @@ def prune_sessions(project, days=PRUNE_DAYS, current=None):
     cutoff = time.time() - days * 86400 * (2 if agents is None else 1)
     removed = []
     for directory in directories:
-        if newest_mtime(directory, ignore_lock=True) >= time.time() - days * 86400:
+        if newest_mtime(directory) >= time.time() - days * 86400:
             continue
         with lock(directory / "session.lock"):
-            activity = newest_mtime(directory, ignore_lock=True)
+            activity = newest_mtime(directory)
             if activity >= cutoff or unresolved(directory):
                 continue
             if agents is not None:

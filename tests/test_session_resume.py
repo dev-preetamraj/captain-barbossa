@@ -2,13 +2,14 @@ import contextlib
 import io
 import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from captain_barbossa import cli
+from captain_barbossa import cli, sessions
 from captain_barbossa.runtime import CaptainError
-from captain_barbossa.sessions import all_sessions, session
+from captain_barbossa.sessions import all_sessions, prune_sessions, session
 from captain_barbossa.store import write_json
 
 PANE = {"workspace_id": "w1", "tab_id": "w1:t1", "pane_id": "w1:p1"}
@@ -54,6 +55,20 @@ class SessionResumeTests(unittest.TestCase):
         self.run_main("--session", session_id, "--rename", "alpha")
         self.run_main("--session", session_id, "--rename", "Late title", "--if-unnamed")
         self.assertEqual(all_sessions(self.here)[0][1], "alpha")
+
+    def test_naming_an_old_session_is_not_activity(self):
+        old = self.make(self.here)
+        (old.directory / "session.lock").unlink()  # made before sessions were locked
+        stamp = time.time() - 30 * 86400
+        for path in (*old.directory.rglob("*"), old.directory):
+            os.utime(path, (stamp, stamp))
+        before = all_sessions(self.here)[0][3]
+        self.run_main("--session", old.meta["id"], "--rename", "alpha")
+        self.run_main("--session", old.meta["id"], "--rename", "beta", "--if-unnamed")
+        self.assertEqual(all_sessions(self.here)[0][1:4], ("alpha", old.meta["id"], before))
+        with patch.object(sessions, "live_agents", return_value=(set(), set())):
+            removed = prune_sessions(self.here)
+        self.assertEqual([path.name for path in removed], [old.meta["id"]])
 
     def test_rename_names_the_session_and_lists_it(self):
         current = self.make(self.here)
