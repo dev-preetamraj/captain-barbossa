@@ -564,7 +564,7 @@ class ApprovalTests(unittest.TestCase):
                 ("captain do push", "captain-do"),
                 ("/abs/path/bin/captain do push", "captain-do"),
                 ("python3 -m captain_barbossa do push", "captain-do"),
-                ("cd /tmp && ../usr/bin/captain crew --task x", "captain-inline"),
+                ("cd / && ../usr/bin/captain crew --task x", "captain-verb"),
                 ("cd /repo/captain-barbossa && python3 -c 'import os'", "shell"),
             ],
             bash,
