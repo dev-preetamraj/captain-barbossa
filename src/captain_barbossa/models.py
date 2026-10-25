@@ -227,18 +227,6 @@ def chosen_model(provider, flag, *setting):
     return resolve_model(provider, wanted), f"{label} = {wanted!r} from {where}"
 
 
-def capabilities(provider):
-    """What provider's CLI can do for the protocol, so no caller re-tests the tuples."""
-    return tuple(
-        name
-        for name, held in (
-            ("hooks", provider not in HOOKLESS),
-            ("hook_delivered_mail", provider in HOOK_DELIVERED),
-        )
-        if held
-    )
-
-
 def native_model_args(provider, model):
     if not model:
         return []

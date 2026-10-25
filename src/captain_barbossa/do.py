@@ -483,6 +483,11 @@ def run(args, session_directory, project):
     """
     try:
         return _dispatch(args, session_directory, project)
+    except KeyboardInterrupt:
+        if args.do_command != "resolve":
+            command = ["captain", "do", args.do_command]
+            record(session_directory, args.do_command, command, 130, "Interrupted.")
+        raise
     except CaptainError as exc:
         if args.do_command != "resolve" and not getattr(exc, "recorded", False):
             command = ["captain", "do", args.do_command]
@@ -547,6 +552,11 @@ def _dispatch(args, session_directory, project):
             _, remotes = _git(root, "remote")
             names = remotes.splitlines()
             command += ["--set-upstream", names[0] if len(names) == 1 else "origin", current]
+        else:
+            _, remote = _git(
+                root, "for-each-ref", "--format=%(push:remotename)", f"refs/heads/{current}"
+            )
+            command += [remote, current]
         output = _act(root, command, session_directory, action)
         summary = f"Pushed {current}."
     else:

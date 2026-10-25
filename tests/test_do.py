@@ -543,6 +543,59 @@ time.sleep(30)
                 except ProcessLookupError:
                     pass
 
+    def test_tracked_push_with_matching_default_only_publishes_current_branch(self):
+        remote = self.advance_remote()
+        git(self.project, "pull", "--ff-only")
+        git(self.project, "branch", "other")
+        git(self.project, "push", "origin", "other")
+        before = subprocess.check_output(["git", "rev-parse", "other"], cwd=remote)
+        git(self.project, "switch", "other")
+        git(self.project, "commit", "--allow-empty", "-m", "private")
+        git(self.project, "switch", "main")
+        git(self.project, "commit", "--allow-empty", "-m", "publish")
+        git(self.project, "config", "push.default", "matching")
+        self.run_do("push")
+        self.assertEqual(subprocess.check_output(["git", "rev-parse", "other"], cwd=remote), before)
+        self.assertEqual(
+            subprocess.check_output(["git", "rev-parse", "main"], cwd=remote),
+            subprocess.check_output(["git", "rev-parse", "main"], cwd=self.project),
+        )
+
+    def test_tracked_push_uses_git_push_remote_precedence(self):
+        upstream = self.advance_remote()
+        git(self.project, "pull", "--ff-only")
+        git(self.project, "remote", "rename", "origin", "upstream")
+        git(self.root, "init", "--bare", "origin.git")
+        origin = self.root / "origin.git"
+        git(self.project, "remote", "add", "origin", str(origin))
+        before = subprocess.check_output(["git", "rev-parse", "main"], cwd=upstream)
+        git(self.project, "config", "push.default", "matching")
+        for setting in ("remote.pushDefault", "branch.main.pushRemote"):
+            with self.subTest(setting=setting):
+                git(self.project, "config", setting, "origin")
+                git(self.project, "commit", "--allow-empty", "-m", setting)
+                self.run_do("push")
+                self.assertEqual(
+                    subprocess.check_output(["git", "rev-parse", "main"], cwd=origin),
+                    subprocess.check_output(["git", "rev-parse", "main"], cwd=self.project),
+                )
+                self.assertEqual(
+                    subprocess.check_output(["git", "rev-parse", "main"], cwd=upstream),
+                    before,
+                )
+                git(self.project, "config", "remote.pushDefault", "upstream")
+
+    def test_interrupted_run_is_recorded_before_propagating(self):
+        (self.project / "Makefile").write_text("test:\n\t@echo test\n", encoding="utf-8")
+        with (
+            mock.patch.object(do, "_capture", side_effect=KeyboardInterrupt),
+            self.assertRaises(KeyboardInterrupt),
+        ):
+            self.run_do("run", target="test")
+        (entry,) = self.recorded()
+        self.assertEqual((entry["type"], entry["action"], entry["exit"]), ("quiet", "run", 130))
+        self.assertIn("Interrupted", entry["output"])
+
     def test_an_interrupt_cleans_up_the_process_group_before_propagating(self):
         process = mock.Mock()
         process.communicate.side_effect = KeyboardInterrupt

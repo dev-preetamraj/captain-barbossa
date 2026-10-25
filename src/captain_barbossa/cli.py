@@ -340,14 +340,10 @@ def resume_target(args):
             raise CaptainError("No sessions to resume.")
         when = lambda row: time.strftime("%Y-%m-%d %H:%M", time.localtime(row[3]))  # noqa: E731
         labels = {row[2]: f"{row[1] or '-'}  {row[2]}  {when(row)}" for row in rows}
-        projects = list(dict.fromkeys(row[0] for row in rows))
         if not sys.stdin.isatty():
-            for project in projects:
-                print(project)
-                print(*(f"  {labels[row[2]]}" for row in rows if row[0] == project), sep="\n")
+            print(*(labels[row[2]] for row in rows), sep="\n")
             return None
-        groups = [(p, [row[2] for row in rows if row[0] == p]) for p in projects]
-        chosen = choose(None, [row[2] for row in rows], "Resume which session?", "", labels, groups)
+        chosen = choose(None, [row[2] for row in rows], "Resume which session?", "", labels)
         row = next(row for row in rows if row[2] == chosen)
     if not os.path.isdir(row[0]):
         raise CaptainError(f"Project {row[0]} of session {row[2]} is not a directory here.")

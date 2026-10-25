@@ -50,9 +50,8 @@ class RecruitmentDefaultsTests(unittest.TestCase):
         recruit = self.resolve()
         self.assertEqual(recruit.agent, "codex")
         self.assertEqual(recruit.model, config.defaults()["models"]["codex"]["cheap"])
-        self.assertEqual((recruit.placement, recruit.direction), ("pane", "vertical"))
+        self.assertEqual((recruit.placement, recruit.spot.direction), ("pane", "vertical"))
         self.assertEqual((recruit.spot.pane, recruit.spot.column), ("captain", 2))
-        self.assertEqual(recruit.capabilities, ("hooks",))
         self.assertIn("captain.json", recruit.sources["agent"])
         self.assertIn("[crew] model = 'cheap'", recruit.sources["model"])
         self.assertEqual(recruit.sources["placement"], "[crew] placement from defaults.toml")
@@ -67,7 +66,6 @@ class RecruitmentDefaultsTests(unittest.TestCase):
         recruit = self.resolve()
         self.assertEqual((recruit.agent, recruit.placement), ("claude", "tab"))
         self.assertEqual(recruit.model, config.defaults()["models"]["claude"]["mid"])
-        self.assertEqual(recruit.capabilities, ("hooks", "hook_delivered_mail"))
         self.herdr.assert_not_called()
         recruit = self.resolve(crew_agent="grok", model="strong", placement="pane")
         self.assertEqual((recruit.agent, recruit.placement), ("grok", "pane"))
@@ -78,7 +76,7 @@ class RecruitmentDefaultsTests(unittest.TestCase):
         with patch.object(sys.stdin, "isatty", return_value=False):
             recruit = self.resolve(split_pane="p9")
         self.assertEqual((recruit.spot.pane, recruit.spot.tab), ("p9", "t2"))
-        self.assertEqual((recruit.placement, recruit.direction), ("pane", "vertical"))
+        self.assertEqual((recruit.placement, recruit.spot.direction), ("pane", "vertical"))
         with self.assertRaisesRegex(CaptainError, "not in this workspace.*Omit --split-pane"):
             self.resolve(split_pane="p7")
 

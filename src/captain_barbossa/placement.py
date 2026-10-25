@@ -15,7 +15,7 @@ from .layout import (
     shape,
     split_for,
 )
-from .models import PROVIDERS, capabilities, chosen_model
+from .models import PROVIDERS, chosen_model
 from .prompts import PLACEMENTS, choose
 from .runtime import CaptainError
 from .store import read_json
@@ -42,12 +42,7 @@ class Recruitment:
     placement: str
     spot: Spot
     model: str
-    capabilities: tuple
     sources: dict
-
-    @property
-    def direction(self):
-        return self.spot.direction
 
 
 def crew_agent(flag, directory):
@@ -364,7 +359,6 @@ class Placement:
             placement,
             spot,
             model,
-            capabilities(agent),
             {**sources, "placement": placement_source},
         )
 

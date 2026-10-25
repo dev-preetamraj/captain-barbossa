@@ -55,7 +55,7 @@ class SessionResumeTests(unittest.TestCase):
         with self.assertRaises(CaptainError):
             cli.rename_session(current.directory, "a" * 32)
 
-    def test_list_groups_by_project_current_first_and_tolerates_old_dirs(self):
+    def test_list_is_flat_and_only_contains_current_project_sessions(self):
         far = self.make(self.other)
         near = self.make(self.here)
         write_json(far.directory / "session.json", {"id": "x"})  # no project recorded
@@ -63,7 +63,9 @@ class SessionResumeTests(unittest.TestCase):
         self.assertEqual([row[2] for row in rows], [near.meta["id"], far.meta["id"]])
         self.assertEqual(rows[1][0], "-")
         _, out, launch = self.run_main("resume")
-        self.assertIn(str(self.here), out)
+        self.assertNotIn(str(self.here), out)
+        self.assertEqual(len(out.splitlines()), 1)
+        self.assertTrue(out.startswith(f"-  {near.meta['id']}  "))
         self.assertNotIn(str(self.other), out)
         self.assertNotIn("-\n", out)
         launch.assert_not_called()
@@ -106,4 +108,5 @@ class SessionResumeTests(unittest.TestCase):
         with patch.object(cli, "choose", return_value=near.meta["id"]) as choose:
             _, _, launch = self.run_main("resume", tty=True)
         self.assertEqual(choose.call_args.args[1], [near.meta["id"]])
+        self.assertEqual(len(choose.call_args.args), 5)
         self.assertEqual(launch.call_args.args[0].session, near.meta["id"])
