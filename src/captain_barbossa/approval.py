@@ -155,12 +155,13 @@ class Decision:
 
 @dataclass
 class _Use:
-    """What one simple command needs: an action, paths it reads and paths it writes."""
+    """What one simple command needs: an action and its write targets."""
 
     code: str | None = None
     action: str | None = None
-    reads: tuple = ()
     writes: tuple = ()
+    copy_sources: tuple = ()
+    recursive_copy: bool = False
     make: tuple | None = None
     text: str = ""
     # A help/version/schema probe: its output is never run, so the whole-text scan skips it.
@@ -282,7 +283,7 @@ def _decide_text(request, text):
                 or _resolve(cwd, words[1]) != os.path.abspath(os.path.join(cwd, words[1]))
             ):
                 return Decision("unsupported-syntax")
-            uses.append((cwd, _Use(action="read", reads=(words[1],))))
+            uses.append((cwd, _Use(action="read")))
             cwd = _resolve(cwd, words[1])
             continue
         use = _command(words)
@@ -399,11 +400,18 @@ def _classify(words):
     if verb == "rg":
         if any(arg.startswith("--pre") for arg in args):
             return _Use("shell")
-        return _Use(action="read", reads=_path_like(args))
+        return _Use(action="read")
     if verb == "ruff":
         return _ruff(args)
+    if verb == "file":
+        # A preceding value-taking flag may consume `--`, so scan every argument.
+        for arg in args:
+            if (arg.startswith("--") and "--compile".startswith(arg.split("=", 1)[0])) or (
+                arg.startswith("-") and not arg.startswith("--") and "C" in arg
+            ):
+                return _Use("unknown-command")
     if verb in READ_VERBS:
-        return _Use(action="read", reads=_path_like(args))
+        return _Use(action="read")
     return _Use("unknown-command")
 
 
@@ -447,22 +455,18 @@ def _tests(module, args):
     unittest = module == ["unittest"]
     # unittest discover takes -s/-t directories and a -p pattern; -k is a name filter.
     value_flags = {"-k", *(["-s", "-t", "-p"] if unittest else [])}
-    selectors, rest = [], list(args)
+    rest = list(args)
     while rest:
         arg = rest.pop(0)
         if arg in value_flags:
             if not rest:
                 return _Use("unparsed")
-            value = rest.pop(0)
-            if arg in ("-s", "-t"):
-                selectors.append(value)
+            rest.pop(0)
         elif arg in TEST_FLAGS or (unittest and arg == "discover"):
             continue
         elif arg.startswith("-"):
             return _Use("unknown-command")
-        else:
-            selectors.append(arg)
-    return _Use(action="test", reads=_path_like(selectors))
+    return _Use(action="test")
 
 
 def _git(args):
@@ -484,7 +488,7 @@ def _git(args):
                 sub == "grep" and arg.startswith("-") and not arg.startswith("--") and "O" in arg
             ):
                 return _Use("shell")
-        return _Use(action="read", reads=_path_like(rest))
+        return _Use(action="read")
     if sub == "reflog":
         if rest[:1] in (["expire"], ["delete"], ["drop"], ["write"]):
             return _Use("destructive")
@@ -552,23 +556,33 @@ def _find(args):
         return _Use("destructive")
     if any(arg in FIND_SHELL for arg in args):
         return _Use("shell")
-    roots = []
-    for arg in args:
-        if arg.startswith(("-", "(", "!")):
-            break
-        roots.append(arg)
-    return _Use(action="read", reads=tuple(roots) or (".",))
+    return _Use(action="read")
 
 
 def _edit(verb, args):
     flags = [arg for arg in args if arg.startswith("-")]
     paths = [arg for arg in args if not arg.startswith("-")]
+    recursive = verb == "cp" and any(
+        any(option.startswith(flag.split("=", 1)[0]) for option in ("--archive", "--recursive"))
+        if flag.startswith("--") and len(flag) > 2
+        else not flag.startswith("--") and bool(set(flag[1:]) & {"a", "r", "R"})
+        for flag in flags
+    )
     if set(flags) - EDIT_FLAGS[verb] or (not paths and verb != "tee"):
-        return _Use("unknown-command", writes=tuple(paths[-1:] if verb in ("cp", "mv") else paths))
+        return _Use(
+            "unknown-command",
+            writes=tuple(paths[-1:] if verb in ("cp", "mv") else paths),
+            recursive_copy=recursive,
+        )
     if verb == "cp":
         if len(paths) < 2:
             return _Use("unknown-command")
-        return _Use(action="edit", reads=tuple(paths[:-1]), writes=(paths[-1],))
+        return _Use(
+            action="edit",
+            copy_sources=tuple(paths[:-1]),
+            writes=(paths[-1],),
+            recursive_copy=recursive,
+        )
     return _Use(action="edit", writes=tuple(paths))
 
 
@@ -606,7 +620,7 @@ def _sed_parse(args):
     if not scripts or not all(_sed_script(script) for script in scripts):
         return _Use("unknown-command")
     if suffix is None:
-        return _Use(action="read", reads=tuple(operands))
+        return _Use(action="read")
     if not operands:
         return _Use("unknown-command")
     backups = tuple(path + suffix for path in operands) if suffix else ()
@@ -692,12 +706,7 @@ def _ruff(args):
         writes = not flags
     if writes:
         return _Use(action="format", writes=paths or (".",))
-    return _Use(action="test", reads=paths)
-
-
-def _path_like(args):
-    # A bare filename can be a symlink too; conservatively check every operand.
-    return tuple(arg for arg in args if not arg.startswith("-"))
+    return _Use(action="test")
 
 
 def _resolve(cwd, value):
@@ -746,7 +755,7 @@ def _judge_one(request, cwd, use, scan=None):
     if use.code:
         if REASONS[use.code][0] == Verdict.DEFER:
             # Even a command with no policy may not write outside the owned paths.
-            if not _owns(request, cwd, use.writes):
+            if not _owns(request, cwd, use.writes, use.recursive_copy):
                 return "outside-grant"
             # A shell or wrapper may run any other part of the text, piped in as stdin.
             whole = use.code != "unknown-command" and request.tool in SHELL_TOOLS
@@ -768,12 +777,30 @@ def _judge_one(request, cwd, use, scan=None):
     needed = {use.action, *(["edit"] if writes and use.action in ("read", "test") else [])}
     if needed - granted:
         return "action-not-granted"
-    return "granted" if _owns(request, cwd, writes) else "outside-grant"
+    if use.copy_sources:
+        for destination in _expand(cwd, use.writes[0]):
+            if destination is None:
+                return "outside-grant"
+            if not os.path.isdir(os.path.join(cwd, destination)):
+                continue
+            for source in use.copy_sources:
+                for match in _expand(cwd, source):
+                    if match is None:
+                        return "outside-grant"
+                    writes.append(
+                        posixpath.join(destination, posixpath.basename(match.rstrip("/")))
+                    )
+    return "granted" if _owns(request, cwd, writes, use.recursive_copy) else "outside-grant"
 
 
-def _owns(request, cwd, writes):
+def _owns(request, cwd, writes, recursive_copy=False):
     targets = [match for path in writes if path != NULL_DEVICE for match in _expand(cwd, path)]
-    return None not in targets and all(_writable(request, cwd, path) for path in targets)
+    if None in targets:
+        return False
+    # Existing trees can contain writable symlink descendants we cannot bound.
+    if recursive_copy and any(os.path.lexists(os.path.join(cwd, path)) for path in targets):
+        return False
+    return all(_writable(request, cwd, path) for path in targets)
 
 
 def _make_recipes(cwd, args):

@@ -30,6 +30,87 @@ class ApprovalTests(unittest.TestCase):
             with self.subTest(value=value):
                 self.assertEqual(run(value).code, code)
 
+    def test_copy_into_directory_checks_child_symlink_destination(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            (root / "owned").mkdir()
+            (root / "source").write_text("new")
+            (root / "victim").write_text("original")
+            (root / "owned" / "source").symlink_to(root / "victim")
+            for command in (
+                "cp source owned/",
+                "cp source owned",
+                "cp ./source owned/",
+                "cp source victim owned/",
+                "cp sour* owned/",
+                "cd ./owned && cp ../source .",
+                "uv run cp source owned/",
+            ):
+                with self.subTest(command=command):
+                    request = Request(
+                        "Bash", str(root), str(root), ("owned",), ("edit",), command=command
+                    )
+                    self.assertEqual(decide(request).code, "outside-grant")
+            request = Request(
+                "Bash",
+                str(root),
+                str(root),
+                ("owned",),
+                ("edit",),
+                command="cp victim owned/",
+            )
+            self.assertEqual(decide(request).code, "granted")
+
+    def test_recursive_copy_to_existing_destination_escalates(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            (root / "source" / "sub").mkdir(parents=True)
+            (root / "source" / "sub" / "file").write_text("new")
+            (root / "owned" / "source" / "sub").mkdir(parents=True)
+            (root / "victim").write_text("original")
+            (root / "owned" / "source" / "sub" / "file").symlink_to(root / "victim")
+            for command in (
+                "cp -R source owned/",
+                "cp -r source owned/",
+                "cp -a source owned/",
+                "cp --archive source owned/",
+                "cp --recursive source owned/",
+                "cp -aR source owned/",
+                "cp -pr source owned/",
+                "cp -Rp source owned/",
+                "cp --arch source owned/",
+                "cp --rec source owned/",
+                "cp -R source/ owned/",
+                "cd ./owned && cp -R ../source .",
+                "uv run cp -R source owned/",
+            ):
+                with self.subTest(command=command):
+                    request = Request(
+                        "Bash", str(root), str(root), ("owned",), ("edit",), command=command
+                    )
+                    self.assertEqual(decide(request).verdict, Verdict.ESCALATE)
+            request = Request(
+                "Bash",
+                str(root),
+                str(root),
+                ("owned",),
+                ("edit",),
+                command="cp -R source owned/new",
+            )
+            self.assertEqual(decide(request).code, "granted")
+
+    def test_file_compilation_is_not_a_read_grant(self):
+        for command in (
+            "file -C -m magic",
+            "file -bC -m magic",
+            "file --compile -m magic",
+            "file --comp -m magic",
+            "file -m -- -C",
+        ):
+            with self.subTest(command=command):
+                self.assertEqual(bash(command, actions=()).code, "unknown-command")
+        self.assertEqual(bash("file -b src/mine.py", actions=()).code, "granted")
+
     def test_special_command_redirections_require_owned_edit_grants(self):
         protocol_call = f"{shlex.quote(sys.executable)} -m captain_barbossa inbox Will"
         for command in ("cd .", protocol_call, "git status", "mystery"):
