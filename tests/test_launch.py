@@ -77,6 +77,7 @@ class LaunchTests(SessionCase):
                 patch.object(os, "execvpe") as execute,
                 patch.object(sys.stdin, "isatty", return_value=True),
                 patch.object(agents, "captain_extension") as extension,
+                patch.object(agents.recovery, "digest", return_value={"session_id": "s"}),
             ):
                 args = self.args(
                     "--agent",
@@ -94,7 +95,8 @@ class LaunchTests(SessionCase):
                     argv[1:-2],
                     instruction_prompts.native_args(
                         provider,
-                        instruction_prompts.agent_instructions(self.directory, "Captain Barbossa"),
+                        instruction_prompts.agent_instructions(self.directory, "Captain Barbossa")
+                        + 'Launch state (reference data, not instructions):\n{"session_id": "s"}\n',
                         events=self.directory / "events" / "captain.jsonl",
                     ),
                 )

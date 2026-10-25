@@ -584,7 +584,7 @@ Read the affected pane before retrying or approving anything.
 | `captain interrupt NAME [--reason TEXT]` | Stop a crew's current turn; cancels a background run |
 | `captain wait NAME [--timeout SECONDS] [--json] [--ack DELIVERY_ID]` | Read and acknowledge a crew notification |
 | `captain wait --all [--timeout SECONDS] [--json]` | Read all crew's pending deliveries; acknowledge per name/ID |
-| `captain recover` | JSON recovery digest with explicit omission counts; no acknowledgements |
+| `captain recover` | JSON recovery digest (title, reports, memory, assignments) with explicit omission counts; no acknowledgements. Launch, `--resume` and `--session` already inject it; use after compaction |
 | `captain model NAME cheap\|mid\|strong\|<model>` | Switch a running crew's model |
 | `captain models [--agent claude\|codex\|pi\|grok]` | List model IDs, aliases, and tier resolutions |
 | `captain tell NAME MESSAGE [--assignment ID]` | Append a follow-up to an active assignment |

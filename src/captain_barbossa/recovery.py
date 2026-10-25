@@ -2,13 +2,31 @@
 
 from . import lifetime, memory, native_history, protocol, results, worktrees
 from .crew import Crew
+from .sessions import session_name
+from .store import read_json
 
 LIMIT = 25
 
 
 def digest(current, project):
+    state = current.directory / "protocol.json"
     result = {
         "session_id": current.meta["id"],
+        "title": session_name(current.directory),
+        # Done work leaves every live section below; these reports are the crew's results.
+        "reports": [
+            {
+                "crew": assignment["crew"],
+                "assignment_id": assignment["id"],
+                "task": assignment["original_task"],
+                "outcome": assignment.get("outcome", "done"),
+                "report": assignment["report"],
+            }
+            for assignment in reversed(
+                (read_json(state)["assignments"] if state.exists() else {}).values()
+            )
+            if assignment["state"] == "done"
+        ],
         "memory": {},
         "assignments": [],
         "owned_paths": [],
@@ -85,6 +103,7 @@ def digest(current, project):
         )
         result["mail"].extend({**identity, **message} for message in protocol.unread(crew))
     for section in (
+        "reports",
         "assignments",
         "owned_paths",
         "questions",

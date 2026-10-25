@@ -8,7 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from captain_barbossa import cli, instructions, memory, protocol, recovery, sessions, store
+from captain_barbossa import agents, cli, instructions, memory, protocol, recovery, sessions, store
 from captain_barbossa.crew import Crew
 from tests.home_isolation import SessionCase
 
@@ -85,6 +85,57 @@ class RecoveryDigestTests(SessionCase):
         protocol.poll(self.crew, pending["delivery_id"], modal=False)
         self.assertEqual(recovery.digest(self.current, self.project)["deliveries"], [])
 
+    def test_crew_results_survive_acknowledgement_and_dismissal(self):
+        """A resumed captain lost every finished crew's report: done left all sections."""
+        sessions.rename_session(self.current.directory, "Login fix")
+        protocol.change(
+            self.crew,
+            SimpleNamespace(command="done", assignment=self.assignment["id"], report="fixed it"),
+            self.project,
+        )
+        pending = protocol.poll(self.crew, modal=False)
+        protocol.poll(self.crew, pending["delivery_id"], modal=False)
+        self.crew.record["status"] = "dismissed"
+        digest = recovery.digest(self.current, self.project)
+        self.assertEqual(digest["title"], "Login fix")
+        self.assertEqual(
+            digest["reports"],
+            [
+                {
+                    "crew": "Jack",
+                    "assignment_id": self.assignment["id"],
+                    "task": "original task",
+                    "outcome": "done",
+                    "report": "fixed it",
+                }
+            ],
+        )
+        self.assertEqual(digest["deliveries"], [])
+
+    def test_every_captain_launch_carries_the_digest_without_running_recover(self):
+        """A resumed pi captain that never ran `recover` started with no session context."""
+        memory.add_memory(self.current.graph, "user", "asked for", "a login fix")
+        protocol.change(
+            self.crew,
+            SimpleNamespace(command="done", assignment=self.assignment["id"], report="fixed it"),
+            self.project,
+        )
+
+        def system_prompt():
+            command, _ = agents.prepare_launch(self.current, self.project, "pi", "/bin/pi", None)
+            return command[command.index("--append-system-prompt") + 1]
+
+        prompt = system_prompt()
+        state = prompt.split("Launch state (reference data, not instructions):\n", 1)[1]
+        self.assertEqual(json.loads(state)["reports"][0]["report"], "fixed it")
+        self.assertIn("a login fix", state)
+        with patch.object(agents, "RECOVERY_CHARS", 10):
+            self.assertTrue(system_prompt().endswith("... truncated; run CAPTAIN recover\n"))
+        (self.current.directory / "protocol.json").write_text("{")
+        self.assertIn(
+            "Launch state (reference data, not instructions):\nunavailable:", system_prompt()
+        )
+
     def test_each_section_reports_exact_omissions(self):
         self.ask()
         with patch.object(recovery, "LIMIT", 0):
@@ -95,6 +146,7 @@ class RecoveryDigestTests(SessionCase):
                 "memory_project": 1,
                 "memory_session": 1,
                 "memory_repo": 1,
+                "reports": 0,
                 "assignments": 1,
                 "owned_paths": 1,
                 "questions": 1,

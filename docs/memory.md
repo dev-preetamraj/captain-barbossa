@@ -107,9 +107,12 @@ captain memory path
 captain memory path --scope project
 ```
 
-At captain startup or after compaction, `captain recover` returns one JSON digest:
-memory from all three scopes, active assignments and owned paths, pending questions,
-wait deliveries and queued crew mail. Each section (and each memory scope) includes
+Captain launches, `--resume` and `--session` inject this recovery digest into the
+captain's system prompt automatically; run `captain recover` after compaction. The
+captain saves user requests, scope and decisions to session memory unasked, so a
+resumed captain knows them. The JSON digest holds the session title, crew reports
+from done assignments, memory from all three scopes, active assignments and owned
+paths, pending questions, wait deliveries and queued crew mail. Each section (and each memory scope) includes
 at most 25 entries with full text; `omitted` counts the remaining entries explicitly.
 Saved deliveries retain their IDs; queued notices have `delivery_id: null` until
 `wait` surfaces them. Recovery reads stored state only, without Herdr, native-event

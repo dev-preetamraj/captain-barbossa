@@ -1,5 +1,6 @@
 """Small keyboard selectors for native agent launches."""
 
+import os
 import sys
 
 import questionary
@@ -30,40 +31,47 @@ STYLE = questionary.Style(
     ]
 )
 
+# Use the terminal's foreground/background and ANSI palette, including on light themes.
+SESSION_STYLE = questionary.Style(
+    [
+        ("heading", "bold"),
+        ("accent", "fg:ansired"),
+        ("selected", "bold noreverse"),
+        ("muted", "fg:ansibrightblack"),
+    ]
+)
+
 
 def session_frame(project, cards, query, cursor, top, rows, size=SESSION_CARDS, width=80):
     """Style/text fragments of the resume picker; cards are the (value, title, meta) matches."""
     width = max(4, width)
-    search = query or "⌕ Search…"
-    while get_cwidth(search) > width - 4:
+    search = query or "search"
+    while get_cwidth(search) > width - 2:
         search = search[1:] if query else search[:-1]
     out = [
-        ("class:separator", "─" * width + "\n"),
-        ("class:question", "Resume session"),
-        ("class:separator", f" ({len(cards)} of {rows})\n"),
-        ("class:separator", "╭" + "─" * (width - 2) + "╮\n│ "),
-        ("" if query else "class:separator", search),
-        ("class:separator", " " * (width - 3 - get_cwidth(search)) + "│\n"),
-        ("class:separator", "╰" + "─" * (width - 2) + "╯\n"),
-        ("class:separator", f"   {project}\n"),
+        ("class:accent", "☠ "),
+        ("class:heading", "resume"),
+        ("class:muted", f" {project} · {len(cards)}/{rows}\n\n"),
+        ("class:muted", "/ "),
+        ("" if query else "class:muted", search),
+        ("", "\n\n"),
     ]
     shown = cards[top : top + size]
     below = len(cards) - top - len(shown)
-    out.append(("class:separator", f"  ↑ {top} more\n" if top else "\n"))
+    out.append(("class:muted", f"  ↑ {top} more\n" if top else "\n"))
     for index, (_, title, meta) in enumerate(shown, top):
         picked = index == cursor
-        more = not picked and below and index == top + len(shown) - 1
+        marker = ("class:accent", " ▌ ") if picked else ("", "   ")
         out += [
-            (
-                "class:separator" if more else "class:pointer",
-                " ❯ " if picked else " ↓ " if more else "   ",
-            ),
-            ("class:highlighted" if picked else "bold", f"{title}\n"),
-            ("class:separator", f"   {meta}\n\n"),
+            marker,
+            ("class:selected" if picked else "", f"{title}\n"),
+            marker,
+            ("class:muted", f"{meta}\n\n"),
         ]
     if not shown:
-        out.append(("class:separator", "   No matching sessions\n"))
-    out.append(("class:separator", "↑↓ move · Enter resume · Esc cancel"))
+        out.append(("class:muted", "   No matching sessions\n\n"))
+    out.append(("class:muted", f"  ↓ {below} more\n" if below else "\n"))
+    out.append(("class:muted", "↑↓ move · Enter resume · Esc cancel"))
     return out
 
 
@@ -74,6 +82,7 @@ def pick_session(project, cards):
     from prompt_toolkit.key_binding import KeyBindings
     from prompt_toolkit.layout import Layout, Window
     from prompt_toolkit.layout.controls import FormattedTextControl
+    from prompt_toolkit.output import ColorDepth
 
     state = {"query": "", "cursor": 0, "top": 0}
 
@@ -135,7 +144,8 @@ def pick_session(project, cards):
     app = Application(
         layout=Layout(Window(FormattedTextControl(render, show_cursor=False), wrap_lines=False)),
         key_bindings=keys,
-        style=STYLE,
+        style=SESSION_STYLE,
+        color_depth=ColorDepth.DEPTH_1_BIT if os.environ.get("NO_COLOR") else None,
         full_screen=False,
     )
     return app.run()

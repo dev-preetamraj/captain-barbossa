@@ -354,12 +354,14 @@ class InstructionTests(SessionCase):
                         self.assertNotIn(command, text)
                     self.assertNotIn("--model", text)
                     for phrase in (
-                        "Recover memory, assignments, paths, questions and deliveries at startup/compaction",
+                        "Your launch state is appended below. After compaction, recover memory, "
+                        "reports, assignments, paths, questions and deliveries",
                         "CAPTAIN recover",
                         "CAPTAIN memory add 'subject' 'relation' 'object'",
                         "CAPTAIN memory query",
                         "CAPTAIN memory path",
-                        "Save concise, meaningful decisions, findings, and handoffs",
+                        "Unasked, as they happen, save each user request and its scope, "
+                        "decisions, findings, and handoffs",
                         "Default scope is session",
                         "Use --scope project ONLY for durable facts for future sessions",
                         "never automatically promote session tasks",
@@ -379,7 +381,8 @@ class InstructionTests(SessionCase):
                     for phrase in (
                         "Do not create Herdr panes/tabs yourself or substitute hidden built-in subagents",
                         "Replace CAPTAIN in commands below with:",
-                        "Recover memory, assignments, paths, questions and deliveries at startup/compaction",
+                        "Your launch state is appended below. After compaction, recover memory, "
+                        "reports, assignments, paths, questions and deliveries",
                         "CAPTAIN recover",
                         "CAPTAIN memory add 'subject' 'relation' 'object'",
                         "Literal search: CAPTAIN memory query 'text'",
@@ -388,7 +391,8 @@ class InstructionTests(SessionCase):
                         "Recruitment resolves omitted flags and prints their sources",
                         "--direction vertical|horizontal|auto --split-pane <pane-id>|auto] "
                         "--model cheap|mid|strong|<model>",
-                        "Save concise, meaningful decisions, findings, and handoffs",
+                        "Unasked, as they happen, save each user request and its scope, "
+                        "decisions, findings, and handoffs",
                         "Default scope is session",
                         "Use --scope project ONLY for durable facts for future sessions",
                         "never automatically promote session tasks",
