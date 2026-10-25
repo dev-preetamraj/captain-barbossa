@@ -213,9 +213,8 @@ class SessionResumeTests(unittest.TestCase):
                 self.assertIn(("class:muted", " here · 1/1\n\n"), frame)
                 self.assertTrue(lines[2].startswith("/ "))
                 self.assertLessEqual(get_cwidth(lines[2]), 30)
-                self.assertEqual(lines[5], " ▌ Login fix")
-                self.assertEqual(lines[6], " ▌ just now")
-                self.assertIn(("class:selected", "Login fix\n"), frame)
+                self.assertEqual(lines[5], " ▌ Login fix   just now")
+                self.assertIn(("class:selected", "Login fix"), frame)
                 self.assertFalse(any("SetCursorPosition" in style for style, _ in frame))
                 if query:
                     self.assertNotIn("search", lines[2])
@@ -250,7 +249,7 @@ class SessionResumeTests(unittest.TestCase):
                 "".join(fragment[1] for fragment in content.get_line(i))
                 for i in range(content.line_count)
             )
-            self.assertIn(" ▌ Login fix\n ▌ just now", text)
+            self.assertIn(" ▌ Login fix   just now", text)
             self.assertFalse(content.show_cursor)
 
     def test_picker_empty_search_keeps_counts_and_hints(self):
@@ -264,17 +263,50 @@ class SessionResumeTests(unittest.TestCase):
 
     def test_picker_separates_cards_and_shows_only_size_cards_with_cues(self):
         cards = [(str(i), f"t{i}", f"m{i}") for i in range(6)]
-        text = "".join(t for _, t in prompts.session_frame("here", cards, "", 3, 2, 6, 2))
+
+        def frame(cursor, top):  # width 9 is too narrow for one-line rows
+            return prompts.session_frame("here", cards, "", cursor, top, 6, 2, 9)
+
+        text = "".join(t for _, t in frame(3, 2))
         self.assertIn("m2\n\n", text)
         self.assertIn("↑ 2 more", text)
         self.assertIn(" ▌ t3\n ▌ m3\n", text)
         self.assertNotIn(" ↓ t3\n", text)
-        unpicked = "".join(t for _, t in prompts.session_frame("here", cards, "", 2, 2, 6, 2))
+        unpicked = "".join(t for _, t in frame(2, 2))
         self.assertIn(" ▌ t2\n ▌ m2\n", unpicked)
         self.assertIn("   t3\n   m3\n", unpicked)
         self.assertIn("↓ 2 more", text)
         self.assertIn("↓ 2 more", unpicked)
-        final = "".join(t for _, t in prompts.session_frame("here", cards, "", 5, 4, 6, 2))
+        final = "".join(t for _, t in frame(5, 4))
         self.assertNotIn("↓", final.split("↑↓ move")[0])
         self.assertNotIn("t1", text)
         self.assertNotIn("t4", text)
+
+    def test_picker_wide_rows_take_one_line_with_aligned_meta(self):
+        from prompt_toolkit import Application
+        from prompt_toolkit.application import create_app_session
+        from prompt_toolkit.input import DummyInput
+        from prompt_toolkit.output import DummyOutput
+
+        cards = [("a", "Login fix", "just now · Jack"), ("b", "Audit complexity", "2h ago")]
+        lines = "".join(t for _, t in prompts.session_frame("here", cards, "", 0, 0, 2)).split("\n")
+        self.assertEqual(
+            lines[5:8],
+            [" ▌ Login fix          just now · Jack", "   Audit complexity   2h ago", ""],
+        )
+        narrow = "".join(t for _, t in prompts.session_frame("here", cards, "", 0, 0, 2, width=30))
+        self.assertIn(
+            " ▌ Login fix\n ▌ just now · Jack\n\n   Audit complexity\n   2h ago\n", narrow
+        )
+        many = [(str(i), f"Session {i}", "1d ago") for i in range(20)]
+        with (
+            create_app_session(input=DummyInput(), output=DummyOutput()),
+            patch.object(Application, "run", autospec=True) as run,
+        ):
+            prompts.pick_session("here", many)
+            content = run.call_args.args[0].layout.current_control.create_content(80, 40)
+        text = "\n".join(
+            "".join(f[1] for f in content.get_line(i)) for i in range(content.line_count)
+        )
+        self.assertIn("Session 19   1d ago", text)
+        self.assertNotIn("more", text)

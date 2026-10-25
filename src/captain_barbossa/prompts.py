@@ -42,9 +42,17 @@ SESSION_STYLE = questionary.Style(
 )
 
 
+def session_columns(cards, width):
+    """Title column width when every card fits one marker/title/meta row, else None to stack."""
+    titles = max((get_cwidth(title) for _, title, _ in cards), default=0)
+    metas = max((get_cwidth(meta) for _, _, meta in cards), default=0)
+    return titles if 3 + titles + 3 + metas <= width else None
+
+
 def session_frame(project, cards, query, cursor, top, rows, size=SESSION_CARDS, width=80):
     """Style/text fragments of the resume picker; cards are the (value, title, meta) matches."""
     width = max(4, width)
+    column = session_columns(cards, width)
     search = query or "search"
     while get_cwidth(search) > width - 2:
         search = search[1:] if query else search[:-1]
@@ -62,12 +70,12 @@ def session_frame(project, cards, query, cursor, top, rows, size=SESSION_CARDS, 
     for index, (_, title, meta) in enumerate(shown, top):
         picked = index == cursor
         marker = ("class:accent", " ▌ ") if picked else ("", "   ")
-        out += [
-            marker,
-            ("class:selected" if picked else "", f"{title}\n"),
-            marker,
-            ("class:muted", f"{meta}\n\n"),
-        ]
+        style = "class:selected" if picked else ""
+        if column is None:
+            out += [marker, (style, f"{title}\n"), marker, ("class:muted", f"{meta}\n\n")]
+        else:
+            pad = " " * (column - get_cwidth(title) + 3)
+            out += [marker, (style, title), ("", pad), ("class:muted", f"{meta}\n")]
     if not shown:
         out.append(("class:muted", "   No matching sessions\n\n"))
     out.append(("class:muted", f"  ↓ {below} more\n" if below else "\n"))
@@ -76,7 +84,7 @@ def session_frame(project, cards, query, cursor, top, rows, size=SESSION_CARDS, 
 
 
 def pick_session(project, cards):
-    """Searchable two-line session cards; returns the chosen value or None on cancel."""
+    """Searchable session rows; returns the chosen value or None on cancel."""
     from prompt_toolkit import Application
     from prompt_toolkit.application import get_app
     from prompt_toolkit.key_binding import KeyBindings
@@ -92,9 +100,10 @@ def pick_session(project, cards):
 
     def render():
         found = matches()
-        # Reserve chrome and a spare terminal line; each card takes 3 lines.
+        # Reserve chrome and a spare terminal line; a stacked card takes 3 lines.
         terminal = get_app().output.get_size()
-        size = max(1, (terminal.rows - 9) // 3)
+        lines = 3 if session_columns(found, terminal.columns) is None else 1
+        size = max(1, (terminal.rows - 9) // lines)
         state["cursor"] = max(0, min(state["cursor"], len(found) - 1))
         top = min(state["top"], state["cursor"])
         state["top"] = max(top, state["cursor"] - size + 1)
