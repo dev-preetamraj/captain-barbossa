@@ -468,6 +468,27 @@ class ProtocolTests(SessionCase):
             self.assertEqual(modal.call_count, 4)
         self.assertGreaterEqual(elapsed, 70)
 
+    def test_wait_all_uses_the_same_deadline_and_modal_throttle(self):
+        elapsed = 0.0
+
+        def advance(seconds):
+            nonlocal elapsed
+            elapsed += seconds
+
+        with (
+            patch.object(protocol.time, "monotonic", side_effect=lambda: elapsed),
+            patch.object(protocol.time, "sleep", side_effect=advance) as sleep,
+            patch.object(protocol, "poll", return_value={"delivery_id": None}) as poll,
+        ):
+            self.assertEqual(protocol.wait_all(self.current, 0)["status"], "timeout")
+            self.assertEqual(poll.call_count, 1)
+            sleep.assert_not_called()
+            poll.reset_mock()
+            self.assertEqual(protocol.wait_all(self.current, 60.5)["status"], "timeout")
+        self.assertEqual(elapsed, 60.5)
+        self.assertEqual(sum(call.kwargs["modal"] for call in poll.call_args_list), 3)
+        self.assertEqual(sleep.call_args.args, (0.5,))
+
     def test_hookless_approval_includes_native_prompt_text(self):
         prompt = ["Run git push origin main?", "1. Allow", "2. Deny"]
         with (
@@ -678,7 +699,7 @@ class ProtocolTests(SessionCase):
         self.assertNotEqual(new["id"], self.assignment["id"])
         self.assertEqual(self.saved()["original_task"], "original")
 
-    def test_symlink_escape_legacy_and_event_bounds(self):
+    def test_symlink_escape_legacy_and_partial_events(self):
         (self.project / "escape").symlink_to(self.root, target_is_directory=True)
         # A symlink out of the project is recorded as where it resolves, never as itself.
         self.assertEqual(
@@ -690,9 +711,12 @@ class ProtocolTests(SessionCase):
         with self.assertRaisesRegex(CaptainError, "Legacy"):
             protocol.poll(legacy)
         self.crew.events.parent.mkdir()
-        self.crew.events.write_bytes(b"x" * 65536)
-        with self.assertRaisesRegex(CaptainError, "64 KiB"):
-            protocol.poll(self.crew)
+        self.crew.events.write_bytes(b"x" * 1000)
+        self.assertEqual(protocol.poll(self.crew)["status"], "working")
+        self.assertEqual(protocol.active_assignment(self.crew)["scan_offset"], 0)
+        with self.crew.events.open("ab") as stream:
+            stream.write(b'\n{"hook_event_name":"Stop"}\n')
+        self.assertEqual(protocol.poll(self.crew)["status"], "idle")
 
     def test_timeout_has_fixed_json_shape_and_no_delivery(self):
         response = protocol.wait(self.crew, 0)
@@ -1150,6 +1174,81 @@ class ApprovalDedupeTests(unittest.TestCase):
         if response["delivery_id"]:
             protocol.poll(self.crew, response["delivery_id"])
         return response["status"]
+
+    def test_large_hook_payload_preserves_identity_and_wait_progress(self):
+        from captain_barbossa import events
+
+        event = {
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Write",
+            "tool_use_id": "large-write",
+            "session_id": "native-session",
+            "tool_input": {"content": "界" * 30000},
+        }
+        self.crew.events.parent.mkdir(exist_ok=True)
+        with patch.object(events.native_history, "observe") as observe:
+            events.append_event([str(self.crew.events), json.dumps(event)])
+        self.assertEqual(observe.call_args.args[1]["tool_input"], event["tool_input"])
+        records, offset = events.read_events(self.crew.events, 0, max_bytes=65536)
+        self.assertLessEqual(offset, 65536)
+        self.assertTrue(records[0]["payload_truncated"])
+        self.assertNotIn("tool_input", records[0])
+        self.assertEqual(records[0]["incarnation_id"], "first")
+        self.assertEqual(records[0]["seq"], 1)
+        for key, value in event.items():
+            if key != "tool_input":
+                self.assertEqual(records[0][key], value)
+        self.assertEqual(protocol.wait(self.crew, 0)["status"], "timeout")
+        self.assertEqual(protocol.active_assignment(self.crew)["scan_offset"], offset)
+        self.event({"hook_event_name": "Stop"})
+        self.assertEqual(protocol.wait(self.crew, 0)["status"], "idle")
+
+    def test_legacy_oversized_line_is_skipped_with_bounded_poll_progress(self):
+        self.crew.events.parent.mkdir(exist_ok=True)
+        self.crew.events.write_bytes(b"x" * (65536 * 2) + b'{"hook_event_name":"Stop"}')
+        for expected in (65536, 65536 * 2):
+            self.assertEqual(protocol.wait(self.crew, 0)["status"], "timeout")
+            self.assertEqual(protocol.active_assignment(self.crew)["scan_offset"], expected)
+        # A JSON-looking suffix is still part of the skipped legacy line, not an event.
+        self.assertEqual(protocol.wait(self.crew, 0)["status"], "timeout")
+        with self.crew.events.open("ab") as stream:
+            stream.write(b'\n{"hook_event_name":"PermissionRequest"}\n')
+        self.assertEqual(protocol.wait(self.crew, 0)["status"], "awaiting_approval")
+
+    def test_event_backlog_is_bounded_per_poll(self):
+        self.crew.events.parent.mkdir(exist_ok=True)
+        line = b'{"hook_event_name":"PostToolUse"}\n'
+        self.crew.events.write_bytes(line * 5000 + b'{"hook_event_name":"Stop"}\n')
+        previous = 0
+        for _ in range(10):
+            response = protocol.wait(self.crew, 0)
+            assignment = protocol.active_assignment(self.crew)
+            offset = (
+                assignment["pending"]["offset"]
+                if assignment["pending"]
+                else assignment["scan_offset"]
+            )
+            self.assertGreater(offset, previous)
+            self.assertLessEqual(offset - previous, 65536)
+            previous = offset
+            if response["status"] == "idle":
+                break
+            self.assertEqual(response["status"], "timeout")
+        else:
+            self.fail("bounded polling did not reach the final event")
+        self.assertEqual(previous, self.crew.events.stat().st_size)
+
+    def test_approval_cleared_before_first_poll_is_not_delivered(self):
+        for tool in ("PostToolUse", "PermissionDecision", "PreToolUse"):
+            with self.subTest(tool=tool):
+                self.event({"hook_event_name": "PermissionRequest"})
+                self.event({"hook_event_name": tool})
+                response = protocol.poll(self.crew)
+                self.assertEqual(response["status"], "working")
+                self.assertIsNone(response["delivery_id"])
+                self.assertIsNone(protocol.active_assignment(self.crew)["native_status"])
+        self.event({"hook_event_name": "PermissionRequest"})
+        self.assertEqual(self.surfaced(), "awaiting_approval")
 
     def test_the_two_events_for_one_approval_surface_once(self):
         self.event({"hook_event_name": "PermissionRequest"})

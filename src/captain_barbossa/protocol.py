@@ -11,6 +11,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from . import lifetime
+from .events import MAX_EVENT_BYTES, read_events
 from .models import HOOK_DELIVERED, HOOKLESS
 from .pane import DRAFT_GATE, HOLD_EXPIRY, UNREADABLE_EXPIRY, UNREADABLE_GATE
 from .runtime import HERDR_ERRORS, CaptainError, check_text, inside_project
@@ -592,7 +593,9 @@ def awaiting_registration(crew, message_id, prior, error, assignment=None):
         and 0 <= time.time() - message["queued_at"] < REGISTRATION_GRACE
         and not any(
             turn_event(event)
-            for event in native_events(crew.events, assignment.get("offset", 0))[0]
+            for event in read_events(
+                crew.events, assignment.get("offset", 0), max_bytes=MAX_EVENT_BYTES
+            )[0]
         )
     )
 
@@ -718,7 +721,7 @@ def stalled(crew, assignment):
     # queue stalled, and rang it once a command for the rest of the session. The crew's own
     # event file is the same proof poll uses; read from the assignment's baseline and not
     # consumed, so a turn poll has already banked stays visible here.
-    events, _ = native_events(crew.events, assignment.get("offset", 0))
+    events, _ = read_events(crew.events, assignment.get("offset", 0), max_bytes=MAX_EVENT_BYTES)
     return not any(turn_event(event) for event in events)
 
 
@@ -866,28 +869,6 @@ def mark_sent(assignment, message):
         assignment["state"] = "working"
 
 
-def native_events(path, offset):
-    """Bound each native-log read; leave partial lines for the next poll."""
-    try:
-        with path.open("rb") as stream:
-            stream.seek(offset)
-            data = stream.read(65536)
-    except FileNotFoundError:
-        return [], offset
-    end = data.rfind(b"\n") + 1
-    if not end and len(data) == 65536:
-        raise CaptainError("Native event exceeds 64 KiB; inspect the event file.")
-    events = []
-    for line in data[:end].splitlines():
-        try:
-            event = json.loads(line)
-        except (ValueError, UnicodeDecodeError):
-            continue
-        if isinstance(event, dict):
-            events.append(event)
-    return events, offset + end
-
-
 def result(crew, assignment, status, summary="", delivery_id=None):
     return {
         "status": status,
@@ -968,7 +949,7 @@ def poll(crew, ack=None, modal=True):
                 "Assignment is done and fully acknowledged; dismiss the crew or hand off."
             )
         else:
-            events, offset = native_events(crew.events, offset)
+            events, offset = read_events(crew.events, offset, max_bytes=MAX_EVENT_BYTES)
             if any(turn_event(event) for event in events):
                 # Liveness is a started turn, never a delivered body; this is committed
                 # outside the ack dance because it only ever goes one way.
@@ -995,7 +976,7 @@ def poll(crew, ack=None, modal=True):
                     # One approval arrives twice, as a PermissionRequest hook and a
                     # permission_prompt Notification, usually in separate polls.
                     new_ask = any(e.get("hook_event_name") == "PreToolUse" for _, _, e in notified)
-                    if native_status == status and not new_ask:
+                    if cleared or (native_status == status and not new_ask):
                         assignment["scan_offset"] = offset
                         if cleared:
                             assignment["native_status"] = None
@@ -1065,10 +1046,8 @@ def poll(crew, ack=None, modal=True):
         return response
 
 
-def wait_all(current, timeout):
-    """Return every crew's pending delivery without advancing any acknowledgement."""
-    from .crew import Crew
-
+def wait_ticks(timeout):
+    """Poll at least once, throttling modal reads and sleeping only until the deadline."""
     deadline = time.monotonic() + timeout
     looked = None
     while True:
@@ -1076,6 +1055,18 @@ def wait_all(current, timeout):
         modal = looked is None or now - looked >= MODAL_INTERVAL
         if modal:
             looked = now
+        yield modal
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return
+        time.sleep(min(1, remaining))
+
+
+def wait_all(current, timeout):
+    """Return every crew's pending delivery without advancing any acknowledgement."""
+    from .crew import Crew
+
+    for modal in wait_ticks(timeout):
         current = current._replace(meta=read_json(current.meta_path))
         deliveries = []
         for crew in sorted(Crew.members(current), key=lambda crew: crew.crew_id):
@@ -1100,10 +1091,7 @@ def wait_all(current, timeout):
                 deliveries.append(response)
         if deliveries:
             return {"status": "ready", "deliveries": deliveries}
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            return {"status": "timeout", "deliveries": []}
-        time.sleep(min(1, remaining))
+    return {"status": "timeout", "deliveries": []}
 
 
 def wait(crew, timeout, ack=None):
@@ -1117,19 +1105,10 @@ def wait(crew, timeout, ack=None):
     the captain already backgrounds this, so keeping it quiet costs nothing, while
     returning early costs a whole context.
     """
-    deadline = time.monotonic() + timeout
-    looked = None
-    while True:
-        now = time.monotonic()
-        modal = looked is None or now - looked >= MODAL_INTERVAL
-        if modal:
-            looked = now
+    for modal in wait_ticks(timeout):
         response = poll(crew, ack, modal)
         ack = None
         if response["delivery_id"] or response["status"] == "idle":
             return response
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            response["status"] = "timeout"
-            return response
-        time.sleep(min(1, remaining))
+    response["status"] = "timeout"
+    return response
