@@ -15,7 +15,7 @@ import time
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from captain_barbossa import agents, background, cli, protocol, runtime, sessions, store
+from captain_barbossa import agents, background, cli, lifetime, protocol, runtime, sessions, store
 from captain_barbossa.crew import Crew
 from captain_barbossa.runtime import CaptainError
 from tests.home_isolation import HERDR, SessionCase
@@ -104,7 +104,10 @@ class BackgroundCrewTests(SessionCase):
         self.assertEqual((response["status"], response["summary"]), ("done", "slow path is X"))
         self.assertEqual(protocol.wait(crew, 0, ack=response["delivery_id"])["status"], "idle")
         # The headless argv is quiet's read-only gate, with no access to session state.
-        argv = store.read_json(background.paths(background.stem(crew))["record"])["argv"]
+        launch = store.read_json(background.paths(background.stem(crew))["record"])
+        self.assertNotIn("argv", launch)
+        self.assertNotIn("env", launch)
+        argv = lifetime.read(crew.session, launch["lifetime_id"])["argv"]
         self.assertEqual(argv[argv.index("--sandbox") + 1], "read-only")
         self.assertIn("--ignore-user-config", argv)
         self.assertNotIn("--add-dir", argv)
@@ -511,6 +514,41 @@ class BackgroundCrewTests(SessionCase):
         background.run(background.paths(background.stem(crew))["record"])
         self.assertEqual(len(self.assignment(crew)["notices"]), notices)
 
+    def test_cancel_after_lifetime_claim_before_start_frees_the_name(self):
+        self.native(SAY)
+        claim = lifetime.claim
+
+        @contextlib.contextmanager
+        def cancel_after_claim(session, ref):
+            with claim(session, ref) as job:
+                crew = self.crew()
+                store.write_text(background.paths(background.stem(crew))["cancel"], "stop")
+                yield job
+
+        with (
+            patch.object(
+                background, "start", side_effect=lambda files: background.run(files["record"])
+            ),
+            patch.object(lifetime, "claim", side_effect=cancel_after_claim),
+            patch.object(lifetime.ManagedJob, "start") as start,
+        ):
+            self.recruit()
+        crew = self.crew()
+        self.assertEqual(self.finished(crew)["outcome"], "cancelled")
+        start.assert_not_called()
+        ref = crew.record["lifetime_id"]
+        self.assertEqual(lifetime.read(crew.session, ref)["state"], "prepared")
+        self.assertTrue(lifetime.read(crew.session, ref)["revoked"])
+        with self.assertRaisesRegex(CaptainError, "revoked"):
+            with lifetime.claim(crew.session, ref):
+                self.fail("cancelled launch was replayed")
+        response = protocol.wait(crew, 0)
+        protocol.wait(crew, 0, ack=response["delivery_id"])
+        with contextlib.redirect_stdout(io.StringIO()):
+            agents.dismiss_crew(self.args("dismiss", "jack"), self.pane, self.project)
+        self.assertTrue(self.crew().is_dismissed)
+        self.herdr.assert_not_called()
+
     def test_an_owner_that_never_starts_fails_the_recruit_and_frees_the_name(self):
         self.native("exit 0")
         with (
@@ -568,8 +606,15 @@ class BackgroundCrewTests(SessionCase):
 
     def execute_job(self, job):
         files = background.paths(self.root / "managed")
-        record = {"timeout": 10, "provider": "codex", "model": None}
-        return background._execute_claimed(files, record, job)
+        record = {
+            "timeout": 10,
+            "provider": "codex",
+            "model": None,
+            "session": str(self.directory),
+            "lifetime_id": "managed",
+        }
+        with patch.object(lifetime, "claim", return_value=contextlib.nullcontext(job)):
+            return background._execute(files, record)
 
     def test_background_finishes_only_after_shutdown_and_output_readers(self):
         job = self.managed_job()

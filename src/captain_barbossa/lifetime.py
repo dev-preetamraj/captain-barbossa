@@ -692,6 +692,18 @@ class ManagedJob:
             return "descendant-scan", {None: "none-observed"}.get(self._escape, self._escape)
         return "none", "unverified"
 
+    def cancel_before_start(self):
+        """Withdraw an explicitly cancelled launch while its claim is still owned."""
+        self._owned()
+        if self._guard is not None or self._started or self._failure:
+            raise CaptainError("Cannot withdraw a started or uncertain managed launch.")
+        with store.lock(_path(self.session, self.ref, ".lock")):
+            record = read(self.session, self.ref)
+            if record["state"] != "claimed":
+                raise CaptainError("Managed launch is not claimed.")
+            record.update(state="prepared", revoked=True)
+            _write(self.session, self.ref, record)
+
     def finish(self):
         self._owned()
         if self._failure or self._shutdown is None or not self._shutdown.ok or not self._reaped:

@@ -234,8 +234,6 @@ def prepare(crew, project, provider, binary, model, task, assignment_id):
         "model": model,
         "cwd": str(execution_root),
         "timeout": timeout(),
-        "env": environment,
-        "argv": argv,
     }
     write_json(files["record"], record)
     write_text(files["intent"], assignment_id)
@@ -411,82 +409,83 @@ def _execute(files, record):
     directory = Path(record["session"])
     current = Session(directory, read_json(directory / "session.json"))
     with lifetime.claim(current, record["lifetime_id"]) as job:
-        return _execute_claimed(files, record, job)
-
-
-def _execute_claimed(files, record, job):
-    stopped = None
-    if files["cancel"].exists():
-        return "cancelled", f"[background-cancelled] {files['cancel'].read_text().strip()}"
-    reader_timeout = config.number("lifetime", "shutdown_timeout", below=float("inf"))
-    deadline = time.monotonic() + record["timeout"]
-    job.start(
-        detached=True, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE
-    )
-    over, failed = threading.Event(), threading.Event()
-    readers = []
-    try:
-        for stream, path, limit in (
-            (job.stdout, files["stdout"], STDOUT_LIMIT),
-            (job.stderr, files["stderr"], STDERR_LIMIT),
-        ):
-            reader = threading.Thread(
-                target=_copy, args=(stream, path, limit, over, failed), daemon=True
-            )
-            reader.start()
-            readers.append(reader)
-        while job.poll() is None:
-            if files["cancel"].exists():
-                stopped = "cancelled"
-            elif time.monotonic() >= deadline:
-                stopped = "timeout"
-            elif over.is_set():
-                stopped = "output"
-            elif failed.is_set():
-                stopped = "reader"
-            if stopped:
-                break
-            time.sleep(POLL)
-    finally:
+        stopped = None
+        if files["cancel"].exists():
+            job.cancel_before_start()
+            return "cancelled", f"[background-cancelled] {files['cancel'].read_text().strip()}"
+        reader_timeout = config.number("lifetime", "shutdown_timeout", below=float("inf"))
+        deadline = time.monotonic() + record["timeout"]
+        job.start(
+            detached=True, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+        )
+        over, failed = threading.Event(), threading.Event()
+        readers = []
         try:
-            verdict = job.shutdown()
+            for stream, path, limit in (
+                (job.stdout, files["stdout"], STDOUT_LIMIT),
+                (job.stderr, files["stderr"], STDERR_LIMIT),
+            ):
+                reader = threading.Thread(
+                    target=_copy, args=(stream, path, limit, over, failed), daemon=True
+                )
+                reader.start()
+                readers.append(reader)
+            while job.poll() is None:
+                if files["cancel"].exists():
+                    stopped = "cancelled"
+                elif time.monotonic() >= deadline:
+                    stopped = "timeout"
+                elif over.is_set():
+                    stopped = "output"
+                elif failed.is_set():
+                    stopped = "reader"
+                if stopped:
+                    break
+                time.sleep(POLL)
         finally:
-            # An escaped pipe holder must not hang the owner or authorize cleanup.
-            reader_deadline = time.monotonic() + reader_timeout
-            for reader in readers:
-                reader.join(timeout=max(0, reader_deadline - time.monotonic()))
-            if len(readers) != 2 or any(reader.is_alive() for reader in readers) or failed.is_set():
-                job.invalidate("background output readers did not complete safely")
-                stopped = "reader"
-    if stopped == "reader":
-        return (
-            "failed",
-            "[background-output] Output readers failed or remain active; artifacts retained.",
-        )
-    if not verdict.ok:
-        return "failed", f"[background-shutdown] {verdict.reason}"
-    verdict = job.finish()
-    if not verdict.ok:
-        return "failed", f"[background-shutdown] {verdict.reason}"
-    exit_code = job.native_returncode
-    if stopped == "cancelled":
-        return "cancelled", f"[background-cancelled] {files['cancel'].read_text().strip()}"
-    if stopped == "timeout":
-        return "failed", f"[background-timeout] stopped after {record['timeout']}s."
-    if stopped == "output" or over.is_set():
-        return "failed", (
-            f"[background-output-limit] output passed {STDOUT_LIMIT} bytes (or stderr "
-            f"{STDERR_LIMIT}); partial output: {files['stdout']}"
-        )
-    stdout = files["stdout"].read_bytes().decode("utf-8", "replace")
-    try:
-        text, _ = headless_report(record["provider"], stdout, record["model"])
-    except CaptainError as exc:
-        detail = _tail(files["stderr"])
-        return "failed", f"[background-failed] exit {exit_code}: {exc}" + (
-            f"\nstderr: {detail}" if detail else ""
-        )
-    return "done", text
+            try:
+                verdict = job.shutdown()
+            finally:
+                # An escaped pipe holder must not hang the owner or authorize cleanup.
+                reader_deadline = time.monotonic() + reader_timeout
+                for reader in readers:
+                    reader.join(timeout=max(0, reader_deadline - time.monotonic()))
+                if (
+                    len(readers) != 2
+                    or any(reader.is_alive() for reader in readers)
+                    or failed.is_set()
+                ):
+                    job.invalidate("background output readers did not complete safely")
+                    stopped = "reader"
+        if stopped == "reader":
+            return (
+                "failed",
+                "[background-output] Output readers failed or remain active; artifacts retained.",
+            )
+        if not verdict.ok:
+            return "failed", f"[background-shutdown] {verdict.reason}"
+        verdict = job.finish()
+        if not verdict.ok:
+            return "failed", f"[background-shutdown] {verdict.reason}"
+        exit_code = job.native_returncode
+        if stopped == "cancelled":
+            return "cancelled", f"[background-cancelled] {files['cancel'].read_text().strip()}"
+        if stopped == "timeout":
+            return "failed", f"[background-timeout] stopped after {record['timeout']}s."
+        if stopped == "output" or over.is_set():
+            return "failed", (
+                f"[background-output-limit] output passed {STDOUT_LIMIT} bytes (or stderr "
+                f"{STDERR_LIMIT}); partial output: {files['stdout']}"
+            )
+        stdout = files["stdout"].read_bytes().decode("utf-8", "replace")
+        try:
+            text, _ = headless_report(record["provider"], stdout, record["model"])
+        except CaptainError as exc:
+            detail = _tail(files["stderr"])
+            return "failed", f"[background-failed] exit {exit_code}: {exc}" + (
+                f"\nstderr: {detail}" if detail else ""
+            )
+        return "done", text
 
 
 if __name__ == "__main__":
