@@ -18,6 +18,7 @@ LABELS = {
     "auto": "Auto (next slot in the tab shape)",
 }
 PLACEMENTS = ("pane", "tab")
+SESSION_CARDS = 5
 STYLE = questionary.Style(
     [
         ("question", "bold"),
@@ -27,6 +28,100 @@ STYLE = questionary.Style(
         ("separator", "fg:#808890"),
     ]
 )
+
+
+def session_frame(project, cards, query, cursor, top, rows, size=SESSION_CARDS):
+    """Style/text fragments of the resume picker; cards are the (value, title, meta) matches."""
+    out = [
+        ("class:question", f"Resume session ({len(cards)} of {rows})\n"),
+        ("class:separator", f"{project}\n\n"),
+    ]
+    out += (
+        [("class:pointer", "Search: "), ("", f"{query}\n")]
+        if query
+        else [("class:separator", "Type to search\n")]
+    )
+    shown = cards[top : top + size]
+    out.append(("class:separator", f"  ↑ {top} more\n" if top else "\n"))
+    for index, (_, title, meta) in enumerate(shown, top):
+        picked = index == cursor
+        out += [
+            ("class:pointer", " ❯ " if picked else "   "),
+            ("class:highlighted" if picked else "bold", f"{title}\n"),
+            ("class:separator", f"   {meta}\n\n"),
+        ]
+    if not shown:
+        out.append(("class:separator", "   No matching sessions\n"))
+    below = len(cards) - top - len(shown)
+    out.append(("class:separator", f"  ↓ {below} more\n" if below else "\n"))
+    out.append(("class:separator", "↑↓ move · Enter resume · Esc cancel"))
+    return out
+
+
+def pick_session(project, cards):
+    """Searchable two-line session cards; returns the chosen value or None on cancel."""
+    from prompt_toolkit import Application
+    from prompt_toolkit.application import get_app
+    from prompt_toolkit.key_binding import KeyBindings
+    from prompt_toolkit.layout import Layout, Window
+    from prompt_toolkit.layout.controls import FormattedTextControl
+
+    state = {"query": "", "cursor": 0, "top": 0}
+
+    def matches():
+        needle = state["query"].casefold()
+        return [card for card in cards if needle in card[1].casefold()]
+
+    def render():
+        found = matches()
+        # 8 chrome lines (header, search, cues, footer, spare); each card takes 3
+        size = max(1, (get_app().output.get_size().rows - 8) // 3)
+        state["cursor"] = max(0, min(state["cursor"], len(found) - 1))
+        top = min(state["top"], state["cursor"])
+        state["top"] = max(top, state["cursor"] - size + 1)
+        return session_frame(
+            project, found, state["query"], state["cursor"], state["top"], len(cards), size
+        )
+
+    keys = KeyBindings()
+
+    def move(step):
+        def handler(event):
+            state["cursor"] += step
+
+        return handler
+
+    keys.add("up")(move(-1))
+    keys.add("down")(move(1))
+
+    @keys.add("<any>")
+    def type_char(event):
+        char = event.data
+        if char.isprintable():
+            state.update(query=state["query"] + char, cursor=0, top=0)
+
+    @keys.add("backspace")
+    def erase(event):
+        state.update(query=state["query"][:-1], cursor=0, top=0)
+
+    @keys.add("enter")
+    def accept(event):
+        found = matches()
+        event.app.exit(result=found[state["cursor"]][0] if found else None)
+
+    @keys.add("escape")
+    @keys.add("c-c")
+    @keys.add("c-d")
+    def cancel(event):
+        event.app.exit(result=None)
+
+    app = Application(
+        layout=Layout(Window(FormattedTextControl(render), wrap_lines=False)),
+        key_bindings=keys,
+        style=STYLE,
+        full_screen=False,
+    )
+    return app.run()
 
 
 def choose(value, options, question, flag, labels=None, groups=None, setting=None):

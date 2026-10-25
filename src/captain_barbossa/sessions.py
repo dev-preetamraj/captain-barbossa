@@ -126,6 +126,29 @@ def session_name(directory):
         return None
 
 
+def session_crew(directory):
+    """Names on the session's crew roster, oldest first."""
+    try:
+        roster = read_json(directory / "session.json").get("crew", {})
+        return [record.get("name", key) for key, record in roster.items()]
+    except (CaptainError, OSError, AttributeError):
+        return []
+
+
+def session_card(row, now=None):
+    """(title, "10h ago · Jack, Elizabeth +2") for the resume picker; never the id."""
+    seconds = max(0, (now or time.time()) - row[3])
+    for unit, size in (("d", 86400), ("h", 3600), ("m", 60)):
+        if seconds >= size:
+            ago = f"{int(seconds // size)}{unit} ago"
+            break
+    else:
+        ago = "just now"
+    names = session_crew(row[4])
+    crew = ", ".join(names[:2]) + (f" +{len(names) - 2}" if len(names) > 2 else "")
+    return row[1] or "Untitled session", " · ".join(filter(None, (ago, crew)))
+
+
 def rename_session(directory, name, *, if_unnamed=False):
     """if_unnamed is the captain titling its own session; it never replaces a name."""
     name = name.strip()

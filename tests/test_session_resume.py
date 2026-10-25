@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from captain_barbossa import cli, sessions
+from captain_barbossa import cli, prompts, sessions
 from captain_barbossa.runtime import CaptainError
 from captain_barbossa.sessions import all_sessions, prune_sessions, session
 from captain_barbossa.store import write_json
@@ -162,8 +162,34 @@ class SessionResumeTests(unittest.TestCase):
     def test_tty_picks_only_from_the_current_project(self):
         self.make(self.other)
         near = self.make(self.here)
-        with patch.object(cli, "choose", return_value=near.meta["id"]) as choose:
+        with patch.object(cli, "pick_session", return_value=near.meta["id"]) as pick:
             _, _, launch = self.run_main("--resume", tty=True)
-        self.assertEqual(choose.call_args.args[1], [near.meta["id"]])
-        self.assertEqual(len(choose.call_args.args), 5)
+        self.assertEqual([card[0] for card in pick.call_args.args[1]], [near.meta["id"]])
         self.assertEqual(launch.call_args.args[0].session, near.meta["id"])
+
+    def test_picker_cards_show_title_age_and_crew_but_never_the_id(self):
+        current = self.make(self.here)
+        self.run_main("--session", current.meta["id"], "--rename", "Login fix")
+        roster = {k: {"name": k} for k in ("Jack", "Elizabeth", "Will", "Anna")}
+        write_json(current.directory / "session.json", {**current.meta, "crew": roster})
+        row = all_sessions(self.here)[0]
+        title, meta = sessions.session_card(row, now=row[3] + 10 * 3600)
+        self.assertEqual((title, meta), ("Login fix", "10h ago · Jack, Elizabeth +2"))
+        bare = self.make(self.here)
+        row = next(r for r in all_sessions(self.here) if r[2] == bare.meta["id"])
+        self.assertEqual(sessions.session_card(row, now=row[3]), ("Untitled session", "just now"))
+        cards = [(current.meta["id"], title, meta)]
+        text = "".join(t for _, t in prompts.session_frame("here", cards, "", 0, 0, 3))
+        self.assertIn("Resume session (1 of 3)", text)
+        self.assertIn("❯ Login fix", text)
+        self.assertNotIn(current.meta["id"], text)
+        self.assertIn("Esc cancel", text)
+
+    def test_picker_separates_cards_and_shows_only_size_cards_with_cues(self):
+        cards = [(str(i), f"t{i}", f"m{i}") for i in range(6)]
+        text = "".join(t for _, t in prompts.session_frame("here", cards, "", 3, 2, 6, 2))
+        self.assertIn("m2\n\n", text)
+        self.assertIn("↑ 2 more", text)
+        self.assertIn("↓ 2 more", text)
+        self.assertNotIn("t1", text)
+        self.assertNotIn("t4", text)

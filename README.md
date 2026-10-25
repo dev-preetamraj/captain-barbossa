@@ -72,9 +72,9 @@ its instructions ask for a 2-5 word title of the first task via
 `captain --rename TITLE --if-unnamed`, run alongside its first command. That flag
 never replaces a name, so your rename always wins; a session not titled yet,
 including one from before titles, shows `-` until its next launch titles it.
-`captain --resume` lists sessions from the current project with name, id and last
-activity; in a terminal it opens a picker and resumes the choice from that project
-root, exactly like `captain --session ID`. It reports cleanly when none exist here.
+`captain --resume` opens a searchable picker of this project's sessions (title, last
+activity, crew; no id) and resumes the choice from that project root, like
+`captain --session ID`; without a terminal it prints the plain list, or reports none.
 `captain --resume NAME|ID` skips the picker; a name shared by several sessions is
 an error, so use the id. Neither flag combines with a subcommand.
 

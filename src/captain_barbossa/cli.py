@@ -29,7 +29,7 @@ from .layout import HERDR_DIRECTIONS
 from .memory import REPO_RELATIONS, RULEBOOK_FILES, memory
 from .models import PROVIDERS, TIER_NAMES, models_for, tiers_for
 from .onboarding import bootstrap
-from .prompts import PLACEMENTS, choose
+from .prompts import PLACEMENTS, pick_session
 from .runtime import HERDR_ERRORS, CaptainError, current_pane
 from .sessions import (
     PRUNE_DAYS,
@@ -37,6 +37,7 @@ from .sessions import (
     project_sessions,
     read_session,
     rename_session,
+    session_card,
 )
 from .store import project_root
 from .update_check import upgrade
@@ -347,7 +348,10 @@ def resume_target(args):
         if not sys.stdin.isatty():
             print(*(labels[row[2]] for row in rows), sep="\n")
             return None
-        chosen = choose(None, [row[2] for row in rows], "Resume which session?", "", labels)
+        cards = [(row[2], *session_card(row)) for row in rows]
+        chosen = pick_session(current.name, cards)
+        if chosen is None:
+            raise CaptainError("Resume cancelled.")
         row = next(row for row in rows if row[2] == chosen)
     if not os.path.isdir(row[0]):
         raise CaptainError(f"Project {row[0]} of session {row[2]} is not a directory here.")
