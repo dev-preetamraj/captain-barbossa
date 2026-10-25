@@ -10,10 +10,7 @@ POLL_INTERVAL = 0.2
 # Consecutive idle polls before a freshly drawn native TUI accepts a submitted prompt.
 READY_POLLS = 6
 PROMPT_TIMEOUT = 5
-# Native prompt ingestion can lag the send; observe longer without sending again.
-SUBMIT_TIMEOUT = 20
 TAIL_LINES = 40
-TAIL_LIMIT = 1500
 MODEL_INTERVAL = 1
 MODEL_TIMEOUT = 20
 # Each CLI's own line after a switch: "Set model to Sonnet 5 …" / "Model changed to …" /
@@ -51,10 +48,9 @@ CLAUDE_PICKER_STEP = 2
 CLAUDE_PICKER_PAINT = 2
 # Input-prompt glyphs of the native TUIs, which also open their status bars.
 PROMPT_GLYPHS = ("❯", "›")
-INTERRUPT_MARKER = "esc to interrupt"
-# Claude Code's own signature for a prompt queued mid-turn, not a draft or a drop.
-QUEUED_SEND_NOW = "ctrl+enter to send now"
-QUEUED_COMPOSER = "Press up to edit queued messages"
+# Claude Code's mode footer, the pane's last line. Its trailing hints (" · ← for agents",
+# shortcuts) come and go between versions, so only the mode itself identifies it.
+CLAUDE_FOOTER = re.compile(r"^(?:⏸|⏵⏵) [a-z ]+ on\b")
 # Pane chrome shared by the Claude Code and Codex TUIs: a bare box-drawing rule, an
 # empty input prompt (provider placeholders need separate recognition),
 # and the bottom status bar, which is always the last line and never starts like
@@ -115,10 +111,7 @@ def inbox_line(crew):
 
 
 def modal_start(lines):
-    """Index of a trailing choice modal's first option, or None when there is none.
-
-    The lines above it are the modal's question, which a blocked crew's tail must keep.
-    """
+    """Index of a trailing choice modal's first option, or None when there is none."""
     if not lines or not PANE_MODAL_CONFIRM.match(lines[-1]):
         return None
     window = range(max(len(lines) - PANE_MODAL_LINES, 0), len(lines) - 1)
@@ -220,24 +213,6 @@ class Pane:
             lines = lines[:-1]
         return lines
 
-    def tail(self):
-        """The end of the crew's terminal output, for crew that recorded no report."""
-        try:
-            lines = self.lines()
-        except HERDR_ERRORS as exc:
-            return f"unreadable ({exc})"
-        start = modal_start(lines)
-        if start is not None:
-            # Drop the option list and confirm line; the question above them is the point.
-            lines = lines[:start]
-        lines = [
-            line
-            for line in lines
-            if not PANE_RULE.match(line) and not PANE_EMPTY_PROMPT.match(line)
-        ]
-        tail = "\n".join(lines)
-        return tail[-TAIL_LIMIT:] or "empty"
-
     def draft_pending(self, provider=None):
         """Whether the composer must not be typed into: any gate, including an unreadable one."""
         try:
@@ -274,14 +249,15 @@ class Pane:
             stripped = ANSI_SGR.sub("", line)
             if stripped[:1] not in PROMPT_GLYPHS or stripped[1:].strip() != text:
                 continue
-            after = line[line.index(stripped[0]) + 1 :].lstrip("\xa0")
+            # The glyph is followed by a plain space or an NBSP depending on the version.
+            after = line[line.index(stripped[0]) + 1 :].lstrip("\xa0 ")
             codes = []
             while True:
                 match = ANSI_SGR.match(after)
                 if not match:
                     break
                 codes.extend(match.group(1).split(";") if match.group(1) else ["0"])
-                after = after[match.end() :]
+                after = after[match.end() :].lstrip("\xa0 ")
             return bool(codes) and "2" in codes and all(code in ("0", "2") for code in codes)
         return False
 
@@ -351,15 +327,7 @@ class Pane:
             ):
                 return "", styled
             return None, styled
-        if (
-            provider == "claude"
-            and len(lines) >= 4
-            and lines[-1]
-            in (
-                "⏸ manual mode on · ? for shortcuts · ← for agents",
-                "⏵⏵ auto mode on (shift+tab to cycle) · ← for agents",
-            )
-        ):
+        if provider == "claude" and len(lines) >= 4 and CLAUDE_FOOTER.match(lines[-1]):
             lines.pop()
             # A user statusLine draws its rows between the composer's bottom rule and the
             # footer; without a rule below it the composer is still unreadable.
@@ -434,81 +402,6 @@ class Pane:
             "prompt",
             self.agent_name,
             f" {body}" if body.startswith("-") else body,
-        )
-
-    def settled_status(self, timeout, provider=None):
-        """Poll until the agent reports working, done, or blocked; return the last status seen.
-
-        Codex reports working while it renames its own thread, so its activity counts as the
-        task starting only once the composer no longer holds the draft.
-        """
-        deadline = time.monotonic() + timeout
-        status = None
-        while time.monotonic() < deadline:
-            status = self.agent_status()
-            if status == "blocked":
-                return status
-            if self.choice_modal():
-                return "blocked"
-            if status in ("working", "done"):
-                if not self.draft_pending(provider):
-                    return status
-                status = "idle"
-            elif self.message_queued():
-                return "working"
-            time.sleep(POLL_INTERVAL)
-        return status
-
-    def message_queued(self):
-        """Whether the pane shows Claude Code's own mid-turn message-queue signature.
-
-        A prompt that arrives while the previous turn is still running gets queued and
-        flushed once it ends, so it landed even though agent_status reads idle for the
-        whole window; this composer/footer trio is the only proof of that.
-        """
-        try:
-            lines = self.lines()
-        except HERDR_ERRORS:
-            return False
-        return (
-            any(QUEUED_SEND_NOW in line for line in lines)
-            and any(QUEUED_COMPOSER in line for line in lines)
-            and any(INTERRUPT_MARKER in line for line in lines)
-        )
-
-    def submit_task(self, task, provider):
-        """Submit at most once; never retry.
-
-        Pane observations are not an execution receipt. In particular, idle after sending
-        cannot distinguish a dropped prompt from a fast completed task.
-        """
-        status = self.agent_status()
-        if status == "blocked" or self.choice_modal():
-            raise CaptainError(
-                f"{self.agent_name} is waiting for input or approval; no task was sent. "
-                "Read its pane before sending any keys."
-            )
-        if status not in ("idle", "working", "done") or self.draft_pending(provider):
-            raise CaptainError(
-                f"{self.agent_name} has a draft or unreadable composer; no task was sent. "
-                f"Inspect it with: herdr agent read {self.agent_name}"
-            )
-        try:
-            # herdr has no "--" terminator; a leading space defuses a task that starts with "-".
-            guarded = f" {task}" if task.startswith("-") else task
-            runtime.herdr("agent", "prompt", self.agent_name, guarded)
-            status = self.settled_status(SUBMIT_TIMEOUT, provider)
-        except HERDR_ERRORS as exc:
-            raise CaptainError(
-                f"{self.agent_name} delivery outcome is unknown ({exc}); no resend was attempted. "
-                f"Inspect it with: herdr agent read {self.agent_name}"
-            ) from exc
-        if status in ("working", "done"):
-            return
-        raise CaptainError(
-            f"{self.agent_name} delivery outcome is unknown (status {status!r}); "
-            "the task may have run or remain an unsent draft. No resend or Enter was attempted. "
-            f"Inspect it with: herdr agent read {self.agent_name}"
         )
 
     def wait_for_crew(self, pane_id, provider, timeout=30):

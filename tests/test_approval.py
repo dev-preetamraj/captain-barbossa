@@ -552,7 +552,7 @@ class ApprovalTests(unittest.TestCase):
                 (f"{captain} ask Tia 'which file?' 2>&1", "granted"),
                 (f"{captain} inbox Tia", "granted"),
                 (f"{captain} memory show --scope repo", "granted"),
-                (f"{captain} memory add Tia report 'summary'", "granted"),
+                (f"{captain} memory add Tia report 'summary'", "captain-verb"),
                 (f"{captain} memory add a decided b --because c --scope repo", "captain-verb"),
                 (f"{captain} do commit --message fix", "captain-do"),
                 (f"{captain} do run test", "captain-do"),

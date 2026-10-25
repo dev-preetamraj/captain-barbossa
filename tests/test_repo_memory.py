@@ -280,12 +280,11 @@ class RepoMemoryTests(SessionCase):
 
     # --- instructions ---
 
-    def test_crew_instructions_read_the_repo_scope_and_write_only_their_report(self):
+    def test_crew_instructions_read_the_repo_scope_and_write_no_memory(self):
         crew = instructions.agent_instructions(self.directory, "crew member Jack")
         self.assertIn("memory show --scope repo", crew)
         self.assertNotIn("--scope project", crew)
-        self.assertEqual(len([line for line in crew.splitlines() if " memory add " in line]), 1)
-        self.assertIn("memory add Jack report '<summary>'", crew)
+        self.assertNotIn(" memory add ", crew)
 
     def test_the_captain_is_told_the_repo_vocabulary_and_that_it_is_committed(self):
         captain = " ".join(

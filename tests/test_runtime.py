@@ -105,8 +105,6 @@ class HerdrResponseTests(SessionCase):
                     runtime.current_pane()
                 with self.assertRaisesRegex(runtime.CaptainError, "unexpected response"):
                     Pane("builder").wait_for_crew("w1:p2", "codex")
-                with self.assertRaisesRegex(runtime.CaptainError, "unexpected response"):
-                    Pane("builder").submit_task("build", "claude")
                 with (
                     patch.object(cli, "project_root", return_value=self.project),
                     contextlib.redirect_stderr(io.StringIO()) as error,

@@ -162,11 +162,21 @@ def occupant(project, directory, paths):
     return None
 
 
+def require_current(crew):
+    """Pre-incarnation crew ran on retired pane heuristics; their files stay on disk."""
+    if not crew.record.get("incarnation_id"):
+        raise CaptainError(
+            f"Legacy crew {crew.display_name} predates this captain and can no longer be "
+            "driven; dismiss it and recruit a fresh crew."
+        )
+
+
 def active(state, crew, assignment_id=None, incarnation=None):
+    require_current(crew)
     key = state["active"].get(crew.crew_id)
     assignment = state["assignments"].get(key)
-    if not assignment or not crew.record.get("incarnation_id"):
-        raise CaptainError("Legacy crew has no protocol assignment; recruit new crew explicitly.")
+    if not assignment:
+        raise CaptainError("Crew has no protocol assignment; recruit new crew explicitly.")
     if assignment["incarnation_id"] != crew.record["incarnation_id"]:
         raise CaptainError("Stale crew incarnation.")
     if assignment_id is not None and assignment_id != key:
@@ -202,8 +212,7 @@ def begin(crew, project, task, paths=(), actions=(), handoff=None, *, assignment
     actions = sorted(set(actions) | {"read", "search"})
     if set(actions) - set(ACTIONS):
         raise CaptainError("Unknown assignment action.")
-    if not crew.record.get("incarnation_id"):
-        raise CaptainError("Legacy crew cannot be silently adopted; recruit new crew.")
+    require_current(crew)
     # One lock for the project, whichever root a session lives in.
     with (
         lock(state_storage(project) / "allocation.lock"),

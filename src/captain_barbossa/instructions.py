@@ -57,8 +57,7 @@ re-read its output file while waiting."""
     delivery_rules = """Unacknowledged deliveries repeat with the same ID and full text.
 Quiet native work never notifies; idle notifies once per message you send. After an
 acknowledged done, wait fails: dismiss or hand off.
-Explicit done with report completes protocol assignments; native finish is inactivity.
-Legacy wait retains its old meaning; never reinterpret legacy records."""
+Explicit done with report completes protocol assignments; native finish is inactivity."""
     background_delivery = "reported through wait"
     pi_captain = provider == "pi" and not is_crew
     if pi_captain:
@@ -99,8 +98,6 @@ Finish:
   {command} done {name} --report 'files changed; checks/results; remaining'
 Uses launch-bound CAPTAIN_ASSIGNMENT; replacements require --assignment ID.
 Native idle is inactivity, never completion.
-For legacy assignments only, record the report before stopping:
-  {command} memory add {name} report '<summary>'
 Print the same report as your final message; report blockers through ask.
 """
         if is_crew

@@ -208,7 +208,6 @@ class DismissCrewTests(SessionCase):
             patch.object(runtime, "herdr", side_effect=pane_stub(created)),
             patch.object(agents, "executable", return_value="/bin/codex"),
             patch.object(Pane, "wait_for_crew"),
-            patch.object(Pane, "submit_task"),
             # The doorbell is held, so the task body never reaches the crew.
             patch.object(Pane, "nudge_block", return_value="agent not idle"),
         ):

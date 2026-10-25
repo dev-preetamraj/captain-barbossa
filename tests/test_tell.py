@@ -5,102 +5,73 @@ import os
 import unittest
 from unittest.mock import patch
 
-from captain_barbossa import agents, cli, runtime, sessions, store
-from captain_barbossa import pane as panes
+from captain_barbossa import agents, cli, protocol, runtime, sessions, store
 from captain_barbossa.crew import Crew
+from captain_barbossa.pane import Pane
 from tests.home_isolation import HERDR, SessionCase
 
 
 class TellCrewTests(SessionCase):
-    """Regression tests for follow-up prompts (agents.tell_crew)."""
+    """Follow-ups are mail on the crew's live assignment (agents.tell_crew)."""
 
     def setUp(self):
         super().setUp()
         self.enterContext(patch.dict(os.environ, HERDR))
-        self.directory, self.meta = sessions.session(self.project, self.pane, create=True)
-        self.agent_name = f"c-{self.meta['id'][:8]}-jack"
-        self.meta["crew"] = {
-            "jack": {
-                "id": "jack",
-                "name": "Jack",
-                "agent": self.agent_name,
-                "provider": "claude",
-                "task": "build",
-                "pane": "w1:p2",
-                "tab": "w1:t1",
-                "status": "started",
-            }
-        }
-        store.write_json(self.directory / "session.json", self.meta)
-        self.events = store.private_dir(self.directory / "events") / "jack.jsonl"
-        self.events.write_text("", encoding="utf-8")
+        self.current = sessions.session(self.project, self.pane, create=True)
+        self.crew = Crew(
+            "jack",
+            {"name": "Jack", "agent": "jack", "provider": "codex", "incarnation_id": "first"},
+            self.current,
+        )
+        self.current.meta["crew"]["jack"] = self.crew.record
+        store.write_json(self.current.meta_path, self.current.meta)
+        self.enterContext(patch.object(Pane, "nudge_block", return_value=None))
+        self.enterContext(patch.object(Pane, "nudge"))
+        self.assignment = protocol.begin(self.crew, self.project, "build", ["src"], ["edit"])
 
-    def args(self, *args):
-        return cli.parser().parse_args(["--session", self.meta["id"], *args])
+    def tell(self, name, message, *extra):
+        args = cli.parser().parse_args(
+            ["--session", self.current.meta["id"], "tell", name, message, *extra]
+        )
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            agents.tell_crew(args, self.pane, self.project)
+        return output.getvalue()
 
-    def tell(self, name, message):
-        sent = []
+    def edit_record(self, **changes):
+        meta = store.read_json(self.current.meta_path)
+        record = {**meta["crew"]["jack"], **changes}
+        meta["crew"]["jack"] = {key: value for key, value in record.items() if value is not None}
+        store.write_json(self.current.meta_path, meta)
 
-        def api(*args, **kwargs):
-            if args[:2] == ("agent", "prompt"):
-                sent.append(args[2:])
-                return {}
-            if args[:2] == ("agent", "get"):
-                return {"agent": {"agent_status": "working"}}
-            if args[:2] == ("agent", "read"):
-                return "❯"
-            raise AssertionError(f"unexpected herdr call: {args}")
+    def test_follow_up_is_queued_as_mail_on_the_named_assignment(self):
+        output = json.loads(
+            self.tell("Jack", "now do the docs", "--assignment", self.assignment["id"])
+        )
+        self.assertEqual(output["crew"], "Jack")
+        mail = protocol.unread(self.crew)
+        self.assertEqual(
+            [(m["id"], m["text"]) for m in mail], [(output["message_id"], "now do the docs")]
+        )
 
-        with (
-            patch.object(runtime, "herdr", side_effect=api),
-            patch.object(panes.time, "sleep"),
-            contextlib.redirect_stdout(io.StringIO()) as output,
-        ):
-            agents.tell_crew(self.args("tell", name, message), self.pane, self.project)
-        return sent, output.getvalue()
+    def test_follow_up_requires_the_assignment_id(self):
+        with self.assertRaisesRegex(agents.CaptainError, "--assignment"):
+            self.tell("Jack", "keep going")
 
-    def append_event(self, event):
-        with self.events.open("a", encoding="utf-8") as file:
-            file.write(json.dumps(event) + "\n")
-
-    def test_follow_up_is_submitted_and_recorded(self):
-        sent, output = self.tell("jack", "now do the docs")
-        self.assertEqual(sent, [(self.agent_name, "now do the docs")])
-        self.assertIn("Sent to Jack.", output)
-        meta = store.read_json(self.directory / "session.json")
-        self.assertEqual(meta["crew"]["jack"]["task"], "now do the docs")
-        graph = store.read_json(self.directory / "graph.json")
-        labels = {node["id"]: node["label"] for node in graph["nodes"]}
-        assigned = [
-            (labels[link["source"]], labels[link["target"]])
-            for link in graph["links"]
-            if link["relation"] == "assigned"
-        ]
-        self.assertIn(("Jack", "now do the docs"), assigned)
-
-    def test_stale_idle_event_is_consumed_before_the_prompt_lands(self):
-        self.append_event({"hook_event_name": "Notification", "notification_type": "idle_prompt"})
-        self.tell("Jack", "keep going")
-        cursor = self.events.with_suffix(".cursor")
-        self.assertEqual(store.read_json(cursor), self.events.stat().st_size)
-        with patch.object(runtime, "herdr", side_effect=AssertionError):
-            status, _ = Crew(
-                "jack",
-                {"agent": self.agent_name, "task": "keep going"},
-                sessions.Session(self.directory, self.meta),
-            ).status(0)
-        self.assertIsNone(status)
+    def test_legacy_crew_is_told_to_recruit_a_fresh_crew(self):
+        self.edit_record(incarnation_id=None)
+        with patch.object(runtime, "herdr", side_effect=AssertionError("herdr")):
+            with self.assertRaisesRegex(agents.CaptainError, "Legacy crew Jack.*fresh crew"):
+                self.tell("Jack", "keep going", "--assignment", self.assignment["id"])
+        self.assertFalse((self.current.directory / "mail" / "jack").exists())
 
     def test_dismissed_crew_is_refused(self):
-        meta = store.read_json(self.directory / "session.json")
-        meta["crew"]["jack"]["status"] = "dismissed"
-        store.write_json(self.directory / "session.json", meta)
+        self.edit_record(status="dismissed")
         with self.assertRaisesRegex(agents.CaptainError, "dismissed"):
-            self.tell("Jack", "keep going")
+            self.tell("Jack", "keep going", "--assignment", self.assignment["id"])
 
     def test_blank_message_is_refused(self):
         with self.assertRaisesRegex(agents.CaptainError, "1–8000 characters"):
-            self.tell("Jack", "   ")
+            self.tell("Jack", "   ", "--assignment", self.assignment["id"])
 
 
 if __name__ == "__main__":

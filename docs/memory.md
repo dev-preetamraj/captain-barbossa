@@ -14,7 +14,7 @@ and shared by the team:
     session.json                  # workspace and crew references
     graph.json                    # this session's memory only
     protocol.json                 # assignments, questions, delivery acknowledgements
-    events/<crew>-<incarnation>.jsonl  # native events; legacy crew omit incarnation
+    events/<crew>-<incarnation>.jsonl  # native events
     lifetimes/<incarnation>.*          # authoritative managed-writer ownership/exit receipts
     native-history/<crew>-<incarnation>.json # crew-only native identity/cleanup journal
     background/<crew>-<incarnation>.*  # background run record, lock, bounded output, report

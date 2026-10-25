@@ -23,6 +23,7 @@ class StatusCrewTests(SessionCase):
                 "id": "jack",
                 "name": "Jack",
                 "agent": "c-abc-jack",
+                "incarnation_id": "j1",
                 "provider": "claude",
                 "model": "claude-sonnet-5",
                 "pane": "w1:p2",
@@ -33,6 +34,7 @@ class StatusCrewTests(SessionCase):
                 "id": "will",
                 "name": "Will",
                 "agent": "c-abc-will",
+                "incarnation_id": "w1",
                 "provider": "codex",
                 "task": "x" * 80,
                 "status": "started",
@@ -87,6 +89,19 @@ class StatusCrewTests(SessionCase):
 
         output = self.status(api, "--all")
         self.assertIn("Gibbs", output)
+
+    def test_legacy_crew_row_points_at_a_fresh_recruit(self):
+        del self.meta["crew"]["will"]["incarnation_id"]
+        store.write_json(self.directory / "session.json", self.meta)
+
+        def api(*call_args, **kwargs):
+            if call_args[:2] == ("agent", "get") and call_args[2] == "c-abc-jack":
+                return {"agent": {"agent_status": "idle"}}
+            raise AssertionError(f"unexpected herdr call: {call_args}")
+
+        will_line = next(line for line in self.status(api).splitlines() if line.startswith("Will"))
+        self.assertIn("state:unknown source:none legacy crew", will_line)
+        self.assertIn("recruit a fresh crew", will_line)
 
     def test_herdr_error_reports_unknown_with_source_and_reason(self):
         def api(*call_args, **kwargs):

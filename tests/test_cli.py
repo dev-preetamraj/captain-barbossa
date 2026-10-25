@@ -449,6 +449,15 @@ class CliCommandTests(SessionCase):
         self.assertEqual(code, 1)
         self.assertEqual(json.loads(output)["status"], "error")
         self.assertEqual((self.directory / "protocol.json").read_bytes(), before)
+        files = sorted(self.directory.rglob("*"))
+        with (
+            patch("captain_barbossa.runtime.herdr", side_effect=AssertionError("herdr")),
+            contextlib.redirect_stderr(io.StringIO()) as error,
+        ):
+            self.assertEqual(self.run_cli("wait", "Jack", "--timeout", "0")[0], 1)
+        self.assertIn("Legacy crew Jack", error.getvalue())
+        self.assertIn("recruit a fresh crew", error.getvalue())
+        self.assertEqual(sorted(self.directory.rglob("*")), files)
 
     def test_cli_scoped_inspection_and_session_need_no_herdr_or_state_writes(self):
         with (

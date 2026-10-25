@@ -400,7 +400,6 @@ class RecruitTests(SessionCase):
                     patch.object(
                         instruction_prompts, "agent_instructions", return_value=instructions
                     ),
-                    patch.object(Pane, "submit_task"),
                     patch(
                         "captain_barbossa.native_history.prepare",
                         return_value={"argv": ["--session-id", "owned-native-session"], "env": {}},

@@ -75,6 +75,21 @@ class CrewStateTests(unittest.TestCase):
         self.save_assignment()
         self.assertEqual(self.crew.current_state().state, "needs-decision")
 
+    def test_codex_title_turn_is_not_the_crews_turn(self):
+        title = {
+            "type": "agent-turn-complete",
+            "input-messages": ["Generate a concise, single-line task title..."],
+        }
+        self.assertIsNone(event_status(title))
+        self.assertEqual(event_status({**title, "input-messages": ["build"]}), "done")
+
+    def test_legacy_record_points_at_a_fresh_recruit_without_reading_evidence(self):
+        del self.record["incarnation_id"]
+        verdict = self.crew.current_state()
+        self.assertEqual(verdict.state, "unknown")
+        self.assertIn("recruit a fresh crew", verdict.detail)
+        self.pane_status.assert_not_called()
+
     def test_missing_evidence_explains_unknown(self):
         self.pane_status.side_effect = CaptainError("unreachable")
         verdict = self.crew.current_state()

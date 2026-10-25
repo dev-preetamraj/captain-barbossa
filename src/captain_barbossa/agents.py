@@ -25,7 +25,6 @@ from . import (
 )
 from .crew import Crew, CrewState
 from .dashboard import dashboard_pane, renest_dashboard, start_dashboard
-from .events import read_events
 from .memory import add_memory, truncate_label
 from .models import HOOKLESS, PROVIDERS, claude_label, model_names, resolve_model
 from .pane import MODEL_TIMEOUT, PROMPT_TIMEOUT, shell_ready_for_input
@@ -34,12 +33,8 @@ from .placement import Placement, launch_choices
 from .prompts import choose
 from .runtime import HERDR_ERRORS, CaptainError, check_text, executable
 from .sessions import agent_name, crew_meta, is_durable, prune_sessions, read_session, session
-from .store import private_dir, read_cursor, read_json, state_root, temp_root, write_json
+from .store import private_dir, read_json, state_root, temp_root, write_json
 from .update_check import check_for_update
-
-# A hook payload carries a whole assistant turn or tool_input; the wait line only needs
-# enough to decide what to do next, and the event file keeps the rest.
-HOOK_LIMIT = 500
 
 # How often the exit watcher checks whether the captain's CLI is still its parent. A pane
 # that outlives the captain by a second costs nothing.
@@ -298,21 +293,6 @@ def launch(args, pane, project):
     os.execvpe(binary, command, env)
 
 
-def tail_note(current, crew, tail):
-    """The wait line's pane-tail fragment: inline, or a file path for pi.
-
-    pi installs no hooks, so every pi wait falls back to the pane tail, and the captain
-    extension steers whatever wait prints straight into the conversation. Filing it keeps
-    each delivery one short line; the captain reads the path only when it needs detail.
-    """
-    if crew.record.get("provider") != "pi":
-        return f"pane tail: {tail}"
-    path = current.directory / f"tail-{crew.crew_id}.txt"
-    path.write_text(tail, encoding="utf-8")
-    path.chmod(0o600)
-    return f"pane tail ({len(tail)} chars): {path}"
-
-
 def wait_crew(args, pane, project):
     if getattr(args, "all", False):
         if args.name or args.ack:
@@ -354,83 +334,24 @@ def wait_crew(args, pane, project):
         return
     if not args.name:
         raise CaptainError("wait requires a crew name or --all.")
-    current, crew = Crew.for_args(args, pane, project)
-    if crew.record.get("incarnation_id") or getattr(args, "json", False):
-        timeout = (
-            config.number("crew", "wait_timeout", kind=int)
-            if args.timeout is None
-            else config.in_range(args.timeout, "--timeout", least=0)
-        )
-        response = protocol.wait(crew, timeout, getattr(args, "ack", None))
-        print(
-            json.dumps(response)
-            if args.json
-            else f"{response['crew']} {response['status']}: {response['summary']} "
-            + (
-                f"(delivery {response['delivery_id']}; acknowledge with wait --ack)"
-                if response["delivery_id"]
-                else "(nothing pending to acknowledge)"
-            )
-        )
-        return
-    if getattr(args, "ack", None):
-        raise CaptainError("Legacy wait has no acknowledged deliveries.")
-    report_cursor = crew.report_cursor
-    # Reports are consumed by cursor alone: pi installs no hooks, so an events file may
-    # never exist, and a report written before this wait started is still undelivered.
-    reported = read_cursor(report_cursor)
+    _, crew = Crew.for_args(args, pane, project)
+    protocol.require_current(crew)
     timeout = (
         config.number("crew", "wait_timeout", kind=int)
         if args.timeout is None
-        # 0 is allowed on the flag alone: it means report whatever has already arrived.
         else config.in_range(args.timeout, "--timeout", least=0)
     )
-    status, event = crew.status(timeout)
-    if status is None:
-        raise CaptainError(
-            f"{crew.display_name} was still working after {timeout} seconds. "
-            "Wait again, or read its pane with: herdr agent read " + crew.record["agent"]
+    response = protocol.wait(crew, timeout, getattr(args, "ack", None))
+    print(
+        json.dumps(response)
+        if args.json
+        else f"{response['crew']} {response['status']}: {response['summary']} "
+        + (
+            f"(delivery {response['delivery_id']}; acknowledge with wait --ack)"
+            if response["delivery_id"]
+            else "(nothing pending to acknowledge)"
         )
-    all_reports = crew.reports
-    reports = all_reports[reported:]
-    if reports:
-        entry = f"{status}; reported: {reports[-1]}"
-        # Blocked means the pane is waiting on input/approval; show it even with a report.
-        printed = (
-            f"{entry}; {tail_note(current, crew, crew.pane.tail())}"
-            if status == "blocked" and event is None
-            else entry
-        )
-        # The report text already lives on its own "report" edge; don't duplicate it here.
-        completed = f"{status}; reported"
-    elif event is not None:
-        entry = f"{status}; no report recorded"
-        printed = entry
-        completed = entry
-    else:
-        tail = crew.pane.tail()
-        entry = f"{status}; no report recorded"
-        printed = f"{entry}; {tail_note(current, crew, tail)}"
-        completed = entry
-    if event is not None and (not reports or status == "blocked"):
-        message = (
-            event.get("last-assistant-message")
-            or event.get("last_assistant_message")
-            or event.get("message")
-        )
-        if status == "blocked" and event.get("tool_name"):
-            message = f"{event['tool_name']} {json.dumps(event.get('tool_input', {}))}"
-        if message:
-            capped = truncate_label(message, HOOK_LIMIT)
-            if capped != message:
-                capped += f" (full event: {crew.events})"
-            printed += f"; hook: {capped}"
-    add_memory(current.graph, crew.display_name, "completed", completed)
-    # pi never creates the events directory this cursor lives beside.
-    private_dir(report_cursor.parent)
-    write_json(report_cursor, len(all_reports))
-    print(f"{crew.display_name} {status}.")
-    print(printed)
+    )
 
 
 def focus_crew(args, pane, project):
@@ -543,30 +464,14 @@ def tell_crew(args, pane, project):
     check_text(args.message, "message")
     current = read_session(project, args.session, pane)
     crew = Crew.resolve(current, args.name)
-    if crew.record.get("incarnation_id"):
-        if crew.is_dismissed:
-            raise CaptainError("Crew was dismissed; recruit new crew instead.")
-        refuse_background(crew, "tell")
-        if not args.assignment:
-            raise CaptainError("Protocol follow-ups require --assignment ID.")
-        message_id = protocol.deliver(crew, args.message, assignment_id=args.assignment)
-        print(json.dumps({"crew": crew.display_name, "message_id": message_id}))
-        return
-    with crew_meta(current.directory) as meta:
-        current = current._replace(meta=meta)
-        crew = Crew.resolve(current, args.name)
-        if crew.is_dismissed:
-            raise CaptainError(f"{crew.display_name} was dismissed; recruit new crew instead.")
-        events = crew.events
-        cursor = crew.cursor
-        # An idle event from the gap before this prompt would otherwise read as done.
-        _, offset = read_events(events, read_cursor(cursor))
-        if events.exists():
-            write_json(cursor, offset)
-        crew.record["task"] = args.message
-        crew.pane.submit_task(args.message, crew.record.get("provider"))
-        add_memory(current.graph, crew.display_name, "assigned", args.message)
-    print(f"Sent to {crew.display_name}.")
+    if crew.is_dismissed:
+        raise CaptainError("Crew was dismissed; recruit new crew instead.")
+    protocol.require_current(crew)
+    refuse_background(crew, "tell")
+    if not args.assignment:
+        raise CaptainError("Protocol follow-ups require --assignment ID.")
+    message_id = protocol.deliver(crew, args.message, assignment_id=args.assignment)
+    print(json.dumps({"crew": crew.display_name, "message_id": message_id}))
 
 
 def protocol_command(args, pane, project):
@@ -1102,8 +1007,6 @@ def create_crew(args, pane, project):
             private_dir(events.parent)
             events.write_text("", encoding="utf-8")
             events.chmod(0o600)
-            crew.cursor.unlink(missing_ok=True)
-            write_json(crew.report_cursor, len(crew.reports))
             native_argv = [
                 binary,
                 *instructions.native_args(

@@ -135,9 +135,7 @@ def parser(*, plan=False):
         "([crew] model when omitted, so routine work never silently lands on an expensive "
         "default)",
     )
-    wait = commands.add_parser(
-        "wait", help="wait for a crew notification (legacy crew report native completion)"
-    )
+    wait = commands.add_parser("wait", help="wait for a crew notification")
     wait.add_argument("name", nargs="?", help="crew name or ID (case-insensitive)")
     wait.add_argument(
         "--all", action="store_true", help="return pending deliveries across the fleet"
@@ -153,7 +151,7 @@ def parser(*, plan=False):
     tell = commands.add_parser("tell", help="send a follow-up prompt to an existing crew")
     tell.add_argument("name", help="crew name or ID (case-insensitive)")
     tell.add_argument("message")
-    tell.add_argument("--assignment", help="required for protocol crew")
+    tell.add_argument("--assignment", help="the crew's live assignment ID (required)")
     inbox = commands.add_parser(
         "inbox", help="print a crew's queued mail oldest first and write the read receipt"
     )

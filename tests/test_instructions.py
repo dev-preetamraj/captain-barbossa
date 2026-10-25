@@ -259,8 +259,6 @@ class InstructionTests(SessionCase):
         for phrase in (
             f"--session {self.directory.name} done Gibbs --report",
             "files changed; checks/results; remaining",
-            "For legacy assignments only, record the report before stopping",
-            "memory add Gibbs report '<summary>'",
             "Print the same report as your final message",
             "Native idle is inactivity, never completion",
         ):
@@ -272,7 +270,6 @@ class InstructionTests(SessionCase):
             "CAPTAIN wait 'NAME' [--timeout <seconds>]",
             "Explicit done with report completes protocol assignments",
             "acknowledge only received notifications",
-            "Legacy wait retains its old meaning",
         ):
             self.assertIn(phrase, captain)
         self.assertNotIn("herdr agent wait", captain)
@@ -324,7 +321,7 @@ class InstructionTests(SessionCase):
             with self.subTest(role=role):
                 text = instruction_prompts.agent_instructions(self.directory, role)
                 instructions = " ".join(text.split())
-                expected = 6 if role.startswith("crew member ") else 1
+                expected = 5 if role.startswith("crew member ") else 1
                 self.assertEqual(text.count(str(self.directory.name)), expected)
                 for phrase in (
                     f"You are {role}",
@@ -337,7 +334,6 @@ class InstructionTests(SessionCase):
                         "Complete your assignment yourself; do not delegate or use subagents",
                         instructions,
                     )
-                    self.assertIn("memory add Gibbs report '<summary>'", instructions)
                     for command in (" crew --agent", " dismiss ", " focus ", "herdr agent"):
                         self.assertNotIn(command, text)
                     self.assertNotIn("--model", text)
@@ -411,7 +407,6 @@ class InstructionTests(SessionCase):
                     patch.object(runtime, "herdr", side_effect=pane_stub(created)) as api,
                     patch.object(agents, "executable", return_value=f"/bin/{provider}"),
                     patch.object(Pane, "wait_for_crew"),
-                    patch.object(Pane, "submit_task") as submit,
                     patch.object(
                         models,
                         "pi_models",
@@ -476,10 +471,7 @@ class InstructionTests(SessionCase):
                         for line in prompt.splitlines()
                         if line.startswith("  ") and " memory " in line
                     ],
-                    [
-                        [*command_prefix, "memory", "add", record["name"], "report", "<summary>"],
-                        [*command_prefix, "memory", "show", "--scope", "repo"],
-                    ],
+                    [[*command_prefix, "memory", "show", "--scope", "repo"]],
                 )
                 self.assertNotIn("CAPTAIN ", prompt)
                 for phrase in (
@@ -515,7 +507,6 @@ class InstructionTests(SessionCase):
                 else:
                     self.assertNotIn("--extension", argv)
                 # The initial task is mailed, not typed; the doorbell carries no content.
-                submit.assert_not_called()
                 (mail_path,) = (self.directory / "mail" / record["id"]).glob("*.json")
                 mail = json.loads(mail_path.read_text())
                 # The stored body is the captain's text alone; identity renders later.

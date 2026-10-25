@@ -90,9 +90,9 @@ Key facts:
   requests are logged as PermissionDecision, so wait does not announce an approval that is
   already handled. Other providers retain native/manual permissions.
 - Crew state is signalled by the native CLI's own hooks (Claude `--settings` hooks,
-  Codex `notify`), which append JSON lines to `sessions/<id>/events/<crew>.jsonl`.
-  `wait` tails that file from a `.cursor` offset; pane reading is only a fallback for
-  when no event has arrived. Filter Codex's title-generation turn. Claude's `Stop` hook
+  Codex `notify`), which append JSON lines to `sessions/<id>/events/<crew>-<incarnation>.jsonl`.
+  `wait` reads that file from the assignment's acknowledged offset; codex and pi panes
+  are also checked for a modal. Filter Codex's title-generation turn. Claude's `Stop` hook
   also blocks on an unfinished assignment with no pending question, so the crew stays
   active. A crew awaiting an answer may stop. Codex and pi cannot block; it fails open.
 - `assign`/`tell`/`answer` write mail (`sessions/<id>/mail/<crew>/<id>.json`). The body

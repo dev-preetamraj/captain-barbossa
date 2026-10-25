@@ -108,8 +108,7 @@ class ShortLabelTests(unittest.TestCase):
         subject, relation, target = json.loads(rest)
         self.assertEqual((subject, relation), ("Jack", "report"))
         self.assertEqual(len(target), memory.LABEL_LIMIT)
-        with memory.memory_snapshot(self.directory) as snapshot:
-            graph = store.read_json(snapshot / "graph.json")
+        graph = memory.read_scoped_graphs(self.directory, scope="session")["session"]
         self.assertEqual(set(graph), set(memory.empty_graph()))
         self.assertEqual(sorted(self.labels()), sorted(node["label"] for node in graph["nodes"]))
 

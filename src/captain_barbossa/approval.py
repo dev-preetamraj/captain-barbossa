@@ -432,9 +432,7 @@ def _captain(args):
     verb, rest = (args[0], args[1:]) if args else ("", [])
     if verb == "do":
         return _Use("captain-do")
-    # Only the legacy session report; any flag could name the committed repo scope.
-    report = rest[:1] == ["add"] and len(rest) == 4 and not any(a.startswith("-") for a in rest)
-    memory = verb == "memory" and (rest[:1] == ["show"] or report)
+    memory = verb == "memory" and rest[:1] == ["show"]
     return _Use(action="captain") if verb in CAPTAIN_VERBS or memory else _Use("captain-verb")
 
 

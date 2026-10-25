@@ -265,7 +265,6 @@ class CrewRenestTests(LaunchHarness):
     def setUp(self):
         super().setUp()
         self.enterContext(patch.object(Pane, "wait_for_crew", lambda *a: None))
-        self.enterContext(patch.object(Pane, "submit_task", lambda *a, **kw: None))
         self.renests = []
         self.enterContext(
             patch.object(agents, "renest_dashboard", lambda *call: self.renests.append(call))

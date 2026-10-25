@@ -263,21 +263,10 @@ default is 86400 seconds. Neither waiting nor timing out retries a terminal prom
 Mail is durable before the pane is touched, so a delivery is never uncertain: it
 is either queued for the crew to read, or `bounced` with its reason.
 
-Legacy crew retain the older non-JSON wait below; they are not silently adopted
-into the protocol. Recruit new crew to use acknowledged notifications.
-
-The final status and the crew's own report are printed and recorded in memory,
-falling back to the crew's last message or the tail of its pane when it
-reported nothing. A crew still working when the timeout (86400s by default)
-expires records nothing and reports an error; wait again, or read its pane
-directly with `herdr agent read <name>`.
-
-For **legacy pi** crew the pane tail is written to `tail-<name>.txt` in the session
-directory and the wait prints that path instead of the tail itself. pi installs
-no lifecycle hooks, so legacy pi waits fall back to the tail; filing it keeps
-each delivery short. Read the file when the status and report leave you
-unsure. Claude Code and Codex crew, which do have hooks, still print the tail
-inline on the rare legacy wait that has no event.
+Legacy crew, recorded before crew incarnations, are retired: `wait` and `tell`
+refuse them with an error to dismiss and recruit a fresh crew, and `status` shows
+them as such. Their session files stay on disk; they are never adopted into the
+protocol.
 
 The pi captain's automatic bridge uses background JSON watches. Its optional
 `captain_wait` tool retries or pauses coverage (minimum watch length 60 seconds)
@@ -295,12 +284,10 @@ captain tell Jack "also update the changelog" --assignment <assignment-id>
 
 `tell` prompts an existing crew in place; its pane, model, and running
 conversation are kept. A message whose text repeats the last message on the
-assignment is refused by that message's ID. For protocol crew,
-`--assignment` is required and the message is appended without replacing the
-original task, ownership, or grants.
+assignment is refused by that message's ID. `--assignment` is required and the
+message is appended without replacing the original task, ownership, or grants.
 Use `answer` for a pending question and `assign --handoff` after completion.
-Legacy crew still replace their recorded task and advance the old event cursor.
-Dismissed crew are refused; recruit new crew instead.
+Dismissed and legacy crew are refused; recruit new crew instead.
 
 ## Checking crew status
 

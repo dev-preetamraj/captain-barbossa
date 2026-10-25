@@ -84,7 +84,6 @@ class CrewNameTests(SessionCase):
             patch.object(runtime, "herdr", side_effect=pane_stub(created)),
             patch.object(agents, "executable", return_value="/bin/codex"),
             patch.object(Pane, "wait_for_crew"),
-            patch.object(Pane, "submit_task"),
         ):
             with ThreadPoolExecutor(max_workers=4) as pool:
                 list(
@@ -135,7 +134,6 @@ class CrewNameTests(SessionCase):
             patch.object(runtime, "herdr", side_effect=pane_stub(created)) as api,
             patch.object(agents, "executable", return_value="/bin/codex"),
             patch.object(Pane, "wait_for_crew"),
-            patch.object(Pane, "submit_task"),
             contextlib.redirect_stdout(io.StringIO()) as output,
         ):
             agents.create_crew(args, self.pane, self.project)
@@ -187,7 +185,6 @@ class CrewNameTests(SessionCase):
             patch.object(runtime, "herdr", side_effect=pane_stub(created)),
             patch.object(agents, "executable", return_value="/bin/codex"),
             patch.object(Pane, "wait_for_crew"),
-            patch.object(Pane, "submit_task"),
         ):
             with contextlib.redirect_stdout(io.StringIO()) as output:
                 agents.create_crew(
@@ -299,7 +296,6 @@ class CrewNameTests(SessionCase):
             patch.object(runtime, "herdr", side_effect=pane_stub(created)),
             patch.object(agents, "executable", return_value="/bin/codex"),
             patch.object(Pane, "wait_for_crew"),
-            patch.object(Pane, "submit_task"),
         ):
             for _ in range(3):
                 agents.create_crew(args, self.pane, self.project)
@@ -333,7 +329,6 @@ class CrewNameTests(SessionCase):
             patch.object(runtime, "herdr", side_effect=pane_stub(created)),
             patch.object(agents, "executable", return_value="/bin/codex"),
             patch.object(Pane, "wait_for_crew"),
-            patch.object(Pane, "submit_task"),
             contextlib.redirect_stdout(io.StringIO()) as output,
         ):
             agents.create_crew(args, self.pane, self.project)
@@ -359,7 +354,6 @@ class CrewNameTests(SessionCase):
             patch.object(runtime, "herdr", side_effect=pane_stub(created)),
             patch.object(agents, "executable", return_value="/bin/codex"),
             patch.object(Pane, "wait_for_crew"),
-            patch.object(Pane, "submit_task"),
         ):
             agents.create_crew(args, self.pane, self.project)
         roster = store.read_json(self.directory / "session.json")["crew"]
@@ -392,7 +386,6 @@ class CrewNameTests(SessionCase):
             patch.object(runtime, "herdr", side_effect=pane_stub(created)),
             patch.object(agents, "executable", return_value="/bin/codex"),
             patch.object(Pane, "wait_for_crew"),
-            patch.object(Pane, "submit_task"),
             contextlib.redirect_stdout(io.StringIO()) as output,
         ):
             agents.create_crew(

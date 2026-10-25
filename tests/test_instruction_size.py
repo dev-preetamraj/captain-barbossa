@@ -89,7 +89,7 @@ class InstructionSizeTests(unittest.TestCase):
                 captain_rule = "The captain must also ask the user first, never instruct crew to override files."
                 self.assertEqual(captain_rule in instructions, role == "Captain Barbossa")
 
-    def test_crew_only_gets_the_report_command_for_every_provider(self):
+    def test_crew_only_gets_the_repo_memory_read_for_every_provider(self):
         for provider in (None, "codex", "claude", "pi"):
             with self.subTest(provider=provider):
                 crew = instruction_prompts.agent_instructions(
@@ -103,9 +103,9 @@ class InstructionSizeTests(unittest.TestCase):
                             if line.startswith("  ") and " memory " in line
                         ]
                     ),
-                    2,
+                    1,
                 )
-                self.assertIn("memory add Jack report '<summary>'", crew)
+                self.assertNotIn(" memory add ", crew)
                 self.assertIn("memory show --scope repo", crew)
                 for phrase in (
                     "CAPTAIN ",
@@ -131,7 +131,7 @@ class InstructionSizeTests(unittest.TestCase):
                     commands = [
                         shlex.split(line) for line in text.splitlines() if line.startswith("  ")
                     ]
-                    self.assertEqual(len(commands), 5)
+                    self.assertEqual(len(commands), 4)
                     for command in commands:
                         self.assertEqual(command[:3], prefix)
                         self.assertEqual(command[3:5], ["--session", self.directory.name])
