@@ -291,14 +291,19 @@ class SessionResumeTests(unittest.TestCase):
         cards = [("a", "Login fix", "just now · Jack"), ("b", "Audit complexity", "2h ago")]
         lines = "".join(t for _, t in prompts.session_frame("here", cards, "", 0, 0, 2)).split("\n")
         self.assertEqual(
-            lines[5:8],
-            [" ▌ Login fix          just now · Jack", "   Audit complexity   2h ago", ""],
+            lines[5:9],
+            [
+                " ▌ Login fix          just now · Jack",
+                "",
+                "   Audit complexity   2h ago",
+                "",
+            ],
         )
         narrow = "".join(t for _, t in prompts.session_frame("here", cards, "", 0, 0, 2, width=30))
         self.assertIn(
             " ▌ Login fix\n ▌ just now · Jack\n\n   Audit complexity\n   2h ago\n", narrow
         )
-        many = [(str(i), f"Session {i}", "1d ago") for i in range(20)]
+        many = [(str(i), f"Session {i}", "1d ago") for i in range(15)]
         with (
             create_app_session(input=DummyInput(), output=DummyOutput()),
             patch.object(Application, "run", autospec=True) as run,
@@ -308,5 +313,5 @@ class SessionResumeTests(unittest.TestCase):
         text = "\n".join(
             "".join(f[1] for f in content.get_line(i)) for i in range(content.line_count)
         )
-        self.assertIn("Session 19   1d ago", text)
+        self.assertIn("Session 14   1d ago", text)
         self.assertNotIn("more", text)

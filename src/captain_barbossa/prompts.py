@@ -75,7 +75,7 @@ def session_frame(project, cards, query, cursor, top, rows, size=SESSION_CARDS, 
             out += [marker, (style, f"{title}\n"), marker, ("class:muted", f"{meta}\n\n")]
         else:
             pad = " " * (column - get_cwidth(title) + 3)
-            out += [marker, (style, title), ("", pad), ("class:muted", f"{meta}\n")]
+            out += [marker, (style, title), ("", pad), ("class:muted", f"{meta}\n\n")]
     if not shown:
         out.append(("class:muted", "   No matching sessions\n\n"))
     out.append(("class:muted", f"  ↓ {below} more\n" if below else "\n"))
@@ -100,9 +100,9 @@ def pick_session(project, cards):
 
     def render():
         found = matches()
-        # Reserve chrome and a spare terminal line; a stacked card takes 3 lines.
+        # Reserve chrome and a spare terminal line; a stacked card takes 3 lines, a compact row 2.
         terminal = get_app().output.get_size()
-        lines = 3 if session_columns(found, terminal.columns) is None else 1
+        lines = 3 if session_columns(found, terminal.columns) is None else 2
         size = max(1, (terminal.rows - 9) // lines)
         state["cursor"] = max(0, min(state["cursor"], len(found) - 1))
         top = min(state["top"], state["cursor"])
