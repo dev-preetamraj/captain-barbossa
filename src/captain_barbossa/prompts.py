@@ -3,6 +3,7 @@
 import sys
 
 import questionary
+from prompt_toolkit.utils import get_cwidth
 
 from .runtime import CaptainError
 
@@ -30,30 +31,38 @@ STYLE = questionary.Style(
 )
 
 
-def session_frame(project, cards, query, cursor, top, rows, size=SESSION_CARDS):
+def session_frame(project, cards, query, cursor, top, rows, size=SESSION_CARDS, width=80):
     """Style/text fragments of the resume picker; cards are the (value, title, meta) matches."""
+    width = max(4, width)
+    search = query or "⌕ Search…"
+    while get_cwidth(search) > width - 4:
+        search = search[1:] if query else search[:-1]
     out = [
-        ("class:question", f"Resume session ({len(cards)} of {rows})\n"),
-        ("class:separator", f"{project}\n\n"),
+        ("class:separator", "─" * width + "\n"),
+        ("class:question", "Resume session"),
+        ("class:separator", f" ({len(cards)} of {rows})\n"),
+        ("class:separator", "╭" + "─" * (width - 2) + "╮\n│ "),
+        ("" if query else "class:separator", search),
+        ("class:separator", " " * (width - 3 - get_cwidth(search)) + "│\n"),
+        ("class:separator", "╰" + "─" * (width - 2) + "╯\n"),
+        ("class:separator", f"   {project}\n"),
     ]
-    out += (
-        [("class:pointer", "Search: "), ("", f"{query}\n")]
-        if query
-        else [("class:separator", "Type to search\n")]
-    )
     shown = cards[top : top + size]
+    below = len(cards) - top - len(shown)
     out.append(("class:separator", f"  ↑ {top} more\n" if top else "\n"))
     for index, (_, title, meta) in enumerate(shown, top):
         picked = index == cursor
+        more = not picked and below and index == top + len(shown) - 1
         out += [
-            ("class:pointer", " ❯ " if picked else "   "),
+            (
+                "class:separator" if more else "class:pointer",
+                " ❯ " if picked else " ↓ " if more else "   ",
+            ),
             ("class:highlighted" if picked else "bold", f"{title}\n"),
             ("class:separator", f"   {meta}\n\n"),
         ]
     if not shown:
         out.append(("class:separator", "   No matching sessions\n"))
-    below = len(cards) - top - len(shown)
-    out.append(("class:separator", f"  ↓ {below} more\n" if below else "\n"))
     out.append(("class:separator", "↑↓ move · Enter resume · Esc cancel"))
     return out
 
@@ -74,13 +83,21 @@ def pick_session(project, cards):
 
     def render():
         found = matches()
-        # 8 chrome lines (header, search, cues, footer, spare); each card takes 3
-        size = max(1, (get_app().output.get_size().rows - 8) // 3)
+        # Reserve chrome and a spare terminal line; each card takes 3 lines.
+        terminal = get_app().output.get_size()
+        size = max(1, (terminal.rows - 9) // 3)
         state["cursor"] = max(0, min(state["cursor"], len(found) - 1))
         top = min(state["top"], state["cursor"])
         state["top"] = max(top, state["cursor"] - size + 1)
         return session_frame(
-            project, found, state["query"], state["cursor"], state["top"], len(cards), size
+            project,
+            found,
+            state["query"],
+            state["cursor"],
+            state["top"],
+            len(cards),
+            size,
+            terminal.columns,
         )
 
     keys = KeyBindings()
@@ -116,7 +133,7 @@ def pick_session(project, cards):
         event.app.exit(result=None)
 
     app = Application(
-        layout=Layout(Window(FormattedTextControl(render), wrap_lines=False)),
+        layout=Layout(Window(FormattedTextControl(render, show_cursor=False), wrap_lines=False)),
         key_bindings=keys,
         style=STYLE,
         full_screen=False,

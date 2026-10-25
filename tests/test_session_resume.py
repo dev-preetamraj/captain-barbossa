@@ -185,11 +185,55 @@ class SessionResumeTests(unittest.TestCase):
         self.assertNotIn(current.meta["id"], text)
         self.assertIn("Esc cancel", text)
 
+    def test_picker_hides_terminal_cursor(self):
+        from prompt_toolkit import Application
+        from prompt_toolkit.application import create_app_session
+        from prompt_toolkit.input import DummyInput
+        from prompt_toolkit.output import DummyOutput
+
+        with (
+            create_app_session(input=DummyInput(), output=DummyOutput()),
+            patch.object(Application, "run", autospec=True) as run,
+        ):
+            prompts.pick_session("here", [("session", "Login fix", "just now")])
+            app = run.call_args.args[0]
+            content = app.layout.current_control.create_content(width=80, height=24)
+            self.assertFalse(content.show_cursor)
+
+    def test_picker_search_box_and_header_styles(self):
+        from prompt_toolkit.utils import get_cwidth
+
+        cards = [("session", "Login fix", "just now")]
+        for query in ("", "Login", "Log", "no match", "界" * 40):
+            with self.subTest(query=query):
+                frame = prompts.session_frame("here", cards, query, 0, 0, 1, width=30)
+                lines = "".join(text for _, text in frame).splitlines()
+                self.assertEqual(lines[0], "─" * 30)
+                self.assertIn(("class:question", "Resume session"), frame)
+                self.assertIn(("class:separator", " (1 of 1)\n"), frame)
+                self.assertEqual(lines[2], "╭" + "─" * 28 + "╮")
+                self.assertEqual(get_cwidth(lines[3]), 30)
+                self.assertEqual(lines[4], "╰" + "─" * 28 + "╯")
+                self.assertEqual(lines[5], "   here")
+                self.assertFalse(any("SetCursorPosition" in style for style, _ in frame))
+                if query:
+                    self.assertNotIn("Search", lines[3])
+                    self.assertIn(query[-13:], lines[3])
+                else:
+                    self.assertIn(("class:separator", "⌕ Search…"), frame)
+
     def test_picker_separates_cards_and_shows_only_size_cards_with_cues(self):
         cards = [(str(i), f"t{i}", f"m{i}") for i in range(6)]
         text = "".join(t for _, t in prompts.session_frame("here", cards, "", 3, 2, 6, 2))
         self.assertIn("m2\n\n", text)
         self.assertIn("↑ 2 more", text)
-        self.assertIn("↓ 2 more", text)
+        self.assertIn(" ❯ t3\n", text)
+        self.assertNotIn(" ↓ t3\n", text)
+        unpicked = "".join(t for _, t in prompts.session_frame("here", cards, "", 2, 2, 6, 2))
+        self.assertIn(" ❯ t2\n", unpicked)
+        self.assertIn(" ↓ t3\n", unpicked)
+        self.assertNotIn("↓ 2 more", text)
+        final = "".join(t for _, t in prompts.session_frame("here", cards, "", 5, 4, 6, 2))
+        self.assertNotIn("↓", final.split("↑↓ move")[0])
         self.assertNotIn("t1", text)
         self.assertNotIn("t4", text)
