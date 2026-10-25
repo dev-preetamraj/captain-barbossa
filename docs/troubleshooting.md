@@ -49,7 +49,8 @@
 - **"durable memory root ... is inside the OS temp directory"** — a captain
   started before the state/temp split is still exporting one root to its
   children; restart it so project-scope memory survives temp cleanup.
-- **`memory query` fails or reports a skip** — Graphify is not installed; run
-  `uv tool install graphifyy`, or use `memory show`/`add` instead.
+- **`memory query` finds no rows** — search uses literal, case-insensitive substrings,
+  not semantic matching or regular expressions. Try a shorter stored phrase or
+  inspect `memory show --all`; full spilled note text is not searched.
 - **Ambiguous crew name or model** — the error lists the available crew or
   models; ask for one of those exactly.

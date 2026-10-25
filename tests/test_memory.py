@@ -1,11 +1,9 @@
-"""The graph itself: scopes, show, snapshot, and concurrent writes."""
+"""The graph itself: scopes, show, literal search, and concurrent writes."""
 
 import contextlib
 import io
 import json
 import os
-import shutil
-import subprocess
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch
@@ -41,15 +39,14 @@ class GraphMemoryTests(SessionCase):
         memory.add_memory(self.directory / "graph.json", "task", "uses", "secret-session-fact")
         memory.add_memory(shared, "project", "tests_with", "Python")
         other, _ = sessions.session(self.project, self.pane, create=True)
-        with memory.memory_snapshot(other) as snapshot:
-            graph = store.read_json(snapshot / "graph.json")
+        graph = memory.read_scoped_graphs(other, self.project)["project"]
         self.assertEqual(len(graph["links"]), 2)
         self.assertNotIn("secret-session-fact", json.dumps(graph))
         project2 = self.root / "other-project"
         project2.mkdir()
         isolated, _ = sessions.session(project2, self.pane, create=True)
-        with memory.memory_snapshot(isolated) as snapshot:
-            self.assertEqual(store.read_json(snapshot / "graph.json")["nodes"], [])
+        for graph in memory.read_scoped_graphs(isolated, project2).values():
+            self.assertEqual(graph["nodes"], [])
         self.assertEqual(list(isolated.glob("query-*")), [])
         with self.assertRaisesRegex(runtime.CaptainError, "another project or Herdr workspace"):
             sessions.session(self.project, dict(self.pane, workspace_id="w2"), self.meta["id"])
@@ -73,8 +70,9 @@ class GraphMemoryTests(SessionCase):
         for path, fact in zip((shared, shared, local, local), facts):
             memory.add_memory(path, *fact)
         before = {path: path.read_bytes() for path in (shared, local)}
-        with memory.memory_snapshot(self.directory) as snapshot:
-            raw = (snapshot / "graph.json").read_text()
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            memory.memory(self.args("memory", "show", "--json"), self.pane, self.project)
+        raw = output.getvalue()
 
         with contextlib.redirect_stdout(io.StringIO()) as output:
             memory.memory(self.args("memory", "show"), self.pane, self.project)
@@ -108,27 +106,24 @@ class GraphMemoryTests(SessionCase):
         self.assertEqual(list(self.directory.glob("query-*")), [])
         self.assertEqual(list(self.project.iterdir()), [])
 
-    def test_failed_snapshot_write_removes_the_query_directory(self):
-        memory.add_memory(self.directory / "graph.json", "task", "has", "fact")
-        for fail in (
-            patch.object(memory, "write_json", side_effect=OSError("No space left on device")),
-            patch.object(memory, "private_dir", side_effect=runtime.CaptainError("not private")),
-        ):
-            with self.subTest(fail=fail.attribute), fail:
-                # Showing memory is now a pure read, even when writes are unavailable.
-                memory.memory(self.args("memory", "show"), self.pane, self.project)
-                with self.assertRaises((OSError, runtime.CaptainError)):
-                    with memory.memory_snapshot(self.directory):
-                        self.fail("snapshot should not be yielded")
-            self.assertEqual(list(self.directory.glob("query-*")), [])
-        with (
-            patch.object(memory, "executable", return_value="/bin/graphify"),
-            patch.object(memory.subprocess, "run", return_value=subprocess.CompletedProcess([], 3)),
-        ):
-            with self.assertRaisesRegex(runtime.CaptainError, "status 3"):
-                memory.memory(self.args("memory", "query", "fact"), self.pane, self.project)
-        self.assertEqual(list(self.directory.glob("query-*")), [])
-        self.assertEqual(list(self.directory.glob(".captain-*")), [])
+    def test_query_is_literal_case_insensitive_and_reads_all_scopes_without_writes(self):
+        memory.add_memory(self.directory / "graph.json", "--all", "uses", "Café [.*]")
+        memory.add_memory(self.directory.parent.parent / "graph.json", "project", "uses", "CAFÉ")
+        memory.add_repo_memory(self.project, "team", "method", "café", "shared convention", False)
+        before = {path: path.read_bytes() for path in self.root.rglob("graph.json")}
+        stray = self.directory / "query-old"
+        stray.mkdir()
+        for query, count in (("café", 3), ("USES", 2), ("--all", 1), ("[.*]", 1), ("absent", 0)):
+            with (
+                self.subTest(query=query),
+                patch.object(memory, "write_json", side_effect=AssertionError("write")),
+                patch.object(memory, "private_dir", side_effect=AssertionError("snapshot")),
+                contextlib.redirect_stdout(io.StringIO()) as output,
+            ):
+                memory.memory(self.args("memory", "query", "--", query), self.pane, self.project)
+            self.assertEqual(len(output.getvalue().splitlines()) - 1, count)
+        self.assertEqual({path: path.read_bytes() for path in before}, before)
+        self.assertEqual(list(self.directory.glob("query-*")), [stray])
 
     def test_graph_concurrent_writes_and_corruption_preservation(self):
         graph_path = self.directory / "graph.json"
@@ -149,29 +144,6 @@ class GraphMemoryTests(SessionCase):
         with self.assertRaisesRegex(runtime.CaptainError, "Invalid captain session"):
             sessions.session(self.project, self.pane, "../../elsewhere")
         self.assertEqual(self.directory.stat().st_mode & 0o777, 0o700)
-
-    @unittest.skipUnless(shutil.which("graphify"), "Graphify is optional")
-    def test_real_graphify_reads_memory_without_writing_in_project(self):
-        memory.add_memory(self.directory / "graph.json", "rate limiter", "uses", "per-user windows")
-        with memory.memory_snapshot(self.directory) as snapshot:
-            env = dict(os.environ, GRAPHIFY_OUT=str(snapshot), GRAPHIFY_QUERY_LOG_DISABLE="1")
-            result = subprocess.run(
-                [
-                    runtime.executable("graphify"),
-                    "query",
-                    "rate limiter",
-                    "--graph",
-                    str(snapshot / "graph.json"),
-                ],
-                cwd=snapshot,
-                env=env,
-                capture_output=True,
-                text=True,
-                timeout=60,
-            )
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("per-user windows", result.stdout)
-        self.assertEqual(list(self.project.iterdir()), [])
 
 
 if __name__ == "__main__":

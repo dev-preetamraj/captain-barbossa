@@ -203,7 +203,7 @@ def parser(*, plan=False):
     commands.add_parser("recover", help="JSON digest of memory, assignments and pending deliveries")
     commands.add_parser("update", help="upgrade the installed captain-barbossa tool")
     start = commands.add_parser(
-        "init", help="write .captain/settings.toml, or top up an existing one"
+        "init", help="create .captain/settings.toml without changing an existing file"
     )
     start.add_argument(
         "--global",
@@ -262,9 +262,7 @@ def parser(*, plan=False):
         action="store_true",
         help="replace the repo fact already recorded for this subject and relation",
     )
-    query = actions.add_parser(
-        "query", help="search session, project, and repo memory with Graphify"
-    )
+    query = actions.add_parser("query", help="literal search of session, project, and repo memory")
     query.add_argument("question")
     show = actions.add_parser("show", help="show session, project, and repo memory relationships")
     show.add_argument(
@@ -493,9 +491,6 @@ def main(argv=None):
             return 0
         if args.command == "models":
             print_models(args)
-            return 0
-        if args.command == "do" and args.do_command == "resolve" and not args.session:
-            do.run(args, None, project_root())
             return 0
         if args.command == "memory" and args.memory_command == "prune":
             config.in_range(args.older_than, "--older-than", below=float("inf"))

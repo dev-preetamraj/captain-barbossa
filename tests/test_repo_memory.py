@@ -233,8 +233,7 @@ class RepoMemoryTests(SessionCase):
         before = self.repo_graph.read_text(encoding="utf-8")
 
         self.run_memory("show")
-        with memory.memory_snapshot(self.directory, self.project):
-            pass
+        self.run_memory("query", "memory")
 
         self.assertEqual(self.repo_graph.read_text(encoding="utf-8"), before)
 
@@ -267,13 +266,17 @@ class RepoMemoryTests(SessionCase):
         rows = self.run_memory("show", "--scope", "repo")[1:]
         self.assertEqual(rows, ['[repo] ["memory", "convention", "three scopes"]'])
 
-    def test_query_snapshot_carries_repo_facts_alongside_the_other_scopes(self):
+    def test_query_carries_repo_facts_alongside_the_other_scopes(self):
         self.add_repo("memory", "convention", "three scopes", "durability differs")
-        memory.add_memory(self.directory / "graph.json", "Jack", "report", "done")
-        with memory.memory_snapshot(self.directory, self.project) as snapshot:
-            graph = json.loads((snapshot / "graph.json").read_text(encoding="utf-8"))
-        labels = {node["label"] for node in graph["nodes"]}
-        self.assertTrue({"memory", "three scopes", "Jack", "done"} <= labels)
+        memory.add_memory(self.directory / "graph.json", "memory", "report", "done")
+        rows = self.run_memory("query", "memory")[1:]
+        self.assertEqual(
+            rows,
+            [
+                '[session] ["memory", "report", "done"]',
+                '[repo] ["memory", "convention", "three scopes"]',
+            ],
+        )
 
     # --- instructions ---
 
@@ -542,7 +545,7 @@ class PureMemoryReadTests(unittest.TestCase):
         with (
             patch.dict(os.environ, {"CAPTAIN_PROJECT": ""}),
             patch.object(Path, "cwd", return_value=child),
-            patch.object(memory.subprocess, "run", side_effect=AssertionError("Git launched")),
+            patch("subprocess.run", side_effect=AssertionError("Git launched")),
         ):
             self.assertEqual(store.project_root(), self.project)
 
@@ -596,7 +599,7 @@ class PureMemoryReadTests(unittest.TestCase):
         with (
             patch.object(memory, "read_session", side_effect=AssertionError("session")),
             patch.object(memory, "state_root", side_effect=AssertionError("state")),
-            patch.object(memory, "memory_snapshot", side_effect=AssertionError("snapshot")),
+            patch.object(memory, "write_json", side_effect=AssertionError("write")),
         ):
             self.assertEqual(
                 json.loads(self.read("memory", "show", "--scope", "repo", "--json")),

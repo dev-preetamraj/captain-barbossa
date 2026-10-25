@@ -3,20 +3,14 @@ repo in the committed .captain/graph.json the team shares."""
 
 import hashlib
 import json
-import os
 import re
-import shutil
-import subprocess
 import sys
-import tempfile
-import time
-from contextlib import contextmanager
 from pathlib import Path
 
 # Sessions launched before 0.30.0 baked `from captain_barbossa.memory import append_event`
 # into their native CLI hook settings; that string outlives the upgrade that moved it.
 from .events import append_event as append_event
-from .runtime import CaptainError, check_text, executable
+from .runtime import CaptainError, check_text
 from .sessions import prune_sessions, read_session, session
 from .store import (
     lock,
@@ -52,7 +46,7 @@ def note_name(label):
 def store_label(path, label):
     """Cap a stored label, spilling the full text to a note file beside the graph.
 
-    Long labels drown Graphify keyword queries and cost context in every `memory show`;
+    Long labels cost context in every `memory show`;
     the marker keeps the full text one file read away.
     """
     if len(label) <= LABEL_LIMIT:
@@ -399,51 +393,6 @@ def read_repo_graph(project):
     return graph
 
 
-def project_and_session_graphs(directory):
-    """Read the project-scope and session-scope graphs backing `directory` separately.
-
-    directory is <temp_root>/<project_id>/sessions/<id>; project-scope data lives
-    under the same project_id in the (possibly different) durable state root.
-    """
-    project_id = directory.parent.parent.name
-    project_path = state_root() / project_id / "graph.json"
-    session_path = directory / "graph.json"
-    return load_graph(project_path), load_graph(session_path)
-
-
-STALE_QUERY_SECONDS = 600
-
-
-@contextmanager
-def memory_snapshot(directory, project=None):
-    # Clean up stray query-* directories from interrupted previous runs, but only
-    # once they're old enough that no concurrent `memory query` could still own one.
-    cutoff = time.time() - STALE_QUERY_SECONDS
-    for item in directory.iterdir():
-        if item.is_dir() and item.name.startswith("query-") and item.stat().st_mtime < cutoff:
-            shutil.rmtree(item, ignore_errors=True)
-    combined = empty_graph()
-    seen = set()
-    graphs = [*project_and_session_graphs(directory), read_repo_graph(project)]
-    for graph in graphs:
-        # Ids key on the label alone, so a label shared across scopes is one node.
-        combined["nodes"].extend(
-            node for node in graph["nodes"] if node["id"] not in seen and not seen.add(node["id"])
-        )
-        combined["links"].extend(graph["links"])
-    # Truncate labels in snapshot for graphify query to prevent keyword-BFS on long labels
-    for node in combined["nodes"]:
-        node["label"] = truncate_label(node["label"])
-    # Each reader gets its own snapshot so concurrent Graphify queries cannot replace it.
-    out = Path(tempfile.mkdtemp(prefix="query-", dir=directory))
-    try:
-        private_dir(out)
-        write_json(out / "graph.json", combined)
-        yield out
-    finally:
-        shutil.rmtree(out, ignore_errors=True)
-
-
 SHOW_LIMIT = 25
 
 
@@ -568,21 +517,12 @@ def memory(args, pane, project):
         add_memory(base / "graph.json", args.subject, args.relation, args.target)
         print(f"Saved {args.scope} memory.")
     else:
-        with memory_snapshot(directory, project) as snapshot:
-            env = dict(os.environ, GRAPHIFY_OUT=str(snapshot), GRAPHIFY_QUERY_LOG_DISABLE="1")
-            # No "--" terminator in graphify; a leading space defuses a "-"-led question.
-            question = f" {args.question}" if args.question.startswith("-") else args.question
-            result = subprocess.run(
-                [
-                    executable("graphify"),
-                    "query",
-                    question,
-                    "--graph",
-                    str(snapshot / "graph.json"),
-                ],
-                cwd=snapshot,
-                env=env,
-                timeout=60,
-            )
-            if result.returncode:
-                raise CaptainError(f"Graphify exited with status {result.returncode}.")
+        print("Memory (subject, relation, object):")
+        for scope, graph in read_scoped_graphs(directory, project).items():
+            labels = {node["id"]: node["label"] for node in graph["nodes"]}
+            for link in reversed(graph["links"]):
+                if link["source"] not in labels or link["target"] not in labels:
+                    continue
+                row = [labels[link["source"]], link["relation"], labels[link["target"]]]
+                if any(args.question.casefold() in value.casefold() for value in row):
+                    print(f"[{scope}] " + json.dumps(row, ensure_ascii=False))

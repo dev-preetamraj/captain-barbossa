@@ -115,8 +115,7 @@ class MemoryShowBoundTests(SessionCase):
     def test_a_label_shared_across_scopes_is_one_node(self):
         memory.add_memory(store.state_storage(self.project) / "graph.json", "task", "has", "one")
         memory.add_memory(self.directory / "graph.json", "task", "has", "two")
-        with memory.memory_snapshot(self.directory) as snapshot:
-            graph = store.read_json(snapshot / "graph.json")
+        graph = json.loads("\n".join(self.show("--json")))
         self.assertEqual(len(graph["nodes"]), 3)
         self.assertEqual(len({node["id"] for node in graph["nodes"]}), 3)
 

@@ -142,10 +142,11 @@ reports, original tasks, and message delivery records survive captain restarts;
 legacy crew are not silently adopted into the protocol. See
 [crew-lifecycle.md](crew-lifecycle.md) for explicit completion and acknowledgements.
 
-[Graphify](https://graphify.com/docs/cli) is optional: install it with
-`uv tool install graphifyy` to enable `memory query`, which runs against an
-isolated snapshot of session, project, and repo memory that is removed afterward.
-Relationships can still be added and read with `memory add`/`show` without it.
+`memory query TEXT` performs case-insensitive literal substring search over stored
+subjects, relations, and objects in session, project, and repo memory. It prints
+matching rows with scope tags, without a model, external tool, snapshot, or cleanup.
+Use `memory query -- '--all'` to search text beginning with a dash. Search covers
+stored labels, not the full text spilled into note files.
 
 ## Prune old sessions
 

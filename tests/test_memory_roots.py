@@ -159,20 +159,17 @@ class MemoryRootTests(unittest.TestCase):
         self.assertIn('[project] ["project", "uses", "Python"]', lines)
         self.assertIn('[session] ["task", "has", "secret"]', lines)
 
-    def test_memory_snapshot_survives_temp_root_cleared_between_runs(self):
+    def test_project_memory_is_found_when_reopening_a_session(self):
         with self.clean_env():
             directory, meta = sessions.session(self.project, self.pane, create=True)
             memory.add_memory(
                 store.state_storage(self.project) / "graph.json", "project", "uses", "Python"
             )
-            with memory.memory_snapshot(directory) as snapshot:
-                graph = store.read_json(snapshot / "graph.json")
+            graph = memory.read_scoped_graphs(directory, self.project)["project"]
             self.assertEqual(len(graph["links"]), 1)
 
-            # simulate the OS purging the temp/session tree: state data must still be found
             other_directory, _ = sessions.session(self.project, self.pane, meta["id"])
-            with memory.memory_snapshot(other_directory) as snapshot:
-                graph = store.read_json(snapshot / "graph.json")
+            graph = memory.read_scoped_graphs(other_directory, self.project)["project"]
         self.assertEqual(len(graph["links"]), 1)
 
     def legacy_graph(self, mode=0o700, root_mode=0o700):

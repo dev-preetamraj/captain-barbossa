@@ -42,7 +42,7 @@ src/captain_barbossa/
   events.py       native CLI hook event stream, permission decisions, and mail delivery
   approval.py     pure assignment-scoped approval verdicts and reason codes
   sessions.py     session dirs, Session, crew naming, live agents, prune
-  memory.py       graph memory in three scopes, repo rulebook, Graphify snapshot
+  memory.py       graph memory in three scopes, repo rulebook, literal search
   models.py       provider-neutral model tiers and free-text matching
   runtime.py      herdr subprocess wrapper, JSON validation, current pane discovery
   dashboard.py    plain-text crew token-usage frame and refresh loop
@@ -110,8 +110,8 @@ Key facts:
 - `captain do` is the write side of `captain inspect`: `commit`, `push`, `branch`,
   `switch`, `fetch`, `pull`, and `run <target>`. Not built on `inspection`'s
   hardened Git, which strips the user config, hooks and credentials a write needs;
-  `do resolve --intent TEXT` uses ordered full-input rules in `do.py`, without executing
-  or granting approval. Unresolved requests report reason codes and accepted shapes. Outward-facing,
+  the captain runs operation requests directly with `do VERB`, never via crew, quiet,
+  a model or a resolver. Outward-facing,
   destructive and history-rewriting actions require explicit user authorization; a
   concrete request authorizes only its stated scope. Every run appends a `{"type": "quiet", ...}` record to
   `events/captain.jsonl`, raised if it cannot be written, because work with no pane is
@@ -162,7 +162,7 @@ Key facts:
   behavior; use temp directories outside the checkout for test state.
 - Commits follow Conventional Commits with a subject under 72 characters. Never add
   `Co-Authored-By` or other AI attribution to commits or PRs.
-- Keep Captain, Graphify, and generated instruction state outside the repo. The one
+- Keep Captain and generated instruction state outside the repo. The one
   exception is `.captain/`: `settings.toml` and the curated `--scope repo` graph
   (`graph.json`) are committed on purpose.
 - Comments are short and only for non-obvious "why"; no banners or restating code.

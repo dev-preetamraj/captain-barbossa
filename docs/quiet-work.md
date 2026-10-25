@@ -78,18 +78,11 @@ cannot become an option.
 
 The third mechanism matters as much as the two commands: **`do run <target>` is the
 general escape hatch**, limited to literal targets declared in the root Makefile.
-`do resolve --intent TEXT` maps requests through the ordered full-input rule table
-in `do.py`: Git operations precede explicit and bare declared-target requests.
-It returns `resolved`, `needs-input`, `unsupported` or `invalid`, with a stable
-reason code and accepted shapes; only `resolved` includes an execution command.
-For example, `push` selects Git and `do the release` selects the declared `release`
-target. The article forms `run the gate`, `make the gate` and `the gate` use the
-same target lookup; no fuzzy matching is involved. Resolution performs no execution
-or model call. Target declarations and
-resolved commands grant no permission. Outward-facing,
-destructive and history-rewriting actions require explicit user authorization.
-A concrete request already authorizes its stated scope; ask only for missing scope.
-Unresolved requests surface their reason and shapes instead of being guessed. Fixed argv,
+For an operation request such as "push the code", the captain runs `do push`
+directly, never through crew, quiet, a model, or a resolver. Target declarations
+grant no permission. Outward-facing, destructive and history-rewriting actions
+require an explicit user request, which authorizes only its stated scope.
+Ask for missing arguments or authorization before execution. Fixed argv,
 target validation and `make -- TARGET` guard syntax, not recipe effects. Discovery
 still scans simple literal declarations; included, generated and pattern rules
 are not resolved by Make for this check.

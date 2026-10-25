@@ -2,8 +2,7 @@
 
 The write-side sibling of `inspection`, deliberately not built on it: that module's
 hardened Git strips user config, hooks and credentials, which is right for reading
-arbitrary paths and useless for writing. Intent rules select bounded operations;
-resolution neither executes project recipes nor grants authorization.
+arbitrary paths and useless for writing.
 
 Every run is recorded before it is reported, because work with no pane keeps the
 watch-your-crew rule only by being reviewable afterwards.
@@ -33,33 +32,6 @@ TAIL = 4000
 DIFF_LIMIT = 6000
 BRANCH = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]*")
 TARGET = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_-]*")
-# Full-input matches, in order: Git requests win over same-named Make targets.
-INTENT_RULES = (
-    ("git", r"(?P<operation>push|fetch|pull)", None, None, "push | fetch | pull"),
-    ("commit", r"commit", "commit", None, "commit (requires message and scope)"),
-    (
-        "branch",
-        r"(?:create|cut) a branch(?: (?P<name>\S+))?",
-        "branch",
-        "name",
-        "create/cut a branch NAME",
-    ),
-    ("switch", r"switch to(?: (?P<name>\S+))?", "switch", "name", "switch to NAME"),
-    (
-        "run",
-        r"(?:run|make)(?: (?:the )?(?P<target>\S+))?",
-        "run",
-        "target",
-        "run/make [the] TARGET",
-    ),
-    (
-        "target",
-        r"(?:(?:do )?the )?(?P<target>\S+)",
-        "run",
-        "target",
-        "[the] TARGET | do the TARGET",
-    ),
-)
 # Every shipped provider has a headless turn and a gate that stops it writing, each in its
 # own shape: models.headless_argv builds the argv, models.headless_report reads the result.
 # A provider without one would need its own list here, and the refusal below is for it.
@@ -78,10 +50,6 @@ def add_arguments(subparsers):
         "do", help="deterministic work with no crew: commit, push, branch, declared targets"
     )
     actions = parser.add_subparsers(dest="do_command", required=True)
-    resolve = actions.add_parser(
-        "resolve", help="resolve an operation request without executing it"
-    )
-    resolve.add_argument("--intent", required=True, help="the user's verbatim operation request")
     commit = actions.add_parser("commit", help="stage the named paths and commit them")
     commit.add_argument("--message", required=True)
     commit.add_argument("path", nargs="*", help="paths to stage; omit to commit what is staged")
@@ -226,75 +194,6 @@ def _name(value):
     if not BRANCH.fullmatch(value) or ".." in value or value.endswith((".lock", "/")):
         raise CaptainError(f"Not a usable branch name: {value}")
     return value
-
-
-def _resolve_intent(text, declared_targets):
-    """Resolve only the declared grammar; never run a command or infer approval."""
-    result = {
-        "status": "unsupported",
-        "code": "unsupported-request",
-        "rule": None,
-        "operation": None,
-        "arguments": {},
-        "missing": [],
-        "reason": "The whole request must match one resolvable shape.",
-        "shapes": [rule[4] for rule in INTENT_RULES],
-    }
-    try:
-        check_text(text, "intent")
-        if any(ord(char) < 32 and char != "\t" for char in text):
-            raise CaptainError("Intent must be a single line without control characters.")
-    except CaptainError as exc:
-        return {**result, "status": "invalid", "code": "invalid-intent", "reason": str(exc)}
-    request = re.sub(r"[ \t]+", " ", text.strip()).removesuffix(".")
-    request = re.sub(r"(?i)^please ", "", request)
-    for rule, pattern, operation, field, _ in INTENT_RULES:
-        match = re.fullmatch(pattern, request, re.IGNORECASE | re.ASCII)
-        if not match:
-            continue
-        operation = operation or match["operation"].lower()
-        result.update(rule=rule, operation=operation)
-        if operation == "commit":
-            return {
-                **result,
-                "status": "needs-input",
-                "code": "missing-message",
-                "missing": ["message", "scope"],
-                "reason": "Provide a commit message and explicit paths or the existing staged scope.",
-            }
-        arguments = {field: match[field]} if field and match[field] else {}
-        result["arguments"] = arguments
-        if field:
-            if field not in arguments:
-                return {
-                    **result,
-                    "status": "needs-input",
-                    "code": f"missing-{field}",
-                    "missing": [field],
-                    "reason": f"Provide the {field} for {operation}.",
-                }
-            value = arguments[field]
-            try:
-                if field == "name":
-                    _name(value)
-                elif not TARGET.fullmatch(value):
-                    raise CaptainError(f"Not a usable target name: {value}")
-            except CaptainError as exc:
-                return {**result, "status": "invalid", "code": "invalid-name", "reason": str(exc)}
-            if field == "target" and value not in declared_targets:
-                return {
-                    **result,
-                    "code": "missing-target",
-                    "reason": f"The root Makefile declares no {value} target.",
-                }
-        return {
-            **result,
-            "status": "resolved",
-            "code": "resolved",
-            "reason": "Resolved only; execution still requires the user's authorization.",
-            "command": ["captain", "do", operation, *arguments.values()],
-        }
-    return result
 
 
 def _quiet(args, root, session_directory):
@@ -476,20 +375,15 @@ def _commit(args, root, session_directory):
 
 
 def run(args, session_directory, project):
-    """Dispatch one `do` action; a refusal is recorded here, once, unless the run was.
-
-    `resolve` executes nothing and changes no state, so it leaves no record: the run it
-    leads to is the reviewable event, and a record per query would bury those.
-    """
+    """Dispatch one `do` action; record a refusal once unless the run already was."""
     try:
         return _dispatch(args, session_directory, project)
     except KeyboardInterrupt:
-        if args.do_command != "resolve":
-            command = ["captain", "do", args.do_command]
-            record(session_directory, args.do_command, command, 130, "Interrupted.")
+        command = ["captain", "do", args.do_command]
+        record(session_directory, args.do_command, command, 130, "Interrupted.")
         raise
     except CaptainError as exc:
-        if args.do_command != "resolve" and not getattr(exc, "recorded", False):
+        if not getattr(exc, "recorded", False):
             command = ["captain", "do", args.do_command]
             record(session_directory, args.do_command, command, 1, str(exc))
         raise
@@ -498,23 +392,6 @@ def run(args, session_directory, project):
 def _dispatch(args, session_directory, project):
     root = Path(project).resolve(strict=True)
     action = args.do_command
-    if action == "resolve":
-        result = _resolve_intent(args.intent, ())
-        if result["status"] == "unsupported" and result["code"] == "missing-target":
-            try:
-                result = _resolve_intent(args.intent, _targets(root))
-            except (CaptainError, OSError) as exc:
-                result.update(status="invalid", code="makefile-unavailable", reason=str(exc))
-        if result["status"] == "resolved" and session_directory:
-            result["command"][1:1] = ["--session", session_directory.name]
-        print(json.dumps(result, ensure_ascii=False))
-        if result["status"] != "resolved":
-            raise CaptainError(
-                f"[{result['code']}] {result['reason']} "
-                f"Resolvable shapes: {'; '.join(result['shapes'])}. "
-                "Optional: please prefix and terminal period."
-            )
-        return
     if action == "quiet":
         note = _quiet(args, root, session_directory)
         if note:

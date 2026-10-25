@@ -23,14 +23,15 @@ class InstructionSizeTests(unittest.TestCase):
         # Guards against the crew memory block creeping back toward the captain's.
         self.assertLessEqual(crew_words, 350)
 
-    def test_operation_routing_uses_the_resolver_without_a_semantic_paragraph(self):
+    def test_operation_routing_is_direct_and_authorization_scoped(self):
         text = instruction_prompts.agent_instructions(self.directory, "Captain Barbossa")
-        routing = text.split("Pass operation requests verbatim to:", 1)[1].split(
-            "Read-only model work", 1
-        )[0]
-        self.assertIn("CAPTAIN do resolve --intent 'verbatim user request'", routing)
-        self.assertIn("surface unresolved results", routing)
-        self.assertLess(len(routing), 220)
+        routing = text.split("For operation requests", 1)[1].split("Read-only model work", 1)[0]
+        self.assertIn("run CAPTAIN do VERB yourself in one step", routing)
+        self.assertIn("never via crew, quiet, a model or a resolve call", routing)
+        self.assertIn("require an explicit user request", routing)
+        self.assertIn("a request authorizes only its stated scope", routing)
+        self.assertLess(len(routing), 380)
+        self.assertNotIn("do resolve --intent", text)
         self.assertNotIn("Judge a target by its recipe", text)
         self.assertNotIn("CAPTAIN do run build|", text)
 
@@ -148,9 +149,7 @@ class InstructionSizeTests(unittest.TestCase):
                         "themselves without check:",
                         text,
                     )
-                    self.assertIn(
-                        f"identify you, {name}; ask sends your question to the captain", text
-                    )
+                    self.assertIn(f"Identity: {name}; ask reaches captain.", text)
 
     def test_captain_instructions_keep_the_full_memory_ruleset(self):
         captain_text = instruction_prompts.agent_instructions(self.directory, "Captain Barbossa")
@@ -271,10 +270,10 @@ class InstructionSizeTests(unittest.TestCase):
             captain,
         )
 
-    def test_graphify_query_is_not_advertised_as_always_available(self):
+    def test_memory_query_is_a_literal_search(self):
         text = instruction_prompts.agent_instructions(self.directory, "Captain Barbossa")
         query_line = next(line for line in text.splitlines() if "memory query" in line)
-        self.assertIn("if Graphify is installed", query_line)
+        self.assertIn("Literal search:", query_line)
 
     def test_crew_runs_its_own_commands_and_waits_for_the_mailed_answer(self):
         """A crew that prints an ask command as text and self-answers it is a live bug."""

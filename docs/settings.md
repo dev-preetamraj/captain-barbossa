@@ -106,10 +106,9 @@ captain init --global   # writes ~/.captain/settings.toml
 a freshly written file changes nothing until you uncomment a line. It creates the
 `.captain` directory if needed and prints the path it wrote.
 
-**It tops up, never overwrites.** If the file already exists, `init` appends only
-the sections and keys the file never mentioned, commented out at their defaults,
-and prints what it added. Every existing line stays byte for byte. A file that
-already mentions every setting is left alone, and `init` says so.
+**Existing files are never modified.** If the file already exists, `init` leaves
+it byte for byte untouched and says so. New defaults apply through settings layering;
+add overrides manually when needed.
 
 `init` needs no Herdr pane, so it works from any shell.
 

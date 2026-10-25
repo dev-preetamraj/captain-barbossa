@@ -29,7 +29,7 @@ To install `captain` itself from source rather than from PyPI, use `make tool`
 uv tool install git+https://github.com/dev-preetamraj/captain-barbossa.git
 ```
 
-Herdr, agent authentication, and Graphify are not required for the core tests.
+Herdr and agent authentication are not required for the core tests.
 Live CLI checks need an interactive Herdr workspace and a signed-in agent.
 
 ## Check your changes
@@ -66,8 +66,8 @@ truth; the targets are shorthand.
 Ruff owns Python formatting and import order; the line-length target is 100.
 Add a focused regression test for changed behavior. Use temporary directories
 outside the checkout for test state. Native Herdr mutations and model sessions
-are mocked; the suite also exercises actual terminal input. The Graphify test
-runs when `graphify` is installed and otherwise reports a skip.
+are mocked; the suite also exercises actual terminal input. Memory queries use
+local literal search and require no external tool.
 
 CI (`.github/workflows/ci.yml`) repeats lint and format checks, validates commit
 messages and PR titles, and runs tests on Linux and macOS with Python 3.11 and

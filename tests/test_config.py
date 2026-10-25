@@ -484,49 +484,15 @@ class InitTests(unittest.TestCase):
         self.assertIn("leaving them alone", self.run_init())
         self.assertEqual(path.read_text(encoding="utf-8"), written)
 
-    def test_init_tops_up_an_old_file_without_altering_a_line_of_it(self):
-        """A file written before a setting existed grows it, commented, at the end only."""
-        path = self.project / ".captain" / "settings.toml"
-        path.parent.mkdir()
-        edited = textwrap.dedent("""\
-            # my notes
-            [captain]
-            model = "opus"
-
-            [dashboard]
-            enabled = true
-        """)
-        path.write_text(edited, encoding="utf-8")
-        printed = self.run_init()
-        topped = path.read_text(encoding="utf-8")
-        # Byte-identical except for the block that follows it.
-        self.assertTrue(topped.startswith(edited))
-        appended = topped[len(edited) :]
-        self.assertIn("[models.grok]", printed)
-        self.assertIn("# [models.grok]", appended)
-        # Nothing appended is live, so the user's own settings are still the only ones set.
-        self.assertEqual(
-            [line for line in appended.splitlines() if line and not line.startswith("#")], []
-        )
-        self.assertEqual(config.text("captain", "model"), "opus")
-        self.assertIs(config.flag("dashboard", "enabled"), True)
-        # The keys the file already had are not offered again, and a third init finds
-        # nothing left to add.
-        offered = config.declared(appended)
-        self.assertEqual(offered["[captain]"], ["agent"])
-        self.assertNotIn("enabled", offered["[dashboard]"])
-        self.assertIn("leaving them alone", self.run_init())
-        self.assertEqual(path.read_text(encoding="utf-8"), topped)
-
-    def test_a_topped_up_file_documents_the_pi_tiers_without_setting_them(self):
-        """pi tiers are per-install, so the stanza must arrive commented, not live."""
-        path = self.project / ".captain" / "settings.toml"
-        path.parent.mkdir()
-        path.write_text("[captain]\n", encoding="utf-8")
-        self.run_init()
-        body = path.read_text(encoding="utf-8")
-        self.assertIn("# [models.pi]", body)
-        self.assertNotIn("pi", tomllib.loads(body).get("models", {}))
+    def test_init_preserves_existing_files_byte_for_byte(self):
+        for flag, root in (((), self.project), (("--global",), self.home)):
+            path = root / ".captain" / "settings.toml"
+            path.parent.mkdir(exist_ok=True)
+            for body in (b"", b'[captain]\nmodel = "opus"', b"not valid TOML\xff"):
+                with self.subTest(flag=flag, body=body):
+                    path.write_bytes(body)
+                    self.assertIn("leaving them alone", self.run_init(*flag))
+                    self.assertEqual(path.read_bytes(), body)
 
     def test_global_init_targets_home_and_leaves_the_project_untouched(self):
         self.assertIn(str(self.home), self.run_init("--global"))

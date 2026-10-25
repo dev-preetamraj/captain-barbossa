@@ -216,8 +216,7 @@ for retiering providers and setting model defaults.
 
 Nothing is required. Project settings override global settings one key at a
 time, and CLI flags win for one invocation. `init` writes a fully commented
-template for a new file; for an existing file it appends missing commented keys
-while preserving all existing content and values.
+template for a new file; existing files are left untouched.
 
 ```sh
 captain init
@@ -411,19 +410,9 @@ Outward-facing, destructive and history-rewriting actions require explicit user
 authorization; a concrete request already authorizes its stated scope. Declaring
 a target grants no permission. Git verbs still expose no force or rewriting flags.
 
-`captain do resolve --intent TEXT` resolves a verbatim operation request without
-executing it. Ordered full-input rules in `do.py` return JSON with a status, reason
-code, matched rule, operation, arguments, missing fields and accepted shapes.
-A resolved result includes the session's `captain do` command as an argument array.
-`push`, `fetch` and `pull` select Git; `create/cut a branch NAME` and `switch to NAME`
-select branch operations. `run/make [the] TARGET`, `[the] TARGET` and `do the TARGET`
-select a declared Make target. Thus `do the release` selects `make -- release`, while `push`
-selects Git even when a `push` target exists; use `run push` for that target.
-`commit` reports the missing message and scope instead of inventing them.
-An optional `please` prefix and terminal period are accepted. Command words ignore
-case; branch and target spelling is preserved. Unsupported wording, invalid names
-and missing inputs return nonzero with a reason code and the resolvable shapes.
-There is no fuzzy matching, model fallback, execution or approval in resolution.
+For an operation request such as 'push the code', the captain runs `captain do push`
+directly within that authorization, never through crew, quiet, a model, or a resolver.
+Missing arguments or authorization are requested before execution.
 
 `captain quiet` runs one headless model turn using the session captain's native
 CLI, prints its report, and needs no crew assignment or wait. It is read-only
@@ -433,7 +422,6 @@ unstaged, or `--read DIR` to let a read-only turn read outside the checkout. `--
 `--timeout SECONDS` overrides the 900-second limit.
 
 ```sh
-captain do resolve --intent "do the release"
 captain do run test
 # Explicit synchronous opt-in; the captain defaults read-only work to a background crew:
 captain quiet --task "Review the current changes" --diff worktree
@@ -515,7 +503,8 @@ and a third `repo` scope committed with the code as `.captain/graph.json`.
 `add` accepts `--scope session|project|repo` plus `--because` and `--supersede`
 for repo scope; `show` accepts `--scope`, `--all`, and `--json`; `path` accepts
 `--scope session|project|repo`; `prune` accepts
-`--older-than DAYS`. `query` uses optional Graphify.
+`--older-than DAYS`. `query` performs case-insensitive literal substring search over stored
+subjects, relations, and objects in all three scopes; no external tool is needed.
 `show` and `path` do not create, migrate, lock, or rewrite memory; scoped JSON
 reads only the selected scope.
 
@@ -549,7 +538,7 @@ reads `AGENTS.md`, else `CLAUDE.md` (`--from PATH` overrides), turns each bullet
 under a `Rules`/`Key facts` section into one `convention` fact, and previews
 them until you pass `--apply`. Re-running adds only what is new. See
 [memory.md](https://github.com/dev-preetamraj/captain-barbossa/blob/main/docs/memory.md)
-for paths, identity, retention, Graphify isolation, and pruning safeguards.
+for paths, identity, retention, literal search, and pruning safeguards.
 
 ## Running commands from another pane
 
@@ -570,7 +559,7 @@ for session and project identity.
 ## Troubleshooting
 
 For install, TTY, crew startup, approval, model confirmation, session,
-memory-root, Graphify, and ambiguous-name failures, see
+memory-root and ambiguous-name failures, see
 [troubleshooting.md](https://github.com/dev-preetamraj/captain-barbossa/blob/main/docs/troubleshooting.md).
 
 ```sh
@@ -600,7 +589,7 @@ Read the affected pane before retrying or approving anything.
 | `captain done NAME [--assignment ID] --report TEXT` | Record explicit completion; ID may default for newly launched crew |
 | `captain check NAME ACTION [PATH ...] [--assignment ID]` | Check grants; ID may default for newly launched crew; executes nothing |
 | `captain inspect files\|read\|search\|state\|git ...` | Bounded local inspection |
-| `captain do resolve\|commit\|push\|branch\|switch\|fetch\|pull\|run ...` | Resolve or run deterministic work without crew |
+| `captain do commit\|push\|branch\|switch\|fetch\|pull\|run ...` | Run deterministic work without crew |
 | `captain quiet --task TEXT [--diff worktree\|staged] [--write PATH] [--read DIR] [--model MODEL] [--timeout SECONDS]` | One headless model turn; repeat `--write` for multiple files |
 | `captain status [--all]` | Print a table of this session's crew |
 | `captain dashboard [--interval SECONDS] [--refresh-prices] [--once]` | Refresh a crew token-usage table, or print one frame |
@@ -618,7 +607,7 @@ Read the affected pane before retrying or approving anything.
 | `captain worktree cleanup WORKTREE_ID` | Clean up a retained isolated checkout |
 | `captain memory add SUBJECT RELATION TARGET [--scope session\|project\|repo] [--because WHY] [--supersede]` | Save a memory relationship |
 | `captain memory init [--from PATH] [--apply]` | Seed repo memory from the project rulebook |
-| `captain memory query QUESTION` | Search memory with Graphify |
+| `captain memory query QUESTION` | Literal search of stored memory |
 | `captain memory show [--scope SCOPE] [--json] [--all]` | Print memory relationships |
 | `captain memory path [--scope session\|project\|repo]` | Print a scope's directory without creating it |
 | `captain memory prune [--older-than DAYS]` | Remove finished sessions' memory |
@@ -635,8 +624,7 @@ for setting up a checkout, running checks, and the commit/PR workflow. Current
 implementation scope is tracked in
 [docs/plan.md](https://github.com/dev-preetamraj/captain-barbossa/blob/main/docs/plan.md).
 
-Related CLIs: [Herdr](https://herdr.dev/docs/cli-reference/),
-[Graphify](https://graphify.com/docs/cli), and
+Related CLIs: [Herdr](https://herdr.dev/docs/cli-reference/) and
 [Codex's additional instructions](https://learn.chatgpt.com/docs/config-file/config-reference).
 
 ## License
