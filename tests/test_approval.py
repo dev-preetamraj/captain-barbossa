@@ -297,10 +297,10 @@ class ApprovalTests(unittest.TestCase):
                 ("sed -i s/a/b/ /etc/hosts", "outside-grant"),
                 ("cp -f a /etc/hosts", "outside-grant"),
                 ("jq . a > /etc/hosts", "outside-grant"),
-                ("python3 -c 'import os; os.remove(\"x\")'", "destructive"),
-                ("python3 -c 'import shutil; shutil.rmtree(\"x\")'", "destructive"),
-                ('python3 -c \'open("x", "w").write("y")\'', "destructive"),
-                ('node -e \'require("fs").unlinkSync("x")\'', "destructive"),
+                ("python3 -c 'import os; os.remove(\"x\")'", "inline-write"),
+                ("python3 -c 'import shutil; shutil.rmtree(\"x\")'", "inline-write"),
+                ('python3 -c \'open("x", "w").write("y")\'', "inline-write"),
+                ('node -e \'require("fs").unlinkSync("x")\'', "inline-write"),
                 ("python3 -c 'import urllib.request as u; u.urlopen(\"http://x\")'", "outward"),
                 ("python3 -c 'print(open(\"x\").read())'", "shell"),
                 ("jq . a > docs/notes/out.json", "unknown-command"),
@@ -396,22 +396,25 @@ class ApprovalTests(unittest.TestCase):
         self.check(
             [
                 ("herdr pane close x; rm -rf y --help", "destructive"),
-                ("herdr api schema x | python3 -c 'import os; os.remove(\"f\")'", "destructive"),
-                ("echo 'import os; os.remove(1)' | python3", "destructive"),
-                ('python3 -c "import captain_barbossa.cli as c; c.main()"', "captain-verb"),
+                ("herdr api schema x | python3 -c 'import os; os.remove(\"f\")'", "inline-write"),
+                ("echo 'import os; os.remove(1)' | python3", "inline-write"),
+                ('python3 -c "import captain_barbossa.cli as c; c.main()"', "captain-inline"),
                 (
                     "python3 -c \"import runpy; runpy.run_module('captain_barbossa')\"",
-                    "captain-verb",
+                    "captain-inline",
                 ),
                 (
                     f"{heredoc.replace('python3 -', 'python3 -m captain_barbossa do push')}",
-                    "captain-verb",
+                    "captain-inline",
                 ),
                 ("git branch --show-current -D old", "destructive"),
                 ("git push --force; git branch --show-current", "destructive"),
-                (f'uv run --locked python -c "{probe}"', "captain-verb"),
-                ('python3 -c "import captain_barbossa.protocol as p; p.bounce(1)"', "captain-verb"),
-                ('python3 -c "from captain_barbossa.agents import crew"', "captain-verb"),
+                (f'uv run --locked python -c "{probe}"', "captain-inline"),
+                (
+                    'python3 -c "import captain_barbossa.protocol as p; p.bounce(1)"',
+                    "captain-inline",
+                ),
+                ('python3 -c "from captain_barbossa.agents import crew"', "captain-inline"),
                 ("./evil.sh --help", "unknown-command"),
                 ("mytool --help; rm -rf x", "destructive"),
                 ("mytool rm --help | python3 -c 'import os; os.remove(1)'", "destructive"),
@@ -561,7 +564,7 @@ class ApprovalTests(unittest.TestCase):
                 ("captain do push", "captain-do"),
                 ("/abs/path/bin/captain do push", "captain-do"),
                 ("python3 -m captain_barbossa do push", "captain-do"),
-                ("cd /tmp && ../usr/bin/captain crew --task x", "captain-verb"),
+                ("cd /tmp && ../usr/bin/captain crew --task x", "captain-inline"),
                 ("cd /repo/captain-barbossa && python3 -c 'import os'", "shell"),
             ],
             bash,
@@ -573,6 +576,35 @@ class ApprovalTests(unittest.TestCase):
         request = Request("Bash", PROJECT, PROJECT, owned, command=f"{captain} done Tia")
         self.assertEqual(decide(request).code, "granted")
 
+    def test_compound_of_granted_reads_passes_with_git_dash_c(self):
+        captain = shlex.join([sys.executable, "-m", "captain_barbossa", "--session", "s1"])
+        show = f"{captain} memory show --scope repo"
+        self.check(
+            [
+                (f"{show}; git -C {PROJECT} status --short; git -C {PROJECT} log -3", "granted"),
+                (f"{show}; git -C /tmp status", "captain-inline"),
+                (f"git -C {PROJECT} status --short", "granted"),
+                (f"{show}; git -C {PROJECT} push", "destructive"),
+                (f"{show}; git -C {PROJECT} commit -m x", "outside-grant"),
+                (f"{show}; {captain} crew --task x", "captain-verb"),
+                (f"{show}; git -C {PROJECT} status --output=x", "unknown-command"),
+            ],
+            bash,
+        )
+
+    def test_git_dash_c_paths_are_judged_from_the_checkout_not_the_cwd(self):
+        sub = f"{PROJECT}/sub"
+
+        def run(command):
+            request = Request("Bash", PROJECT, sub, ("sub/file.txt",), ALL_ACTIONS, command=command)
+            return decide(request).code
+
+        self.assertEqual(run("git add file.txt"), "granted")
+        self.assertEqual(run(f"git -C {PROJECT} add file.txt"), "outside-grant")
+        self.assertEqual(run(f"git -C {PROJECT} add sub/file.txt"), "granted")
+        self.assertEqual(run(f"git -C {PROJECT} status > file.txt"), "granted")
+        self.assertEqual(run(f"git -C {PROJECT} status > other.txt"), "outside-grant")
+
     def test_protocol_verbs_pass_whatever_their_argument_text(self):
         captain = shlex.join([sys.executable, "-m", "captain_barbossa", "--session", "s1"])
         report = "ran do run test; rm and git push are\nnot run; `x` costs $5"
@@ -581,8 +613,8 @@ class ApprovalTests(unittest.TestCase):
                 (f"{captain} done Tia --report {shlex.quote(report)}", "granted"),
                 (f"{captain} ask Tia 'push now?\nor rm it?'", "granted"),
                 (f"codex run; {captain} done Tia --report 'no push'", "unknown-command"),
-                (f'{captain} done Tia --report "line\\\nrm"', "captain-verb"),
-                (f'{captain} done Tia --report "$(rm -rf x)"', "captain-verb"),
+                (f'{captain} done Tia --report "line\\\nrm"', "captain-inline"),
+                (f'{captain} done Tia --report "$(rm -rf x)"', "captain-inline"),
             ],
             bash,
         )
@@ -599,13 +631,13 @@ class ApprovalTests(unittest.TestCase):
             [
                 (report("files: a.py; rm and git push were not run"), "granted"),
                 (report("costs $5 and `x`", quote="'"), "granted"),
-                (report("costs $5"), "captain-verb"),
-                (report("x\nEOF\nrm -rf y\n", quote="'"), "captain-verb"),
+                (report("costs $5"), "captain-inline"),
+                (report("x\nEOF\nrm -rf y\n", quote="'"), "captain-inline"),
                 (report("ok", f'{captain} crew --task "$REPORT"'), "captain-verb"),
                 (report("ok", f'{captain} do commit --message "$REPORT"'), "captain-do"),
                 (report("rm -rf y", 'sh -c "$REPORT"', "'"), "destructive"),
                 (report("ok", 'rm -rf "$REPORT"'), "destructive"),
-                (report("ok", f"{captain} done Jack --report $REPORT"), "captain-verb"),
+                (report("ok", f"{captain} done Jack --report $REPORT"), "captain-inline"),
             ],
             bash,
         )
@@ -796,6 +828,29 @@ class ApprovalHookTests(SessionCase):
                 self.assertEqual(output["hookSpecificOutput"]["permissionDecision"], "ask")
                 self.assertEqual(event["hook_event_name"], "PreToolUse")
                 self.assertEqual(self.crew.current_state().state, "blocked")
+
+    def test_pretooluse_denies_unverifiable_shell_with_guidance_and_asks_only_for_risk(self):
+        heredoc = (
+            "python3 - <<'EOF'\nfrom pathlib import Path\nPath('src/a.py').write_text('x')\nEOF"
+        )
+        mention = "cat <<EOF\npython3 -m captain_barbossa done Jack\nEOF"
+        for command, guidance in (
+            (heredoc, "Edit tool"),
+            (mention, "standalone command"),
+        ):
+            with self.subTest(command=command):
+                output, _ = self.pretool({"command": command})
+                native = output["hookSpecificOutput"]
+                self.assertEqual(native["permissionDecision"], "deny")
+                self.assertIn(guidance, native["permissionDecisionReason"])
+        for command in ("rm -rf beta.txt", "git push", "git reset --hard", "echo x > /elsewhere/f"):
+            with self.subTest(command=command):
+                output, _ = self.pretool({"command": command})
+                self.assertEqual(output["hookSpecificOutput"]["permissionDecision"], "ask")
+        for command in ("git status", "echo x > src/a.py"):
+            with self.subTest(command=command):
+                output, _ = self.pretool({"command": command})
+                self.assertEqual(output["hookSpecificOutput"]["permissionDecision"], "allow")
 
     def test_pretool_ask_reports_command_and_reason_before_permissionrequest(self):
         command = "rm " + "x" * 1700

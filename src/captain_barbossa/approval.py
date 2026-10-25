@@ -46,6 +46,14 @@ REASONS = {
         Verdict.ESCALATE,
         "only the crew protocol verbs may run captain, from the interpreter it named",
     ),
+    "captain-inline": (
+        Verdict.DENY,
+        "captain named inside other shell text; run the crew protocol verbs as a standalone command",
+    ),
+    "inline-write": (
+        Verdict.DENY,
+        "edit owned files with your Edit tool, not shell or inline scripts",
+    ),
     "captain-do": (Verdict.DENY, "`captain do` is captain-only; report back to the captain"),
     "outside-grant": (Verdict.ESCALATE, "a write outside the owned paths or inside .git"),
 }
@@ -189,9 +197,9 @@ def _flagged(text):
         name == "captain" or word == name == "captain_barbossa"
         for word, name in ((w, posixpath.basename(w)) for w in paths)
     ):
-        return Decision("captain-verb")
+        return Decision("captain-inline")
     words = names | {part for word in paths for part in re.split(r"[./:]+", word)}
-    if words & (DESTRUCTIVE | PRIVILEGE | DELETE_APIS) or WRITE_OPEN.search(text):
+    if words & (DESTRUCTIVE | PRIVILEGE):
         return Decision("destructive")
     if "git" in words and (
         words & GIT_DESTRUCTIVE
@@ -201,6 +209,8 @@ def _flagged(text):
         return Decision("destructive")
     if words & (OUTWARD | NETWORK_APIS):
         return Decision("outward")
+    if words & DELETE_APIS or WRITE_OPEN.search(text):
+        return Decision("inline-write")
     return None
 
 
@@ -218,7 +228,8 @@ def _decide(request):
         if argv[1] in ("-c", "-lc"):
             return _decide_text(request, argv[2])
     if argv:
-        return _judge(request, [(request.cwd, _command(argv))])
+        cwd, words = _own_checkout(request, request.cwd, argv)
+        return _judge(request, [(cwd, _command(words))])
     return _decide_text(request, request.command or "")
 
 
@@ -286,8 +297,8 @@ def _decide_text(request, text):
             uses.append((cwd, _Use(action="read")))
             cwd = _resolve(cwd, words[1])
             continue
-        use = _command(words)
-        uses.append((cwd, use))
+        git_cwd, words = _own_checkout(request, cwd, words)
+        uses.append((git_cwd, _command(words)))
     return _judge(request, uses)
 
 
@@ -346,6 +357,15 @@ def _segments(tokens):
     if words or redirects:
         segments.append((words, redirects))
     return segments or None
+
+
+def _own_checkout(request, cwd, words):
+    """`git -C <this checkout>` is plain `git` run from the checkout, so its paths are judged
+    there; any other directory keeps its wrapper verdict. Returns (cwd, words)."""
+    if words[:2] == ["git", "-C"] and len(words) > 3 and words[2][:1] != "-":
+        if _resolve(cwd, words[2]) == posixpath.normpath(request.project):
+            return request.project, ["git", *words[3:]]
+    return cwd, words
 
 
 def _command(words):
