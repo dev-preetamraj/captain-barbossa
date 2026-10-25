@@ -10,7 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from captain_barbossa import execution, lifetime, results, sessions, store, worktrees
+from captain_barbossa import execution, inspection, lifetime, results, sessions, store, worktrees
 from captain_barbossa.runtime import CaptainError
 from tests.home_isolation import SessionCase
 
@@ -51,6 +51,45 @@ class WorktreeLifecycleTests(SessionCase):
         check = verifier.start()
         self.addCleanup(verifier.stop)
         return check
+
+    def test_worktree_git_uses_shared_hardened_environment_and_flags(self):
+        with patch.object(
+            subprocess, "run", return_value=SimpleNamespace(returncode=0, stdout=b"ok")
+        ) as run:
+            self.assertEqual(worktrees.git(self.project, "status"), b"ok")
+        self.assertEqual(run.call_args.args[0], [*inspection.git_command(inspection.GIT), "status"])
+        self.assertEqual(run.call_args.kwargs["env"], inspection.git_environment())
+        for name in ("alternates", "http-alternates", "config.worktree", "pack.promisor"):
+            self.assertTrue(inspection.unsupported_git_metadata(Path(".git") / name))
+        self.assertTrue(inspection.unsupported_git_metadata(Path(".git/commondir")))
+        self.assertFalse(inspection.unsupported_git_metadata(Path(".git/worktrees/crew/gitdir")))
+
+    def test_project_root_accepts_only_launch_bound_registered_worktree(self):
+        record = worktrees.create(self.session, self.reserve()["id"])
+        self.session.meta["crew"] = {"Elizabeth": {**record, "worktree_id": record["id"]}}
+        store.write_json(self.session.directory / "session.json", self.session.meta)
+        root = Path(record["execution_root"])
+        nested = root / "nested"
+        nested.mkdir()
+        env = {
+            "CAPTAIN_PROJECT": str(self.project),
+            "CAPTAIN_SESSION": self.session.meta["id"],
+            "CAPTAIN_CREW": "Elizabeth",
+            "CAPTAIN_WORKTREE_ID": record["id"],
+            "CAPTAIN_INCARNATION": record["incarnation_id"],
+            "CAPTAIN_ASSIGNMENT": record["assignment_id"],
+        }
+        with patch.dict(os.environ, env), patch.object(Path, "cwd", return_value=nested):
+            self.assertEqual(store.project_root(), self.project)
+            with patch.dict(os.environ, {"CAPTAIN_ASSIGNMENT": uuid.uuid4().hex}):
+                with self.assertRaisesRegex(CaptainError, "worktree-identity"):
+                    store.project_root()
+            with patch.object(Path, "cwd", return_value=self.root):
+                with self.assertRaisesRegex(CaptainError, "outside the active"):
+                    store.project_root()
+            with patch.dict(os.environ, {"CAPTAIN_WORKTREE_ID": ""}):
+                with self.assertRaisesRegex(CaptainError, "outside the active"):
+                    store.project_root()
 
     def test_pins_exact_commit_without_copying_dirty_inputs(self):
         record = self.reserve()

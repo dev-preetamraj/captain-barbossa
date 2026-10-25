@@ -161,13 +161,9 @@ def read_bytes(root, path, limit=MAX_BYTES):
     with _open(root, path) as fd:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
             _fail("unsupported-file", "only regular files can be read.")
-        data = bytearray()
-        while len(data) <= limit:
-            chunk = os.read(fd, min(8192, limit + 1 - len(data)))
-            if not chunk:
-                break
-            data.extend(chunk)
-    return bytes(data[:limit]), len(data) > limit
+        with os.fdopen(fd, "rb", closefd=False) as file:
+            data = file.read(limit + 1)
+    return data[:limit], len(data) > limit
 
 
 def walk_files(root, path, deadline, *, metadata=False):
@@ -305,6 +301,48 @@ def validate_git_config(root):
                 _fail("unsupported-git", "only ordinary format-0 worktrees are supported.")
 
 
+def unsupported_git_metadata(path):
+    return (
+        (path.name in ("commondir", "gitdir") and path.parts[:2] != (".git", "worktrees"))
+        or path.name in ("config.worktree", "alternates", "http-alternates")
+        or path.suffix == ".promisor"
+    )
+
+
+def git_environment():
+    return {
+        "PATH": "/usr/bin:/bin",
+        "HOME": "/dev/null",
+        "XDG_CONFIG_HOME": "/dev/null",
+        "LANG": "C",
+        "LC_ALL": "C",
+        "TZ": "UTC",
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_SYSTEM": "/dev/null",
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_ATTR_NOSYSTEM": "1",
+        "GIT_OPTIONAL_LOCKS": "0",
+        "GIT_TERMINAL_PROMPT": "0",
+        "GIT_NO_REPLACE_OBJECTS": "1",
+        "GIT_NO_LAZY_FETCH": "1",
+        "GIT_LITERAL_PATHSPECS": "1",
+    }
+
+
+def git_command(executable):
+    command = [str(executable), "--no-pager", "--no-optional-locks"]
+    for setting in (
+        "core.fsmonitor=false",
+        "core.hooksPath=/dev/null",
+        "core.attributesFile=/dev/null",
+        "protocol.allow=never",
+        "maintenance.auto=false",
+        "gc.auto=0",
+    ):
+        command.extend(("-c", setting))
+    return command
+
+
 def git_text(root, operation, *, staged=False):
     """One hardened Git read for another module, as plain text."""
     return _git(Path(root), operation, staged, time.monotonic() + TIMEOUT)["text"]
@@ -330,11 +368,7 @@ def _git(root, operation, staged, deadline, text=None, registration=None):
     elif (root / ".git").is_symlink() or not (root / ".git").is_dir():
         _fail("unsupported-git", "an ordinary or registered .git directory is required.")
     for path in walk_files(metadata_root, Path(".git"), deadline, metadata=True):
-        if (
-            (path.name in ("commondir", "gitdir") and path.parts[:2] != (".git", "worktrees"))
-            or path.name in ("config.worktree", "alternates", "http-alternates")
-            or path.suffix == ".promisor"
-        ):
+        if unsupported_git_metadata(path):
             _fail("unsupported-git", "linked, alternate and partial object stores are unsupported.")
     validate_git_config(metadata_root)
     executable = GIT.resolve(strict=True)
@@ -342,23 +376,7 @@ def _git(root, operation, staged, deadline, text=None, registration=None):
         info = item.stat()
         if info.st_uid != 0 or info.st_mode & 0o022:
             _fail("unsupported-git", "Git must be a root-owned system executable.")
-    env = {
-        "PATH": "/usr/bin:/bin",
-        "HOME": "/dev/null",
-        "XDG_CONFIG_HOME": "/dev/null",
-        "LANG": "C",
-        "LC_ALL": "C",
-        "TZ": "UTC",
-        "GIT_CONFIG_NOSYSTEM": "1",
-        "GIT_CONFIG_SYSTEM": "/dev/null",
-        "GIT_CONFIG_GLOBAL": "/dev/null",
-        "GIT_ATTR_NOSYSTEM": "1",
-        "GIT_OPTIONAL_LOCKS": "0",
-        "GIT_TERMINAL_PROMPT": "0",
-        "GIT_NO_REPLACE_OBJECTS": "1",
-        "GIT_NO_LAZY_FETCH": "1",
-        "GIT_LITERAL_PATHSPECS": "1",
-    }
+    env = git_environment()
     commands = {
         "status": [
             "status",
@@ -395,17 +413,7 @@ def _git(root, operation, staged, deadline, text=None, registration=None):
             "--",
         ],
     }
-    command = [str(executable), "--no-pager", "--no-optional-locks"]
-    for setting in (
-        "core.fsmonitor=false",
-        "core.hooksPath=/dev/null",
-        "core.attributesFile=/dev/null",
-        "protocol.allow=never",
-        "maintenance.auto=false",
-        "gc.auto=0",
-    ):
-        command.extend(("-c", setting))
-    command.extend(commands[operation])
+    command = [*git_command(executable), *commands[operation]]
     with subprocess.Popen(
         command,
         cwd=root,

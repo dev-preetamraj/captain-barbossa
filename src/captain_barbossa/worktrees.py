@@ -38,29 +38,8 @@ def durable(path, value):
 
 def git(root, *args):
     """Run local Git with no inherited Git environment, hooks or network."""
-    env = {
-        "PATH": "/usr/bin:/bin",
-        "HOME": "/dev/null",
-        "LANG": "C",
-        "GIT_CONFIG_NOSYSTEM": "1",
-        "GIT_CONFIG_GLOBAL": "/dev/null",
-        "GIT_ATTR_NOSYSTEM": "1",
-        "GIT_NO_REPLACE_OBJECTS": "1",
-        "GIT_NO_LAZY_FETCH": "1",
-        "GIT_TERMINAL_PROMPT": "0",
-        "GIT_LITERAL_PATHSPECS": "1",
-        "GIT_OPTIONAL_LOCKS": "0",
-    }
-    command = [str(inspection.GIT), "--no-pager"]
-    for setting in (
-        "core.hooksPath=/dev/null",
-        "core.fsmonitor=false",
-        "core.attributesFile=/dev/null",
-        "protocol.allow=never",
-        "maintenance.auto=false",
-        "gc.auto=0",
-    ):
-        command.extend(("-c", setting))
+    env = inspection.git_environment()
+    command = inspection.git_command(inspection.GIT)
     try:
         result = subprocess.run(
             [*command, *map(str, args)],
@@ -113,11 +92,7 @@ def validate_repository(project, *, deadline=None):
         raise CaptainError("Worktree creation requires an ordinary Git checkout.")
     inspection.validate_git_config(project)
     for path in inspection.walk_files(project, Path(".git"), deadline, metadata=True):
-        if (
-            (path.name in ("commondir", "gitdir") and path.parts[:2] != (".git", "worktrees"))
-            or path.name in ("alternates", "http-alternates", "config.worktree")
-            or path.suffix == ".promisor"
-        ):
+        if inspection.unsupported_git_metadata(path):
             raise CaptainError("Unsupported Git object store or worktree configuration.")
     inspection.check_deadline(deadline)
     return common

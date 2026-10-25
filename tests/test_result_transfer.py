@@ -38,6 +38,47 @@ class ResultTransferTests(SessionCase):
     def collect(self, owned=None):
         return results.collect(self.session, self.record["id"], owned or ["."])
 
+    def test_committed_tree_filters_paths_and_preserves_destination_error(self):
+        tree = results._tree(self.project, "HEAD")
+        self.assertEqual(results._committed(self.project, ["file"]), {"file": tree["file"]})
+        (self.project / "link").symlink_to("file")
+        self.git(self.project, "add", "link")
+        self.git(self.project, "commit", "-m", "link")
+        with self.assertRaisesRegex(CaptainError, "transfer-unsupported.*Destination HEAD"):
+            results._committed(self.project, ["link"])
+        self.assertEqual(results._committed(self.project, ["file"]), {"file": tree["file"]})
+
+    def test_tracked_file_replaced_by_directory_transfers_deletion_and_children(self):
+        (self.checkout / "file").unlink()
+        (self.checkout / "file").mkdir()
+        (self.checkout / "file/new").write_text("child\n")
+        manifest = self.collect(["file"])
+        self.assertEqual(manifest["unresolved"], [])
+        entries = {entry["path"]: entry for entry in manifest["entries"]}
+        self.assertEqual(set(entries), {"file", "file/new"})
+        self.assertIsNone(entries["file"]["post"])
+        self.assertIsNone(entries["file/new"]["base"])
+        index = (self.project / ".git/index").read_bytes()
+        receipt = results.apply(self.session, manifest["id"])
+        self.assertEqual(receipt["state"], "applied")
+        self.assertEqual((self.project / "file/new").read_text(), "child\n")
+        self.assertEqual((self.project / ".git/index").read_bytes(), index)
+        self.assertEqual(results.preview(self.session, manifest["id"])["observed_state"], "applied")
+        self.assertEqual(results.apply(self.session, manifest["id"]), receipt)
+
+    def test_file_to_directory_apply_allows_verified_cleanup(self):
+        (self.checkout / "file").unlink()
+        (self.checkout / "file").mkdir()
+        (self.checkout / "file/new").write_text("child\n")
+        self.git(self.checkout, "add", "file")
+        with patch("captain_barbossa.lifetime.check", return_value=SimpleNamespace(ok=True)):
+            manifest = self.collect(["file"])
+            self.assertEqual(results.apply(self.session, manifest["id"])["state"], "applied")
+            worktrees.dispose(self.session, self.record["id"])
+        self.assertFalse(self.checkout.exists())
+        self.assertEqual((self.project / "file/new").read_text(), "child\n")
+        self.assertEqual(results.read(self.session, manifest["id"]), manifest)
+
     def test_collects_committed_staged_unstaged_binary_modes_and_untracked(self):
         (self.checkout / "file").write_text("committed\n")
         self.git(self.checkout, "commit", "-am", "crew commit")

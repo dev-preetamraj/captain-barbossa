@@ -51,7 +51,13 @@ def _parent(root, value, *, create=False):
                     os.mkdir(part, 0o777, dir_fd=fd)
                 except FileExistsError:
                     pass
-            next_fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            try:
+                next_fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            except NotADirectoryError:
+                mode = os.stat(part, dir_fd=fd, follow_symlinks=False).st_mode
+                if not create and stat.S_ISREG(mode):
+                    raise FileNotFoundError(value) from None
+                raise
             os.close(fd)
             fd = next_fd
         yield fd, path.name
@@ -59,10 +65,13 @@ def _parent(root, value, *, create=False):
         os.close(fd)
 
 
-def _at(parent, name):
+def _at(parent, name, *, directory=False):
     try:
         fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
     except FileNotFoundError:
+        return None
+    if directory and stat.S_ISDIR(os.fstat(fd).st_mode):
+        os.close(fd)
         return None
     with os.fdopen(fd, "rb") as file:
         info = os.fstat(file.fileno())
@@ -71,19 +80,19 @@ def _at(parent, name):
         return _payload(file.read(), "100755" if info.st_mode & 0o111 else "100644")
 
 
-def _file(root, value):
+def _file(root, value, *, directory=False):
     try:
         with _parent(root, value) as (parent, name):
-            return _at(parent, name)
+            return _at(parent, name, directory=directory)
     except FileNotFoundError:
         return None
     except OSError as exc:
         raise CaptainError(f"Unsafe or unreadable result path: {value}") from exc
 
 
-def _tree(root, oid):
+def _tree(root, oid, *paths, error=None):
     result = {}
-    for row in worktrees.git(root, "ls-tree", "-rz", oid).split(b"\0"):
+    for row in worktrees.git(root, "ls-tree", "-rz", oid, "--", *paths).split(b"\0"):
         if not row:
             continue
         meta, name = row.split(b"\t", 1)
@@ -92,7 +101,8 @@ def _tree(root, oid):
         _relative(path)
         if kind != "blob" or mode not in ("100644", "100755"):
             raise CaptainError(
-                "Results containing symlinks or submodules are unsupported; retain checkout."
+                error
+                or "Results containing symlinks or submodules are unsupported; retain checkout."
             )
         result[path] = _payload(worktrees.git(root, "cat-file", "blob", blob), mode)
     return result
@@ -131,7 +141,7 @@ def _snapshot(record, owned_paths):
     entries, unresolved, observed = [], [], {}
     for name in sorted(tracked | untracked | ignored | discovered):
         try:
-            post = _file(root, name)
+            post = _file(root, name, directory=name in directories)
         except (CaptainError, OSError) as exc:
             unresolved.append({"path": name, "reason": str(exc)})
             continue
@@ -313,7 +323,7 @@ def preview(session, result_id):
     transfer = store.read_json(worktrees.plain_path(journal)) if journal.exists() else None
     states = set()
     for entry in manifest["entries"]:
-        current = _file(root, entry["path"])
+        current = _file(root, entry["path"], directory=entry["post"] is None)
         states.add(
             "post"
             if current == entry["post"]
@@ -339,18 +349,12 @@ def preview(session, result_id):
 
 
 def _committed(root, paths):
-    result = {}
-    for row in worktrees.git(root, "ls-tree", "-rz", "HEAD", "--", *paths).split(b"\0"):
-        if not row:
-            continue
-        meta, name = row.split(b"\t", 1)
-        mode, kind, oid = meta.decode().split()
-        if kind != "blob" or mode not in ("100644", "100755"):
-            raise CaptainError(
-                "[transfer-unsupported] Destination HEAD has a symlink or submodule."
-            )
-        result[os.fsdecode(name)] = _payload(worktrees.git(root, "cat-file", "blob", oid), mode)
-    return result
+    return _tree(
+        root,
+        "HEAD",
+        *paths,
+        error="[transfer-unsupported] Destination HEAD has a symlink or submodule.",
+    )
 
 
 def _write(root, value, expected, payload):
@@ -406,7 +410,10 @@ def apply(session, result_id):
             ) != str(root):
                 raise CaptainError("Transfer receipt identity mismatch.")
         try:
-            current = {entry["path"]: _file(root, entry["path"]) for entry in entries}
+            current = {
+                entry["path"]: _file(root, entry["path"], directory=entry["post"] is None)
+                for entry in entries
+            }
         except (CaptainError, OSError) as exc:
             raise CaptainError(f"[transfer-uncertain] {exc}; nothing applied.") from exc
         at_post = all(current[entry["path"]] == entry["post"] for entry in entries)
@@ -460,7 +467,10 @@ def apply(session, result_id):
                 f"[transfer-partial] {exc}; wrote {len(written)} of {len(entries)} files. "
                 f"Recover manually from {directory / 'manifest.json'}."
             ) from exc
-        if any(_file(root, entry["path"]) != entry["post"] for entry in entries):
+        if any(
+            _file(root, entry["path"], directory=entry["post"] is None) != entry["post"]
+            for entry in entries
+        ):
             receipt.update(state="partial", written=written, error="changed after write")
             worktrees.durable(journal, receipt)
             raise CaptainError("[transfer-partial] Destination changed after write; retain result.")
@@ -510,7 +520,9 @@ def cleanup_ready(session, record):
     index = _index(root, ["."])
     base = _tree(root, record["base_oid"])
     for name in index.keys() | base.keys():
-        if index.get(name) != base.get(name) and _file(root, name) != index.get(name):
+        if index.get(name) != base.get(name) and _file(
+            root, name, directory=index.get(name) is None
+        ) != index.get(name):
             raise CaptainError(
                 "Distinct staged content remains; explicit discard required for cleanup."
             )
@@ -524,7 +536,8 @@ def cleanup_ready(session, record):
             and receipt.get("manifest_hash") == manifest["manifest_hash"]
             and receipt.get("destination_root") == manifest["project"]
             and all(
-                _file(Path(manifest["project"]), entry["path"]) == entry["post"]
+                _file(Path(manifest["project"]), entry["path"], directory=entry["post"] is None)
+                == entry["post"]
                 for entry in manifest["entries"]
             )
         ):

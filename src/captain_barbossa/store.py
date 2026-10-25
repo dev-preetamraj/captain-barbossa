@@ -1,7 +1,7 @@
 """Where captain state lives on disk, and how it is read and written.
 
 Roots, the per-project namespace hash, atomic writes and the file lock. This is the
-bottom of the package: it imports nothing but `.runtime`, so anything may import it.
+bottom of the package; execution validation is imported only when resolving a worktree.
 """
 
 import fcntl
@@ -23,7 +23,10 @@ def project_root():
     if os.environ.get("CAPTAIN_PROJECT"):
         project = Path(os.environ["CAPTAIN_PROJECT"]).resolve()
         if not cwd.is_relative_to(project):
-            raise CaptainError("This directory is outside the active captain project.")
+            from .execution import current
+
+            if not cwd.is_relative_to(current(project)):
+                raise CaptainError("This directory is outside the active captain project.")
         return project
     for directory in (cwd, *cwd.parents):
         if (directory / ".git").exists():

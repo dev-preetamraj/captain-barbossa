@@ -43,6 +43,16 @@ class InspectionTests(unittest.TestCase):
         self.assertLessEqual(len(out.getvalue().encode()), inspection.MAX_BYTES)
         return json.loads(out.getvalue())
 
+    def test_read_bytes_bounds_and_descriptor_ownership(self):
+        path = self.project / "bounded"
+        for size in (0, 3, 4, 5, 20_000):
+            with self.subTest(size=size):
+                path.write_bytes(b"x" * size)
+                self.assertEqual(
+                    inspection.read_bytes(self.project, Path("bounded"), limit=4),
+                    (b"x" * min(size, 4), size > 4),
+                )
+
     def test_sorted_files_literal_search_and_escaped_output(self):
         for name in ("z", "a", "$(touch nope)", "--help", "[literal]"):
             (self.project / name).write_text("plain\na.*b\n\x1b[31m", encoding="utf-8")
