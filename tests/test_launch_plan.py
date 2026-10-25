@@ -95,6 +95,39 @@ class LaunchPlanTests(SessionCase):
         for prefix in ([], ["--agent", "pi"], ["--session=explicit"], ["--no-dashboard"]):
             self.assertTrue(cli.is_launch_plan([*prefix, "launch-plan"]))
         self.assertFalse(cli.is_launch_plan(["--prompt", "launch-plan"]))
+        self.assertFalse(cli.is_launch_plan(["--rename", "launch-plan"]))
+        # argparse takes the word after --resume as its target, launch-plan included.
+        self.assertFalse(cli.is_launch_plan(["--resume", "launch-plan"]))
+        for prefix in (
+            ["--resume", "a"],
+            ["--res", "a"],
+            ["--resume=a"],
+            ["--resume", "--agent=pi"],
+        ):
+            self.assertTrue(cli.is_launch_plan([*prefix, "launch-plan"]))
+
+    def test_session_flags_with_launch_plan_are_one_json_error(self):
+        session_flags = (
+            ["--resume", "a"],
+            ["--res=a"],
+            ["--resume", "--agent=pi"],
+            ["--rename", "a"],
+        )
+        for prefix in session_flags:
+            for rest in (["--model"], ["--agent", "pi", "--model", "provider/model"]):
+                with self.subTest(prefix=prefix, rest=rest):
+                    output = io.StringIO()
+                    with contextlib.redirect_stdout(output):
+                        code = cli.main([*prefix, "launch-plan", *rest])
+                    self.assertEqual(code, 1)
+                    error = json.loads(output.getvalue())["error"]
+                    self.assertEqual(error["code"], "invalid-arguments")
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.assertEqual(cli.main(["--if-unnamed", "launch-plan", "--agent", "pi"]), 1)
+        self.assertIn(
+            "--if-unnamed needs --rename", json.loads(output.getvalue())["error"]["message"]
+        )
 
     def test_errors_are_one_json_object(self):
         for args, expected in (

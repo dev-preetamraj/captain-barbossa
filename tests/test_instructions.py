@@ -113,11 +113,27 @@ class InstructionTests(SessionCase):
             captain,
         )
 
+    def test_only_an_unnamed_captain_session_is_told_to_title_itself(self):
+        rule = "CAPTAIN --rename 'TITLE' --if-unnamed"
+        for provider in models.PROVIDERS:
+            captain = instruction_prompts.agent_instructions(
+                self.directory, "Captain Barbossa", provider
+            )
+            self.assertIn(rule, captain)
+        crew = instruction_prompts.agent_instructions(self.directory, "crew member Gibbs")
+        self.assertNotIn("--if-unnamed", crew)
+        sessions.rename_session(self.directory, "alpha")
+        captain = instruction_prompts.agent_instructions(self.directory, "Captain Barbossa")
+        self.assertNotIn("--if-unnamed", captain)
+
     def test_crew_role_cannot_reach_captain_commands_or_non_repo_memory(self):
         commands = (
             ["status"],
             ["memory", "query", "assignments"],
             ["memory", "add", "x", "y", "z", "--scope", "project"],
+            ["--rename", "x"],
+            ["--rename", "x", "memory", "show"],
+            ["--resume"],
         )
         with patch.dict(os.environ, {"CAPTAIN_ROLE": "crew"}):
             for command in commands:

@@ -59,6 +59,18 @@ def parser(*, plan=False):
         help="reuse graph memory for this session",
     )
     root.add_argument("--prompt", help="initial captain prompt")
+    sessions = root.add_mutually_exclusive_group()
+    sessions.add_argument(
+        "--resume",
+        nargs="?",
+        const="",
+        metavar="TARGET",
+        help="list sessions, or resume one by name or id",
+    )
+    sessions.add_argument("--rename", metavar="NAME", help="name the current session")
+    root.add_argument(
+        "--if-unnamed", action="store_true", help="with --rename, keep an existing name"
+    )
     root.add_argument(
         "--no-dashboard",
         action="store_true",
@@ -194,10 +206,6 @@ def parser(*, plan=False):
     stop.add_argument("name", help="crew name or ID (case-insensitive)")
     stop.add_argument("--reason", help="why, recorded in session memory")
     commands.add_parser("session", help="print the current session id")
-    rename = commands.add_parser("rename", help="name the current session")
-    rename.add_argument("name")
-    resume = commands.add_parser("resume", help="list sessions, or resume one by name or id")
-    resume.add_argument("target", nargs="?", help="session name or id (lists when omitted)")
     commands.add_parser("recover", help="JSON digest of memory, assignments and pending deliveries")
     commands.add_parser("update", help="upgrade the installed captain-barbossa tool")
     start = commands.add_parser(
@@ -328,8 +336,8 @@ def print_session(args):
 def resume_target(args):
     """Choose the session to resume and chdir to its project; None after only listing."""
     current = project_root()
-    if args.target:
-        row = find_session(current, args.target)
+    if args.resume:
+        row = find_session(current, args.resume)
     else:
         rows = project_sessions(current)
         if not rows:
@@ -427,8 +435,15 @@ def is_launch_plan(argv):
     while index < len(argv) and argv[index].startswith("-"):
         option = argv[index]
         index += 1
-        if "=" not in option and any(
-            name.startswith(option) for name in ("--agent", "--session", "--prompt")
+        if "=" in option:
+            continue
+        if any(
+            name.startswith(option) for name in ("--agent", "--session", "--prompt", "--rename")
+        ):
+            index += 1
+        # Like argparse, --resume takes the next word as its target unless it is an option.
+        elif (
+            "--resume".startswith(option) and index < len(argv) and not argv[index].startswith("-")
         ):
             index += 1
     return argv[index : index + 1] == ["launch-plan"]
@@ -448,8 +463,24 @@ def main(argv=None):
         return 1
     try:
         guard_crew(args)
+        # LaunchPlanError so launch-plan reports these as its JSON error too.
+        if args.if_unnamed and args.rename is None:
+            raise LaunchPlanError("invalid-arguments", "--if-unnamed needs --rename.")
+        if args.command and (args.rename is not None or args.resume is not None):
+            # guard_crew passes crew subcommands, so a flag riding one must not run.
+            raise LaunchPlanError("invalid-arguments", "--rename and --resume take no subcommand.")
         if args.command == "launch-plan":
             print(json.dumps(launch_plan(args, project_root())))
+            return 0
+        if args.rename is not None:
+            directory = read_session(project_root(), args.session).directory
+            rename_session(directory, args.rename, if_unnamed=args.if_unnamed)
+            return 0
+        if args.resume is not None:
+            project = resume_target(args)
+            if project is None:
+                return 0
+            launch(args, current_pane(), project)
             return 0
         if args.command is None:
             bootstrap(args)
@@ -458,16 +489,6 @@ def main(argv=None):
             return 0
         if args.command == "session":
             print_session(args)
-            return 0
-        if args.command == "rename":
-            project = project_root()
-            rename_session(read_session(project, args.session).directory, args.name)
-            return 0
-        if args.command == "resume":
-            project = resume_target(args)
-            if project is None:
-                return 0
-            launch(args, current_pane(), project)
             return 0
         if args.command in ("result", "worktree"):
             print(json.dumps(artifact_command(args, read_session(project_root(), args.session))))

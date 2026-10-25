@@ -45,10 +45,52 @@ class SessionResumeTests(unittest.TestCase):
             code = cli.main(list(args))
         return code, out.getvalue(), launch
 
+    def test_if_unnamed_titles_only_an_unnamed_session_and_rename_wins(self):
+        current = self.make(self.here)
+        session_id = current.meta["id"]
+        self.run_main("--session", session_id, "--rename", "Login fix", "--if-unnamed")
+        self.run_main("--session", session_id, "--rename", "Second title", "--if-unnamed")
+        self.assertEqual(all_sessions(self.here)[0][1], "Login fix")
+        self.run_main("--session", session_id, "--rename", "alpha")
+        self.run_main("--session", session_id, "--rename", "Late title", "--if-unnamed")
+        self.assertEqual(all_sessions(self.here)[0][1], "alpha")
+
     def test_rename_names_the_session_and_lists_it(self):
         current = self.make(self.here)
-        self.run_main("--session", current.meta["id"], "rename", "alpha")
+        self.run_main("--session", current.meta["id"], "--rename", "alpha")
         self.assertEqual(all_sessions(self.here)[0][1], "alpha")
+
+    def test_rename_and_resume_are_flags_not_subcommands(self):
+        for argv in (["rename", "alpha"], ["resume"], ["--rename", "a", "--resume"]):
+            with self.subTest(argv=argv), contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit):
+                    cli.parser().parse_args(argv)
+
+    def test_flags_refuse_a_subcommand(self):
+        current = self.make(self.here)
+        session_id = current.meta["id"]
+        with contextlib.redirect_stderr(io.StringIO()) as error:
+            code, _, launch = self.run_main("--session", session_id, "--rename", "a", "status")
+            self.assertEqual(code, 1)
+            self.assertEqual(self.run_main("--resume", "x", "status")[0], 1)
+        self.assertIn("take no subcommand", error.getvalue())
+        self.assertIsNone(all_sessions(self.here)[0][1])
+        launch.assert_not_called()
+
+    def test_if_unnamed_without_rename_never_launches(self):
+        session_id = self.make(self.here).meta["id"]
+        for argv in (["--if-unnamed"], ["--if-unnamed", "--resume"], ["--if-unnamed", "status"]):
+            with (
+                self.subTest(argv=argv),
+                patch.object(cli, "bootstrap") as bootstrap,
+                contextlib.redirect_stderr(io.StringIO()) as error,
+            ):
+                code, _, launch = self.run_main("--session", session_id, *argv)
+                self.assertEqual(code, 1)
+                self.assertIn("--if-unnamed needs --rename", error.getvalue())
+                bootstrap.assert_not_called()
+                launch.assert_not_called()
+        self.assertIsNone(all_sessions(self.here)[0][1])
 
     def test_rename_rejects_an_id_shaped_name(self):
         current = self.make(self.here)
@@ -62,7 +104,7 @@ class SessionResumeTests(unittest.TestCase):
         rows = all_sessions(self.here)
         self.assertEqual([row[2] for row in rows], [near.meta["id"], far.meta["id"]])
         self.assertEqual(rows[1][0], "-")
-        _, out, launch = self.run_main("resume")
+        _, out, launch = self.run_main("--resume")
         self.assertNotIn(str(self.here), out)
         self.assertEqual(len(out.splitlines()), 1)
         self.assertTrue(out.startswith(f"-  {near.meta['id']}  "))
@@ -72,7 +114,7 @@ class SessionResumeTests(unittest.TestCase):
 
     def test_resume_reports_when_current_project_has_no_sessions(self):
         self.make(self.other)
-        code, out, launch = self.run_main("resume")
+        code, out, launch = self.run_main("--resume")
         self.assertEqual(code, 1)
         self.assertEqual(out, "")
         launch.assert_not_called()
@@ -80,9 +122,9 @@ class SessionResumeTests(unittest.TestCase):
     def test_resume_by_name_launches_from_that_project(self):
         far = self.make(self.other)
         self.project = self.other
-        self.run_main("--session", far.meta["id"], "rename", "boat")
+        self.run_main("--session", far.meta["id"], "--rename", "boat")
         self.project = self.here
-        code, _, launch = self.run_main("resume", "boat")
+        code, _, launch = self.run_main("--resume", "boat")
         self.assertEqual(code, 0)
         args, project = launch.call_args.args[0], launch.call_args.args[2]
         self.assertEqual((args.session, project), (far.meta["id"], self.other))
@@ -90,14 +132,14 @@ class SessionResumeTests(unittest.TestCase):
 
     def test_resume_by_id(self):
         far = self.make(self.other)
-        _, _, launch = self.run_main("resume", far.meta["id"])
+        _, _, launch = self.run_main("--resume", far.meta["id"])
         self.assertEqual(launch.call_args.args[0].session, far.meta["id"])
 
     def test_ambiguous_name_errors(self):
         for project in (self.here, self.other):
             current = self.make(project)
             self.project = project
-            self.run_main("--session", current.meta["id"], "rename", "twin")
+            self.run_main("--session", current.meta["id"], "--rename", "twin")
         self.project = self.here
         with self.assertRaisesRegex(CaptainError, "ambiguous-session"):
             cli.find_session(self.here, "twin")
@@ -106,7 +148,7 @@ class SessionResumeTests(unittest.TestCase):
         self.make(self.other)
         near = self.make(self.here)
         with patch.object(cli, "choose", return_value=near.meta["id"]) as choose:
-            _, _, launch = self.run_main("resume", tty=True)
+            _, _, launch = self.run_main("--resume", tty=True)
         self.assertEqual(choose.call_args.args[1], [near.meta["id"]])
         self.assertEqual(len(choose.call_args.args), 5)
         self.assertEqual(launch.call_args.args[0].session, near.meta["id"])

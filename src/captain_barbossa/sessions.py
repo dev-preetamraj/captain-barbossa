@@ -119,18 +119,21 @@ def project_sessions(project):
 
 
 def session_name(directory):
-    """The name given by `captain rename`, or None."""
+    """The name given by `captain --rename`, or None."""
     try:
         return read_json(directory / "name.json").get("name")
     except (CaptainError, OSError, AttributeError):
         return None
 
 
-def rename_session(directory, name):
+def rename_session(directory, name, *, if_unnamed=False):
+    """if_unnamed is the captain titling its own session; it never replaces a name."""
     name = name.strip()
     if not name or len(name) > 60 or SESSION_ID.fullmatch(name):
         raise CaptainError("A session name is 1-60 characters and not a session id.")
-    write_json(directory / "name.json", {"name": name})
+    with lock(directory / "session.lock"):
+        if not (if_unnamed and session_name(directory)):
+            write_json(directory / "name.json", {"name": name})
 
 
 def find_session(current, target):

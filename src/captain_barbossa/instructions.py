@@ -7,6 +7,7 @@ from pathlib import Path
 
 from .events import DELIVERY_HOOKS
 from .models import HOOK_DELIVERED, native_model_args
+from .sessions import session_name
 
 # Shared memory includes other assignments; only the captain loads it automatically.
 CAPTAIN_MEMORY = """Recover memory, assignments, paths, questions and deliveries at startup/compaction:
@@ -83,6 +84,16 @@ Never run blocking CAPTAIN wait or wait --all from Bash in pi."""
         if provider in HOOK_DELIVERED
         else f"Read your mail at the start of every turn: {command} inbox {name}\n"
     )
+    # The captain's own model titles the session in a turn it already runs; once named, this
+    # costs no tokens, and --if-unnamed never replaces a user's rename.
+    naming = (
+        ""
+        if is_crew or session_name(directory)
+        else """Unnamed session: alongside your first command for the user's first task, run
+  CAPTAIN --rename 'TITLE' --if-unnamed
+TITLE is 2-5 words naming that task.
+"""
+    )
     duties = (
         f"""{mail_line}Complete your assignment yourself; do not delegate or use subagents.
 Never close/kill panes/tabs. Use only inspect, check, ask, done, memory.
@@ -105,7 +116,7 @@ Print the same report as your final message; report blockers through ask.
 The captain must also ask the user first, never instruct crew to override files.
 Replace CAPTAIN in commands below with:
   {command}
-Delegate the work that needs judgment and steering - code changes, debugging, design,
+{naming}Delegate the work that needs judgment and steering - code changes, debugging, design,
 planning, open-ended research - to crew; never do that yourself. Never delegate a task whose
 outcome its inputs already determine: a commit, a push, a branch, or one of the
 project's own declared targets is not crew work, and recruiting for it costs a pane, a

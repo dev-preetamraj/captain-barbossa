@@ -66,12 +66,17 @@ to print the ID; `--session ID` selects it when restarting. See
 [memory.md](https://github.com/dev-preetamraj/captain-barbossa/blob/main/docs/memory.md)
 for what persists.
 
-`captain rename NAME` names the current session (`--session ID` targets another).
-`captain resume` lists sessions from the current project with name, id and last
+`captain --rename NAME` names the current session (`--session ID` targets another).
+An unnamed session is titled by the captain's own model: while it has no name,
+its instructions ask for a 2-5 word title of the first task via
+`captain --rename TITLE --if-unnamed`, run alongside its first command. That flag
+never replaces a name, so your rename always wins; a session not titled yet,
+including one from before titles, shows `-` until its next launch titles it.
+`captain --resume` lists sessions from the current project with name, id and last
 activity; in a terminal it opens a picker and resumes the choice from that project
 root, exactly like `captain --session ID`. It reports cleanly when none exist here.
-`captain resume NAME|ID` skips the picker; a name shared by several sessions is
-an error, so use the id.
+`captain --resume NAME|ID` skips the picker; a name shared by several sessions is
+an error, so use the id. Neither flag combines with a subcommand.
 
 ## Pane-free launch plans
 
@@ -103,7 +108,8 @@ captain --prompt "Inspect this project"
 ```
 
 `--agent claude|codex|pi|grok` selects the native CLI, `--prompt TEXT` supplies its
-first task, `--session ID` resumes Captain state, and `--no-dashboard` skips an
+first task, `--session ID` resumes Captain state, `--resume [NAME|ID]` picks a
+session to resume, `--rename NAME` names one, and `--no-dashboard` skips an
 enabled dashboard for this launch.
 
 It renames the current tab to **Captain Barbossa** and replaces itself with
@@ -595,8 +601,8 @@ Read the affected pane before retrying or approving anything.
 | `captain dashboard [--interval SECONDS] [--refresh-prices] [--once]` | Refresh a crew token-usage table, or print one frame |
 | `captain focus NAME` | Focus crew's pane and tab |
 | `captain session` | Print the current session id |
-| `captain rename NAME` | Name the current session |
-| `captain resume [NAME\|ID]` | List current-project sessions, or resume one from its project |
+| `captain --rename NAME [--if-unnamed]` | Name the current session (the captain titles unnamed ones) |
+| `captain --resume [NAME\|ID]` | List current-project sessions, or resume one from its project |
 | `captain update` | Upgrade the installed tool |
 | `captain init [--global]` | Write a commented `.captain/settings.toml` template |
 | `captain dismiss NAME [--confirm-unlanded]` | Close and retire crew; confirmation permits known unlanded shared work |
