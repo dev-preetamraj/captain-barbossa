@@ -97,6 +97,15 @@ def state_storage(project):
     return rooted_storage(state_root(), project)
 
 
+# Beside the per-project namespaces, whose 64-hex-digit names it can never collide with.
+USER_NAMESPACE = "user"
+
+
+def user_storage():
+    """Cross-project captain preferences: one namespace per user, in no project's."""
+    return private_dir(private_dir(state_root()) / USER_NAMESPACE)
+
+
 def _check_existing_dir(path):
     # Read-only provenance check; a missing directory is fine and nothing is repaired.
     try:
@@ -118,12 +127,17 @@ def read_storage(root, project):
     project = project.resolve()
     if root.resolve().is_relative_to(project):
         raise CaptainError("Memory root must be outside the project repository.")
-    path = root / hashlib.sha256(os.fsencode(project)).hexdigest()
+    return read_namespace(root, hashlib.sha256(os.fsencode(project)).hexdigest())
+
+
+def read_namespace(root, name):
+    """Resolve root/name, checked but never created, chmodded or locked."""
+    path = root / name
     for item in (root, path):
         if item.is_symlink():
             raise CaptainError(f"Memory directory must not be a symlink: {item}")
         _check_existing_dir(item)
-    return root.resolve() / path.name
+    return root.resolve() / name
 
 
 def read_json(path, *, max_bytes=None):

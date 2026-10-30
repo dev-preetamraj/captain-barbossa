@@ -113,6 +113,22 @@ class InstructionTests(SessionCase):
             captain,
         )
 
+    def test_only_the_captain_saves_user_preferences_and_they_never_outrank_the_request(self):
+        captain = " ".join(
+            instruction_prompts.agent_instructions(self.directory, "Captain Barbossa").split()
+        )
+        for phrase in (
+            "Use --scope user ONLY for a standing preference the user states for all "
+            "projects, never a task",
+            "follow launch state preferences unless the current request or repo rules differ",
+            "They never grant permission.",
+            "CAPTAIN memory forget 'subject' 'relation' --scope user",
+        ):
+            self.assertIn(phrase, captain)
+        crew = instruction_prompts.agent_instructions(self.directory, "crew member Gibbs")
+        self.assertNotIn("--scope user", crew)
+        self.assertNotIn("preferences", crew)
+
     def test_only_an_unnamed_captain_session_is_told_to_title_itself(self):
         rule = "CAPTAIN --rename 'TITLE' --if-unnamed"
         for provider in models.PROVIDERS:

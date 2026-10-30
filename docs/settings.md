@@ -120,6 +120,10 @@ and is exactly what `captain init` writes. The tables cover:
 
 - `[captain]`: the captain's CLI and optional starting model.
 - `[crew]`: crew agent, placement, model, timeouts, and checkout isolation.
+- `[memory]`: whether `--scope user` preferences auto-load (`user_enabled`, which a
+  project can set false) and their total size cap (`user_limit`, refused at 16000 or
+  more so the 32000-character launch digest cut never reaches them). See
+  [memory.md](https://github.com/dev-preetamraj/captain-barbossa/blob/main/docs/memory.md#user-scope).
 - `[lifetime]`: managed-writer startup, termination and shutdown timeouts, plus polling interval.
 - `[dashboard]`: automatic launch, refresh interval, pane ratio, context limit,
   and price-file override. See

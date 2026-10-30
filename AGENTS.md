@@ -42,7 +42,7 @@ src/captain_barbossa/
   events.py       native CLI hook event stream, permission decisions, and mail delivery
   approval.py     pure assignment-scoped approval verdicts and reason codes
   sessions.py     session dirs, Session, crew naming, live agents, prune
-  memory.py       graph memory in three scopes, repo rulebook, literal search
+  memory.py       graph memory in four scopes, repo rulebook, literal search
   models.py       provider-neutral model tiers and free-text matching
   runtime.py      herdr subprocess wrapper, JSON validation, current pane discovery
   dashboard.py    plain-text crew token-usage frame and refresh loop
@@ -75,6 +75,12 @@ Key facts:
   and re-adding one is a no-op, and changing one needs `--supersede`.
   `memory init` seeds it from AGENTS.md/CLAUDE.md by a fixed markdown parse (bullets
   under Rules/Key facts sections), previewing until `--apply`; it only ever adds.
+- User scope is the captain's cross-project preferences in `<state root>/user/graph.json`
+  with its own lock: one value per subject/relation (`--supersede`, `memory forget`),
+  total size capped at write (`[memory] user_limit`). `recovery.preferences` reads it
+  apart from the other scopes and `digest` puts it first, so neither a broken graph
+  nor `agents.RECOVERY_CHARS` truncation hides it; `[memory] user_enabled = false`
+  opts a project out. Crew can neither read nor write it.
 - Recruitment resolves flags/settings/session defaults through `Placement.resolve` under
   the crew metadata lock. Shipped crew agent follows the captain;
   `[crew] placement = "auto"` reports `defaults.toml`. `status` prints evidence only.

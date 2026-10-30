@@ -1,5 +1,5 @@
-"""Graph memory in three scopes: session and project outside the checkout,
-repo in the committed .captain/graph.json the team shares."""
+"""Graph memory in four scopes: session and project outside the checkout, repo in the
+committed .captain/graph.json the team shares, and the user's cross-project preferences."""
 
 import hashlib
 import json
@@ -7,19 +7,24 @@ import re
 import sys
 from pathlib import Path
 
+from . import config
+
 # Sessions launched before 0.30.0 baked `from captain_barbossa.memory import append_event`
 # into their native CLI hook settings; that string outlives the upgrade that moved it.
 from .events import append_event as append_event
 from .runtime import CaptainError, check_text
 from .sessions import prune_sessions, read_session, session
 from .store import (
+    USER_NAMESPACE,
     lock,
     private_dir,
     read_json,
+    read_namespace,
     read_storage,
     state_root,
     state_storage,
     temp_root,
+    user_storage,
     write_json,
     write_text,
 )
@@ -167,7 +172,7 @@ def check_repo_fact(subject, relation, target, rationale):
             )
 
 
-def repo_nodes(links, labels):
+def live_nodes(links, labels):
     """The endpoints of `links`, sorted by id, so the file is a pure function of the
     facts rather than of the order they were written or superseded in."""
     known = {node_id(label): label for label in labels}
@@ -231,7 +236,7 @@ def add_repo_memory(project, subject, relation, target, rationale, supersede=Fal
         graph["links"].append(edge)
         graph["links"].sort(key=lambda link: (link["source"], link["key"], link["target"]))
         labels = {node["label"] for node in graph["nodes"]} | {subject, target}
-        graph["nodes"] = repo_nodes(graph["links"], labels)
+        graph["nodes"] = live_nodes(graph["links"], labels)
         path.parent.mkdir(parents=True, exist_ok=True)
         write_json(path, graph)
     return True
@@ -376,11 +381,8 @@ def init_repo_memory(project, source=None, apply=False):
         print(f"Preview only. Re-run with --apply to write {target}.")
 
 
-def read_repo_graph(project):
-    """Read the committed graph as-is; never migrate a file the whole team shares."""
-    if project is None:
-        return empty_graph()
-    path = repo_graph(project)
+def read_graph(path, what):
+    """Read a graph as-is: missing is empty, and anything but a graph is refused."""
     if not path.is_file():
         return empty_graph()
     graph = read_json(path)
@@ -389,8 +391,108 @@ def read_repo_graph(project):
         and isinstance(graph.get("nodes"), list)
         and isinstance(graph.get("links"), list)
     ):
-        raise CaptainError(f"Repo memory at {path} is not a graph; fix or remove it.")
+        raise CaptainError(f"{what} at {path} is not a graph; fix or remove it.")
     return graph
+
+
+def read_repo_graph(project):
+    """Read the committed graph as-is; never migrate a file the whole team shares."""
+    if project is None:
+        return empty_graph()
+    return read_graph(repo_graph(project), "Repo memory")
+
+
+def user_graph():
+    """The cross-project preference graph, located without creating anything."""
+    path = read_namespace(state_root(), USER_NAMESPACE) / "graph.json"
+    if path.is_symlink():
+        raise CaptainError(f"Memory graph must not be a symlink: {path}")
+    return path
+
+
+def read_user_graph():
+    return read_graph(user_graph(), "User memory")
+
+
+def user_rows(graph):
+    """Every preference as [subject, relation, object]: the shape each launch carries."""
+    return [list(row[1:]) for row in _scoped_rows(graph, "user")]
+
+
+def user_match(graph, subject, relation):
+    source = node_id(subject)
+    return next(
+        (
+            link
+            for link in graph["links"]
+            if link["source"] == source and link.get("key") == relation
+        ),
+        None,
+    )
+
+
+def add_user_memory(subject, relation, target, supersede=False):
+    """Upsert one cross-project captain preference. Explicit `--scope user` only.
+
+    One value per subject and relation: the same triple is a no-op and another value
+    needs --supersede. Every preference rides whole in every captain launch, so the
+    total is capped here rather than cut there.
+    """
+    for text in (subject, relation, target):
+        check_text(text, "memory value")
+        if len(text) > LABEL_LIMIT:
+            raise CaptainError(
+                f"User memory values are capped at {LABEL_LIMIT} characters; "
+                "record the preference, not the conversation."
+            )
+    edge = {
+        "source": node_id(subject),
+        "target": node_id(target),
+        "key": relation,
+        "relation": relation,
+        "confidence": 1.0,
+    }
+    path = user_storage() / "graph.json"
+    with lock(path.with_suffix(".lock")):
+        graph = read_user_graph()
+        existing = user_match(graph, subject, relation)
+        if existing == edge:
+            return False
+        if existing is not None:
+            if not supersede:
+                raise CaptainError(
+                    f"User memory already records {subject!r} {relation!r}; "
+                    "pass --supersede to replace it."
+                )
+            graph["links"].remove(existing)
+        graph["links"].append(edge)
+        labels = {node["label"] for node in graph["nodes"]} | {subject, target}
+        graph["nodes"] = live_nodes(graph["links"], labels)
+        # Measured as the launch serialises it, so the cap is the context it costs.
+        size = len(json.dumps(user_rows(graph)))
+        # Half of agents.RECOVERY_CHARS, so the launch digest's cut never reaches them.
+        limit = config.number("memory", "user_limit", kind=int, below=16_000)
+        if size > limit:
+            raise CaptainError(
+                f"User memory would take {size} characters, over its {limit} limit; "
+                "forget or shorten a preference, or raise [memory] user_limit."
+            )
+        write_json(path, graph)
+    return True
+
+
+def forget_user_memory(subject, relation):
+    """Drop the preference recorded for subject and relation; False when there is none."""
+    path = user_storage() / "graph.json"
+    with lock(path.with_suffix(".lock")):
+        graph = read_user_graph()
+        existing = user_match(graph, subject, relation)
+        if existing is None:
+            return False
+        graph["links"].remove(existing)
+        graph["nodes"] = live_nodes(graph["links"], {node["label"] for node in graph["nodes"]})
+        write_json(path, graph)
+    return True
 
 
 SHOW_LIMIT = 25
@@ -414,9 +516,12 @@ def _scoped_rows(graph, scope):
 def read_scoped_graphs(directory, project=None, scope=None):
     """Read only requested scopes, preserving legacy graph bytes and labels."""
     graphs = {}
-    for name in (scope,) if scope else ("project", "session", "repo"):
+    for name in (scope,) if scope else ("project", "session", "repo", "user"):
         if name == "repo":
             graphs[name] = read_repo_graph(project)
+            continue
+        if name == "user":
+            graphs[name] = read_user_graph()
             continue
         if name == "session":
             path = directory / "graph.json"
@@ -444,17 +549,24 @@ def show_memory(directory, show_all, project=None, scope=None):
     session_rows = _scoped_rows(graphs.get("session", empty_graph()), "session")
     project_rows = _scoped_rows(graphs.get("project", empty_graph()), "project")
     repo_rows = _scoped_rows(graphs.get("repo", empty_graph()), "repo")
+    user_rows = _scoped_rows(graphs.get("user", empty_graph()), "user")
     if scope:
-        rows = {"session": session_rows, "project": project_rows, "repo": repo_rows}[scope]
+        rows = {
+            "session": session_rows,
+            "project": project_rows,
+            "repo": repo_rows,
+            "user": user_rows,
+        }[scope]
         rows = rows if show_all else rows[:SHOW_LIMIT]
     else:
         if not show_all:
             # Reserve project and repo slices so a busy session can't crowd durable
-            # facts off the end; session rows fill whatever the two leave unused.
+            # facts off the end; session rows fill whatever the two leave unused. User
+            # rows are never cut: their total is capped when written.
             project_rows = project_rows[:PROJECT_RESERVE]
             repo_rows = repo_rows[:REPO_RESERVE]
             session_rows = session_rows[: SHOW_LIMIT - len(project_rows) - len(repo_rows)]
-        rows = session_rows + project_rows + repo_rows
+        rows = session_rows + project_rows + repo_rows + user_rows
     print("Memory (subject, relation, object):")
     for row_scope, subject, relation, target in rows:
         print(f"[{row_scope}] " + json.dumps([subject, relation, target], ensure_ascii=False))
@@ -471,6 +583,8 @@ def memory(args, pane, project):
                 directory = read_storage(state_root(), project)
             elif scope == "repo":
                 directory = repo_graph(project).parent
+            elif scope == "user":
+                directory = user_graph().parent
             print(directory)
         elif args.json:
             graph, seen = empty_graph(), set()
@@ -504,6 +618,10 @@ def memory(args, pane, project):
                 print(f"  {directory}")
         return
     directory, _ = session(project, pane, args.session)
+    if args.memory_command == "forget":
+        forgotten = forget_user_memory(args.subject, args.relation)
+        print("Forgot user memory." if forgotten else "User memory has no such preference.")
+        return
     if args.memory_command == "add":
         if args.scope == "repo":
             written = add_repo_memory(
@@ -511,8 +629,14 @@ def memory(args, pane, project):
             )
             print("Saved repo memory." if written else "Repo memory already records that.")
             return
-        if args.because or args.supersede:
-            raise CaptainError("--because and --supersede apply only to --scope repo.")
+        if args.because:
+            raise CaptainError("--because applies only to --scope repo.")
+        if args.scope == "user":
+            written = add_user_memory(args.subject, args.relation, args.target, args.supersede)
+            print("Saved user memory." if written else "User memory already records that.")
+            return
+        if args.supersede:
+            raise CaptainError("--supersede applies only to --scope repo or user.")
         base = state_storage(project) if args.scope == "project" else directory
         add_memory(base / "graph.json", args.subject, args.relation, args.target)
         print(f"Saved {args.scope} memory.")

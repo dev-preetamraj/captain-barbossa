@@ -1,14 +1,42 @@
 """A read-only captain recovery digest from existing memory and protocol readers."""
 
-from . import lifetime, memory, native_history, protocol, results, worktrees
+from . import config, lifetime, memory, native_history, protocol, results, worktrees
 from .crew import Crew
+from .runtime import CaptainError
 from .sessions import session_name
 from .store import read_json
 
 LIMIT = 25
 
 
+def preferences():
+    """Every user preference, or [] when the project sets [memory] user_enabled = false.
+
+    Read apart from the rest of the digest, so a broken session, project or repo graph
+    cannot hide them, and a broken user graph or settings file is reported in their place.
+    """
+    try:
+        if not config.flag("memory", "user_enabled"):
+            return []
+        return memory.user_rows(memory.read_user_graph())
+    except (CaptainError, KeyError, OSError, TypeError) as exc:
+        return f"unavailable: {exc}"
+
+
 def digest(current, project):
+    """The preferences, then the session; any failed read leaves the preferences and why.
+
+    Launch and `recover` share this guard, so unreadable state costs neither the launch
+    nor a preference. First, so truncating the serialised digest never cuts one.
+    """
+    found = preferences()
+    try:
+        return {"preferences": found, **session_digest(current, project)}
+    except (CaptainError, KeyError, TypeError) as exc:
+        return {"preferences": found, "unavailable": str(exc)}
+
+
+def session_digest(current, project):
     state = current.directory / "protocol.json"
     result = {
         "session_id": current.meta["id"],
@@ -61,16 +89,23 @@ def digest(current, project):
         }
         for manifest in results.inventory(current)
     ]
-    for scope, graph in memory.read_scoped_graphs(current.directory, project).items():
-        labels = {node["id"]: node["label"] for node in graph["nodes"]}
-        rows = [
-            {
-                **link,
-                "source": labels.get(link["source"], link["source"]),
-                "target": labels.get(link["target"], link["target"]),
-            }
-            for link in reversed(graph["links"])
-        ]
+    for scope in ("project", "session", "repo"):
+        try:
+            graph = memory.read_scoped_graphs(current.directory, project, scope)[scope]
+            labels = {node["id"]: node["label"] for node in graph["nodes"]}
+            rows = [
+                {
+                    **link,
+                    "source": labels.get(link["source"], link["source"]),
+                    "target": labels.get(link["target"], link["target"]),
+                }
+                for link in reversed(graph["links"])
+            ]
+        except (CaptainError, KeyError, TypeError) as exc:
+            # One broken graph costs its own rows, never the preferences or the other scopes.
+            result["memory"][scope] = f"unavailable: {exc}"
+            result["omitted"][f"memory_{scope}"] = 0
+            continue
         result["memory"][scope] = rows[:LIMIT]
         result["omitted"][f"memory_{scope}"] = max(0, len(rows) - LIMIT)
     for crew in sorted(Crew.members(current), key=lambda crew: crew.crew_id):

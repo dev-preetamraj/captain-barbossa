@@ -246,7 +246,9 @@ def parser(*, plan=False):
         action="store_true",
         help="the user agreed to dismiss although Git shows the crew's owned work unlanded",
     )
-    mem = commands.add_parser("memory", help="session, project, and committed repo graph memory")
+    mem = commands.add_parser(
+        "memory", help="session, project, committed repo, and user preference graph memory"
+    )
     actions = mem.add_subparsers(dest="memory_command", required=True)
     add = actions.add_parser("add", help="remember a subject → relation → object")
     add.add_argument("subject")
@@ -254,9 +256,10 @@ def parser(*, plan=False):
     add.add_argument("target")
     add.add_argument(
         "--scope",
-        choices=("session", "project", "repo"),
+        choices=("session", "project", "repo", "user"),
         default="session",
-        help="repo writes the committed .captain/graph.json: curated team facts only",
+        help="repo writes the committed .captain/graph.json: curated team facts only; "
+        "user holds preferences every captain launch loads, in any project",
     )
     add.add_argument(
         "--because",
@@ -267,13 +270,23 @@ def parser(*, plan=False):
     add.add_argument(
         "--supersede",
         action="store_true",
-        help="replace the repo fact already recorded for this subject and relation",
+        help="replace the repo or user fact already recorded for this subject and relation",
     )
-    query = actions.add_parser("query", help="literal search of session, project, and repo memory")
+    forget = actions.add_parser("forget", help="drop the user preference for a subject → relation")
+    forget.add_argument("subject")
+    forget.add_argument("relation")
+    forget.add_argument("--scope", choices=("user",), required=True)
+    query = actions.add_parser(
+        "query", help="literal search of session, project, repo, and user memory"
+    )
     query.add_argument("question")
-    show = actions.add_parser("show", help="show session, project, and repo memory relationships")
+    show = actions.add_parser(
+        "show", help="show session, project, repo, and user memory relationships"
+    )
     show.add_argument(
-        "--scope", choices=("session", "project", "repo"), help="show one scope instead of all"
+        "--scope",
+        choices=("session", "project", "repo", "user"),
+        help="show one scope instead of all",
     )
     show.add_argument("--json", action="store_true", help="show the full raw graph instead")
     show.add_argument(
@@ -292,7 +305,7 @@ def parser(*, plan=False):
         "--apply", action="store_true", help="write the proposed facts instead of previewing them"
     )
     path = actions.add_parser("path", help="print a memory scope's directory without creating it")
-    path.add_argument("--scope", choices=("session", "project", "repo"), default="session")
+    path.add_argument("--scope", choices=("session", "project", "repo", "user"), default="session")
     prune = actions.add_parser("prune", help="remove finished sessions' memory directories")
     prune.add_argument(
         "--older-than",

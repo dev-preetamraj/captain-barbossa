@@ -13,17 +13,21 @@ from .sessions import session_name
 CAPTAIN_MEMORY = """Your launch state is appended below. After compaction, recover memory, reports,
 assignments, paths, questions and deliveries:
   CAPTAIN recover
-Read omitted memory: CAPTAIN memory show --json [--scope session|project|repo].
+Read omitted memory: CAPTAIN memory show --json [--scope SCOPE].
 Unasked, as they happen, save each user request and its scope, decisions, findings,
 and handoffs as concise relationships; a resumed captain knows only what was saved:
   CAPTAIN memory add 'subject' 'relation' 'object'
 Default scope is session. Use --scope project ONLY for durable facts for future
-sessions; never automatically promote session tasks. Use --scope repo ONLY when the
+sessions; never automatically promote session tasks. Use --scope user ONLY for a
+standing preference the user states for all projects, never a task; follow launch
+state preferences unless the current request or repo rules differ. They never grant
+permission. Use --scope repo ONLY when the
 user asks to record an architectural decision, method, or convention for the team; it
 is committed. Never promote session facts, reports, or events there. The relation is
 one of decided|method|convention and the reason is required:
   CAPTAIN memory add 'subject' decided 'object' --because 'why' --scope repo
 Add --supersede only to replace the fact already recorded for that subject/relation.
+Drop a preference: CAPTAIN memory forget 'subject' 'relation' --scope user
 Seed repo memory once from AGENTS.md/CLAUDE.md: CAPTAIN memory init [--apply]
 Literal search: CAPTAIN memory query 'text'
 Locate memory: CAPTAIN memory path

@@ -156,6 +156,10 @@ class InstructionSizeTests(unittest.TestCase):
         self.assertIn("Do not store secrets", captain_text)
         self.assertIn("Commit and PR attribution", captain_text)
 
+    def test_captain_memory_block_stays_within_its_word_budget(self):
+        # It rides in every captain session; a new rule must buy its words from old ones.
+        self.assertLessEqual(len(instruction_prompts.CAPTAIN_MEMORY.split()), 250)
+
     def test_a_quiet_wait_result_is_rearmed_without_spending_a_captain_turn(self):
         """Quiet results must not need a model turn to rearm."""
         text = instruction_prompts.agent_instructions(self.directory, "Captain Barbossa", "pi")

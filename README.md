@@ -505,12 +505,14 @@ captain interrupt Jack --reason "no longer needed"
 ## Memory
 
 Captain stores session and project graph relationships outside the repository,
-and a third `repo` scope committed with the code as `.captain/graph.json`.
-`add` accepts `--scope session|project|repo` plus `--because` and `--supersede`
-for repo scope; `show` accepts `--scope`, `--all`, and `--json`; `path` accepts
-`--scope session|project|repo`; `prune` accepts
+a third `repo` scope committed with the code as `.captain/graph.json`, and a
+fourth `user` scope of your own cross-project preferences, loaded into every captain.
+`add` accepts `--scope session|project|repo|user` plus `--because` (repo) and
+`--supersede` (repo, user); `forget SUBJECT RELATION --scope user` drops a
+preference; `show` accepts `--scope`, `--all`, and `--json`; `path` accepts
+`--scope session|project|repo|user`; `prune` accepts
 `--older-than DAYS`. `query` performs case-insensitive literal substring search over stored
-subjects, relations, and objects in all three scopes; no external tool is needed.
+subjects, relations, and objects in all four scopes; no external tool is needed.
 `show` and `path` do not create, migrate, lock, or rewrite memory; scoped JSON
 reads only the selected scope.
 
@@ -519,6 +521,8 @@ captain memory add "rate limiter" "uses" "per-user windows"
 captain memory add "test command" "is" "python -m unittest" --scope project
 captain memory add "placement" decided "declared tab shapes" --scope repo \
   --because "even ratios must survive a dismissal"
+captain memory add "commits" "style" "conventional, no AI attribution" --scope user
+captain memory forget "commits" "style" --scope user
 captain memory init --apply
 captain memory show
 captain memory show --scope repo
@@ -537,6 +541,13 @@ shape: an explicit `--scope repo` only, a relation from the closed set
 `decided|method|convention`, a required `--because` rationale, deterministic
 sorted bytes that re-add as a no-op, and `--supersede` to change one rather than
 newest-wins. Nothing is committed for you.
+
+User preferences are stored once in the state root and lead every captain launch,
+resume and `recover`, so you never repeat them. They hold one value per subject
+and relation, their total size is capped at write time (`[memory] user_limit`), a
+project can opt out with `[memory] user_enabled = false`, and crew can neither
+read nor write them. The current request and repo rules override a preference, and
+no preference grants permission.
 
 `captain memory init` seeds that graph from the rules the project already
 states, the counterpart of `captain init` writing `.captain/settings.toml`. It
@@ -584,7 +595,7 @@ Read the affected pane before retrying or approving anything.
 | `captain interrupt NAME [--reason TEXT]` | Stop a crew's current turn; cancels a background run |
 | `captain wait NAME [--timeout SECONDS] [--json] [--ack DELIVERY_ID]` | Read and acknowledge a crew notification |
 | `captain wait --all [--timeout SECONDS] [--json]` | Read all crew's pending deliveries; acknowledge per name/ID |
-| `captain recover` | JSON recovery digest (title, reports, memory, assignments) with explicit omission counts; no acknowledgements. Launch, `--resume` and `--session` already inject it; use after compaction |
+| `captain recover` | JSON recovery digest (user preferences, title, reports, memory, assignments) with explicit omission counts; no acknowledgements. Launch, `--resume` and `--session` already inject it; use after compaction |
 | `captain model NAME cheap\|mid\|strong\|<model>` | Switch a running crew's model |
 | `captain models [--agent claude\|codex\|pi\|grok]` | List model IDs, aliases, and tier resolutions |
 | `captain tell NAME MESSAGE [--assignment ID]` | Append a follow-up to an active assignment |
@@ -611,11 +622,12 @@ Read the affected pane before retrying or approving anything.
 | `captain result discard RESULT_ID --reason TEXT` | Explicitly discard an isolated result |
 | `captain worktree list` | List retained isolated checkouts |
 | `captain worktree cleanup WORKTREE_ID` | Clean up a retained isolated checkout |
-| `captain memory add SUBJECT RELATION TARGET [--scope session\|project\|repo] [--because WHY] [--supersede]` | Save a memory relationship |
+| `captain memory add SUBJECT RELATION TARGET [--scope session\|project\|repo\|user] [--because WHY] [--supersede]` | Save a memory relationship |
+| `captain memory forget SUBJECT RELATION --scope user` | Drop a cross-project preference |
 | `captain memory init [--from PATH] [--apply]` | Seed repo memory from the project rulebook |
 | `captain memory query QUESTION` | Literal search of stored memory |
 | `captain memory show [--scope SCOPE] [--json] [--all]` | Print memory relationships |
-| `captain memory path [--scope session\|project\|repo]` | Print a scope's directory without creating it |
+| `captain memory path [--scope session\|project\|repo\|user]` | Print a scope's directory without creating it |
 | `captain memory prune [--older-than DAYS]` | Remove finished sessions' memory |
 | `captain --session ID ...` | Run any command against another shell's session |
 | `captain --version` | Print the installed version |

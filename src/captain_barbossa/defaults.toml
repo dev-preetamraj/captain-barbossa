@@ -24,6 +24,14 @@ wait_timeout = 86400
 # records a failure. Bounded so no unattended worker outlives its usefulness.
 background_timeout = 1800
 
+[memory]
+# Load `--scope user` preferences into every captain launch, resume and `recover`.
+# A project's own settings can set false to keep them out of its sessions.
+user_enabled = true
+# Characters all user preferences may take together, checked at `memory add`. They
+# lead every launch digest, which is cut at 32000, so it must stay below 16000.
+user_limit = 4000
+
 [lifetime]
 # Seconds allowed for the managed native group to start.
 startup_timeout = 5.0
