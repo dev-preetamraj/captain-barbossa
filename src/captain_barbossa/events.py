@@ -185,6 +185,24 @@ def permission_output(decision, hook="PermissionRequest"):
     return {"hookSpecificOutput": {"hookEventName": "PermissionRequest", "decision": native}}
 
 
+def environment_events():
+    """Resolve the stable Codex command against its launch-bound identity."""
+    from .sessions import read_session
+
+    current = read_session(Path(os.environ["CAPTAIN_PROJECT"]), os.environ["CAPTAIN_SESSION"])
+    name = os.environ.get("CAPTAIN_CREW")
+    if not name:
+        if os.environ.get("CAPTAIN_ROLE") == "crew":
+            raise CaptainError("Missing crew hook identity.")
+        return current.events("captain")
+    crew_id = name.lower()
+    record = current.meta["crew"][crew_id]
+    incarnation = os.environ["CAPTAIN_INCARNATION"]
+    if not incarnation or record.get("incarnation_id") != incarnation:
+        raise CaptainError("Stale crew hook identity.")
+    return current.events(f"{crew_id}-{incarnation}")
+
+
 def append_event(args=None):
     """Native hooks supply JSON on stdin (Claude) or as the last argument (Codex).
 
@@ -193,6 +211,11 @@ def append_event(args=None):
     """
     args = sys.argv[1:] if args is None else args
     events_path = args[0]
+    if events_path == "--environment":
+        try:
+            events_path = environment_events()
+        except (CaptainError, OSError, ValueError, KeyError, TypeError):
+            return
     event = json.loads(args[1]) if len(args) > 1 else json.load(sys.stdin)
     if not isinstance(event, dict):
         return
@@ -292,8 +315,20 @@ def append_event(args=None):
             print(json.dumps(output))
             sys.stdout.flush()
         return
-    # Only Claude sends hook_event_name, so Codex notify and pi are untouched. stop_hook_active
-    # means a block already fired; blocking again would loop the crew.
+    if provider == "codex" and event.get("hook_event_name") == "Stop":
+        # Codex Stop accepts decision/reason, not Claude's mail additionalContext.
+        output = {}
+        if not event.get("stop_hook_active"):
+            try:
+                reason = stop_reason(Path(events_path))
+                if reason:
+                    output = {"decision": "block", "reason": reason}
+            except (CaptainError, OSError, ValueError, KeyError, StopIteration):
+                pass
+        print(json.dumps(output))
+        sys.stdout.flush()
+        return
+    # stop_hook_active means a block already fired; blocking again would loop the crew.
     if kind not in DELIVERY_HOOKS or (kind == "Stop" and event.get("stop_hook_active")):
         return
     try:

@@ -98,12 +98,20 @@ Key facts:
 - Crew state is signalled by the native CLI's own hooks (Claude `--settings` hooks,
   Codex `notify`), which append JSON lines to `sessions/<id>/events/<crew>-<incarnation>.jsonl`.
   `wait` reads that file from the assignment's acknowledged offset; codex and pi panes
-  are also checked for a modal. Filter Codex's title-generation turn. Claude's `Stop` hook
-  also blocks on an unfinished assignment with no pending question, so the crew stays
-  active. A crew awaiting an answer may stop. Codex and pi cannot block; it fails open.
+  are also checked for a modal. Filter Codex's title-generation turn. Claude's and supported
+  Codex crew's `Stop` hooks block on an unfinished assignment with no pending question.
+  Codex Stop requires a verified CLI version (0.164.0+) and user hook trust; notify remains
+  the fallback. Codex hook commands are identical across launches, resolving identity from
+  CAPTAIN_PROJECT/SESSION/CREW/INCARNATION, so one user review per hook survives new crew.
+  Never write Codex's trust store or bypass hook trust.
+  A crew awaiting an answer may stop; recursive Stop calls fail open. Pi cannot block.
 - `assign`/`tell`/`answer` write mail (`sessions/<id>/mail/<crew>/<id>.json`). The body
   is the captain's text alone: `protocol.render` adds the identity block at read time
   and `protocol.receipt` is the one writer of `read`.
+- `crew`/`assign --verify TARGET` requires `--allow test` and stores the Makefile target
+  on the assignment. `done` runs it outside the protocol lock only when the crew gate
+  allows that target (today `make test`), else the receipt says NOT RUN with the reason;
+  it records a receipt shown by `wait` and verification never refuses `done`.
 - A provider in `models.HOOK_DELIVERED` (claude) is handed its mail by its own hook on
   `SessionStart`/`UserPromptSubmit`/`Stop` as `additionalContext`, stamped only after
   the body is flushed. Its doorbell is payload-free (`pane.WAKE_LINE`) and it is never

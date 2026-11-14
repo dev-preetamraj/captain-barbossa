@@ -18,6 +18,12 @@
   question. Read the mail with `captain inbox <name>` in that pane, finish with
   `captain done <name> --report '...'`, or raise a question with `captain ask`;
   any of the three releases it.
+- **A Codex crew will not end its turn, or never blocks at all** - Codex
+  0.164.0+ blocks the same way once the user trusts the launch hooks in
+  Codex's own review prompt (asked once; the hook command stays identical
+  across crew, so later recruits need no new review). On an older CLI, or
+  before that trust is given, Codex falls back to `notify` and cannot block;
+  release or finish it the same way as above.
 - **Codex crew blocked on approval is invisible to `captain wait <crew>
   --timeout 0`** — pane fallback starts after 6 seconds; use a non-zero
   timeout.
@@ -44,8 +50,9 @@
   or pass the matching `--session`. The one exception is `captain --session ID dismiss NAME` once
   Herdr's workspace list proves the old workspace gone: it releases that session's
   crew without a done report, closes no pane, and still refuses unlanded work. A
-  managed writer stays `cleanup_pending` until its exit receipt confirms shutdown;
-  retry `dismiss` then. An unverifiable listing keeps the refusal.
+  managed writer stays `cleanup_pending` until its exit receipt confirms shutdown,
+  or until its owner is confirmed dead with its process group gone (e.g. after a
+  Herdr restart); retry `dismiss` then. An unverifiable listing keeps the refusal.
 - **"durable memory root ... is inside the OS temp directory"** — a captain
   started before the state/temp split is still exporting one root to its
   children; restart it so project-scope memory survives temp cleanup.

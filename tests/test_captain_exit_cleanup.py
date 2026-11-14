@@ -254,6 +254,59 @@ class UnlandedWorkSurvivesExitTests(SessionCase):
         self.assertNotEqual(crew["jack"].get("status"), "dismissed")
         self.assertEqual(crew["gibbs"]["status"], "dismissed")
 
+    def test_a_failed_check_keeps_the_pane_with_the_error_as_reason(self):
+        calls = []
+        with (
+            patch.object(protocol, "unlanded", side_effect=CaptainError("Stale crew incarnation.")),
+            patch.object(
+                agents.runtime, "herdr", side_effect=lambda *a, **_: calls.append(a) or {}
+            ),
+            contextlib.redirect_stderr(io.StringIO()) as err,
+        ):
+            agents.close_session_panes(self.current.meta["id"], self.project)
+        self.assertEqual(calls, [("pane", "close", "w1:p3")])
+        self.assertIn("kept Jack's pane open", err.getvalue())
+        self.assertIn("Stale crew incarnation.", err.getvalue())
+
+    def test_inherited_git_location_vars_do_not_redirect_the_check(self):
+        other = self.project.parent / "other-repo"
+        subprocess.run(["git", "init", "-q", str(other)], check=True)
+        with patch.dict(os.environ, {"GIT_DIR": str(other / ".git"), "GIT_WORK_TREE": str(other)}):
+            reasons = protocol.unlanded(self.project, protocol.active_assignment(self.crew()))
+        self.assertIn("[uncommitted] src/a.py", "; ".join(reasons))
+
+    def test_a_globally_excluded_file_is_not_uncommitted(self):
+        home = self.project.parent / "git-home"
+        (home / "git").mkdir(parents=True)
+        (home / "git" / "ignore").write_text(".DS_Store\n")
+        (self.project / "src" / ".DS_Store").write_text("")
+        env = {"XDG_CONFIG_HOME": str(home), "HOME": str(home)}
+        with patch.dict(os.environ, env):
+            reasons = protocol.unlanded(self.project, protocol.active_assignment(self.crew()))
+        self.assertNotIn(".DS_Store", "; ".join(reasons))
+
+    def test_a_failed_commit_query_is_unverifiable_not_unreachable(self):
+        assignment = {"paths": ["src"], "report": "landed deadbeef1"}
+        failed = subprocess.CompletedProcess([], 128, "", "boom")
+        real = protocol._git
+
+        def fake(project, *args):
+            return failed if args[0] == "rev-parse" and "--verify" in args else real(project, *args)
+
+        with patch.object(protocol, "_git", side_effect=fake):
+            reasons = protocol.unlanded(self.project, assignment)
+        text = "; ".join(reasons)
+        self.assertIn("[git-failed] cannot verify commit deadbeef1", text)
+        self.assertNotIn("unreachable-commit", text)
+
+    def test_an_absent_commit_is_unreachable(self):
+        assignment = {"paths": ["src"], "report": "landed deadbeef1"}
+        reasons = protocol.unlanded(self.project, assignment)
+        self.assertIn("[unreachable-commit] deadbeef1", "; ".join(reasons))
+
+    def crew(self):
+        return Crew("jack", self.current.meta["crew"]["jack"], self.current)
+
 
 class LaunchTeardownTests(SessionCase):
     """A teardown that cannot be set up is reported, never fatal."""

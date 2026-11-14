@@ -92,7 +92,9 @@ def close_session_panes(session_id, project):
                     else:
                         reasons = protocol.unlanded(project, assignment)
                 except CaptainError as exc:
-                    reasons = [str(exc)] if crew.record.get("worktree_id") else []
+                    # A crew never assigned owns nothing; any other failure is unverified.
+                    unassigned = state["active"].get(crew.crew_id) is None
+                    reasons = [] if unassigned else [str(exc)]
                 if reasons:
                     try:
                         print(
@@ -491,7 +493,9 @@ def protocol_command(args, pane, project):
     if args.command in ("assign", "answer"):
         refuse_background(crew, args.command)
     if args.command == "assign":
-        assignment = protocol.begin(crew, project, args.task, args.owns, args.allow, args.handoff)
+        assignment = protocol.begin(
+            crew, project, args.task, args.owns, args.allow, args.handoff, verify=args.verify
+        )
         message_id = protocol.deliver(crew, args.task, assignment_id=assignment["id"], initial=True)
         response = {"assignment_id": assignment["id"], "message_id": message_id}
     elif args.command == "answer":
@@ -741,6 +745,7 @@ def begin_recruitment(crew, project, args):
             args.allow,
             args.handoff,
             assignment_id=assignment_id,
+            verify=getattr(args, "verify", None),
         )
     except (CaptainError, OSError) as exc:
         if crew.record.get("worktree_id"):
@@ -883,6 +888,8 @@ def create_crew(args, pane, project):
     paneless = getattr(args, "background", False)
     if paneless:
         background.refuse_flags(args)
+        if getattr(args, "verify", None):
+            raise CaptainError("[background-flags] --background takes no --verify.")
     current = session(project, pane, args.session)
     managed = is_durable(current.directory, project)
     if paneless and not managed:

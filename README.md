@@ -244,6 +244,10 @@ captain wait Jack --json --ack <delivery-id>
 
 New crew use explicit assignments: `wait` reports activity, questions, approval
 prompts, or completion; native idle alone does not mean the assignment is done.
+Claude Code crew, and Codex crew on 0.164.0+ once the user trusts the launch
+hooks in Codex's review prompt, block their own turn via a `Stop` hook until
+mail is read and the assignment finishes or asks a question; untrusted or older
+Codex falls back to `notify`, and pi cannot block.
 Claude PermissionRequest hooks validate assignment grants: known scoped requests
 are allowed once, ungranted actions are denied, and uncertain or destructive
 requests remain at the native user prompt. No persistent permission is granted.
@@ -265,6 +269,17 @@ owned paths with repeated `--owns PATH` (absolute paths outside the checkout are
 allowed) and grants with repeated `--allow ACTION`.
 Use `ask`/`answer` for a question, `done --report` for completion, and
 `assign --handoff` to reuse a finished assignment's crew. Dismissed crew are refused.
+
+`crew` and `assign` take `--verify TARGET`, a root Makefile target checked as
+`captain do run` checks one, and require `--allow test`. At `done` the run must earn
+the verdict the crew gate would give that crew for `make TARGET` against the current
+Makefile (today only `make test` passes); otherwise the receipt says NOT RUN with the
+reason code and nothing executes. `done` then runs it in the crew's checkout and
+records a receipt beside the report: target, exit code, duration, the last output
+lines, and the full log under the session directory. A failing run is recorded, not
+refused, so `wait` shows the real result whatever the report claims. The receipt
+leads the delivery, and report lines starting with `[verify]` are quoted so they
+cannot pose as one.
 
 `assign`, `tell`, and `answer` write a durable mail file. For Claude crew,
 every ring is the fixed wake line; native hooks deliver the body as
@@ -370,7 +385,8 @@ bounced. After a Herdr workspace disappears, `captain --session ID dismiss Jack`
 from a new workspace releases that session's crew once Herdr confirms the old
 workspace gone: no done report is needed, no pane is closed, unlanded work is
 still refused, and a managed writer stays `cleanup_pending` until its shutdown is
-confirmed. See
+confirmed, or until its owner is confirmed dead with its process group gone
+(e.g. after a Herdr restart). See
 [crew-lifecycle.md](https://github.com/dev-preetamraj/captain-barbossa/blob/main/docs/crew-lifecycle.md)
 for dismissal and shared-checkout guardrails.
 
@@ -462,7 +478,7 @@ late; the watch warns after 30 seconds and keeps checking history until it expir
 acknowledging the delivery only once it is there and never resending it.
 
 - Opt-in only; plain `captain crew` is unchanged. Placement flags, `--owns`,
-  `--handoff`, any `--allow` beyond `read`/`search`, a non-finite timeout, and the
+  `--handoff`, `--verify`, any `--allow` beyond `read`/`search`, a non-finite timeout, and the
   `claude` and `grok` agents are refused before anything is reserved.
 - Only codex and pi run in the background, because only their read-only gate holds
   against the user's own configuration: codex ignores the user's config under its
@@ -590,7 +606,7 @@ Read the affected pane before retrying or approving anything.
 | Command | Purpose |
 |---|---|
 | `captain [--agent claude\|codex\|pi\|grok] [--prompt TEXT] [--no-dashboard]` | Start a captain in this pane |
-| `captain crew [NAME] --task TEXT [--profile NAME] [--checkout auto\|shared\|worktree] [--owns PATH] [--allow ACTION] [--handoff ID] [--agent ...] [--placement pane\|tab] [--direction ...] [--split-pane ...] [--model ...]` | Recruit crew |
+| `captain crew [NAME] --task TEXT [--profile NAME] [--checkout auto\|shared\|worktree] [--owns PATH] [--allow ACTION] [--handoff ID] [--verify TARGET] [--agent ...] [--placement pane\|tab] [--direction ...] [--split-pane ...] [--model ...]` | Recruit crew |
 | `captain crew [NAME] --background --agent codex\|pi --task TEXT [--model ...]` | One read-only headless turn as a paneless crew |
 | `captain interrupt NAME [--reason TEXT]` | Stop a crew's current turn; cancels a background run |
 | `captain wait NAME [--timeout SECONDS] [--json] [--ack DELIVERY_ID]` | Read and acknowledge a crew notification |
@@ -600,7 +616,7 @@ Read the affected pane before retrying or approving anything.
 | `captain models [--agent claude\|codex\|pi\|grok]` | List model IDs, aliases, and tier resolutions |
 | `captain tell NAME MESSAGE [--assignment ID]` | Append a follow-up to an active assignment |
 | `captain inbox NAME` | Print a crew's queued mail oldest first and write the read receipt |
-| `captain assign NAME --task TEXT --handoff ID [--owns PATH] [--allow ACTION]` | Start the next assignment after acknowledged completion |
+| `captain assign NAME --task TEXT --handoff ID [--owns PATH] [--allow ACTION] [--verify TARGET]` | Start the next assignment after acknowledged completion |
 | `captain ask NAME QUESTION [--assignment ID]` | Record one pending question; ID may default for newly launched crew |
 | `captain answer NAME QUESTION_ID MESSAGE --assignment ID` | Answer that question |
 | `captain done NAME [--assignment ID] --report TEXT` | Record explicit completion; ID may default for newly launched crew |

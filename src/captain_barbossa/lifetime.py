@@ -295,6 +295,39 @@ def _foreign_credentials(entry):
         return False
 
 
+def _carried(ref):
+    """Whether any live process names ref in its argv or environment.
+
+    A sweep that cannot see every same-user process raises, so the caller retains.
+    """
+    marker = ref.encode()
+    if _LINUX:
+        for entry in _pids():
+            try:
+                if any(marker in (entry / name).read_bytes() for name in ("cmdline", "environ")):
+                    return True
+            except FileNotFoundError:
+                continue  # exited during the sweep
+            except OSError as exc:
+                try:
+                    foreign = entry.stat().st_uid != os.getuid() or _foreign_credentials(entry)
+                except FileNotFoundError:
+                    continue
+                if not foreign:
+                    raise CaptainError(f"process sweep failed: {exc}") from exc
+        return False
+    result = subprocess.run(
+        ["/bin/ps", "-E", "-ww", "-ax", "-o", "command="],
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+    if result.returncode or not result.stdout:
+        raise CaptainError("process sweep failed")
+    return marker in result.stdout
+
+
 def cwd_holders(root):
     """Live processes whose working directory is inside root; never signals them.
 
@@ -493,6 +526,12 @@ class ManagedJob:
                         if self._escape != "observed":
                             self._escape = message["evidence"]
                     else:
+                        # Covers a native that left its group, so group absence alone
+                        # must never release this claim, even once its owner is gone.
+                        with store.lock(_path(self.session, self.ref, ".lock")):
+                            record = read(self.session, self.ref)
+                            record["guard_error"] = True
+                            _write(self.session, self.ref, record)
                         raise CaptainError("Managed guard reported invalid or escaped execution.")
             if stopping and self._buffer:
                 raise CaptainError("Truncated managed guard message.")
@@ -565,6 +604,15 @@ class ManagedJob:
                 raise CaptainError("Managed guard did not become ready before its deadline.")
             if not self._ready:
                 time.sleep(_duration("poll_interval"))
+        try:
+            # Durable before GO, so a lost owner's native group stays checkable.
+            with store.lock(_path(self.session, self.ref, ".lock")):
+                record = read(self.session, self.ref)
+                record["group"] = self._guard.pid
+                _write(self.session, self.ref, record)
+        except (OSError, CaptainError) as exc:
+            self.invalidate("group-unrecorded")
+            raise CaptainError(f"Managed guard group was not recorded: {exc}") from exc
         if not detached and self._terminal[0] is not None:
             with _terminal_access():
                 if os.tcgetpgrp(0) != self._terminal[0]:
@@ -742,7 +790,8 @@ def claim(session, ref):
                 raise CaptainError("Lifetime launch belongs to a stale incarnation.")
             if record["revoked"] or record["state"] != "prepared":
                 raise CaptainError("Lifetime launch was revoked or already claimed.")
-            record["state"] = "claimed"
+            # None until start records it; only claims older than group recording lack it.
+            record.update(state="claimed", group=None)
             _write(session, ref, record)
         job = ManagedJob(session, ref)
         try:
@@ -808,9 +857,47 @@ def _observe(path):
 _NO_ESCAPE = {("subreaper", "none-surviving"), ("descendant-scan", "none-observed")}
 
 
+def _lost_owner(record, scope):
+    """A claim whose owner flock is free: its owner died without a receipt.
+
+    The native runs only in the recorded guard group, so that group's absence proves the
+    native stopped. A recycled group number reads as alive and retains. Nothing
+    observed the native's exit or descendant escapes, so only group scope can pass.
+    """
+    if record.get("guard_error"):
+        return Verdict(False, "guard-reported-error")
+    if "group" not in record and scope == "group":
+        # Claimed before groups were recorded. ponytail: a member that scrubbed its argv
+        # and environment evades this sweep; it ages out with those launches.
+        try:
+            if _carried(record["incarnation_id"]):
+                return Verdict(False, "incarnation-process-alive")
+        except (OSError, CaptainError, subprocess.SubprocessError):
+            return Verdict(False, "exit-unknown")
+        return Verdict(True, "owner-lost-no-carrier")
+    group = record.get("group")
+    if type(group) is not int or group <= 1:
+        return Verdict(False, "exit-unknown")
+    try:
+        os.killpg(group, 0)
+        return Verdict(False, "managed-group-alive")
+    except ProcessLookupError:
+        pass
+    except OSError:
+        return Verdict(False, "managed-group-alive")
+    if scope == "group":
+        return Verdict(True, "owner-lost-group-absent")
+    if scope == "native":
+        return Verdict(False, "native-exit-unreported")
+    return Verdict(False, "descendant-escape-unexcluded")
+
+
 def _shutdown_verdict(record, scope):
+    """Only called while the owner flock is observed free."""
     if record["state"] == "prepared":
         return Verdict(True, "never-launched")
+    if record["state"] == "claimed":
+        return _lost_owner(record, scope)
     if record["state"] != "exited":
         return Verdict(False, "exit-unknown")
     shutdown = record.get("shutdown")

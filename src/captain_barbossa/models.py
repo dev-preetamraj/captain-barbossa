@@ -63,6 +63,22 @@ GEMINI_ID = re.compile(r"gemini-(\d+(?:\.\d+)*)-(flash-lite|flash|pro)(-preview)
 
 
 @lru_cache(maxsize=1)
+def codex_stop_hooks():
+    """Conservative floor verified against rust-v0.164.0 hooks/src/schema.rs."""
+    try:
+        result = runtime.subprocess.run(
+            [runtime.executable("codex"), "--version"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (CaptainError, *runtime.HERDR_ERRORS):
+        return False
+    match = re.fullmatch(r"codex-cli (\d+)\.(\d+)\.(\d+)\s*", result.stdout)
+    return bool(result.returncode == 0 and match and tuple(map(int, match.groups())) >= (0, 164, 0))
+
+
+@lru_cache(maxsize=1)
 def pi_models():
     """This pi install's authenticated models, in pi's own order; pi_tiers() ranks them.
 

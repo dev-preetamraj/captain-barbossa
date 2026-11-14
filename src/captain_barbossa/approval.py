@@ -398,7 +398,9 @@ def _classify(words):
     if verb == "pytest":
         return _tests(["pytest"], args)
     if verb == "make":
-        return _Use(action="test") if args == ["test"] else _Use("unknown-command", make=args)
+        if args == ["test"]:
+            return _Use(action="test", make=args)
+        return _Use("unknown-command", make=args)
     if verb == "git":
         return _git(args)
     if verb == "gh":
@@ -765,11 +767,22 @@ def _judge(request, uses):
     return Decision(max(codes, key=lambda code: SEVERITY[REASONS[code][0]], default="granted"))
 
 
+def recipe_flag(cwd, args):
+    """The escalation code `make ARGS` earns from the recipes it reaches, or None."""
+    recipes = _make_recipes(cwd, args)
+    if recipes is None:
+        return "unparsed"
+    flagged = _flagged(recipes)
+    if flagged:
+        return flagged.code
+    return "unparsed" if "$" in recipes else None
+
+
 def _judge_one(request, cwd, use, scan=None):
     if use.make is not None:
-        flagged = _flagged(_make_recipes(cwd, use.make))
+        flagged = recipe_flag(cwd, use.make)
         if flagged:
-            return flagged.code
+            return flagged
     if use.code:
         if REASONS[use.code][0] == Verdict.DEFER:
             # Even a command with no policy may not write outside the owned paths.
@@ -822,7 +835,7 @@ def _owns(request, cwd, writes, recursive_copy=False):
 
 
 def _make_recipes(cwd, args):
-    """Recipe text of the named targets and everything they reach, or "" if unreadable."""
+    """Reachable recipe text, or None when the inspected makefile is uncertain."""
     directory, makefile, goals, rest = cwd, "Makefile", [], list(args)
     while rest:
         arg = rest.pop(0)
@@ -835,6 +848,9 @@ def _make_recipes(cwd, args):
         elif not arg.startswith("-") and "=" not in arg:
             goals.append(arg)
     try:
+        # Compare actual names: makefile aliases Makefile on case-insensitive volumes.
+        if {entry.name for entry in Path(directory).iterdir()} & {"GNUmakefile", "makefile"}:
+            return None
         text = (Path(directory) / makefile).read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
         return ""
@@ -848,7 +864,11 @@ def _make_recipes(cwd, args):
         if match:
             target = match[1].split()
             for name in target:
-                rules.setdefault(name, ([], []))[0].extend(match[2].split())
+                prerequisites, lines = rules.setdefault(name, ([], []))
+                prerequisites.extend(match[2].split())
+                remainder = line[match.end() :]
+                if remainder.startswith(";"):
+                    lines.append(remainder[1:])
             default = default or next((n for n in target if not n.startswith(".")), None)
         elif goal := re.match(r"\.DEFAULT_GOAL\s*:?=\s*(\S+)", line):
             default = goal[1]
@@ -862,6 +882,7 @@ def _make_recipes(cwd, args):
         seen.add(name)
         prerequisites, lines = rules[name]
         recipes.extend(lines)
+        recipes.extend(word for word in prerequisites if "$" in word)
         # Prerequisites and recursive $(MAKE) targets run too.
         queue += prerequisites + [word for line in lines for word in line.split() if word in rules]
     return "\n".join(recipes)

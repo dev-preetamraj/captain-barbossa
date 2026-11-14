@@ -78,12 +78,37 @@ class NativeEventLogTests(SessionCase):
                 command = tomllib.loads(next(arg for arg in args if arg.startswith("notify=")))[
                     "notify"
                 ]
+                self.meta["crew"]["jack"] = {
+                    "name": "Jack",
+                    "provider": "codex",
+                    "incarnation_id": "first",
+                }
+                store.write_json(self.directory / "session.json", self.meta)
+                crew_events = store.private_dir(self.directory / "events") / "jack-first.jsonl"
+                environment = {
+                    **os.environ,
+                    "CAPTAIN_PROJECT": str(self.project),
+                    "CAPTAIN_SESSION": self.directory.name,
+                    "CAPTAIN_ROLE": "crew",
+                    "CAPTAIN_CREW": "Jack",
+                    "CAPTAIN_INCARNATION": "first",
+                }
                 event = {"type": "agent-turn-complete", "last-assistant-message": "done\nOK"}
                 result = subprocess.run(
-                    [*command, json.dumps(event)], text=True, capture_output=True, timeout=10
+                    [*command, json.dumps(event)],
+                    text=True,
+                    capture_output=True,
+                    timeout=10,
+                    env=environment,
                 )
                 self.assertEqual(result.returncode, 0, result.stderr)
-                expected.append(event)
+                self.assertEqual(result.stdout, "")
+                records = [json.loads(line) for line in crew_events.read_text().splitlines()]
+                self.assertEqual(len(records), 1)
+                self.assertTrue(records[0].pop("timestamp"))
+                self.assertEqual(
+                    records[0], event | {"provider": "codex", "incarnation_id": "first", "seq": 1}
+                )
         records = [json.loads(line) for line in events.read_text().splitlines()]
         for record in records:
             self.assertTrue(record.pop("timestamp"))

@@ -42,6 +42,8 @@ from .sessions import (
 from .store import project_root
 from .update_check import upgrade
 
+VERIFY_HELP = "Makefile target captain runs at done; its receipt rides the report"
+
 
 class PlanParser(argparse.ArgumentParser):
     def error(self, message):
@@ -117,6 +119,7 @@ def parser(*, plan=False):
     crew.add_argument("--owns", action="append", default=[], metavar="PATH")
     crew.add_argument("--allow", action="append", default=[], choices=protocol.ACTIONS)
     crew.add_argument("--handoff", metavar="ASSIGNMENT_ID", help="explicitly reuse a retired name")
+    crew.add_argument("--verify", metavar="TARGET", help=VERIFY_HELP)
     execution = crew.add_mutually_exclusive_group()
     execution.add_argument(
         "--background",
@@ -177,6 +180,7 @@ def parser(*, plan=False):
             command.add_argument("--owns", action="append", default=[], metavar="PATH")
             command.add_argument("--allow", action="append", default=[], choices=protocol.ACTIONS)
             command.add_argument("--handoff", required=True, metavar="ASSIGNMENT_ID")
+            command.add_argument("--verify", metavar="TARGET", help=VERIFY_HELP)
         else:
             command.add_argument("--assignment", required=verb not in ("ask", "done", "check"))
             command.add_argument("--incarnation", default=os.environ.get("CAPTAIN_INCARNATION"))

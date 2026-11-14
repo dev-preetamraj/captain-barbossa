@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import subprocess
 import time
 from contextlib import contextmanager
@@ -11,6 +12,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from . import lifetime
+from .approval import Request, Verdict, decide, recipe_flag
 from .events import MAX_EVENT_BYTES, read_events
 from .models import HOOK_DELIVERED, HOOKLESS
 from .pane import DRAFT_GATE, HOLD_EXPIRY, UNREADABLE_EXPIRY, UNREADABLE_GATE
@@ -57,6 +59,9 @@ PLACEHOLDER = re.compile(
 )
 PATH_PLACEHOLDER = re.compile(r"\b(?:TODO|TBD|FIXME)\b|<[^<>]+>|\{\{[^{}]+\}\}", re.I)
 GIT_TIMEOUT = 5
+# Enough of a --verify run's output to see why it failed; the full log is on disk.
+VERIFY_LINES = 15
+VERIFY_MARK = "[verify]"
 UNSAVED_CAVEAT = "Git cannot see unsaved edits still inside the crew's native session."
 
 
@@ -191,7 +196,9 @@ def active(state, crew, assignment_id=None, incarnation=None):
     return assignment
 
 
-def begin(crew, project, task, paths=(), actions=(), handoff=None, *, assignment_id=None):
+def begin(
+    crew, project, task, paths=(), actions=(), handoff=None, *, assignment_id=None, verify=None
+):
     if not isinstance(task, str) or not task.strip():
         raise CaptainError("[empty-goal] Assignment goal must not be empty.")
     check_text(task, "task")
@@ -201,6 +208,8 @@ def begin(crew, project, task, paths=(), actions=(), handoff=None, *, assignment
     from .execution import root
 
     execution_root = root(crew.session, crew.record)
+    if verify is not None:
+        check_target(execution_root, verify)
     if crew.record.get("worktree_id") and assignment_id != crew.record.get("assignment_id"):
         raise CaptainError("[worktree-handoff] Isolated assignment identity is immutable.")
     if handoff and crew.record.get("worktree_id"):
@@ -249,6 +258,8 @@ def begin(crew, project, task, paths=(), actions=(), handoff=None, *, assignment
             )
         if "edit" in actions and not paths:
             raise CaptainError("[missing-owned-paths] Edit actions require owned paths.")
+        if verify is not None and "test" not in actions:
+            raise CaptainError("[verify-needs-test] --verify runs a target; grant --allow test.")
         for other in project_assignments(project, state, crew.session.directory):
             if other["state"] != "done" and any(
                 overlaps(a, b)
@@ -280,6 +291,7 @@ def begin(crew, project, task, paths=(), actions=(), handoff=None, *, assignment
             "pending": None,
             "last_ack": None,
             "native_status": None,
+            "verify": verify,
         }
         state["assignments"][assignment["id"]] = assignment
         state["active"][crew.crew_id] = assignment["id"]
@@ -320,6 +332,8 @@ def check_action(assignment, project, action, paths):
 
 def _git(project, *args):
     """Read-only git in the project, or None when there is no readable work tree."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env["GIT_OPTIONAL_LOCKS"] = "0"
     try:
         result = subprocess.run(
             ["git", "-C", str(project), *args],
@@ -327,7 +341,7 @@ def _git(project, *args):
             text=True,
             timeout=GIT_TIMEOUT,
             stdin=subprocess.DEVNULL,
-            env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"},
+            env=env,
         )
     except (OSError, subprocess.TimeoutExpired):
         return None
@@ -361,16 +375,21 @@ def unlanded(project, assignment):
                     next(fields, None)
         if changed:
             reasons.append(f"[uncommitted] {', '.join(sorted(changed))}")
-    missing = []
+    missing, unverified = [], []
     for token in dict.fromkeys(COMMIT_TOKEN.findall(assignment.get("report") or "")):
         found = _git(project, "rev-parse", "--verify", "--quiet", f"{token}^{{commit}}")
-        refs = (
-            _git(project, "for-each-ref", "--count=1", "--contains", found.stdout.strip())
-            if found is not None and not found.returncode
-            else None
-        )
-        if refs is None or refs.returncode or not refs.stdout.strip():
+        if found is None or found.returncode not in (0, 1):
+            unverified.append(token)
+        elif found.returncode:
             missing.append(token)
+        else:
+            refs = _git(project, "for-each-ref", "--count=1", "--contains", found.stdout.strip())
+            if refs is None or refs.returncode:
+                unverified.append(token)
+            elif not refs.stdout.strip():
+                missing.append(token)
+    if unverified:
+        reasons.append(f"[git-failed] cannot verify commit {', '.join(unverified)}")
     if missing:
         reasons.append(f"[unreachable-commit] {', '.join(missing)}")
     return reasons
@@ -382,6 +401,9 @@ def change(crew, args, project):
         # `done` is the crew's last action, so it runs before the Stop hook and a refusal
         # here pre-empts that delivery. Hand the mail over rather than naming a command.
         deliver_before_done(crew)
+        check_text(args.report, "report")
+        # Run outside the lock: a test suite must not stall every other protocol verb.
+        receipt = verified(crew, assignment_id)
     with checkpoint(crew.session.directory) as state:
         # `ask` binds to the live assignment, not the launch-bound id: it is the crew's
         # only way out, and a stale id used to block it. Everything else keeps the explicit
@@ -414,7 +436,6 @@ def change(crew, args, project):
             assignment["state"] = "asked"
             notice(assignment, "asked", f"{question['id']}: {args.question}")
             return {"assignment_id": assignment["id"], "question_id": question["id"]}
-        check_text(args.report, "report")
         if assignment["question"]:
             raise CaptainError("Answer the pending question before done.")
         if any(message["delivery"] == "prepared" for message in assignment["messages"]):
@@ -424,8 +445,113 @@ def change(crew, args, project):
             raise CaptainError("Mail arrived while this report was being filed; retry done.")
         assignment["report"] = args.report
         assignment["state"] = "done"
+        if receipt:
+            assignment["verification"] = receipt
         notice(assignment, "done", args.report)
-        return {"assignment_id": assignment["id"], "status": "done"}
+        response = {"assignment_id": assignment["id"], "status": "done"}
+        if receipt:
+            response["verification"] = receipt
+        return response
+
+
+def check_target(root, target):
+    """A target validated as `captain do run` validates one."""
+    from .do import TARGET, _targets  # do imports protocol
+
+    if not isinstance(target, str) or not TARGET.fullmatch(target):
+        raise CaptainError(f"Not a usable target name: {target}")
+    if target not in _targets(Path(root)):
+        raise CaptainError(f"The project's Makefile declares no {target} target.")
+
+
+def verified(crew, assignment_id):
+    """Run the assignment's --verify target; its failure is recorded, never a refusal.
+
+    `done` is a protocol verb the crew gate grants outright, so the run must earn the
+    verdict the gate would give this crew for the same make command, judged now, against
+    the Makefile as it stands. The recipe check also covers `make test`, which the gate
+    grants by name.
+    """
+    from .do import _capture  # do imports protocol
+
+    assignment = active_assignment(crew)
+    if (
+        not assignment
+        or assignment["id"] != assignment_id
+        or assignment["state"] == "done"
+        or not assignment.get("verify")
+    ):
+        return None
+    target = assignment["verify"]
+    root = str(Path(assignment["execution_root"]).resolve())
+    # The judged argv is the argv run; begin's target check rules out an option.
+    command = ["make", target]
+    gate = decide(
+        Request(
+            "Bash",
+            root,
+            root,
+            tuple(assignment["paths"]),
+            tuple(assignment["actions"]),
+            command=shlex.join(command),
+        )
+    )
+    refused = None if gate.verdict == Verdict.ALLOW_ONCE else gate.code
+    if lifetime.revoked(crew.session, crew.record):
+        refused = "action-not-granted"
+    refused = refused or recipe_flag(root, [target])
+    if refused:
+        return {"target": target, "exit": None, "seconds": 0, "output": None, "refused": refused}
+    log = crew.session.directory / "verify" / f"{assignment_id}.log"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    started = time.monotonic()
+    try:
+        # Leave time for process cleanup and the receipt within the crew's 10-minute call.
+        ran = _capture(root, command, timeout=540)
+        code, output = ran.returncode, ran.stdout + ran.stderr
+    except (CaptainError, OSError) as exc:
+        code, output = None, str(exc)
+    log.write_text(output, encoding="utf-8")
+    return {
+        "target": target,
+        "exit": code,
+        "seconds": round(time.monotonic() - started, 1),
+        "output": str(log),
+        "tail": output.strip().splitlines()[-VERIFY_LINES:],
+    }
+
+
+def done_summary(assignment):
+    """The crew's report, with the captain-run receipt first when one was recorded.
+
+    Report and make output are crew-controlled, so they are quoted under the receipt, and
+    a report line that leads with the marker is quoted even without one: only the
+    captain's own receipt can start a line with VERIFY_MARK.
+    """
+    report = assignment["report"]
+    receipt = assignment.get("verification")
+    if not receipt:
+        return "\n".join(
+            f"| {line}" if line.lstrip().casefold().startswith(VERIFY_MARK) else line
+            for line in report.splitlines()
+        )
+    if receipt.get("refused"):
+        outcome = f"NOT RUN [{receipt['refused']}]"
+    elif receipt["exit"] == 0:
+        outcome = "passed"
+    else:
+        outcome = f"FAILED (exit {receipt['exit']})"
+    head = f"{VERIFY_MARK} make {receipt['target']} {outcome}"
+    if receipt.get("output"):
+        head += f" in {receipt['seconds']}s; output: {receipt['output']}"
+    return "\n".join(
+        [
+            head,
+            *(f"  | {line}" for line in receipt.get("tail", [])),
+            "Crew report:",
+            *(f"  | {line}" for line in report.splitlines()),
+        ]
+    )
 
 
 def deliver_before_done(crew):
@@ -936,7 +1062,7 @@ def poll(crew, ack=None, modal=True):
                 question["due_at"] = time.time() + QUESTION_INTERVAL
         if pending:
             if pending["result"]["status"] == "done" and assignment["report"]:
-                pending["result"]["summary"] = assignment["report"]
+                pending["result"]["summary"] = done_summary(assignment)
             return pending["result"]
         paneless = crew.is_background
         if paneless:
@@ -950,7 +1076,7 @@ def poll(crew, ack=None, modal=True):
             seq += 1
             status, summary = entry["status"], entry["summary"]
             if status == "done" and assignment["report"]:
-                summary = assignment["report"]
+                summary = done_summary(assignment)
         elif assignment["state"] == "done":
             if acked:
                 return result(crew, assignment, "idle")

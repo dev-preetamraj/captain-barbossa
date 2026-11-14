@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 
 from .events import DELIVERY_HOOKS
-from .models import HOOK_DELIVERED, native_model_args
+from .models import HOOK_DELIVERED, codex_stop_hooks, native_model_args
 from .sessions import session_name
 
 # Shared memory includes other assignments; only the captain loads it automatically.
@@ -113,6 +113,7 @@ One pending question:
 After ask, stop and wait for the answer as mail; never answer your own question.
 Finish:
   {command} done {name} --report 'files changed; checks/results; remaining'
+Done runs the verify target first; use a 10-minute command timeout.
 Uses launch-bound CAPTAIN_ASSIGNMENT; replacements require --assignment ID.
 Native idle is inactivity, never completion.
 Print the same report as your final message; report blockers through ask.
@@ -174,7 +175,7 @@ not raise.
 Run, for writable or explicitly foreground crew:
   CAPTAIN crew --agent codex|claude|pi|grok --task 'assignment' --placement pane|tab
     [--direction vertical|horizontal|auto --split-pane <pane-id>|auto]
-    --model cheap|mid|strong|<model>
+    --model cheap|mid|strong|<model> [--verify TARGET] (needs --allow test)
 Keep crew prompts short: a few lines with goal, hard constraints, and expected report.
 Trust the crew; omit background paragraphs, step lists, and restated context.
 Name the files each crew owns. Give simultaneous writers disjoint files; serialize
@@ -293,11 +294,25 @@ def native_args(provider, instructions, model=None, events=None, add_dirs=()):
     else:
         flags = ["-c", "developer_instructions=" + json.dumps(instructions, ensure_ascii=False)]
         if hook:
+            # Codex hashes the literal command for trust; bind identity from launch env.
+            hook = [*hook[:-1], "--environment"]
             flags.extend(["-c", "notify=" + json.dumps(hook)])
             flags.extend(
                 [
                     "-c",
                     'hooks.SessionStart=[{hooks=[{type="command",command='
+                    + json.dumps(shlex.join(hook))
+                    + "}]}]",
+                ]
+            )
+        if crew and codex_stop_hooks():
+            # Invoke Python directly: a nested login shell can pollute the JSON stdout.
+            flags.extend(
+                [
+                    "-c",
+                    "features.hooks=true",
+                    "-c",
+                    'hooks.Stop=[{hooks=[{type="command",command='
                     + json.dumps(shlex.join(hook))
                     + "}]}]",
                 ]

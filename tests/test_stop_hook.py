@@ -178,6 +178,67 @@ class StopHookTests(SessionCase):
         self.assertEqual(json.loads(self.logged()[0])["hook_event_name"], "Notification")
         self.assertEqual(len(self.still_queued()), 1)
 
+    def codex(self):
+        self.crew.record["provider"] = "codex"
+        store.write_json(self.current.meta_path, self.current.meta)
+
+    def test_environment_hook_routes_stop_startup_and_notify_to_launch_identity(self):
+        self.codex()
+        environment = {
+            "CAPTAIN_PROJECT": str(self.project),
+            "CAPTAIN_SESSION": self.current.directory.name,
+            "CAPTAIN_ROLE": "crew",
+            "CAPTAIN_CREW": "Jack",
+            "CAPTAIN_INCARNATION": "first",
+        }
+        with patch.dict(os.environ, environment):
+            self.assertEqual(events.environment_events(), self.crew.events)
+            out = io.StringIO()
+            with (
+                contextlib.redirect_stdout(out),
+                patch("sys.stdin", io.StringIO('{"hook_event_name":"Stop"}')),
+            ):
+                cli.main(["hook", "--environment"])
+            self.assertEqual(json.loads(out.getvalue())["decision"], "block")
+            cli.main(["hook", "--environment", '{"hook_event_name":"SessionStart"}'])
+            cli.main(["hook", "--environment", '{"type":"agent-turn-complete"}'])
+            self.assertEqual(len(self.logged()), 3)
+            for invalid in (
+                {"CAPTAIN_INCARNATION": "stale"},
+                {"CAPTAIN_CREW": "unknown"},
+                {"CAPTAIN_CREW": ""},
+                {"CAPTAIN_SESSION": ""},
+            ):
+                with self.subTest(invalid=invalid), patch.dict(os.environ, invalid):
+                    cli.main(["hook", "--environment", '{"type":"agent-turn-complete"}'])
+            self.assertEqual(len(self.logged()), 3)
+            with patch.dict(os.environ, {"CAPTAIN_ROLE": "captain", "CAPTAIN_CREW": ""}):
+                self.assertEqual(events.environment_events(), self.current.events("captain"))
+
+    def test_codex_stop_blocks_without_receipting_mail_or_claude_context(self):
+        self.codex()
+        self.mail()
+        output = self.decision({"hook_event_name": "Stop", "stop_hook_active": False})
+        self.assertEqual(set(output), {"decision", "reason"})
+        self.assertEqual(output["decision"], "block")
+        self.assertIn("captain done Jack", output["reason"])
+        self.assertEqual(len(self.still_queued()), 1)
+        self.assertEqual(json.loads(self.logged()[0])["provider"], "codex")
+
+    def test_codex_stop_allows_question_done_recursion_and_unreadable_state(self):
+        self.codex()
+        self.assertEqual(self.decision({"hook_event_name": "Stop", "stop_hook_active": True}), {})
+        self.ask()
+        self.assertEqual(self.decision({"hook_event_name": "Stop"}), {})
+        (self.current.directory / "protocol.json").write_text("{bad", encoding="utf-8")
+        self.assertEqual(self.decision({"hook_event_name": "Stop"}), {})
+
+    def test_codex_finished_assignment_and_notify_do_not_block(self):
+        self.codex()
+        self.finish()
+        self.assertEqual(self.decision({"hook_event_name": "Stop"}), {})
+        self.assertEqual(self.hook({"type": "agent-turn-complete"}), "")
+
     def test_codex_notify_never_blocks(self):
         out = io.StringIO()
         with contextlib.redirect_stdout(out):

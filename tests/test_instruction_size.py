@@ -23,6 +23,13 @@ class InstructionSizeTests(unittest.TestCase):
         # Guards against the crew memory block creeping back toward the captain's.
         self.assertLessEqual(crew_words, 350)
 
+    def test_verification_guidance_is_role_scoped(self):
+        crew = instruction_prompts.agent_instructions(self.directory, "crew member Jack")
+        captain = instruction_prompts.agent_instructions(self.directory, "Captain Barbossa")
+        self.assertIn("Done runs the verify target first; use a 10-minute command timeout.", crew)
+        self.assertIn("[--verify TARGET]", captain)
+        self.assertNotIn("[--verify TARGET]", crew)
+
     def test_operation_routing_is_direct_and_authorization_scoped(self):
         text = instruction_prompts.agent_instructions(self.directory, "Captain Barbossa")
         routing = text.split("For operation requests", 1)[1].split("Read-only model work", 1)[0]

@@ -193,7 +193,9 @@ New launches export `CAPTAIN_ASSIGNMENT`, letting crew omit `--assignment` on
 must match; missing or stale context fails. Captain calls still require explicit
 IDs, and replacement assignments require their new explicit `--assignment ID`.
 Crew commands also validate `--incarnation`, defaulting to the launcher's
-`CAPTAIN_INCARNATION`. Only one question may be pending. `done` requires a report
+`CAPTAIN_INCARNATION`. Only one question may be pending. `--verify TARGET` needs
+`--allow test`; `done` runs it only when the crew gate allows that target (today
+`make test`), else the receipt says NOT RUN. `done` requires a report
 and an answered question; it receipts landed mail and serves any undelivered body.
 Reassignment requires `done`, acknowledgement of prior notifications, and the
 exact handoff ID. Stale assignment, incarnation, and question IDs are refused.
@@ -208,8 +210,10 @@ and writes the receipt. If `done` follows a landed body, it writes that receipt 
 continues; otherwise it returns the undelivered body and refuses the report. Claude's
 `Stop` hook also blocks while mail is unread, or while the active assignment is
 unfinished with no question pending; a crew waiting on an answer to `ask` may still
-stop. Codex and pi cannot block, so acting on delivered mail and finishing with
-`done` remain instructions. See
+stop. Supported Codex crew (0.164.0+, once the user trusts the launch hooks in
+Codex's review prompt) block the same way; untrusted or older Codex falls back to
+`notify`. Pi cannot block, so acting on delivered mail and finishing with `done`
+remain instructions for it. See
 [crew-mail.md](crew-mail.md) for the doorbell's gates and bounce handling.
 
 ## Waiting for crew to finish
@@ -364,9 +368,10 @@ A crew whose Herdr workspace is gone (captain or Herdr exited) can still be
 dismissed from a new workspace with `captain --session ID dismiss Jack`, but only
 when a well-formed Herdr workspace list omits the old workspace. No done report or
 acknowledgement is required and no pane is closed, since its ID may be recycled;
-unlanded work is still refused. A managed writer is released only once its exit
-receipt confirms shutdown; until then the crew stays `cleanup_pending` and
-`dismiss` can be retried. A real done report is kept; otherwise the assignment
+unlanded work is still refused. A managed writer is released once its exit
+receipt confirms shutdown, or once its owner is confirmed dead with its managed
+process group gone (e.g. after a Herdr restart); until then the crew stays
+`cleanup_pending` and `dismiss` can be retried. A real done report is kept; otherwise the assignment
 closes as "Dismissed after Herdr workspace disappeared."
 
 ## Editing guardrails

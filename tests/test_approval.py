@@ -10,7 +10,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from captain_barbossa import events, protocol, sessions, store
-from captain_barbossa.approval import REASONS, Decision, Request, Verdict, decide
+from captain_barbossa.approval import REASONS, Decision, Request, Verdict, decide, recipe_flag
 from captain_barbossa.crew import Crew, event_status
 from captain_barbossa.runtime import CaptainError
 from tests.home_isolation import SessionCase
@@ -330,6 +330,43 @@ class ApprovalTests(unittest.TestCase):
                 ],
                 make,
             )
+            # `done --verify` runs make outside the gate and reuses this same recipe check.
+            self.assertEqual(recipe_flag(root, ["ship"]), "destructive")
+            self.assertIsNone(recipe_flag(root, ["lint"]))
+
+    def test_make_inline_recipes_and_unresolved_variables_escalate(self):
+        with tempfile.TemporaryDirectory() as root:
+            for text, code in (
+                ("test: ; rm -rf build\n", "destructive"),
+                ("DELETE = rm -rf build\ntest:\n\t$(DELETE)\n", "unparsed"),
+                ("test: $(OTHER)\n\t@echo safe\n", "unparsed"),
+            ):
+                with self.subTest(text=text):
+                    Path(root, "Makefile").write_text(text)
+                    self.assertEqual(recipe_flag(root, ["test"]), code)
+                    decision = decide(
+                        Request("Bash", root, root, OWNED, ALL_ACTIONS, command="make test")
+                    )
+                    self.assertEqual(decision.code, code)
+            project = Path(__file__).resolve().parents[1]
+            self.assertIsNone(recipe_flag(project, ["test"]))
+
+    def test_make_preferred_makefiles_escalate(self):
+        with tempfile.TemporaryDirectory() as root:
+            Path(root, "Makefile").write_text("test:\n\t@echo safe\n")
+            for name in ("GNUmakefile", "makefile"):
+                with self.subTest(name=name):
+                    preferred = Path(root, name)
+                    if preferred.exists():
+                        # A case-insensitive filesystem cannot hold both spellings.
+                        preferred.unlink()
+                    preferred.write_text("test: ; rm -rf build\n")
+                    self.assertEqual(recipe_flag(root, ["test"]), "unparsed")
+                    decision = decide(
+                        Request("Bash", root, root, OWNED, ALL_ACTIONS, command="make test")
+                    )
+                    self.assertEqual(decision.code, "unparsed")
+                    preferred.unlink()
 
     def test_outward_actions_escalate(self):
         self.check(

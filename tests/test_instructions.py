@@ -585,15 +585,69 @@ class InstructionTests(SessionCase):
         pi_args = instruction_prompts.native_args("pi", "instructions")
         self.assertNotIn("--settings", pi_args)
 
+    def test_codex_stop_registration_is_crew_and_version_gated(self):
+        for supported in (False, True):
+            for name in ("captain", "jack-first"):
+                with (
+                    self.subTest(supported=supported, name=name),
+                    patch("captain_barbossa.instructions.codex_stop_hooks", return_value=supported),
+                ):
+                    path = f"/tmp/{name}.jsonl"
+                    args = instruction_prompts.native_args("codex", "instructions", events=path)
+                    stops = [arg for arg in args if arg.startswith("hooks.Stop=")]
+                    self.assertEqual(bool(stops), supported and name != "captain")
+                    self.assertTrue(any(arg.startswith("notify=") for arg in args))
+                    if stops:
+                        command = tomllib.loads(stops[0])["hooks"]["Stop"][0]["hooks"][0]
+                        self.assertEqual(
+                            shlex.split(command["command"]),
+                            [sys.executable, "-m", "captain_barbossa", "hook", "--environment"],
+                        )
+                        self.assertIn("features.hooks=true", args)
+
+    def test_codex_hook_declarations_are_identical_across_launch_identities(self):
+        with patch("captain_barbossa.instructions.codex_stop_hooks", return_value=True):
+            declarations = []
+            for path in ("/one/jack-first.jsonl", "/two/will-second.jsonl"):
+                args = instruction_prompts.native_args("codex", "instructions", events=path)
+                declarations.append([arg for arg in args if arg.startswith("hooks.")])
+            self.assertEqual(declarations[0], declarations[1])
+            captain = instruction_prompts.native_args(
+                "codex", "instructions", events="/three/captain.jsonl"
+            )
+            self.assertIn(declarations[0][0], captain)
+
+    def test_codex_stop_support_probe_fails_open(self):
+        for version, status, expected in (
+            ("codex-cli 0.164.0\n", 0, True),
+            ("codex-cli 0.163.0\n", 0, False),
+            ("codex-cli 0.164.0\n", 1, False),
+            ("unknown", 0, False),
+        ):
+            models.codex_stop_hooks.cache_clear()
+            with (
+                self.subTest(version=version, status=status),
+                patch("captain_barbossa.models.runtime.executable", return_value="codex"),
+                patch("captain_barbossa.models.runtime.subprocess.run") as run,
+            ):
+                run.return_value.stdout = version
+                run.return_value.returncode = status
+                self.assertEqual(models.codex_stop_hooks(), expected)
+        models.codex_stop_hooks.cache_clear()
+        with patch("captain_barbossa.models.runtime.executable", side_effect=OSError):
+            self.assertFalse(models.codex_stop_hooks())
+        models.codex_stop_hooks.cache_clear()
+
     def test_native_hook_runs_the_module_entry_point_not_an_internal_path(self):
         hook = [sys.executable, "-m", "captain_barbossa", "hook", "/tmp/events"]
         codex_args = instruction_prompts.native_args("codex", "instructions", events="/tmp/events")
         notify = next(arg for arg in codex_args if arg.startswith("notify="))
-        self.assertEqual(json.loads(notify.removeprefix("notify=")), hook)
+        codex_hook = [*hook[:-1], "--environment"]
+        self.assertEqual(json.loads(notify.removeprefix("notify=")), codex_hook)
         startup = next(arg for arg in codex_args if arg.startswith("hooks.SessionStart="))
         self.assertEqual(
             tomllib.loads(startup)["hooks"]["SessionStart"],
-            [{"hooks": [{"type": "command", "command": shlex.join(hook)}]}],
+            [{"hooks": [{"type": "command", "command": shlex.join(codex_hook)}]}],
         )
         self.assertNotIn("dangerously-bypass-hook-trust", " ".join(codex_args))
         claude_args = instruction_prompts.native_args(
