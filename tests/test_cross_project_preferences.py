@@ -210,6 +210,12 @@ class CrossProjectPreferenceTests(SessionCase):
         digest = recovery.digest(self.current, self.project)
         self.assertTrue(digest["preferences"].startswith("unavailable: Could not read settings"))
 
+    def test_graph_stat_permission_error_is_not_treated_as_missing(self):
+        path = memory.user_graph()
+        with patch.object(type(path), "stat", side_effect=PermissionError("denied")):
+            with self.assertRaisesRegex(PermissionError, "denied"):
+                memory.read_graph(path, "User memory")
+
     def test_inaccessible_user_storage_reports_preferences_unavailable(self):
         """A user directory without read or search permission failed launch in every project."""
         memory.add_user_memory("commits", "style", "conventional")

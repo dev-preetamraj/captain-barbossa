@@ -275,13 +275,16 @@ def _status(path):
 def _foreign_credentials(entry):
     """Linux: True when the kernel's ptrace read check denies the target's credentials.
 
-    Reading a cwd link needs the target's real/effective/saved uid and gid to equal
-    this process's fs uid/gid and its permitted capabilities to be within this effective
-    set. A same-owner /proc entry can still fail that (setgid, file capabilities). Any
-    other denial, or unreadable status, is not explained here and stays a failure.
-    FileNotFoundError propagates: the process exited.
+    Reading environ or a cwd link needs the target dumpable, its real/effective/saved uid
+    and gid equal to this process's fs uid/gid and its permitted capabilities within this
+    effective set. A same-owner /proc entry can still fail that (setgid, file capabilities,
+    or non-dumpable like systemd's sd-pam: the kernel then owns its files, not its
+    directory, as root). Any other denial, or unreadable status, is not explained here and
+    stays a failure. FileNotFoundError propagates: the process exited.
     """
     try:
+        if (entry / "status").stat().st_uid != os.getuid():
+            return True
         target = _status(entry / "status")
         own = _status(_PROC / "self" / "status")
         if set(target["Uid"][:3]) != {own["Uid"][3]}:
@@ -310,7 +313,7 @@ def _carried(ref):
                 continue  # exited during the sweep
             except OSError as exc:
                 try:
-                    foreign = entry.stat().st_uid != os.getuid() or _foreign_credentials(entry)
+                    foreign = _foreign_credentials(entry)
                 except FileNotFoundError:
                     continue
                 if not foreign:
@@ -347,9 +350,7 @@ def cwd_holders(root):
                 continue  # exited during the sweep
             except OSError as exc:
                 try:
-                    foreign = link.parent.stat().st_uid != os.getuid() or _foreign_credentials(
-                        link.parent
-                    )
+                    foreign = _foreign_credentials(link.parent)
                 except FileNotFoundError:
                     continue
                 if not foreign:

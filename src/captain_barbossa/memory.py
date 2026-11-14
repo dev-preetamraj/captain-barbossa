@@ -4,6 +4,7 @@ committed .captain/graph.json the team shares, and the user's cross-project pref
 import hashlib
 import json
 import re
+import stat
 import sys
 from pathlib import Path
 
@@ -383,7 +384,12 @@ def init_repo_memory(project, source=None, apply=False):
 
 def read_graph(path, what):
     """Read a graph as-is: missing is empty, and anything but a graph is refused."""
-    if not path.is_file():
+    # Path.is_file() suppresses permission errors on Python 3.14 and later.
+    try:
+        mode = path.stat().st_mode
+    except FileNotFoundError:
+        return empty_graph()
+    if not stat.S_ISREG(mode):
         return empty_graph()
     graph = read_json(path)
     if not (

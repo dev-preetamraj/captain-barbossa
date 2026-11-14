@@ -163,6 +163,29 @@ class LostOwnerDismissTests(SessionCase):
             verdict = execution.stop(self.session, ref)
         self.assertEqual(verdict, lifetime.Verdict(True, "owner-lost-no-carrier"))
 
+    def test_legacy_sweep_skips_only_the_environ_a_non_dumpable_process_hides(self):
+        if not lifetime._LINUX or os.getuid() == 0:
+            self.skipTest("Linux non-root /proc sweep")
+        marker = uuid.uuid4().hex
+        # Like systemd's sd-pam: same owner, environ unreadable, argv still readable.
+        hidden = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                "import ctypes,time; ctypes.CDLL(None).prctl(4, 0, 0, 0, 0); "
+                "print(flush=True); time.sleep(30)",
+                marker,
+            ],
+            stdout=subprocess.PIPE,
+        )
+        self.addCleanup(hidden.communicate)
+        self.addCleanup(hidden.kill)
+        hidden.stdout.readline()
+        with self.assertRaises(PermissionError), open(f"/proc/{hidden.pid}/environ", "rb") as f:
+            f.read()
+        self.assertTrue(lifetime._carried(marker))
+        self.assertFalse(lifetime._carried(uuid.uuid4().hex))
+
     def test_guard_error_is_recorded_before_its_owner_can_be_lost(self):
         ref = self.prepare(["native"])
         with lifetime.claim(self.session, ref) as job:
