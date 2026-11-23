@@ -160,7 +160,7 @@ class SettingsTests(unittest.TestCase):
             with (
                 contextlib.redirect_stderr(stderr),
                 patch.object(cli, "current_pane", lambda: PANE),
-                patch.object(cli, "project_root", lambda: self.project),
+                patch.object(cli, "active_project", lambda: self.project),
             ):
                 self.assertEqual(cli.main(["--session", current.meta["id"], "dashboard"]), 1)
         self.assertIn(str(path), stderr.getvalue())

@@ -169,7 +169,7 @@ class DismissCrewTests(SessionCase):
         store.write_json(self.directory / "session.json", self.meta)
         with (
             patch.object(cli, "current_pane", return_value=self.pane),
-            patch.object(cli, "project_root", return_value=self.project),
+            patch.object(cli, "active_project", return_value=self.project),
             patch.object(runtime, "herdr", return_value={}) as api,
             contextlib.redirect_stdout(io.StringIO()) as output,
         ):
@@ -273,7 +273,7 @@ class DismissCrewTests(SessionCase):
                 api.assert_not_called()
         with (
             patch.object(cli, "current_pane", return_value=self.pane),
-            patch.object(cli, "project_root", return_value=self.project),
+            patch.object(cli, "active_project", return_value=self.project),
             patch.object(runtime, "herdr", side_effect=runtime.CaptainError("boom")) as api,
             contextlib.redirect_stderr(io.StringIO()) as error,
         ):
@@ -293,7 +293,7 @@ class DismissCrewTests(SessionCase):
         store.write_json(self.directory / "session.json", self.meta)
         with (
             patch.object(cli, "current_pane", return_value=self.pane),
-            patch.object(cli, "project_root", return_value=self.project),
+            patch.object(cli, "active_project", return_value=self.project),
             patch.object(
                 runtime, "herdr", side_effect=runtime.CaptainError("pane_not_found")
             ) as api,

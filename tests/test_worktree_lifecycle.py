@@ -64,7 +64,7 @@ class WorktreeLifecycleTests(SessionCase):
         self.assertTrue(inspection.unsupported_git_metadata(Path(".git/commondir")))
         self.assertFalse(inspection.unsupported_git_metadata(Path(".git/worktrees/crew/gitdir")))
 
-    def test_project_root_accepts_only_launch_bound_registered_worktree(self):
+    def test_active_project_accepts_only_launch_bound_registered_worktree(self):
         record = worktrees.create(self.session, self.reserve()["id"])
         self.session.meta["crew"] = {"Elizabeth": {**record, "worktree_id": record["id"]}}
         store.write_json(self.session.directory / "session.json", self.session.meta)
@@ -80,16 +80,16 @@ class WorktreeLifecycleTests(SessionCase):
             "CAPTAIN_ASSIGNMENT": record["assignment_id"],
         }
         with patch.dict(os.environ, env), patch.object(Path, "cwd", return_value=nested):
-            self.assertEqual(store.project_root(), self.project)
+            self.assertEqual(execution.active_project(), self.project)
             with patch.dict(os.environ, {"CAPTAIN_ASSIGNMENT": uuid.uuid4().hex}):
                 with self.assertRaisesRegex(CaptainError, "worktree-identity"):
-                    store.project_root()
+                    execution.active_project()
             with patch.object(Path, "cwd", return_value=self.root):
                 with self.assertRaisesRegex(CaptainError, "outside the active"):
-                    store.project_root()
+                    execution.active_project()
             with patch.dict(os.environ, {"CAPTAIN_WORKTREE_ID": ""}):
                 with self.assertRaisesRegex(CaptainError, "outside the active"):
-                    store.project_root()
+                    execution.active_project()
 
     def test_pins_exact_commit_without_copying_dirty_inputs(self):
         record = self.reserve()

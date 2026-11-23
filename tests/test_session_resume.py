@@ -37,7 +37,7 @@ class SessionResumeTests(unittest.TestCase):
 
     def run_main(self, *args, tty=False):
         with (
-            patch.object(cli, "project_root", side_effect=lambda: self.project),
+            patch.object(cli, "active_project", side_effect=lambda: self.project),
             patch.object(cli, "current_pane", return_value=PANE),
             patch.object(cli, "launch") as launch,
             patch("sys.stdin.isatty", return_value=tty),

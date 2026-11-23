@@ -163,7 +163,7 @@ class InstructionTests(SessionCase):
 
             with (
                 patch.object(cli, "current_pane", return_value=self.pane),
-                patch.object(cli, "project_root", return_value=self.project),
+                patch.object(cli, "active_project", return_value=self.project),
                 patch.object(cli, "memory") as show,
             ):
                 self.assertEqual(cli.main(["memory", "show", "--scope", "session", "--json"]), 0)

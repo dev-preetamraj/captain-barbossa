@@ -21,7 +21,7 @@ from .agents import (
 )
 from .crew import Crew
 from .events import mail_context, receipt_for
-from .execution import artifact_command
+from .execution import active_project, artifact_command
 from .launch import LaunchPlanError, launch, launch_plan
 from .layout import HERDR_DIRECTIONS
 from .memory import REPO_RELATIONS, RULEBOOK_FILES, memory
@@ -37,7 +37,6 @@ from .sessions import (
     rename_session,
     session_card,
 )
-from .store import project_root
 from .update_check import upgrade
 
 VERIFY_HELP = "Makefile target captain runs at done; its receipt rides the report"
@@ -371,7 +370,7 @@ def print_session(args):
 
 def resume_target(args):
     """Choose the session to resume and chdir to its project; None after only listing."""
-    current = project_root()
+    current = active_project()
     if args.resume:
         row = find_session(current, args.resume)
     else:
@@ -458,7 +457,7 @@ def paneless_target(args):
     if args.command not in ("wait", "interrupt") or not args.session:
         return False
     try:
-        current = read_session(project_root(), args.session)
+        current = read_session(active_project(), args.session)
         if args.name:
             crews = [Crew.resolve(current, args.name)]
         else:
@@ -509,10 +508,10 @@ def main(argv=None):
             # guard_crew passes crew subcommands, so a flag riding one must not run.
             raise LaunchPlanError("invalid-arguments", "--rename and --resume take no subcommand.")
         if args.command == "launch-plan":
-            print(json.dumps(launch_plan(args, project_root())))
+            print(json.dumps(launch_plan(args, active_project())))
             return 0
         if args.rename is not None:
-            directory = read_session(project_root(), args.session).directory
+            directory = read_session(active_project(), args.session).directory
             rename_session(directory, args.rename, if_unnamed=args.if_unnamed)
             return 0
         if args.resume is not None:
@@ -530,10 +529,10 @@ def main(argv=None):
             print_session(args)
             return 0
         if args.command in ("result", "worktree"):
-            print(json.dumps(artifact_command(args, read_session(project_root(), args.session))))
+            print(json.dumps(artifact_command(args, read_session(active_project(), args.session))))
             return 0
         if args.command == "recover":
-            project = project_root()
+            project = active_project()
             current = read_session(project, args.session)
             digest = recovery.digest(current, project)
             if current.meta.get("plugins"):
@@ -549,13 +548,13 @@ def main(argv=None):
         if args.command == "update":
             return upgrade()
         if args.command == "inspect":
-            inspection.run(args, project_root())
+            inspection.run(args, active_project())
             return 0
         if args.command == "status":
-            status_crew(args, None, project_root())
+            status_crew(args, None, active_project())
             return 0
         if args.command == "memory" and args.memory_command in ("show", "path"):
-            memory(args, None, project_root())
+            memory(args, None, active_project())
             return 0
         if args.command == "models":
             print_models(args)
@@ -563,7 +562,7 @@ def main(argv=None):
         if args.command == "memory" and args.memory_command == "prune":
             config.in_range(args.older_than, "--older-than", below=float("inf"))
         pane = None if paneless_target(args) else current_pane()
-        project = project_root()
+        project = active_project()
         if pane is not None:
             pump_mail(args, pane, project)
         if args.command == "crew":

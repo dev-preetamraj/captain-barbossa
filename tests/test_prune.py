@@ -229,7 +229,7 @@ class PruneTests(SessionCase):
         out = io.StringIO()
         with (
             patch.object(cli, "current_pane", return_value=self.pane),
-            patch.object(cli, "project_root", return_value=self.project),
+            patch.object(cli, "active_project", return_value=self.project),
             patch.object(sessions, "herdr", return_value=agent_list()),
             contextlib.redirect_stdout(out),
         ):
@@ -243,7 +243,7 @@ class PruneTests(SessionCase):
         out = io.StringIO()
         with (
             patch.object(cli, "current_pane", return_value=self.pane),
-            patch.object(cli, "project_root", return_value=self.project),
+            patch.object(cli, "active_project", return_value=self.project),
             patch.object(sessions, "herdr", return_value=agent_list()),
             contextlib.redirect_stdout(out),
         ):
@@ -259,7 +259,7 @@ class PruneTests(SessionCase):
             with (
                 self.subTest(value=value),
                 patch.object(cli, "current_pane", return_value=self.pane),
-                patch.object(cli, "project_root", return_value=self.project),
+                patch.object(cli, "active_project", return_value=self.project),
                 patch.object(sessions, "herdr", return_value=agent_list()),
                 contextlib.redirect_stderr(io.StringIO()),
             ):

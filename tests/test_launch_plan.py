@@ -14,7 +14,7 @@ from tests.home_isolation import SessionCase
 class LaunchPlanTests(SessionCase):
     def setUp(self):
         super().setUp()
-        self.enterContext(patch.object(cli, "project_root", return_value=self.project))
+        self.enterContext(patch.object(cli, "active_project", return_value=self.project))
         self.enterContext(patch.object(launch, "executable", return_value="/bin/pi"))
         self.enterContext(patch.object(agents.config, "text", return_value=None))
         self.enterContext(patch.object(models, "models_for", return_value=[("provider/model", ())]))

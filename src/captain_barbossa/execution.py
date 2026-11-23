@@ -7,7 +7,7 @@ from . import lifetime, native_history, protocol, results, worktrees
 from .crew import Crew
 from .runtime import CaptainError
 from .sessions import read_session
-from .store import read_json
+from .store import project_root, read_json
 
 
 def root(session, record, *, deadline=None):
@@ -23,6 +23,17 @@ def root(session, record, *, deadline=None):
     if registered["crew_id"] != crew_id or Path(registered["project"]).resolve() != project:
         raise CaptainError("[worktree-identity] Execution root belongs to another crew or project.")
     return Path(registered["execution_root"])
+
+
+def active_project():
+    """The project root, refusing a cwd outside it unless that cwd is in this crew's
+    launch-bound, registered worktree."""
+    project = project_root()
+    if os.environ.get("CAPTAIN_PROJECT"):
+        cwd = Path.cwd().resolve()
+        if not cwd.is_relative_to(project) and not cwd.is_relative_to(current(project)):
+            raise CaptainError("This directory is outside the active captain project.")
+    return project
 
 
 def current(project, session_id=None, *, deadline=None):
