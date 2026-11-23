@@ -156,7 +156,13 @@ def prepare(crew, *, incarnation, project, background=False):
             store.private_dir(root)
             extension = path.with_suffix(".ts")
             store.write_text(
-                extension, pi_history.extension(root, path.with_suffix(".pi.jsonl"), incarnation)
+                extension,
+                pi_history.extension(
+                    root,
+                    path.with_suffix(".pi.jsonl"),
+                    incarnation,
+                    (crew.record.get("plugins") or {}).get("denials", ()),
+                ),
             )
             argv = [
                 "--session-dir",

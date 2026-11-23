@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from . import lifetime, native_history
-from .approval import Decision, Request, Verdict, decide
+from .approval import Decision, Request, Verdict, decide, denied
 from .runtime import CaptainError
 from .sessions import Session
 from .store import read_json
@@ -94,22 +94,47 @@ def stop_reason(events_path):
     return None
 
 
-def _incarnation_crew(directory, incarnation):
-    meta = read_json(directory / "session.json")
+def _incarnation_crew(directory, incarnation, meta=None):
+    meta = meta or read_json(directory / "session.json")
     crew_id = next(
         key for key, value in meta["crew"].items() if value.get("incarnation_id") == incarnation
     )
     return crew_id, meta["crew"][crew_id], Session(directory, meta)
 
 
+def plugin_denial(events_path, event, meta=None):
+    """A plugin-denied decision for a crew request whose command a plugin forbids, or None.
+
+    Session denials are fixed at captain launch and a crew's own at its recruit; both apply,
+    so relaunching the captain without plugins never frees a crew already running.
+    """
+    path = Path(events_path)
+    metadata = path.parent.parent / "session.json"
+    if path.stem == "captain" or (meta is None and not metadata.exists()):
+        return None
+    meta = meta or read_json(metadata)
+    roster = meta.get("crew", {})
+    record = roster.get(match_crew(path.stem, roster)[0]) or {}
+    denials = [
+        *(meta.get("plugins") or {}).get("denials", []),
+        *(record.get("plugins") or {}).get("denials", []),
+    ]
+    inputs = event.get("tool_input")
+    command = inputs.get("command") if isinstance(inputs, dict) else None
+    return Decision("plugin-denied") if denied(denials, command) else None
+
+
 def permission_decision(events_path, event):
     """Bind one native tool request to this incarnation's active assignment grants."""
     try:
+        meta = read_json(events_path.parent.parent / "session.json")
+        if refusal := plugin_denial(events_path, event, meta):
+            return refusal
         directory, _, assignment = crew_for_events(events_path)
         # execution imports Crew, which imports events.
         from .execution import root
 
-        _, record, current = _incarnation_crew(directory, assignment["incarnation_id"])
+        _, record, current = _incarnation_crew(directory, assignment["incarnation_id"], meta)
         if lifetime.revoked(current, record):
             return Decision("action-not-granted")
         project = str(root(current, record))
