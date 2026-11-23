@@ -106,6 +106,36 @@ class WaitTailTests(SessionCase):
             (saved["state"], saved["notices"], saved["pending"]), ("working", [], None)
         )
 
+    def test_wait_reads_visible_screen_when_busy_pi_tail_is_unavailable(self):
+        self.crew.record["provider"] = "pi"
+        store.write_json(self.current.meta_path, self.current.meta)
+        reads = []
+
+        def api(*args, **kwargs):
+            reads.append(args)
+            if "--source" not in args:
+                raise runtime.CaptainError(
+                    'Herdr: {"code":"agent_not_idle","message":"alternate-screen history"}'
+                )
+            return "Pi is working"
+
+        with (
+            patch.object(runtime, "herdr", side_effect=api),
+            contextlib.redirect_stdout(io.StringIO()) as output,
+        ):
+            agents.wait_crew(
+                self.args("wait", "Jack", "--json", "--timeout", "0"), self.pane, self.project
+            )
+
+        self.assertEqual(json.loads(output.getvalue())["status"], "timeout")
+        self.assertEqual(
+            reads,
+            [
+                ("agent", "read", "jack", "--lines", "40"),
+                ("agent", "read", "jack", "--source", "visible", "--lines", "40"),
+            ],
+        )
+
     def test_an_omitted_timeout_falls_back_to_the_crew_setting(self):
         """The parser leaves --timeout unset, so wait itself reads [crew] wait_timeout."""
         seen = []

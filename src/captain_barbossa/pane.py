@@ -201,9 +201,24 @@ class Pane:
 
         Composer checks retain chrome and blank rows to avoid mistaking a draft for a footer.
         """
-        output = runtime.herdr(
-            "agent", "read", self.agent_name, "--lines", str(TAIL_LINES), raw=True, timeout=10
-        )
+        try:
+            output = runtime.herdr(
+                "agent", "read", self.agent_name, "--lines", str(TAIL_LINES), raw=True, timeout=10
+            )
+        except CaptainError as exc:
+            if not re.search(r"\bagent_not_idle\b", str(exc)):
+                raise
+            output = runtime.herdr(
+                "agent",
+                "read",
+                self.agent_name,
+                "--source",
+                "visible",
+                "--lines",
+                str(TAIL_LINES),
+                raw=True,
+                timeout=10,
+            )
         lines = [line.strip() for line in output.splitlines() if keep_blank or line.strip()]
         if (
             not keep_status
