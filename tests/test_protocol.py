@@ -632,7 +632,7 @@ class ProtocolTests(SessionCase):
             "will", {"name": "Will", "agent": "will", "incarnation_id": "second"}, self.current
         )
         # Another execution root still writes the same absolute file.
-        self.enterContext(patch("captain_barbossa.execution.root", return_value=self.root / "wt"))
+        self.enterContext(patch("captain_barbossa.protocol.root", return_value=self.root / "wt"))
         with self.assertRaisesRegex(CaptainError, "owned-path-conflict"):
             protocol.begin(other, self.project, "task", [str(outside / "a.md")], ["edit"])
         other.record["worktree_id"] = "w"

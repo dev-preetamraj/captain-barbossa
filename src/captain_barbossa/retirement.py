@@ -2,7 +2,16 @@
 
 from pathlib import Path
 
-from . import lifetime, native_history, protocol, results, store, worktrees
+from . import (
+    background,
+    background_state,
+    lifetime,
+    native_history,
+    protocol,
+    results,
+    store,
+    worktrees,
+)
 from .crew import Crew
 from .runtime import CaptainError
 from .store import read_json
@@ -50,10 +59,8 @@ def artifact_command(args, session):
 
 def retire(crew):
     """Stop the registered incarnation; keep unresolved artifacts independently."""
-    # background imports execution for launch roots.
-    from . import background
 
-    if crew.is_background and background.alive(crew):
+    if crew.is_background and background_state.alive(crew):
         background.cancel(crew, "Crew dismissed.")
     ref = crew.record["lifetime_id"]
     verdict = stop(crew.session, ref)

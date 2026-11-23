@@ -103,7 +103,7 @@ def permission_decision(events_path, event):
         if refusal := plugin_denial(events_path, event, meta):
             return refusal
         directory, _, assignment = crew_for_events(events_path)
-        # execution imports Crew, which imports events.
+        # Local, like this module's other upper imports: each hook is a fresh process.
         from .execution import root
 
         _, record, current = _incarnation_crew(directory, assignment["incarnation_id"], meta)
@@ -232,7 +232,7 @@ def append_event(args=None):
             if captain_provider:
                 provider, managed_provider = captain_provider, True
     if incarnation:
-        # crew imports event readers from this module.
+        # Local, like this module's other upper imports: each hook is a fresh process.
         from .crew import Crew
 
         directory = Path(events_path).parent.parent

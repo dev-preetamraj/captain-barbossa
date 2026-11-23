@@ -18,6 +18,7 @@ from unittest.mock import Mock, patch
 from captain_barbossa import (
     agents,
     background,
+    background_state,
     cli,
     lifetime,
     protocol,
@@ -69,7 +70,7 @@ class BackgroundCrewTests(SessionCase):
         return Crew.resolve(sessions.read_session(self.project, self.meta["id"]), "jack")
 
     def finished(self, crew):
-        path = background.paths(background.stem(crew))["record"]
+        path = background_state.paths(background_state.stem(crew))["record"]
         deadline = time.monotonic() + 20
         while store.read_json(path)["state"] != "finished":
             if time.monotonic() > deadline:
@@ -114,7 +115,7 @@ class BackgroundCrewTests(SessionCase):
         self.assertEqual((response["status"], response["summary"]), ("done", "slow path is X"))
         self.assertEqual(protocol.wait(crew, 0, ack=response["delivery_id"])["status"], "idle")
         # The headless argv is quiet's read-only gate, with no access to session state.
-        launch = store.read_json(background.paths(background.stem(crew))["record"])
+        launch = store.read_json(background_state.paths(background_state.stem(crew))["record"])
         self.assertNotIn("argv", launch)
         self.assertNotIn("env", launch)
         argv = lifetime.read(crew.session, launch["lifetime_id"])["argv"]
@@ -133,8 +134,8 @@ class BackgroundCrewTests(SessionCase):
         prepare = background.prepare
 
         def poll_before_record(crew, *args, **kwargs):
-            self.assertFalse(background.paths(background.stem(crew))["record"].exists())
-            self.assertTrue(background.alive(crew))
+            self.assertFalse(background_state.paths(background_state.stem(crew))["record"].exists())
+            self.assertTrue(background_state.alive(crew))
             response = protocol.wait(crew, 0)
             self.assertIsNone(response["delivery_id"])
             self.assertEqual(self.assignment(crew)["state"], "working")
@@ -154,7 +155,7 @@ class BackgroundCrewTests(SessionCase):
 
         def poll_after_begin(crew, *args, **kwargs):
             assignment = begin(crew, *args, **kwargs)
-            self.assertFalse(background.paths(background.stem(crew))["record"].exists())
+            self.assertFalse(background_state.paths(background_state.stem(crew))["record"].exists())
             response = protocol.wait(crew, 0)
             self.assertIsNone(response["delivery_id"])
             self.assertEqual(self.assignment(crew)["state"], "working")
@@ -257,12 +258,12 @@ class BackgroundCrewTests(SessionCase):
         self.native(f"sleep 30 & echo $! >> {pids}; echo $$ >> {pids}; exec sleep 30")
         self.recruit()
         crew = self.crew()
-        files = background.paths(background.stem(crew))
-        self.assertTrue(background.alive(crew))
+        files = background_state.paths(background_state.stem(crew))
+        self.assertTrue(background_state.alive(crew))
         running = self.pids(pids, 2)
         os.kill(store.read_json(files["record"])["owner"], signal.SIGKILL)
         self.assertGone(running)
-        self.assertFalse(background.alive(crew))
+        self.assertFalse(background_state.alive(crew))
         # Status reads the loss without recording it; the next wait records and delivers it.
         self.assertEqual(crew.current_state().state, "failed")
         self.assertIn("[background-lost]", crew.current_state().detail)
@@ -320,7 +321,7 @@ class BackgroundCrewTests(SessionCase):
             self.recruit()
         self.assertLess(time.monotonic() - started, 5)
         crew = self.crew()
-        files = background.paths(background.stem(crew))
+        files = background_state.paths(background_state.stem(crew))
         self.assertTrue(crew.is_dismissed)
         self.assertEqual(store.read_json(files["record"])["state"], "abandoned")
         self.assertEqual(self.assignment(crew)["outcome"], "failed")
@@ -354,7 +355,7 @@ class BackgroundCrewTests(SessionCase):
             self.recruit()
         self.assertLess(time.monotonic() - started, 5)
         crew = self.crew()
-        files = background.paths(background.stem(crew))
+        files = background_state.paths(background_state.stem(crew))
         holding = self.pids(files["record"].with_name(files["record"].name + ".pid"), 1)
         self.assertTrue(crew.is_dismissed)
         self.assertEqual(store.read_json(files["record"])["state"], "abandoned")
@@ -521,7 +522,7 @@ class BackgroundCrewTests(SessionCase):
         crew = self.crew()
         self.finished(crew)
         notices = len(self.assignment(crew)["notices"])
-        background.run(background.paths(background.stem(crew))["record"])
+        background.run(background_state.paths(background_state.stem(crew))["record"])
         self.assertEqual(len(self.assignment(crew)["notices"]), notices)
 
     def test_cancel_after_lifetime_claim_before_start_frees_the_name(self):
@@ -532,7 +533,9 @@ class BackgroundCrewTests(SessionCase):
         def cancel_after_claim(session, ref):
             with claim(session, ref) as job:
                 crew = self.crew()
-                store.write_text(background.paths(background.stem(crew))["cancel"], "stop")
+                store.write_text(
+                    background_state.paths(background_state.stem(crew))["cancel"], "stop"
+                )
                 yield job
 
         with (
@@ -569,7 +572,7 @@ class BackgroundCrewTests(SessionCase):
         crew = self.crew()
         self.assertTrue(crew.is_dismissed)
         self.assertEqual(self.assignment(crew)["outcome"], "failed")
-        self.assertFalse(background.alive(crew))
+        self.assertFalse(background_state.alive(crew))
 
     def test_follow_ups_focus_and_model_switches_are_refused(self):
         self.native(f"{SAY}")
@@ -615,7 +618,7 @@ class BackgroundCrewTests(SessionCase):
         return job
 
     def execute_job(self, job):
-        files = background.paths(self.root / "managed")
+        files = background_state.paths(self.root / "managed")
         record = {
             "timeout": 10,
             "provider": "codex",

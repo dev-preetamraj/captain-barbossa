@@ -12,7 +12,7 @@ import subprocess
 import time
 from pathlib import Path
 
-from . import memory, protocol, sessions, store
+from . import execution, memory, protocol, sessions, store, worktrees
 from .runtime import CaptainError
 from .safe_read import (
     GIT,
@@ -29,6 +29,7 @@ from .safe_read import (
     validate_git_config,
     walk_files,
 )
+from .worktrees import validate_registration
 
 MAX_RESULTS = 200
 MAX_SCAN_BYTES = 8 * 1024 * 1024
@@ -136,9 +137,6 @@ def _git(root, operation, staged, deadline, text=None, registration=None):
         fail("invalid-option", "--text applies only to git grep.")
     metadata_root = root
     if registration is not None:
-        # worktrees imports bounded inspection helpers.
-        from .worktrees import validate_registration
-
         validate_registration(registration, deadline=deadline)
         if root != Path(registration["execution_root"]):
             fail("unsupported-git", "registered execution root does not match.")
@@ -238,9 +236,6 @@ def run(args, project):
         command = args.inspection_command
         registration = None
         if command != "state" and os.environ.get("CAPTAIN_WORKTREE_ID"):
-            # execution -> worktrees imports bounded inspection helpers.
-            from . import execution, worktrees
-
             current = sessions.read_session(root, getattr(args, "session", None))
             root = execution.current(root, current.meta["id"], deadline=deadline)
             registration = worktrees.read(

@@ -10,6 +10,7 @@ from uuid import uuid4
 
 from . import (
     background,
+    background_state,
     config,
     execution,
     instructions,
@@ -73,7 +74,7 @@ def wait_crew(args, pane, project):
         # A recruiter can publish the roster and die before begin reserves anything.
         # These failures have no assignment to acknowledge; never adopt a stale one.
         orphans = [
-            protocol.result(crew, None, "error", background.UNRESERVED)
+            protocol.result(crew, None, "error", background_state.UNRESERVED)
             for crew in Crew.members(current)
             if not crew.is_dismissed and unreserved(crew)
         ]
@@ -194,7 +195,7 @@ def status_crew(args, pane, project):
         current_state = (
             CrewState("cleanup_pending", "cleanup", "shutdown unconfirmed; retry dismiss")
             if crew.record.get("status") == "cleanup_pending"
-            else CrewState("failed", "process", background.UNRESERVED)
+            else CrewState("failed", "process", background_state.UNRESERVED)
             if orphan
             else crew.current_state()
         )
@@ -527,7 +528,7 @@ def launch_background(crew, current, project, provider, binary, model, args, con
     try:
         # Held before begin publishes the assignment, so a wait in between sees a live
         # recruiter rather than a lost run.
-        with background.launching(crew):
+        with background_state.launching(crew):
             assignment = begin_recruitment(crew, project, args)
             record["assignment_id"] = assignment["id"]
             write_json(current.meta_path, current.meta)
@@ -540,7 +541,7 @@ def launch_background(crew, current, project, provider, binary, model, args, con
             with protocol.checkpoint(current.directory, timeout=background.LOCK_WAIT) as state:
                 assignment = protocol.active(state, crew)
                 if assignment["state"] != "done":
-                    background.close(assignment, "failed", f"[background-start] {exc}")
+                    protocol.close_unreported(assignment, "failed", f"[background-start] {exc}")
         except CaptainError:
             pass  # nothing reserved, or the lock stayed held: the next wait reconciles it
         record.update(status="dismissed", startup_error=str(exc))

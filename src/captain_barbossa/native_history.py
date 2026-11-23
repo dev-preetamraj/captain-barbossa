@@ -10,7 +10,7 @@ import subprocess
 import uuid
 from pathlib import Path
 
-from . import pi_history, store, usage
+from . import lifetime, pi_history, store, usage
 from .history_manifest import plain, read_manifest
 from .runtime import CaptainError
 
@@ -314,8 +314,6 @@ def _grok_delete_argv(record, launch):
 
 def cleanup(crew):
     """Freeze accounting before deletion; retain incomplete manifests for retry/pruning."""
-    # lifetime imports sessions, whose pruning path imports native_history.
-    from . import lifetime
 
     if not crew.record.get("incarnation_id"):
         return {"state": "unsupported", "reason": "no-ownership-manifest"}

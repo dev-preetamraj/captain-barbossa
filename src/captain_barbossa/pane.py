@@ -4,6 +4,8 @@ import re
 import time
 
 from . import runtime
+from .instructions import captain_command
+from .models import HOOK_DELIVERED
 from .runtime import HERDR_ERRORS, CaptainError
 
 POLL_INTERVAL = 0.2
@@ -34,6 +36,7 @@ CLAUDE_PICKER_SESSION_KEY = "s"
 CLAUDE_PICKER_ROW = re.compile(
     r"^(?P<mark>❯)?\s*(?:[↓↑]\s*)?(?P<number>\d+)\.\s+(?P<label>.+?)(?:\s{2,}|$)"
 )
+
 CLAUDE_PICKER_IN_USE = "✔"
 # The confirm modal Claude Code opens when a switch re-reads the conversation: its header,
 # the "Yes, switch to <model>" option that names what is switched to, and the option that
@@ -100,8 +103,6 @@ WAKE_LINE = "mail from the captain is waiting; keep working"
 def inbox_line(crew):
     """The one line every ring ends with. Defined once: nudge types it, and nudge_block has to
     recognise it on screen to tell our own echo from a human's draft."""
-    from .instructions import captain_command
-    from .models import HOOK_DELIVERED
 
     if crew.record.get("provider") in HOOK_DELIVERED:
         return WAKE_LINE
