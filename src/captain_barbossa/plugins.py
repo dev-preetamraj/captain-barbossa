@@ -6,12 +6,14 @@ replaced pointer, so a reader sees one complete snapshot or the previous one. La
 only cached state and never waits on a plugin; docs/plugin-design.md is the wire contract.
 """
 
+import contextlib
 import fcntl
 import hashlib
 import json
 import os
 import re
 import secrets
+import select
 import shutil
 import signal
 import subprocess
@@ -24,7 +26,7 @@ from pathlib import Path, PurePosixPath
 
 from . import __version__, config
 from .runtime import CaptainError
-from .store import private_dir, read_json, state_root, write_json, write_text
+from .store import lock, private_dir, read_json, state_root, write_json, write_text
 
 NAME = re.compile(r"[a-z][a-z0-9-]{0,31}")
 CODE = re.compile(r"[a-z_]{1,64}")
@@ -94,7 +96,7 @@ def request(call, options, *, points=None, server_id=None):
 
 
 def invoke(entry, payload):
-    """Run the plugin once; the deadline kills its whole process group."""
+    """Run the plugin once; the deadline or reading past MAX_OUTPUT kills its process group."""
     command = entry["command"]
     try:
         process = subprocess.Popen(
@@ -107,21 +109,47 @@ def invoke(entry, payload):
     except OSError as exc:
         raise PluginError("plugin_exit", f"cannot run {command}: {exc}") from exc
     try:
-        output, _ = process.communicate(
-            json.dumps(payload).encode(), timeout=DEADLINES[payload["call"]]
-        )
-    except subprocess.TimeoutExpired as exc:
-        os.killpg(process.pid, signal.SIGKILL)
-        process.communicate()
-        raise PluginError("timeout", f"{payload['call']} took longer than allowed") from exc
+        output = _read_bounded(process, payload, time.monotonic() + DEADLINES[payload["call"]])
+    except BaseException:
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(process.pid, signal.SIGKILL)
+        process.stdout.close()
+        process.wait()
+        raise
     if process.returncode:
         raise PluginError("plugin_exit", f"{payload['call']} exited {process.returncode}")
-    if len(output) > MAX_OUTPUT:
-        raise PluginError("bad_response", f"response exceeds {MAX_OUTPUT} bytes")
     try:
         return json.loads(output)
     except ValueError as exc:
         raise PluginError("bad_response", "response is not JSON") from exc
+
+
+def _read_bounded(process, payload, deadline):
+    """Stdout until EOF and exit, never holding more than MAX_OUTPUT bytes."""
+    with contextlib.suppress(BrokenPipeError):
+        process.stdin.write(json.dumps(payload).encode())
+    with contextlib.suppress(BrokenPipeError):
+        process.stdin.close()
+    chunks, size, stream = [], 0, process.stdout.fileno()
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise PluginError("timeout", f"{payload['call']} took longer than allowed")
+        if not select.select([stream], [], [], remaining)[0]:
+            continue
+        chunk = os.read(stream, 65536)
+        if not chunk:
+            break
+        size += len(chunk)
+        if size > MAX_OUTPUT:
+            raise PluginError("bad_response", f"response exceeds {MAX_OUTPUT} bytes")
+        chunks.append(chunk)
+    try:
+        process.wait(timeout=max(deadline - time.monotonic(), 0.001))
+    except subprocess.TimeoutExpired as exc:
+        raise PluginError("timeout", f"{payload['call']} took longer than allowed") from exc
+    process.stdout.close()
+    return b"".join(chunks)
 
 
 def checked(response):
@@ -219,6 +247,9 @@ def validate(name, reply):
         roles = item.get("roles") if isinstance(item, dict) else None
         if (
             path in seen
+            or path == "manifest.json"
+            or any(ord(char) < 32 or char == "\x7f" for char in path)
+            or any(other.startswith(path + "/") or path.startswith(other + "/") for other in seen)
             or path.startswith("/")
             or any(part in (".", "..") for part in parts)
             or path != "/".join(parts)
@@ -319,6 +350,11 @@ def collect(root):
     """
     for leftover in root.glob(".tmp-*"):
         shutil.rmtree(leftover, ignore_errors=True)
+    with lock(root / "refs.lock"):
+        _collect_generations(root)
+
+
+def _collect_generations(root):
     live = {(_read(root / "current.json") or {}).get("generation")}
     refs = root / "refs"
     for ref in refs.iterdir() if refs.is_dir() else ():
@@ -375,17 +411,18 @@ def _sync(name, entry, root):
 def pin(name, generation, session_directory):
     """Hold a generation for a session's crew; returns the one actually pinned.
 
-    A collection that ran between reading the pointer and writing the ref may already have
-    taken the generation, so the ref is checked after it exists and the reader retries.
+    The ref is written and checked under the refs lock collection holds, so collection either
+    sees the ref or has already taken the generation, and then the reader retries.
     """
     root = directory(name)
     key = hashlib.sha256(os.fsencode(str(session_directory))).hexdigest()[:16]
     for _ in range(3):
         ref = private_dir(root / "refs") / f"{generation}@{key}"
-        write_text(ref, str(session_directory))
-        if (root / "generations" / generation).is_dir():
-            return generation
-        ref.unlink(missing_ok=True)
+        with lock(root / "refs.lock"):
+            write_text(ref, str(session_directory))
+            if (root / "generations" / generation).is_dir():
+                return generation
+            ref.unlink(missing_ok=True)
         generation = (pointer(name) or {}).get("generation")
         if generation is None:
             return None

@@ -1,6 +1,8 @@
 """Plugin mirror: wholesale generations, kept on failure, pinned by sessions, collected."""
 
 import json
+import stat
+import threading
 
 from captain_barbossa import plugins, store
 from tests.home_isolation import SessionCase
@@ -114,6 +116,50 @@ class MirrorPublicationTests(SessionCase):
         gone = plugins.sync("example")
         latest = plugins.sync("example")
         self.assertEqual(plugins.pin("example", gone, session), latest)
+
+    def test_pin_waits_while_collection_holds_the_refs(self):
+        session = self.root / "session-c"
+        session.mkdir()
+        generation = plugins.sync("example")
+        result = []
+        with store.lock(self.mirror / "refs.lock"):
+            worker = threading.Thread(
+                target=lambda: result.append(plugins.pin("example", generation, session))
+            )
+            worker.start()
+            worker.join(0.3)
+            self.assertTrue(worker.is_alive())
+        worker.join(5)
+        self.assertEqual(result, [generation])
+
+    def test_paths_that_cannot_publish_are_refused_before_writing(self):
+        for files in (
+            [{"path": "a\x00b", "roles": ["crew"], "text": "x"}],
+            [{"path": "a\x1bb", "roles": ["crew"], "text": "x"}],
+            [{"path": "manifest.json", "roles": ["crew"], "text": "x"}],
+            [
+                {"path": "a", "roles": ["crew"], "text": "x"},
+                {"path": "a/b", "roles": ["crew"], "text": "x"},
+            ],
+            [
+                {"path": "a/b", "roles": ["crew"], "text": "x"},
+                {"path": "a", "roles": ["crew"], "text": "x"},
+            ],
+        ):
+            with self.subTest(files=files):
+                self.plugin.script(sync={**snapshot(), "files": files})
+                with self.assertRaises(plugins.PluginError) as caught:
+                    plugins.sync("example")
+                self.assertEqual(caught.exception.code, "invalid_manifest")
+                self.assertEqual(plugins.status("example")["error"], "invalid_manifest")
+
+    def test_output_past_the_cap_is_cut_while_reading(self):
+        script = self.root / "flood"
+        script.write_text("#!/bin/sh\ncat >/dev/null\nexec yes xxxxxxxxxxxxxxxxxxxxxxxxxxxx\n")
+        script.chmod(script.stat().st_mode | stat.S_IXUSR)
+        with self.assertRaises(plugins.PluginError) as caught:
+            plugins.invoke({"command": str(script)}, plugins.request("hello", {}))
+        self.assertEqual(caught.exception.code, "bad_response")
 
     def test_an_empty_generation_is_current_and_injects_nothing(self):
         plugins.sync("example")
