@@ -12,7 +12,7 @@ import urllib.request
 from datetime import datetime
 from pathlib import Path
 
-from . import config, models, store
+from . import config, history_manifest, models, store
 from .runtime import CaptainError
 
 # Prices change without a new model shipping, so they are fetched rather than tabulated
@@ -60,9 +60,6 @@ _PRICE_KEYS = (
 
 def usage_for_events(events_path, *, cached_only=True):
     """Read frozen incarnation accounting first, otherwise the native session usage."""
-    # native_history imports usage to freeze accounting.
-    from . import native_history
-
     saved = Path(events_path).with_suffix(".usage.json")
     if os.path.lexists(saved):
         try:
@@ -75,7 +72,7 @@ def usage_for_events(events_path, *, cached_only=True):
     if not os.path.lexists(manifest):
         return _live_usage(events_path, cached_only=cached_only)
     try:
-        owned = native_history.read_manifest(manifest)
+        owned = history_manifest.read_manifest(manifest)
         identities = journal(manifest.with_suffix(".pi.jsonl")) if owned["provider"] == "pi" else []
     except CaptainError:
         return None

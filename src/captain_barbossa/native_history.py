@@ -11,10 +11,10 @@ import uuid
 from pathlib import Path
 
 from . import pi_history, store, usage
+from .history_manifest import plain, read_manifest
 from .runtime import CaptainError
 
 _KEY = re.compile(r"[A-Za-z0-9_-]+")
-_MANIFEST_BYTES = 1 << 20
 
 
 def _grok_context():
@@ -42,69 +42,23 @@ def _path(crew, incarnation=None):
     )
 
 
-def _plain(path):
-    path = Path(path).absolute()
-    if ".." in path.parts:
-        raise CaptainError("Native history path contains parent traversal.")
-    for part in (*reversed(path.parents), path):
-        if part.is_symlink():
-            raise CaptainError(f"Native history path is a symlink: {part}")
-    return path
-
-
 def _anchor(path):
-    path = _plain(path)
+    path = plain(path)
     while not path.exists():
         path = path.parent
     info = path.stat()
     return {"path": str(path), "device": info.st_dev, "inode": info.st_ino}
 
 
-def _strings(value):
-    return isinstance(value, list) and all(isinstance(item, str) for item in value)
-
-
-def read_manifest(path):
-    """Bounded regular-file read; any unexpected shape is unusable evidence."""
-    record = store.read_json(_plain(path), max_bytes=_MANIFEST_BYTES)
-    keys = ("crew_id", "incarnation_id", "provider", "project", "execution_root")
-    keys += ("native_root", "native_alias", "events", "state", "reason")
-    if not (
-        isinstance(record, dict)
-        and all(isinstance(record.get(key), str) for key in keys)
-        and all(
-            isinstance(record.get(key), bool) for key in ("background", "ambiguous", "observed")
-        )
-        and all(_strings(record.get(key)) for key in ("session_ids", "transcripts", "deleted_ids"))
-        and _strings(record.get("usage_transcripts", []))
-        and all(
-            record.get(key) is None or isinstance(record[key], str)
-            for key in ("worktree_id", "binary", "history_policy", "grok_context")
-        )
-        and isinstance(record.get("grok_environment", {}), dict)
-        and all(isinstance(value, str) for value in record.get("grok_environment", {}).values())
-        and isinstance(record.get("anchors"), list)
-        and all(
-            isinstance(anchor, dict)
-            and isinstance(anchor.get("path"), str)
-            and type(anchor.get("device")) is int
-            and type(anchor.get("inode")) is int
-            for anchor in record["anchors"]
-        )
-    ):
-        raise CaptainError(f"Native history manifest is malformed: {path}")
-    return record
-
-
 def _validate(record):
     if Path(record["native_alias"]).resolve() != Path(record["native_root"]):
         raise CaptainError("Native history root alias was replaced.")
     for anchor in record["anchors"]:
-        path = _plain(anchor["path"])
+        path = plain(anchor["path"])
         info = path.stat()
         if (info.st_dev, info.st_ino) != (anchor["device"], anchor["inode"]):
             raise CaptainError("Native history root was replaced.")
-    _plain(record["native_root"])
+    plain(record["native_root"])
 
 
 def prepare(crew, *, incarnation, project, background=False):
@@ -114,7 +68,7 @@ def prepare(crew, *, incarnation, project, background=False):
     if crew.record.get("incarnation_id") != incarnation:
         raise CaptainError("Native history incarnation differs from the roster.")
     path = _path(crew, incarnation)
-    _plain(path)
+    plain(path)
     store.private_dir(path.parent)
     with store.lock(path.parent / "history.lock"):
         if path.exists():
@@ -133,7 +87,7 @@ def prepare(crew, *, incarnation, project, background=False):
         alias = root.expanduser()
         # Claude and grok receive the caller's string, so a relative one is where they launch.
         alias = launch / alias if provider in {"claude", "grok"} else alias.absolute()
-        root = _plain(alias if provider == "pi" else alias.resolve())
+        root = plain(alias if provider == "pi" else alias.resolve())
         argv, env = [], {}
         if provider in {"claude", "grok"}:
             argv = ["--session-id", session_id]
@@ -265,7 +219,7 @@ def _transcript(record, transcript, session_id):
     alias = Path(record["native_alias"])
     if transcript.is_relative_to(alias):
         transcript = root / transcript.relative_to(alias)
-    transcript = _plain(transcript)
+    transcript = plain(transcript)
     valid = transcript.is_relative_to(root) and transcript.suffix == ".jsonl"
     if provider == "claude":
         valid = (
@@ -306,7 +260,7 @@ def observe(crew, event):
 
 def _unlink(path):
     """Open every directory without following links, then unlink only a regular file."""
-    path = _plain(path)
+    path = plain(path)
     fd = os.open(path.anchor, os.O_RDONLY | os.O_DIRECTORY)
     try:
         for part in path.parts[1:-1]:
@@ -434,8 +388,8 @@ def cleanup(crew):
                 return record
             counted = record["transcripts"] + record.get("usage_transcripts", [])
             for transcript in counted:
-                _plain(transcript)
-            _plain(Path(record["events"]).with_suffix(".usage.json"))
+                plain(transcript)
+            plain(Path(record["events"]).with_suffix(".usage.json"))
             saved_usage = usage.freeze(
                 record["events"],
                 record["incarnation_id"],
@@ -521,7 +475,7 @@ def cleanup(crew):
                         "unverified": ["other native session sidecars and index entries"],
                     }
                 if record["provider"] == "pi":
-                    remaining = list(_plain(record["native_root"]).iterdir())
+                    remaining = list(plain(record["native_root"]).iterdir())
                     record.update(
                         state="partial" if remaining else "complete",
                         reason="unobserved-files" if remaining else "exclusive-sessions-removed",
@@ -542,7 +496,7 @@ def pending(session_directory):
     """Include every retained incarnation, not only the current roster."""
     directory = Path(session_directory).resolve() / "native-history"
     try:
-        _plain(directory)
+        plain(directory)
         return any(read_manifest(path)["state"] != "complete" for path in directory.glob("*.json"))
     except (CaptainError, OSError, TypeError):
         return True

@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from . import lifetime, native_history, protocol, results, worktrees
+from . import lifetime, native_history, protocol, results, store, worktrees
 from .crew import Crew
 from .runtime import CaptainError
 from .store import read_json
@@ -27,7 +27,7 @@ def artifact_command(args, session):
                 f"[cleanup-pending] {verdict.reason}; native history: {history['state']}"
             )
         _no_cwd_holders(session, args.worktree_id)
-        return worktrees.dispose(session, args.worktree_id)
+        return dispose(session, args.worktree_id)
     if args.result_command == "collect":
         record = worktrees.read(session, args.worktree_id)
         assignment = read_json(session.directory / "protocol.json")["assignments"][
@@ -76,7 +76,7 @@ def retire(crew):
                 state["result_id"] = manifest["id"]
                 if verdict.ok:
                     _no_cwd_holders(crew.session, crew.record["worktree_id"])
-                    state["worktree"] = worktrees.dispose(crew.session, crew.record["worktree_id"])[
+                    state["worktree"] = dispose(crew.session, crew.record["worktree_id"])[
                         "cleanup_state"
                     ]
                 else:
@@ -124,3 +124,28 @@ def stop(session, ref):
         worktree=record["worktree_id"],
         scope="worktree" if record["worktree_id"] else "group",
     )
+
+
+def dispose(session, worktree_id):
+    with store.lock(session.directory / "worktrees.lock"):
+        record = worktrees.read(session, worktree_id, validate=False)
+        if record["phase"] == "removed":
+            return record
+        if not worktrees.stopped(session, record):
+            raise CaptainError("Cleanup requires verified managed-writer termination.")
+        root = Path(record["execution_root"])
+        admin = Path(record["worktree_git_dir"] or record["common_git_dir"])
+        if record["phase"] == "removing" and not root.exists() and not admin.exists():
+            record.update(phase="removed", cleanup_state="removed")
+            worktrees.durable(worktrees.record_path(session, worktree_id), record)
+            return record
+        worktrees.validate_registration(record)
+        results.cleanup_ready(session, record)
+        record.update(phase="removing", cleanup_state="removing")
+        worktrees.durable(worktrees.record_path(session, worktree_id), record)
+        worktrees.git(record["project"], "worktree", "remove", "--force", root)
+        if root.exists() or admin.exists():
+            raise CaptainError("Worktree removal incomplete; journal retained.")
+        record.update(phase="removed", cleanup_state="removed")
+        worktrees.durable(worktrees.record_path(session, worktree_id), record)
+        return record

@@ -15,7 +15,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from captain_barbossa import cli, do, models
+from captain_barbossa import cli, do, models, processes
 from captain_barbossa.runtime import CaptainError
 from tests import home_isolation  # noqa: F401
 
@@ -476,10 +476,10 @@ time.sleep(30)
 """
         try:
             with (
-                mock.patch.object(do, "GROUP_TERMINATE_TIMEOUT", 0.1),
+                mock.patch.object(processes, "GROUP_TERMINATE_TIMEOUT", 0.1),
                 self.assertRaisesRegex(CaptainError, "exceeded"),
             ):
-                do._capture(
+                processes.capture(
                     self.project,
                     [sys.executable, "-c", parent, child, str(pid_path), str(term_path)],
                     timeout=0.2,
@@ -527,10 +527,10 @@ time.sleep(30)
         started = time.monotonic()
         try:
             with (
-                mock.patch.object(do, "GROUP_TERMINATE_TIMEOUT", 0.1),
+                mock.patch.object(processes, "GROUP_TERMINATE_TIMEOUT", 0.1),
                 self.assertRaisesRegex(CaptainError, "exceeded"),
             ):
-                do._capture(
+                processes.capture(
                     self.project,
                     [sys.executable, "-c", parent, child, str(pid_path)],
                     timeout=0.2,
@@ -588,7 +588,7 @@ time.sleep(30)
     def test_interrupted_run_is_recorded_before_propagating(self):
         (self.project / "Makefile").write_text("test:\n\t@echo test\n", encoding="utf-8")
         with (
-            mock.patch.object(do, "_capture", side_effect=KeyboardInterrupt),
+            mock.patch.object(do, "capture", side_effect=KeyboardInterrupt),
             self.assertRaises(KeyboardInterrupt),
         ):
             self.run_do("run", target="test")
@@ -600,11 +600,11 @@ time.sleep(30)
         process = mock.Mock()
         process.communicate.side_effect = KeyboardInterrupt
         with (
-            mock.patch.object(do.subprocess, "Popen", return_value=process) as popen,
-            mock.patch.object(do, "_terminate_process_group") as terminate,
+            mock.patch.object(processes.subprocess, "Popen", return_value=process) as popen,
+            mock.patch.object(processes, "terminate_process_group") as terminate,
             self.assertRaises(KeyboardInterrupt),
         ):
-            do._capture(self.project, ["command"])
+            processes.capture(self.project, ["command"])
         self.assertTrue(popen.call_args.kwargs["start_new_session"])
         terminate.assert_called_once_with(process)
 

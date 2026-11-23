@@ -286,7 +286,7 @@ class LaunchPathMatrixTests(SessionCase):
         with (
             patch.object(do, "executable", return_value=f"/bin/{provider}"),
             patch.object(do, "resolve_model", return_value="model"),
-            patch.object(do, "_capture", side_effect=capture),
+            patch.object(do, "capture", side_effect=capture),
             self.assertRaises(store.CaptainError) as caught,
         ):
             do._quiet(args, self.project, self.current.directory)
@@ -314,7 +314,7 @@ class LaunchPathMatrixTests(SessionCase):
         args = cli.parser().parse_args(["quiet", "--task", "look"])
         with (
             patch.object(do, "executable", return_value="/bin/codex"),
-            patch.object(do, "_capture", side_effect=store.CaptainError("captured")),
+            patch.object(do, "capture", side_effect=store.CaptainError("captured")),
             self.assertRaises(store.CaptainError) as caught,
         ):
             do._quiet(args, self.project, self.current.directory)

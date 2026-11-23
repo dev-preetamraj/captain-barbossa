@@ -16,6 +16,7 @@ from .approval import Request, Verdict, decide, recipe_flag
 from .eventlog import MAX_EVENT_BYTES, read_events
 from .models import HOOK_DELIVERED, HOOKLESS
 from .pane import DRAFT_GATE, HOLD_EXPIRY, UNREADABLE_EXPIRY, UNREADABLE_GATE
+from .processes import TARGET, capture, makefile_targets
 from .runtime import HERDR_ERRORS, CaptainError, check_text, inside_project
 from .sessions import session_directories
 from .store import lock, read_json, state_root, state_storage, temp_root, write_json
@@ -456,11 +457,10 @@ def change(crew, args, project):
 
 def check_target(root, target):
     """A target validated as `captain do run` validates one."""
-    from .do import TARGET, _targets  # do imports protocol
 
     if not isinstance(target, str) or not TARGET.fullmatch(target):
         raise CaptainError(f"Not a usable target name: {target}")
-    if target not in _targets(Path(root)):
+    if target not in makefile_targets(Path(root)):
         raise CaptainError(f"The project's Makefile declares no {target} target.")
 
 
@@ -472,7 +472,6 @@ def verified(crew, assignment_id):
     the Makefile as it stands. The recipe check also covers `make test`, which the gate
     grants by name.
     """
-    from .do import _capture  # do imports protocol
 
     assignment = active_assignment(crew)
     if (
@@ -507,7 +506,7 @@ def verified(crew, assignment_id):
     started = time.monotonic()
     try:
         # Leave time for process cleanup and the receipt within the crew's 10-minute call.
-        ran = _capture(root, command, timeout=540)
+        ran = capture(root, command, timeout=540)
         code, output = ran.returncode, ran.stdout + ran.stderr
     except (CaptainError, OSError) as exc:
         code, output = None, str(exc)

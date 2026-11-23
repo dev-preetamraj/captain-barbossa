@@ -193,7 +193,7 @@ class WorktreeLifecycleTests(SessionCase):
         self.assertTrue(manifest["unresolved"])
         results.discard(self.session, manifest["id"], "discard requested")
         with self.assertRaises(CaptainError):
-            worktrees.dispose(self.session, record["id"])
+            retirement.dispose(self.session, record["id"])
 
     def test_rejects_stale_record_and_forged_reciprocal_pointer(self):
         record = worktrees.create(self.session, self.reserve()["id"])
@@ -210,14 +210,14 @@ class WorktreeLifecycleTests(SessionCase):
         record = worktrees.create(self.session, self.reserve()["id"])
         results.collect(self.session, record["id"], ["."])
         with self.assertRaises(CaptainError):
-            worktrees.dispose(self.session, record["id"])
+            retirement.dispose(self.session, record["id"])
         self.assertTrue(Path(record["execution_root"]).exists())
 
     def test_empty_final_result_can_be_removed_and_journal_is_retained(self):
         check = self.verified_lifetime()
         record = worktrees.create(self.session, self.reserve()["id"])
         manifest = results.collect(self.session, record["id"], ["."])
-        removed = worktrees.dispose(self.session, record["id"])
+        removed = retirement.dispose(self.session, record["id"])
         self.assertEqual(removed["phase"], "removed")
         self.assertFalse(Path(record["execution_root"]).exists())
         self.assertEqual(results.read(self.session, manifest["id"]), manifest)
@@ -245,7 +245,7 @@ class WorktreeLifecycleTests(SessionCase):
         self.assertFalse(manifest["provisional"])
         check.return_value = SimpleNamespace(ok=False)
         with self.assertRaises(CaptainError):
-            worktrees.dispose(self.session, record["id"])
+            retirement.dispose(self.session, record["id"])
         self.assertTrue(Path(record["execution_root"]).exists())
 
     def test_post_collection_edit_blocks_cleanup_even_after_discard(self):
@@ -255,7 +255,7 @@ class WorktreeLifecycleTests(SessionCase):
         results.discard(self.session, manifest["id"], "user explicitly discarded")
         (Path(record["execution_root"]) / "new").write_text("later")
         with self.assertRaises(CaptainError):
-            worktrees.dispose(self.session, record["id"])
+            retirement.dispose(self.session, record["id"])
 
     def test_interrupted_remove_is_reconciled_without_repeating_deletion(self):
         self.verified_lifetime()
@@ -270,11 +270,11 @@ class WorktreeLifecycleTests(SessionCase):
 
         with patch.object(worktrees, "durable", side_effect=interrupt):
             with self.assertRaises(OSError):
-                worktrees.dispose(self.session, record["id"])
+                retirement.dispose(self.session, record["id"])
         self.assertEqual(
             worktrees.read(self.session, record["id"], validate=False)["phase"], "removing"
         )
-        self.assertEqual(worktrees.dispose(self.session, record["id"])["phase"], "removed")
+        self.assertEqual(retirement.dispose(self.session, record["id"])["phase"], "removed")
 
     def test_dismissal_keeps_settled_final_result_and_cleans_up(self):
         self.verified_lifetime()

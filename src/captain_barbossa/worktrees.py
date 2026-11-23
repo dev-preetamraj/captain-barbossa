@@ -223,31 +223,3 @@ def stopped(session, record):
         root=record["execution_root"],
         worktree=record["id"],
     ).ok
-
-
-def dispose(session, worktree_id):
-    # results imports worktrees for identity and Git operations.
-    from . import results
-
-    with store.lock(session.directory / "worktrees.lock"):
-        record = read(session, worktree_id, validate=False)
-        if record["phase"] == "removed":
-            return record
-        if not stopped(session, record):
-            raise CaptainError("Cleanup requires verified managed-writer termination.")
-        root = Path(record["execution_root"])
-        admin = Path(record["worktree_git_dir"] or record["common_git_dir"])
-        if record["phase"] == "removing" and not root.exists() and not admin.exists():
-            record.update(phase="removed", cleanup_state="removed")
-            durable(record_path(session, worktree_id), record)
-            return record
-        validate_registration(record)
-        results.cleanup_ready(session, record)
-        record.update(phase="removing", cleanup_state="removing")
-        durable(record_path(session, worktree_id), record)
-        git(record["project"], "worktree", "remove", "--force", root)
-        if root.exists() or admin.exists():
-            raise CaptainError("Worktree removal incomplete; journal retained.")
-        record.update(phase="removed", cleanup_state="removed")
-        durable(record_path(session, worktree_id), record)
-        return record

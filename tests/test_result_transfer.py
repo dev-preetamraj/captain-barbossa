@@ -9,7 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from captain_barbossa import results, sessions, store, worktrees
+from captain_barbossa import results, retirement, sessions, store, worktrees
 from captain_barbossa.runtime import CaptainError
 from tests.home_isolation import SessionCase
 
@@ -74,7 +74,7 @@ class ResultTransferTests(SessionCase):
         with patch("captain_barbossa.lifetime.check", return_value=SimpleNamespace(ok=True)):
             manifest = self.collect(["file"])
             self.assertEqual(results.apply(self.session, manifest["id"])["state"], "applied")
-            worktrees.dispose(self.session, self.record["id"])
+            retirement.dispose(self.session, self.record["id"])
         self.assertFalse(self.checkout.exists())
         self.assertEqual((self.project / "file/new").read_text(), "child\n")
         self.assertEqual(results.read(self.session, manifest["id"]), manifest)
@@ -232,7 +232,7 @@ class ResultTransferTests(SessionCase):
         with patch("captain_barbossa.lifetime.check", return_value=SimpleNamespace(ok=True)):
             manifest = self.collect()
             self.assertEqual(results.apply(self.session, manifest["id"])["state"], "applied")
-            worktrees.dispose(self.session, self.record["id"])
+            retirement.dispose(self.session, self.record["id"])
         self.assertFalse(self.checkout.exists())
         self.assertEqual((self.project / "file").read_text(), "crew")
         self.assertEqual(results.read(self.session, manifest["id"]), manifest)

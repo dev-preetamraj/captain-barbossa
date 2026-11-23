@@ -11,27 +11,21 @@ watch-your-crew rule only by being reviewable afterwards.
 import json
 import os
 import re
-import signal
-import subprocess
 import sys
 import time
 from pathlib import Path
 
 from . import config, inspection, protocol
 from .models import PROVIDERS, headless_argv, headless_report, resolve_model
+from .processes import TARGET, TIMEOUT, capture, makefile_targets
 from .runtime import CaptainError, check_text, executable, inside_project
 from .store import lock, read_json, state_storage
 
-# A declared target may run a whole test suite.
-TIMEOUT = 900
-# Let commands flush or clean up before a stuck process group is killed.
-GROUP_TERMINATE_TIMEOUT = 1.0
 # Enough tail to diagnose a failure without putting a build log in the record.
 TAIL = 4000
 # A headless turn reads Git through the task text, which `check_text` caps at 8000.
 DIFF_LIMIT = 6000
 BRANCH = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]*")
-TARGET = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_-]*")
 # Every shipped provider has a headless turn and a gate that stops it writing, each in its
 # own shape: models.headless_argv builds the argv, models.headless_report reads the result.
 # A provider without one would need its own list here, and the refusal below is for it.
@@ -99,68 +93,8 @@ def _git(root, *arguments, check=True):
     return _spawn(root, ["git", *arguments], check=check)
 
 
-def _terminate_process_group(process):
-    """Stop and reap the command and every descendant still in its process group."""
-    try:
-        os.killpg(process.pid, signal.SIGTERM)
-    except (ProcessLookupError, PermissionError):
-        pass
-    deadline = time.monotonic() + GROUP_TERMINATE_TIMEOUT
-    while time.monotonic() < deadline:
-        try:
-            os.killpg(process.pid, 0)
-        except (ProcessLookupError, PermissionError):
-            break
-        time.sleep(min(0.02, max(0, deadline - time.monotonic())))
-    try:
-        os.killpg(process.pid, signal.SIGKILL)
-    except (ProcessLookupError, PermissionError):
-        pass
-    try:
-        process.communicate(timeout=GROUP_TERMINATE_TIMEOUT)
-    except subprocess.TimeoutExpired:
-        # A descendant may have escaped with setsid while retaining these pipe descriptors.
-        for pipe in (process.stdout, process.stderr):
-            if pipe is not None:
-                pipe.close()
-        try:
-            process.wait(timeout=GROUP_TERMINATE_TIMEOUT)
-        except subprocess.TimeoutExpired:
-            pass
-
-
-def _capture(root, command, timeout=TIMEOUT, *, text=True):
-    """Run a bounded command, raising only when it could not run at all.
-
-    Kept apart from `_spawn` so a headless turn can read stdout on its own: its result is
-    JSON, which anything the tool writes to stderr would make unparseable.
-    """
-    try:
-        process = subprocess.Popen(
-            command,
-            cwd=root,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=text,
-            stdin=subprocess.DEVNULL,
-            env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
-            start_new_session=True,
-        )
-    except FileNotFoundError as exc:
-        raise CaptainError(f"{command[0]} is not installed.") from exc
-    try:
-        stdout, stderr = process.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired as exc:
-        _terminate_process_group(process)
-        raise CaptainError(f"{command[0]} exceeded {timeout}s.") from exc
-    except KeyboardInterrupt:
-        _terminate_process_group(process)
-        raise
-    return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
-
-
 def _spawn(root, command, check=True):
-    done = _capture(root, command)
+    done = capture(root, command)
     output = (done.stdout + done.stderr).strip()
     if check and done.returncode != 0:
         # A quiet action that failed silently is worse than a visible one.
@@ -265,24 +199,11 @@ def _quiet(args, root, session_directory, meta=None):
         if args.timeout is None
         else config.in_range(args.timeout, "--timeout", below=float("inf"))
     )
-    done = _capture(root, command, timeout)
+    done = capture(root, command, timeout)
     report, note = headless_report(provider, done.stdout, model)
     record(session_directory, "quiet", command, done.returncode, report)
     print(report)
     return note
-
-
-def _targets(root):
-    """Target names the project declares in its own Makefile."""
-    makefile = root / "Makefile"
-    if not makefile.is_file() or makefile.is_symlink():
-        raise CaptainError("No Makefile at the project root; `do run` has nothing to call.")
-    found = set()
-    for line in makefile.read_text(encoding="utf-8", errors="replace").splitlines():
-        match = re.match(r"^([A-Za-z0-9_-]+)\s*:(?!=)", line)
-        if match:
-            found.add(match.group(1))
-    return found
 
 
 def record(session_directory, action, command, code, output):
@@ -305,7 +226,7 @@ def record(session_directory, action, command, code, output):
 
 
 def _git_bytes(root, *arguments):
-    result = _capture(root, ["git", *arguments], text=False)
+    result = capture(root, ["git", *arguments], text=False)
     if result.returncode:
         raise CaptainError(os.fsdecode(result.stderr)[-TAIL:])
     return result.stdout
@@ -449,7 +370,7 @@ def _dispatch(args, session_directory, project, meta=None):
     else:
         if not TARGET.fullmatch(args.target):
             raise CaptainError(f"Not a usable target name: {args.target}")
-        if args.target not in _targets(root):
+        if args.target not in makefile_targets(root):
             raise CaptainError(f"The project's Makefile declares no {args.target} target.")
         command = ["make", "--", args.target]
         output = _act(root, command, session_directory, action)
