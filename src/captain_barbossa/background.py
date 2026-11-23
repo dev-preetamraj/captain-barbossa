@@ -194,7 +194,7 @@ def describe(crew, assignment):
     return "failed", "process", "[background-lost] owner gone without an outcome"
 
 
-def prepare(crew, project, provider, binary, model, task, assignment_id):
+def prepare(crew, project, provider, binary, model, task, assignment_id, context=""):
     """Queue the task and record launch intent before any process exists."""
     directory = crew.session.directory
     files = paths(stem(crew))
@@ -217,7 +217,8 @@ def prepare(crew, project, provider, binary, model, task, assignment_id):
         crew, incarnation=crew.record["incarnation_id"], project=project, background=True
     )
     environment.update(history["env"])
-    argv = headless_argv(provider, binary, f"{QUIET_PROMPT}\n\n{task}", model=model, isolated=True)
+    prompt = f"{QUIET_PROMPT}{context}\n\n{task}"
+    argv = headless_argv(provider, binary, prompt, model=model, isolated=True)
     argv[-1:-1] = history["argv"]
     ref = lifetime.prepare(crew.session, crew.record, argv, environment, execution_root)
     crew.record["lifetime_id"] = ref

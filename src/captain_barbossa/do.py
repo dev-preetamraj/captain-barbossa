@@ -196,7 +196,7 @@ def _name(value):
     return value
 
 
-def _quiet(args, root, session_directory):
+def _quiet(args, root, session_directory, meta=None):
     """One headless model turn: no pane, no assignment, no wait, a result read afterwards.
 
     A pane buys somewhere to approve a prompt and somewhere to steer a running turn. Work
@@ -213,6 +213,14 @@ def _quiet(args, root, session_directory):
             f"{provider or 'This captain'} has no headless turn to spend, so there is no way "
             "to bound what an unwatched one could do. Recruit crew instead."
         )
+    if meta is None:
+        path = session_directory / "session.json"
+        meta = read_json(path) if path.exists() else {}
+    denials = (meta.get("plugins") or {}).get("denials")
+    if denials:
+        from .plugins import refuse
+
+        refuse(denials, provider, "quiet")
     paths = protocol.owned_paths(root, args.write)
     outside_files = [path for path in paths if Path(path).is_absolute() and not Path(path).is_dir()]
     if outside_files:
@@ -249,6 +257,8 @@ def _quiet(args, root, session_directory):
             protocol.outside_dirs(root, paths) if paths else [str(session_directory), *reads]
         ),
         model=model,
+        # A denial is enforced by pi having no shell tool, so its extensions must not add one.
+        isolated=bool(denials),
     )
     timeout = (
         TIMEOUT
@@ -374,10 +384,10 @@ def _commit(args, root, session_directory):
         return f"Committed {head} on {_branch(root)}.", output
 
 
-def run(args, session_directory, project):
+def run(args, session_directory, project, meta=None):
     """Dispatch one `do` action; record a refusal once unless the run already was."""
     try:
-        return _dispatch(args, session_directory, project)
+        return _dispatch(args, session_directory, project, meta)
     except KeyboardInterrupt:
         command = ["captain", "do", args.do_command]
         record(session_directory, args.do_command, command, 130, "Interrupted.")
@@ -389,11 +399,11 @@ def run(args, session_directory, project):
         raise
 
 
-def _dispatch(args, session_directory, project):
+def _dispatch(args, session_directory, project, meta=None):
     root = Path(project).resolve(strict=True)
     action = args.do_command
     if action == "quiet":
-        note = _quiet(args, root, session_directory)
+        note = _quiet(args, root, session_directory, meta)
         if note:
             print(note, file=sys.stderr)
         return

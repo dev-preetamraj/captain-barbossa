@@ -31,7 +31,8 @@ src/captain_barbossa/
   results.py      isolated result snapshots, preview, apply and discard
   lifetime.py     managed native-writer ownership, exit receipts, terminal closure
   native_history.py crew-incarnation native-history ownership and conservative cleanup
-  pi_history.py   crew-only pi session-boundary/identity extension
+  pi_history.py   crew-only pi session-boundary/identity extension and plugin denial gate
+  plugins.py      plugin registry, protocol, mirror generations, launch context and denials
   layout.py       declared tab shapes: slot order, split target, even ratios
   crew.py         crew identities, roster queries, evidence-based state, native events
   pane.py         native agent terminal interaction and pane parsing
@@ -163,6 +164,9 @@ Key facts:
   re-read before edit, stage only owned hunks). Nothing locks files or authorizes commits.
 - Generated instructions are token-budgeted. Every added line costs context in every
   captain and crew session; prefer short rules over explanations.
+- Plugins (`docs/plugins.md`) are registered only in home settings and read through
+  `config.home_settings()`. Without a registration or a session `plugins` binding nothing
+  imports `plugins.py`; hooks read crew denials from session meta, never home settings.
 - The version is defined once in `pyproject.toml` and read via `importlib.metadata`.
 
 ## Rules

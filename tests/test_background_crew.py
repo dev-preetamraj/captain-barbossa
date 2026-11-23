@@ -122,13 +122,13 @@ class BackgroundCrewTests(SessionCase):
         self.native(SAY)
         prepare = background.prepare
 
-        def poll_before_record(crew, *args):
+        def poll_before_record(crew, *args, **kwargs):
             self.assertFalse(background.paths(background.stem(crew))["record"].exists())
             self.assertTrue(background.alive(crew))
             response = protocol.wait(crew, 0)
             self.assertIsNone(response["delivery_id"])
             self.assertEqual(self.assignment(crew)["state"], "working")
-            return prepare(crew, *args)
+            return prepare(crew, *args, **kwargs)
 
         with patch.object(background, "prepare", side_effect=poll_before_record) as preparing:
             self.recruit()

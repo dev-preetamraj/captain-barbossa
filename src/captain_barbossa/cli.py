@@ -75,6 +75,11 @@ def parser(*, plan=False):
         "--if-unnamed", action="store_true", help="with --rename, keep an existing name"
     )
     root.add_argument(
+        "--no-plugins",
+        action="store_true",
+        help="launch with no plugin context and no plugin crew denials this session",
+    )
+    root.add_argument(
         "--no-dashboard",
         action="store_true",
         help="skip the crew token-usage pane even when [dashboard] enabled is set",
@@ -96,6 +101,21 @@ def parser(*, plan=False):
         command.add_argument("result_id")
         if action == "discard":
             command.add_argument("--reason", required=True)
+    plugin = commands.add_parser("plugin", help="register, sync and inspect captain plugins")
+    plugin_actions = plugin.add_subparsers(dest="plugin_command", required=True)
+    add = plugin_actions.add_parser("add", help="register an executable in home settings")
+    add.add_argument("name")
+    add.add_argument("executable")
+    add.add_argument(
+        "--required", action="store_true", help="block captain launch on a version mismatch"
+    )
+    plugin_actions.add_parser("remove", help="unregister a plugin").add_argument("name")
+    for action, text in (
+        ("list", "registered plugins and what they negotiated"),
+        ("sync", "refresh plugin mirrors now"),
+        ("status", "mirror freshness, expiry and last failure as JSON"),
+    ):
+        plugin_actions.add_parser(action, help=text).add_argument("name", nargs="?")
     worktree = commands.add_parser("worktree", help="retained isolated crew checkouts")
     worktree_actions = worktree.add_subparsers(dest="worktree_command", required=True)
     worktree_actions.add_parser("list")
@@ -516,8 +536,18 @@ def main(argv=None):
             return 0
         if args.command == "recover":
             project = project_root()
-            print(json.dumps(recovery.digest(read_session(project, args.session), project)))
+            current = read_session(project, args.session)
+            digest = recovery.digest(current, project)
+            if current.meta.get("plugins"):
+                from .plugins import context
+
+                digest["plugins"] = context(current.meta["plugins"], "captain")
+            print(json.dumps(digest))
             return 0
+        if args.command == "plugin":
+            from .plugins import command
+
+            return command(args)
         if args.command == "update":
             return upgrade()
         if args.command == "inspect":
@@ -555,7 +585,8 @@ def main(argv=None):
         elif args.command == "interrupt":
             interrupt_crew(args, pane, project)
         elif args.command in ("do", "quiet"):
-            do.run(args, read_session(project, args.session, pane).directory, project)
+            current = read_session(project, args.session, pane)
+            do.run(args, current.directory, project, current.meta)
         elif args.command == "dashboard":
             if args.once:
                 print(dashboard.render(read_session(project, args.session, pane)))

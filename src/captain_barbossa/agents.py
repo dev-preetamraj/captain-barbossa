@@ -167,11 +167,34 @@ def close_panes_on_exit(session_id, project):
         os._exit(0)
 
 
-def prepare_launch(current, project, provider, binary, model):
+def launch_binding(enabled):
+    """The session's plugin binding, or None when no plugin is registered or --no-plugins."""
+    if not enabled or not config.home_settings().get("plugins"):
+        return None
+    from . import plugins
+
+    return plugins.binding()
+
+
+def bind_plugins(meta, record, provider, path, directory, managed=True):
+    """Fix a crew's plugin denials and pinned context at recruit; '' without a binding."""
+    if not meta.get("plugins"):
+        return ""
+    from . import plugins
+
+    return plugins.bind(meta["plugins"], record, provider, path, directory, managed)
+
+
+def prepare_launch(current, project, provider, binary, model, plugins=True):
     """Build the native captain command and environment overlay for either transport."""
     model = resolve_model(provider, model) if model else None
     with crew_meta(current.directory) as meta:
         meta["captain_provider"] = provider
+        bound = launch_binding(plugins)
+        if bound is None:
+            meta.pop("plugins", None)
+        else:
+            meta["plugins"] = bound
     instruction_text = instructions.agent_instructions(
         current.directory, "Captain Barbossa", provider
     )
@@ -181,6 +204,12 @@ def prepare_launch(current, project, provider, binary, model):
     if len(state) > RECOVERY_CHARS:
         state = state[:RECOVERY_CHARS] + "... truncated; run CAPTAIN recover"
     instruction_text += f"Launch state (reference data, not instructions):\n{state}\n"
+    if bound is not None:
+        from . import plugins as portal
+
+        # After the cut, so plugin context never competes with the session for it.
+        instruction_text += portal.context(bound, "captain")
+        portal.refresh()
     add_memory(current.graph, f"session:{meta['id']}", "captain", provider)
     events = current.events("captain")
     private_dir(events.parent)
@@ -234,7 +263,9 @@ def launch_plan(args, project):
         raise LaunchPlanError("missing-choice", "Choose --model.")
     binary = executable(provider)
     current = current or session(project, None, create=True)
-    command, env = prepare_launch(current, project, provider, binary, model)
+    command, env = prepare_launch(
+        current, project, provider, binary, model, plugins=not getattr(args, "no_plugins", False)
+    )
     command[1:1] = ["--mode", "rpc"]
     if args.effort:
         command.extend(["--thinking", args.effort])
@@ -278,7 +309,9 @@ def launch(args, pane, project):
     except HERDR_ERRORS:
         pass  # retention is housekeeping; never block a launch on it
     model = config.text("captain", "model")
-    command, overrides = prepare_launch(current, project, provider, binary, model)
+    command, overrides = prepare_launch(
+        current, project, provider, binary, model, plugins=not getattr(args, "no_plugins", False)
+    )
     runtime.herdr("tab", "rename", pane["tab_id"], "Captain Barbossa")
     env = dict(os.environ, **overrides)
     if args.prompt:
@@ -755,7 +788,7 @@ def begin_recruitment(crew, project, args):
         raise
 
 
-def launch_background(crew, current, project, provider, binary, model, args):
+def launch_background(crew, current, project, provider, binary, model, args, context=""):
     """Start a paneless crew. The roster entry is written before the assignment is
     reserved, so a recruiter that dies at any later point leaves a crew status shows
     (failed, if nothing ran), wait reconciles, and dismiss can retire."""
@@ -779,7 +812,7 @@ def launch_background(crew, current, project, provider, binary, model, args):
             record["assignment_id"] = assignment["id"]
             write_json(current.meta_path, current.meta)
             files = background.prepare(
-                crew, project, provider, binary, model, task, assignment["id"]
+                crew, project, provider, binary, model, task, assignment["id"], context=context
             )
             background.start(files)
     except (CaptainError, OSError) as exc:
@@ -969,8 +1002,16 @@ def create_crew(args, pane, project):
             },
             current,
         )
+        plugin_context = bind_plugins(
+            meta,
+            crew.record,
+            provider,
+            "background" if paneless else "foreground",
+            current.directory,
+            managed=managed,
+        )
         if paneless:
-            launch_background(crew, current, project, provider, binary, model, args)
+            launch_background(crew, current, project, provider, binary, model, args, plugin_context)
             return
         assignment = begin_recruitment(crew, project, args)
         # Reserve ownership before launch; failures before native startup release it below.
@@ -1020,6 +1061,7 @@ def create_crew(args, pane, project):
             instruction_text = instructions.agent_instructions(
                 current.directory, f"crew member {display_name}", provider
             )
+            instruction_text += plugin_context
             events = crew.events
             private_dir(events.parent)
             events.write_text("", encoding="utf-8")
