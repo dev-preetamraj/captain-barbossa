@@ -320,7 +320,7 @@ def git(project, *args):
 
 
 class DismissUnlandedTests(SessionCase):
-    """Dismiss refuses while Git shows the crew's owned work unlanded; a report is not consent."""
+    """Acknowledged reports permit dirty paths but still require verifiable commits."""
 
     def setUp(self):
         super().setUp()
@@ -354,7 +354,8 @@ class DismissUnlandedTests(SessionCase):
             assignment["state"] = "done"
             assignment["report"] = text
 
-    def dismiss(self, *flags):
+    def dismiss(self, *flags, dead_workspace=False):
+        pane = {"workspace_id": "w2", "tab_id": "w2:t1", "pane_id": "w2:p1"}
         args = cli.parser().parse_args(
             ["--session", self.current.meta["id"], "dismiss", "Jack", *flags]
         )
@@ -363,14 +364,19 @@ class DismissUnlandedTests(SessionCase):
             patch.object(
                 agents.runtime, "herdr", side_effect=lambda *a, **_: calls.append(a) or {}
             ),
+            patch.object(
+                sessions,
+                "herdr",
+                return_value={"workspaces": [] if dead_workspace else [{"workspace_id": "w1"}]},
+            ),
             contextlib.redirect_stdout(io.StringIO()),
         ):
-            agents.dismiss_crew(args, self.pane, self.project)
+            agents.dismiss_crew(args, pane if dead_workspace else self.pane, self.project)
         return calls
 
     def assert_refused(self, code):
         with self.assertRaises(runtime.CaptainError) as caught:
-            self.dismiss()
+            self.dismiss(dead_workspace=True)
         self.assertIn(code, str(caught.exception))
         self.assertIn(protocol.UNSAVED_CAVEAT, str(caught.exception))
         self.assertIn("--confirm-unlanded", str(caught.exception))
@@ -378,10 +384,31 @@ class DismissUnlandedTests(SessionCase):
             store.read_json(self.current.meta_path)["crew"]["jack"].get("status"), "dismissed"
         )
 
-    def test_uncommitted_owned_change_refuses_even_with_a_done_report(self):
+    def test_a_reported_acknowledged_crew_dismisses_with_dirty_paths(self):
         (self.project / "src" / "a.py").write_text("a = 2\n")
         (self.project / "src" / "new.py").write_text("")
         self.report("Done; all good.")
+        self.assertIn(("pane", "close", "w1:p2"), self.dismiss())
+
+    def test_acknowledged_report_still_refuses_unreachable_commit(self):
+        self.report("Committed 1234abcd.")
+        (self.project / "src" / "a.py").write_text("dirty\n")
+        with self.assertRaisesRegex(runtime.CaptainError, "unreachable-commit"):
+            self.dismiss()
+
+    def test_cleanup_retry_of_acknowledged_report_allows_dirty_paths(self):
+        self.report("Done.")
+        (self.project / "src" / "a.py").write_text("dirty\n")
+        self.current.meta["crew"]["jack"]["status"] = "cleanup_pending"
+        store.write_json(self.current.meta_path, self.current.meta)
+        self.assertIn(("pane", "close", "w1:p2"), self.dismiss())
+
+    def test_uncommitted_owned_change_refuses_a_forced_dismissal(self):
+        (self.project / "src" / "a.py").write_text("a = 2\n")
+        (self.project / "src" / "new.py").write_text("")
+        self.report("Done; all good.")
+        with protocol.checkpoint(self.current.directory) as state:
+            protocol.active(state, self.crew)["state"] = "working"
         self.assert_refused("[uncommitted] src/a.py, src/new.py")
 
     def test_owned_paths_outside_the_checkout_are_named_not_handed_to_git(self):
@@ -395,10 +422,38 @@ class DismissUnlandedTests(SessionCase):
         lines = [str(call.args[0]) for call in printed.call_args_list if call.args]
         self.assertIn(f"Owned paths outside the checkout, not Git-tracked: {outside}", lines)
 
-    def test_user_confirmation_is_the_only_override(self):
+    def test_user_confirmation_overrides_a_forced_dismissal(self):
         (self.project / "src" / "a.py").write_text("a = 2\n")
         self.report("Done.")
-        self.assertIn(("pane", "close", "w1:p2"), self.dismiss("--confirm-unlanded"))
+        self.dismiss("--confirm-unlanded", dead_workspace=True)
+        roster = store.read_json(self.current.meta_path)["crew"]
+        self.assertEqual(roster["jack"]["status"], "dismissed")
+
+    def unreported(self):
+        with protocol.checkpoint(self.current.directory) as state:
+            protocol.active(state, self.crew)["messages"] = [{"id": "m", "delivery": "read"}]
+        (self.project / "src" / "a.py").write_text("a = 2\n")
+
+    def test_unreported_crew_is_refused_without_force(self):
+        self.unreported()
+        with self.assertRaisesRegex(runtime.CaptainError, "no done report"):
+            self.dismiss()
+
+    def test_force_dismisses_unreported_crew_with_unlanded_work_and_closes_the_assignment(self):
+        self.unreported()
+        self.assertIn(("pane", "close", "w1:p2"), self.dismiss("--force"))
+        roster = store.read_json(self.current.meta_path)["crew"]
+        self.assertEqual(roster["jack"]["status"], "dismissed")
+        assignment = protocol.active_assignment(self.crew)
+        self.assertEqual(assignment["state"], "done")
+        self.assertIn("--force", assignment["report"])
+
+    def test_force_still_bounces_unread_mail(self):
+        self.unreported()
+        message = protocol.deliver(self.crew, "later", queue_only=True)
+        self.dismiss("--force")
+        mail = protocol.mail_dir(self.current.directory, self.crew.crew_id) / f"{message}.json"
+        self.assertEqual(store.read_json(mail)["state"], "bounced")
 
     def test_clean_owned_paths_and_a_reachable_commit_dismiss(self):
         (self.project / "src" / "a.py").write_text("a = 2\n")
@@ -409,11 +464,11 @@ class DismissUnlandedTests(SessionCase):
         self.report(f"Committed {head}; assignment {'a' * 31}1.")
         self.assertIn(("pane", "close", "w1:p2"), self.dismiss())
 
-    def test_a_named_commit_no_ref_contains_refuses(self):
+    def test_a_named_commit_no_ref_contains_refuses_a_forced_dismissal(self):
         self.report("Committed 1234abcd.")
         self.assert_refused("[unreachable-commit] 1234abcd")
 
-    def test_outside_git_the_work_cannot_be_verified(self):
+    def test_outside_git_a_forced_dismissal_cannot_verify_the_work(self):
         shutil.rmtree(self.project / ".git")
         self.report("Done.")
         self.assert_refused("[no-git]")

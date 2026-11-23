@@ -47,6 +47,30 @@ CREW_NAMES = (
     "tia",
     "davy",
     "sao",
+    "james",
+    "weatherby",
+    "cutler",
+    "henry",
+    "carina",
+    "angelica",
+    "philip",
+    "syrena",
+    "scrum",
+    "murtogg",
+    "mullroy",
+    "bill",
+    "maccus",
+    "koehler",
+    "shansa",
+    "ian",
+    "theodore",
+    "gillette",
+    "giselle",
+    "scarlett",
+    "twigg",
+    "crash",
+    "edward",
+    "ammand",
 )
 
 
@@ -115,6 +139,8 @@ def wait_crew(args, pane, project):
         + (
             f"(delivery {response['delivery_id']}; acknowledge with wait --ack)"
             if response["delivery_id"]
+            else "(done acknowledged; dismiss or hand off)"
+            if response["status"] == "idle"
             else "(nothing pending to acknowledge)"
         )
     )
@@ -342,11 +368,11 @@ def dismiss_blocker(crew, assignment, project, confirmed=False, *, allow_unrepor
             f"{crew.display_name} has {unacked} unacknowledged notification(s); "
             "acknowledge them with wait --ack before dismissal."
         )
+    reported = assignment["state"] == "done" and not unacked
     if confirmed or crew.record.get("worktree_id"):
         return
-    reasons = protocol.unlanded(project, assignment)
+    reasons = protocol.unlanded(project, assignment, ignore_uncommitted=reported)
     if reasons:
-        # A done report is not consent: only the user can let owned work go unlanded.
         raise CaptainError(
             f"{crew.display_name}'s owned work has not landed: {'; '.join(reasons)}. "
             f"{protocol.UNSAVED_CAVEAT} Have it committed, or rerun dismiss with "
@@ -364,6 +390,7 @@ def dismiss_crew(args, pane, project):
         if crew.is_dismissed:
             raise CaptainError(f"{crew.display_name} was already dismissed.")
         retrying = crew.record.get("status") == "cleanup_pending"
+        forced = getattr(args, "force", False)
         # Read while the crew still holds its slot; applied once Herdr has closed the pane.
         placement = Placement(pane, current, dashboard_pane(current))
         try:
@@ -382,8 +409,8 @@ def dismiss_crew(args, pane, project):
                     crew,
                     assignment,
                     project,
-                    getattr(args, "confirm_unlanded", False),
-                    allow_unreported=dead_workspace or retrying,
+                    getattr(args, "confirm_unlanded", False) or forced,
+                    allow_unreported=dead_workspace or retrying or forced,
                 )
                 untracked = [path for path in assignment["paths"] if Path(path).is_absolute()]
                 if untracked:
@@ -424,7 +451,7 @@ def dismiss_crew(args, pane, project):
         except HERDR_ERRORS as exc:  # geometry is cosmetic; never lose the dismissal over it
             print(f"captain: tab not re-evened: {exc}", file=sys.stderr)
         if undelivered or (
-            (dead_workspace or retrying)
+            (dead_workspace or retrying or forced)
             and crew.record.get("incarnation_id")
             and not unreserved(crew)
         ):
@@ -439,6 +466,8 @@ def dismiss_crew(args, pane, project):
                         if dead_workspace
                         else "Dismissed after shutdown retry."
                         if retrying
+                        else "Dismissed without a report (--force)."
+                        if forced
                         else "Dismissed before any message was read."
                     )
         if crew.record.get("worktree_id") and not crew.record.get("lifetime_id"):
@@ -460,10 +489,45 @@ def dismiss_crew(args, pane, project):
     # Rename after the roster write: a stale tab id must not cost the dismissal record.
     if label:
         runtime.herdr("tab", "rename", tab_id, label)
+    if not dead_workspace:
+        relayout_session(current)
     add_memory(current.graph, f"session:{meta['id']}", "dismissed", crew.record["agent"])
     for message in bounced:
         print(f"Bounced unread mail to {crew.display_name}: {message['id']}.")
     print(f"Dismissed {crew.display_name}.")
+
+
+def relayout_session(current):
+    """Repack only after dismissal is durable; layout failures are cosmetic."""
+    try:
+        captain = read_json(current.directory / "captain.json")
+        origin = (
+            runtime.herdr("pane", "get", captain["pane"]).get("pane", {})
+            if captain.get("pane")
+            else {}
+        )
+        if not (
+            origin.get("pane_id") == captain.get("pane")
+            and origin.get("workspace_id") == current.meta["workspace"]
+            and origin.get("tab_id")
+            and (
+                not captain.get("terminal_id")
+                or origin.get("terminal_id") == captain["terminal_id"]
+            )
+        ):
+            return
+        with crew_meta(current.directory) as meta:
+            current = current._replace(meta=meta)
+            try:
+                Placement(origin, current, dashboard_pane(current)).relayout(current)
+            except HERDR_ERRORS as exc:
+                print(f"captain: tabs not relaid out: {exc}", file=sys.stderr)
+    except HERDR_ERRORS as exc:
+        print(f"captain: tabs not relaid out: {exc}", file=sys.stderr)
+
+
+def relayout_crew(args, pane, project):
+    relayout_session(session(project, pane, args.session))
 
 
 def begin_recruitment(crew, project, args):

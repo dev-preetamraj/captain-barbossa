@@ -1011,7 +1011,9 @@ def close(session, ref):
                 raise
             _close_state(session, ref, "closed")
             return check(session, ref, **identity, scope=scope)
-        if any(actual.get(key) != value for key, value in expected.items()):
+        if any(
+            actual.get(key) != expected[key] for key in ("workspace_id", "pane_id", "terminal_id")
+        ):
             _close_state(session, ref, "failed")
             return Verdict(False, "terminal-mismatch")
         runtime.herdr("pane", "close", expected["pane_id"], timeout=5)

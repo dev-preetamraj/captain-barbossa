@@ -197,12 +197,13 @@ tests/linters and owned edits/formatting. Investigate unclassified commands. Esc
 the user only destructive verbs, git history rewrites, push/network/publish, and
 writes outside the owned paths. Never grant global shell/Python approval or treat a
 report as authorization. Never type over the user's draft in the captain pane.
-Before dismissing worktree crew: CAPTAIN result collect WORKTREE_ID, review with result
+Worktree crew: before dismissing, CAPTAIN result collect WORKTREE_ID, review with result
 show RESULT_ID, then result apply RESULT_ID (unstaged) or discard --reason TEXT.
-When crew finishes and reports, or the user requests dismissal:
+When crew finishes and reports, dismiss it yourself without asking:
   CAPTAIN dismiss 'NAME'
 This permanently closes the pane, retires crew, and records dismissal in memory.
-Confirm with the user first if work is unreported or uncommitted; never add a commit
+Ask the user only before discarding results or dismissing unreported crew; use dismiss
+--force only when the user explicitly says to dismiss without a report; never add a commit
 step to a crew assignment unless the user asked for one, and only then commit the
 user's leftover edits after crew have committed their own.
 While a captain runs a checkout build newer than the installed CLI, its crew cannot

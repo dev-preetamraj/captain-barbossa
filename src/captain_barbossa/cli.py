@@ -14,6 +14,7 @@ from .agents import (
     focus_crew,
     interrupt_crew,
     protocol_command,
+    relayout_crew,
     status_crew,
     switch_model,
     tell_crew,
@@ -255,12 +256,18 @@ def parser(*, plan=False):
         action="store_true",
         help="print one frame and exit, for a token and cost reading with no pane",
     )
+    commands.add_parser("relayout", help="repack auto-placed crew into the declared tab shapes")
     dismiss = commands.add_parser("dismiss", help="close an existing crew's pane and retire it")
     dismiss.add_argument("name", help="crew name or ID (case-insensitive)")
     dismiss.add_argument(
         "--confirm-unlanded",
         action="store_true",
         help="the user agreed to dismiss although Git shows the crew's owned work unlanded",
+    )
+    dismiss.add_argument(
+        "--force",
+        action="store_true",
+        help="the user said to dismiss without a report; skips report, ack and unlanded checks",
     )
     mem = commands.add_parser(
         "memory", help="session, project, committed repo, and user preference graph memory"
@@ -586,6 +593,8 @@ def main(argv=None):
                 dashboard.run_dashboard(args, pane, project)
         elif args.command == "dismiss":
             dismiss_crew(args, pane, project)
+        elif args.command == "relayout":
+            relayout_crew(args, pane, project)
         elif args.command == "memory":
             memory(args, pane, project)
         else:

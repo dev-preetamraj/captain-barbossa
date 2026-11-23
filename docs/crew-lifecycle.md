@@ -204,7 +204,7 @@ exact handoff ID. Stale assignment, incarnation, and question IDs are refused.
 Each writes the message to a durable file, then rings the pane. Claude hooks deliver
 and receipt the body. For other providers, the first ring carries the body plus a
 line to run `captain inbox NAME`; once that body lands, it counts as delivered even
-without an inbox read. Dismissal therefore keeps the report and unlanded-work checks.
+without an inbox read. Dismissal therefore keeps the report check.
 A later ring is the inbox line alone. `captain inbox NAME` remains a manual re-read
 and writes the receipt. If `done` follows a landed body, it writes that receipt and
 continues; otherwise it returns the undelivered body and refuses the report. Claude's
@@ -261,7 +261,8 @@ Each crew exposes one pending delivery at a time; queued notices follow its ack.
 A fleet timeout returns an empty array. Acknowledging may return the next notification; consume that
 too. `wait --ack ID` on the final `done` notification returns one `idle` status
 instead of the next notification. Waiting again once the assignment is done and
-every notification is acknowledged fails: dismiss the crew or hand off. Timeouts
+every notification is acknowledged fails: dismiss the crew or hand off. After the
+acknowledgement, text `wait` prints "done acknowledged; dismiss or hand off". Timeouts
 have no delivery ID and do not imply completion. `--timeout 0` polls once; the
 default is 86400 seconds. Neither waiting nor timing out retries a terminal prompt.
 Mail is durable before the pane is touched, so a delivery is never uncertain: it
@@ -361,18 +362,25 @@ records the dismissal in memory. Protocol crew must first finish with a report
 and have all notifications acknowledged; a refusal names whichever of those, or
 an unresolved delivery, is actually holding it. Any mail still unread at that
 point is bounced with a reason instead of being left queued, and the command
-names each bounced message. It is permanent, so handle unreported or
-uncommitted work first; commit only when the user explicitly requested it.
+names each bounced message.
+Once its report is acknowledged, the captain dismisses it without asking, with no uncommitted-work refusal.
+Git verification failures and unreachable reported commits still block dismissal.
+The captain asks the user only before dismissing unreported crew.
+Dismissal is permanent, so commit only when the user explicitly requested it.
+Uncommitted work requires `--confirm-unlanded` for forced, retry and dead-workspace dismissals without an acknowledged report.
 
 A crew whose Herdr workspace is gone (captain or Herdr exited) can still be
 dismissed from a new workspace with `captain --session ID dismiss Jack`, but only
 when a well-formed Herdr workspace list omits the old workspace. No done report or
 acknowledgement is required and no pane is closed, since its ID may be recycled;
-unlanded work is still refused. A managed writer is released once its exit
-receipt confirms shutdown, or once its owner is confirmed dead with its managed
-process group gone (e.g. after a Herdr restart); until then the crew stays
-`cleanup_pending` and `dismiss` can be retried. A real done report is kept; otherwise the assignment
-closes as "Dismissed after Herdr workspace disappeared."
+unlanded work is still refused unless `--confirm-unlanded` is given.
+
+`captain dismiss NAME --force` dismisses a crew with no done report, unacknowledged notifications or unlanded work.
+The captain uses it only when the user explicitly says to dismiss without a report.
+Unread mail is still bounced, the assignment closes as "Dismissed without a report (--force).", and worktree retirement and result safety are unchanged.
+A managed writer is released once its exit receipt confirms shutdown, or once its owner is confirmed dead with its managed process group gone (e.g. after a Herdr restart).
+Until then the crew stays `cleanup_pending` and `dismiss` can be retried.
+A real done report is kept; otherwise the assignment closes as "Dismissed after Herdr workspace disappeared."
 
 ## Editing guardrails
 

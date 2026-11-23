@@ -19,7 +19,7 @@ plain-text refresh loop in a Herdr pane, not a TUI.
 ```text
 src/captain_barbossa/
   cli.py          argparse entry point and dispatch: captain, crew, wait, tell, model,
-                  focus, session, init, status, dashboard, dismiss, memory, recover
+                  focus, session, init, status, dashboard, dismiss, relayout, memory, recover
   launch.py       native captain launch, launch plan, dashboard pane, exit pane cleanup
   agents.py       crew recruitment and create/wait/tell/model/focus/status/dismiss
   instructions.py role instructions and per-provider native CLI arguments

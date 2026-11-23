@@ -378,8 +378,12 @@ captain dismiss Jack
 ```
 
 `dismiss` permanently closes the pane, records the dismissal, and permits name
-reuse with an explicit handoff; handle unreported or uncommitted work first.
-`--confirm-unlanded` proceeds only when the user accepts Git-reported unlanded work.
+reuse with an explicit handoff.
+Once a crew's done report is acknowledged, the captain dismisses it without asking; dirty owned files do not block it, but Git verification failures and unreachable reported commits do.
+After any dismissal, auto-placed foreground crew are repacked into the configured tab shapes, filling gaps from the last occupied slots and closing emptied trailing tabs.
+Use `captain relayout` to repack manually; tabs containing hand-placed or non-crew panes stay untouched.
+`--confirm-unlanded` accepts Git-reported unlanded work only for forced, retry or dead-workspace dismissals.
+`--force` is for when the user explicitly says to dismiss without a report; unread mail is still bounced and worktree results are still retired through the normal safety checks.
 Unread mail is bounced, not delivered, and the command reports which messages
 bounced. After a Herdr workspace disappears, `captain --session ID dismiss Jack`
 from a new workspace releases that session's crew once Herdr confirms the old
@@ -632,7 +636,8 @@ Read the affected pane before retrying or approving anything.
 | `captain --resume [NAME\|ID]` | List current-project sessions, or resume one from its project |
 | `captain update` | Upgrade the installed tool |
 | `captain init [--global]` | Write a commented `.captain/settings.toml` template |
-| `captain dismiss NAME [--confirm-unlanded]` | Close and retire crew; confirmation permits known unlanded shared work |
+| `captain relayout` | Repack auto-placed crew into the configured tab shapes |
+| `captain dismiss NAME [--confirm-unlanded] [--force]` | Retire acknowledged crew; confirmation accepts unlanded work only for forced, retry or dead-workspace dismissals; `--force` (only when the user says to dismiss without a report) skips the report, acknowledgement and unlanded checks |
 | `captain result collect WORKTREE_ID` | Snapshot an isolated crew's owned paths |
 | `captain result show\|apply RESULT_ID` | Review or apply an isolated result unstaged |
 | `captain result discard RESULT_ID --reason TEXT` | Explicitly discard an isolated result |

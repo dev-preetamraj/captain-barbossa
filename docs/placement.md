@@ -209,8 +209,17 @@ Worked, on `captain_tab = [1, 2, 2]` holding crew 1 to 4:
   goes to its sibling. Column 2 is no longer open, so the next crew opens it again by
   splitting the top pane of column 1 to the right, exactly as crew 1 did.
 
-Nothing is renumbered and no crew record is rewritten when another is dismissed. Every
-placement recomputes from counts, so there is no bookkeeping to drift.
+After any dismissal in a live workspace, the remaining auto-placed foreground crew are repacked into `captain_tab` first, then crew tabs in recruitment order using `crew_tab`.
+Run `captain relayout` to repack manually, including after changing layout settings.
+Each gap takes the last surplus pane from the last mapped tab; already packed panes stay put.
+Herdr closes emptied trailing tabs automatically.
+
+Collapsed columns are relabeled leftwards and surviving rows are renumbered without moving panes.
+A same-tab move goes through a temporary tab because Herdr otherwise ignores it.
+Moved panes keep their identities, both affected tabs are re-evened, and the dashboard stays under the captain.
+Tabs containing hand-placed, background or non-crew panes are skipped entirely: neither filled nor drained.
+The captain and dashboard never move as crew, and a failed move skips that crew without blocking dismissal.
+A missing captain record or dead workspace prevents repacking without preventing dismissal.
 
 #### Evening out after a dismissal
 

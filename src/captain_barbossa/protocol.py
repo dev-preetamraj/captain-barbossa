@@ -349,12 +349,8 @@ def _git(project, *args):
     return result
 
 
-def unlanded(project, assignment):
-    """Reason codes for owned work Git shows as not landed; empty when Git shows none.
-
-    A report is evidence, not proof: every commit it names must be reachable from a ref,
-    and the owned paths must hold no uncommitted or untracked change.
-    """
+def unlanded(project, assignment, *, ignore_uncommitted=False):
+    """Acknowledged reports may retain dirty paths, but still require verifiable commits."""
     # Paths outside the checkout are not Git's to vouch for; dismiss names them instead.
     paths = [path for path in assignment["paths"] if not Path(path).is_absolute()]
     if not paths:
@@ -374,7 +370,7 @@ def unlanded(project, assignment):
                 if "R" in entry[:2] or "C" in entry[:2]:
                     # -z gives a rename or copy its source path as the next, unprefixed field.
                     next(fields, None)
-        if changed:
+        if changed and not ignore_uncommitted:
             reasons.append(f"[uncommitted] {', '.join(sorted(changed))}")
     missing, unverified = [], []
     for token in dict.fromkeys(COMMIT_TOKEN.findall(assignment.get("report") or "")):

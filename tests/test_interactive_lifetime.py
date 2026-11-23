@@ -42,6 +42,34 @@ class InteractiveLifetimeTests(SessionCase):
             self.session, self.crew, argv or ["native"], env or {}, self.project
         )
 
+    def test_close_accepts_moved_tab_but_rejects_reused_terminal(self):
+        ref = self.prepare()
+        self.crew.update(tab="old", pane="pane", terminal_id="terminal")
+        lifetime.bind(self.session, ref, self.crew)
+        store.write_json(
+            self.session.directory / "captain.json",
+            {
+                "pane": "captain",
+                "terminal_id": "captain-terminal",
+            },
+        )
+        actual = {**lifetime.read(self.session, ref)["pane"], "tab_id": "new"}
+        with patch.object(lifetime, "check", return_value=lifetime.Verdict(True, "stopped")):
+            with patch.object(
+                lifetime.runtime,
+                "herdr",
+                return_value={"pane": {**actual, "terminal_id": "reused"}},
+            ) as api:
+                self.assertFalse(lifetime.close(self.session, ref).ok)
+                self.assertFalse(
+                    any(call.args[:2] == ("pane", "close") for call in api.call_args_list)
+                )
+            with patch.object(lifetime.runtime, "herdr", return_value={"pane": actual}) as api:
+                self.assertTrue(lifetime.close(self.session, ref).ok)
+                self.assertTrue(
+                    any(call.args[:2] == ("pane", "close") for call in api.call_args_list)
+                )
+
     def test_inherited_stdio_session_group_environment_and_signal_handlers(self):
         ref = self.prepare(env={"CAPTAIN_CREW": "will"})
         before = {
