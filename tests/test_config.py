@@ -13,7 +13,17 @@ from unittest.mock import patch
 
 import questionary
 
-from captain_barbossa import agents, cli, config, dashboard, models, runtime, sessions, store
+from captain_barbossa import (
+    agents,
+    cli,
+    config,
+    dashboard,
+    launch,
+    models,
+    runtime,
+    sessions,
+    store,
+)
 from captain_barbossa.runtime import CaptainError
 
 PANE = {"workspace_id": "w1", "tab_id": "w1:t1", "pane_id": "w1:p1"}
@@ -203,12 +213,12 @@ class LaunchTestCase(unittest.TestCase):
         args = cli.parser().parse_args(["--session", self.meta["id"], *agent, *flags])
         with (
             patch.object(runtime, "herdr", return_value={}),
-            patch.object(agents, "executable", side_effect=lambda name: f"/bin/{name}"),
+            patch.object(launch, "executable", side_effect=lambda name: f"/bin/{name}"),
             patch.object(agents.sys.stdin, "isatty", return_value=True),
-            patch.object(agents, "start_dashboard", return_value="w1:p2") as board,
+            patch.object(launch, "start_dashboard", return_value="w1:p2") as board,
             patch.object(os, "execvpe") as execute,
         ):
-            agents.launch(args, self.pane, self.project)
+            launch.launch(args, self.pane, self.project)
         self.board = board
         return execute.call_args.args[1]
 
@@ -325,7 +335,7 @@ class CaptainAgentTests(LaunchTestCase):
             self.launch(provider=None)
 
     def test_no_setting_still_asks(self):
-        with patch.object(agents, "choose", return_value="claude") as asked:
+        with patch.object(launch, "choose", return_value="claude") as asked:
             self.launch(provider=None)
         self.assertEqual(asked.call_args.args[0], None)
 

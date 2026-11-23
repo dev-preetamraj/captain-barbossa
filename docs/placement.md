@@ -238,7 +238,7 @@ exits, whichever way it exits, and each crew is recorded `dismissed` as its pane
 so resuming with `--session` finds no crew holding a slot no pane backs any more.
 
 `captain` execs the native CLI over itself, so there is no exit hook to hang this on. It
-forks a watcher first (`agents.close_panes_on_exit`), which polls `getppid()` once a
+forks a watcher first (`launch.close_panes_on_exit`), which polls `getppid()` once a
 second and runs the teardown once it has been reparented away from the CLI. Polling
 rather than waiting on an inherited pipe is deliberate: a pipe is held open by every
 descendant the CLI forks, so one backgrounded job would mean no teardown at all. The

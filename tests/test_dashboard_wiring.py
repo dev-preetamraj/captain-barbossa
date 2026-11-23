@@ -7,7 +7,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
-from captain_barbossa import agents, cli, dashboard, runtime, sessions, store
+from captain_barbossa import agents, cli, dashboard, launch, runtime, sessions, store
 from captain_barbossa.pane import Pane
 from captain_barbossa.placement import Placement
 from captain_barbossa.runtime import CaptainError
@@ -32,14 +32,15 @@ class LaunchHarness(SessionCase):
         self.calls = []
         self.splits = 0
         self.enterContext(patch.object(runtime, "herdr", self._herdr))
-        self.enterContext(patch.object(agents, "check_for_update", lambda: None))
+        self.enterContext(patch.object(launch, "check_for_update", lambda: None))
         self.enterContext(patch.object(agents.instructions, "agent_instructions", lambda *a: "x"))
         self.enterContext(patch.object(agents.sys.stdin, "isatty", lambda: True))
         self.execs = []
         self.enterContext(
-            patch.object(agents.os, "execvpe", lambda b, c, e: self.execs.append((b, c, e)))
+            patch.object(launch.os, "execvpe", lambda b, c, e: self.execs.append((b, c, e)))
         )
-        self.enterContext(patch.object(agents, "executable", lambda name: f"/bin/{name}"))
+        for module in (agents, launch):
+            self.enterContext(patch.object(module, "executable", lambda name: f"/bin/{name}"))
         # This harness exists to test the dashboard pane, so opt in to [dashboard] enabled.
         self.enterContext(patch.object(agents.config, "flag", lambda *names: True))
 
@@ -73,7 +74,7 @@ class LaunchHarness(SessionCase):
         args = cli.parser().parse_args(list(argv))
         stderr = io.StringIO()
         with redirect_stderr(stderr):
-            agents.launch(args, PANE, self.project)
+            launch.launch(args, PANE, self.project)
         return stderr.getvalue()
 
     def split_call(self):

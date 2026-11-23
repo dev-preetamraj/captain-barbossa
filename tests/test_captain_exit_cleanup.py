@@ -14,7 +14,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from captain_barbossa import agents, protocol, sessions, store
+from captain_barbossa import agents, launch, protocol, sessions, store
 from captain_barbossa.crew import Crew
 from captain_barbossa.runtime import CaptainError
 from tests.home_isolation import SessionCase
@@ -47,7 +47,7 @@ class CloseSessionPanesTests(SessionCase):
 
     def close(self, herdr):
         with patch.object(agents.runtime, "herdr", side_effect=herdr):
-            agents.close_session_panes(self.current.meta["id"], self.project)
+            launch.close_session_panes(self.current.meta["id"], self.project)
 
     def test_live_crew_panes_and_the_dashboard_close_and_nothing_else(self):
         self.board = "w1:p9"
@@ -148,7 +148,7 @@ class CloseSessionPanesTests(SessionCase):
             patch.object(protocol, "unlanded", return_value=[]),
             patch.object(agents.runtime, "herdr", side_effect=CaptainError("close failed")),
         ):
-            agents.close_session_panes(self.current.meta["id"], self.project)
+            launch.close_session_panes(self.current.meta["id"], self.project)
         self.assertEqual(
             store.read_json(self.current.meta_path)["crew"]["jack"]["status"], "cleanup_pending"
         )
@@ -173,14 +173,14 @@ class CloseSessionPanesTests(SessionCase):
         """
         marker = self.root / "closed"
         with (
-            patch.object(agents, "close_session_panes", lambda *_: marker.write_text("done")),
-            patch.object(agents, "EXIT_POLL_SECONDS", 0.05),
+            patch.object(launch, "close_session_panes", lambda *_: marker.write_text("done")),
+            patch.object(launch, "EXIT_POLL_SECONDS", 0.05),
             contextlib.redirect_stderr(io.StringIO()),
         ):
             child = os.fork()
             if not child:  # stands in for the captain's CLI: forks the watcher, then dies
                 try:
-                    agents.close_panes_on_exit(self.current.meta["id"], self.project)
+                    launch.close_panes_on_exit(self.current.meta["id"], self.project)
                 finally:
                     os._exit(0)
             os.waitpid(child, 0)
@@ -192,14 +192,14 @@ class CloseSessionPanesTests(SessionCase):
         """
         marker, lingering = self.root / "closed", self.root / "lingering"
         with (
-            patch.object(agents, "close_session_panes", lambda *_: marker.write_text("done")),
-            patch.object(agents, "EXIT_POLL_SECONDS", 0.05),
+            patch.object(launch, "close_session_panes", lambda *_: marker.write_text("done")),
+            patch.object(launch, "EXIT_POLL_SECONDS", 0.05),
             contextlib.redirect_stderr(io.StringIO()),
         ):
             child = os.fork()
             if not child:
                 try:
-                    agents.close_panes_on_exit(self.current.meta["id"], self.project)
+                    launch.close_panes_on_exit(self.current.meta["id"], self.project)
                     job = os.fork()  # a backgrounded job of the CLI, alive past its death
                     if not job:
                         time.sleep(30)
@@ -246,7 +246,7 @@ class UnlandedWorkSurvivesExitTests(SessionCase):
             ),
             contextlib.redirect_stderr(io.StringIO()) as err,
         ):
-            agents.close_session_panes(self.current.meta["id"], self.project)
+            launch.close_session_panes(self.current.meta["id"], self.project)
         self.assertEqual(calls, [("pane", "close", "w1:p3")])
         self.assertIn("kept Jack's pane open", err.getvalue())
         self.assertIn("[uncommitted] src/a.py", err.getvalue())
@@ -263,7 +263,7 @@ class UnlandedWorkSurvivesExitTests(SessionCase):
             ),
             contextlib.redirect_stderr(io.StringIO()) as err,
         ):
-            agents.close_session_panes(self.current.meta["id"], self.project)
+            launch.close_session_panes(self.current.meta["id"], self.project)
         self.assertEqual(calls, [("pane", "close", "w1:p3")])
         self.assertIn("kept Jack's pane open", err.getvalue())
         self.assertIn("Stale crew incarnation.", err.getvalue())
@@ -323,13 +323,13 @@ class LaunchTeardownTests(SessionCase):
         with (
             patch.object(agents.runtime, "herdr", return_value={}),
             patch.object(agents, "executable", return_value="/bin/claude"),
-            patch.object(agents, "close_panes_on_exit", side_effect=OSError("no fork")),
+            patch.object(launch, "close_panes_on_exit", side_effect=OSError("no fork")),
             patch.object(agents.sys.stdin, "isatty", return_value=True),
             patch.object(os, "execvpe") as execute,
             contextlib.redirect_stderr(io.StringIO()) as problem,
             contextlib.redirect_stdout(io.StringIO()),
         ):
-            agents.launch(args, self.pane, self.project)
+            launch.launch(args, self.pane, self.project)
         execute.assert_called_once()
         self.assertIn("no exit teardown", problem.getvalue())
 

@@ -8,7 +8,7 @@ import sys
 from datetime import UTC, datetime, timedelta
 from unittest.mock import patch
 
-from captain_barbossa import agents, background, cli, models, plugins, sessions, store
+from captain_barbossa import agents, background, cli, launch, models, plugins, sessions, store
 from tests.home_isolation import SessionCase
 from tests.plugin_fixture import FakePlugin, register, snapshot, unregister
 
@@ -28,7 +28,7 @@ class ContextDeliveryTests(SessionCase):
 
     def launch(self, provider="claude", enabled=True):
         """The instruction text the native CLI receives, unescaped."""
-        command, _ = agents.prepare_launch(
+        command, _ = launch.prepare_launch(
             self.current, self.project, provider, f"/bin/{provider}", None, plugins=enabled
         )
         if provider == "codex":
@@ -45,7 +45,7 @@ class ContextDeliveryTests(SessionCase):
         for provider in PROVIDERS:
             with (
                 self.subTest(provider=provider),
-                patch.object(agents.recovery, "digest", return_value=huge),
+                patch.object(launch.recovery, "digest", return_value=huge),
             ):
                 text = self.launch(provider)
                 self.assertIn("truncated; run CAPTAIN recover", text)

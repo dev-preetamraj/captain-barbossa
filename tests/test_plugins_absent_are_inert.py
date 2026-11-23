@@ -8,7 +8,7 @@ import subprocess
 import sys
 from unittest.mock import patch
 
-from captain_barbossa import agents, cli, config, events, protocol, sessions, store
+from captain_barbossa import agents, cli, config, events, launch, protocol, sessions, store
 from captain_barbossa.crew import Crew
 from tests.home_isolation import SessionCase
 from tests.plugin_fixture import clear_settings, unregister
@@ -25,8 +25,8 @@ class PluginsAbsentTests(SessionCase):
 
     def launch(self, provider, enabled=True):
         """Launch with a fixed digest, since each launch also records itself in memory."""
-        self.enterContext(patch.object(agents.recovery, "digest", return_value={"fixed": True}))
-        command, env = agents.prepare_launch(
+        self.enterContext(patch.object(launch.recovery, "digest", return_value={"fixed": True}))
+        command, env = launch.prepare_launch(
             self.current, self.project, provider, f"/bin/{provider}", None, plugins=enabled
         )
         # The pi captain extension gets a fresh temporary file name on every launch.

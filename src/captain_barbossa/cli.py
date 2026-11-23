@@ -9,13 +9,10 @@ from pathlib import Path
 
 from . import __version__, config, dashboard, do, events, inspection, protocol, recovery
 from .agents import (
-    LaunchPlanError,
     create_crew,
     dismiss_crew,
     focus_crew,
     interrupt_crew,
-    launch,
-    launch_plan,
     protocol_command,
     status_crew,
     switch_model,
@@ -25,6 +22,7 @@ from .agents import (
 from .crew import Crew
 from .events import mail_context, receipt_for
 from .execution import artifact_command
+from .launch import LaunchPlanError, launch, launch_plan
 from .layout import HERDR_DIRECTIONS
 from .memory import REPO_RELATIONS, RULEBOOK_FILES, memory
 from .models import PROVIDERS, TIER_NAMES, models_for, tiers_for

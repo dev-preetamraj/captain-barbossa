@@ -11,7 +11,7 @@ import sys
 import unittest
 from unittest.mock import patch
 
-from captain_barbossa import agents, cli, config, models, runtime, sessions, store
+from captain_barbossa import agents, cli, config, launch, models, runtime, sessions, store
 from captain_barbossa import instructions as instruction_prompts
 from captain_barbossa import pane as panes
 from captain_barbossa.crew import Crew
@@ -167,7 +167,7 @@ class RecruitTests(SessionCase):
             with (
                 self.subTest(provider=provider),
                 patch.object(runtime, "herdr"),
-                patch.object(agents, "executable", side_effect=lambda name: f"/bin/{name}"),
+                patch.object(launch, "executable", side_effect=lambda name: f"/bin/{name}"),
                 patch.object(os, "execvpe") as execute,
                 patch.object(sys.stdin, "isatty", return_value=True),
                 patch(
@@ -175,7 +175,7 @@ class RecruitTests(SessionCase):
                     **{"return_value.unsafe_ask.return_value": provider},
                 ) as ask,
             ):
-                agents.launch(self.args(), self.pane, self.project)
+                launch.launch(self.args(), self.pane, self.project)
                 self.assertEqual(execute.call_args.args[0], f"/bin/{provider}")
                 self.assertIn("Choose your captain", ask.call_args.args[0])
         with (
@@ -187,7 +187,7 @@ class RecruitTests(SessionCase):
             patch.object(runtime, "herdr") as api,
         ):
             with self.assertRaisesRegex(runtime.CaptainError, "cancelled"):
-                agents.launch(self.args(), self.pane, self.project)
+                launch.launch(self.args(), self.pane, self.project)
             api.assert_not_called()
 
     def test_crew_requires_choices_and_cancellation_creates_nothing(self):

@@ -244,7 +244,7 @@ of the task behave identically and need no fourth code path.
 Flow, as a `quiet` action in `do.run`:
 
 1. `provider = read_json(session_directory / "captain.json")["provider"]`, already
-   written by `agents.launch`; no new state.
+   written by `launch.launch`; no new state.
 2. Not in `models.PROVIDERS` -> the refusal above.
 3. `model = resolve_model(provider, args.model or config.text("crew", "model"))` - the
    same tier resolution and the same `cheap` default a crew gets.

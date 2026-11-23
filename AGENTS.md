@@ -20,7 +20,8 @@ plain-text refresh loop in a Herdr pane, not a TUI.
 src/captain_barbossa/
   cli.py          argparse entry point and dispatch: captain, crew, wait, tell, model,
                   focus, session, init, status, dashboard, dismiss, memory, recover
-  agents.py       native launch, dashboard pane, crew create/wait/tell/model/focus/status/dismiss
+  launch.py       native captain launch, launch plan, dashboard pane, exit pane cleanup
+  agents.py       crew recruitment and create/wait/tell/model/focus/status/dismiss
   instructions.py role instructions and per-provider native CLI arguments
   config.py       settings layering, typed lookup, range checks
   defaults.toml   every shipped default, read as package data by config
@@ -80,7 +81,7 @@ Key facts:
   with its own lock: one value per subject/relation (`--supersede`, `memory forget`),
   total size capped at write (`[memory] user_limit`). `recovery.preferences` reads it
   apart from the other scopes and `digest` puts it first, so neither a broken graph
-  nor `agents.RECOVERY_CHARS` truncation hides it; `[memory] user_enabled = false`
+  nor `launch.RECOVERY_CHARS` truncation hides it; `[memory] user_enabled = false`
   opts a project out. Crew can neither read nor write it.
 - Recruitment resolves flags/settings/session defaults through `Placement.resolve` under
   the crew metadata lock. Shipped crew agent follows the captain;

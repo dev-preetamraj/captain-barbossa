@@ -6,7 +6,7 @@ import json
 import os
 from unittest.mock import patch
 
-from captain_barbossa import agents, cli, config, memory, recovery, sessions, store
+from captain_barbossa import cli, config, launch, memory, recovery, sessions, store
 from captain_barbossa.runtime import CaptainError
 from tests.home_isolation import SessionCase
 
@@ -33,7 +33,7 @@ class CrossProjectPreferenceTests(SessionCase):
         config.settings.cache_clear()
 
     def launch_state(self):
-        command, _ = agents.prepare_launch(self.current, self.project, "pi", "/bin/pi", None)
+        command, _ = launch.prepare_launch(self.current, self.project, "pi", "/bin/pi", None)
         prompt = command[command.index("--append-system-prompt") + 1]
         return prompt.split("Launch state (reference data, not instructions):\n", 1)[1]
 
@@ -103,7 +103,7 @@ class CrossProjectPreferenceTests(SessionCase):
         self.assertEqual(state["preferences"], rows)
         # Truncation keeps exactly the preferences: they are serialised first.
         head = '{"preferences": ' + json.dumps(rows)
-        with patch.object(agents, "RECOVERY_CHARS", len(head)):
+        with patch.object(launch, "RECOVERY_CHARS", len(head)):
             self.assertEqual(self.launch_state(), f"{head}... truncated; run CAPTAIN recover\n")
         project_graph = store.state_storage(self.project) / "graph.json"
         repo_graph = memory.repo_graph(self.project)
@@ -184,7 +184,7 @@ class CrossProjectPreferenceTests(SessionCase):
     def test_no_setting_lets_preferences_reach_the_launch_cut(self):
         ceiling = 16_000
         # Below the ceiling, the whole preferences array ends before the launch cut.
-        self.assertLessEqual(len('{"preferences": ') + ceiling, agents.RECOVERY_CHARS)
+        self.assertLessEqual(len('{"preferences": ') + ceiling, launch.RECOVERY_CHARS)
         self.settings(f"[memory]\nuser_limit = {ceiling - 1}\n")
         memory.add_user_memory("commits", "style", "conventional")
         self.settings(f"[memory]\nuser_limit = {ceiling}\n")

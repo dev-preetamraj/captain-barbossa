@@ -9,7 +9,7 @@ import time
 import unittest
 from unittest.mock import patch
 
-from captain_barbossa import agents, cli, memory, runtime, sessions, store
+from captain_barbossa import agents, cli, launch, memory, runtime, sessions, store
 from captain_barbossa.runtime import CaptainError
 from tests.home_isolation import HERDR, SessionCase
 
@@ -277,19 +277,19 @@ class PruneTests(SessionCase):
             patch.object(sys.stdin, "isatty", return_value=True),
             contextlib.redirect_stdout(io.StringIO()),
         ):
-            agents.launch(args, self.pane, self.project)
+            launch.launch(args, self.pane, self.project)
         execute.assert_called_once()
         self.assertFalse(stale.exists())
         blocked = self.make_session("b" * 32, 30)
         with (
             patch.object(runtime, "herdr"),
-            patch.object(agents, "prune_sessions", side_effect=OSError("state is unreadable")),
+            patch.object(launch, "prune_sessions", side_effect=OSError("state is unreadable")),
             patch.object(agents, "executable", return_value="/bin/claude"),
             patch.object(os, "execvpe") as execute,
             patch.object(sys.stdin, "isatty", return_value=True),
             contextlib.redirect_stdout(io.StringIO()),
         ):
-            agents.launch(args, self.pane, self.project)
+            launch.launch(args, self.pane, self.project)
         execute.assert_called_once()
         self.assertTrue(blocked.is_dir())
 
@@ -324,7 +324,7 @@ class PruneTests(SessionCase):
             patch.object(sys.stdin, "isatty", return_value=True),
             contextlib.redirect_stdout(io.StringIO()),
         ):
-            agents.launch(args, pane, self.project)
+            launch.launch(args, pane, self.project)
         (new_session,) = set(self.sessions.iterdir()) - before
         captain = store.read_json(new_session / "captain.json")
         self.assertEqual(captain["terminal_id"], "term_captain")

@@ -7,7 +7,7 @@ from argparse import Namespace
 from pathlib import Path
 from unittest.mock import patch
 
-from captain_barbossa import __version__, plugins
+from captain_barbossa import __version__, launch, plugins
 from tests.home_isolation import SessionCase
 from tests.plugin_fixture import FakePlugin, clear_settings, golden, hello, register, unregister
 
@@ -143,7 +143,7 @@ class ProtocolNegotiationTests(SessionCase):
             plugins.add("example", str(self.plugin.path), required=False)
 
     def test_malformed_plugin_settings_are_ignored_silently(self):
-        from captain_barbossa import agents, sessions
+        from captain_barbossa import sessions
 
         self.settings.parent.mkdir(parents=True, exist_ok=True)
         current = sessions.session(self.project, self.pane, create=True)
@@ -168,7 +168,7 @@ class ProtocolNegotiationTests(SessionCase):
                     contextlib.redirect_stderr(io.StringIO()) as error,
                     contextlib.redirect_stdout(io.StringIO()),
                 ):
-                    command, _ = agents.prepare_launch(
+                    command, _ = launch.prepare_launch(
                         current, self.project, "claude", "/bin/claude", None
                     )
                     self.assertEqual(plugins.command(Namespace(plugin_command="list")), 0)

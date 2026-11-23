@@ -250,7 +250,7 @@ class StopHookTests(SessionCase):
         with (
             patch.object(cli, "parser", side_effect=AssertionError("hook built the parser")),
             patch(
-                "captain_barbossa.agents.check_for_update",
+                "captain_barbossa.launch.check_for_update",
                 side_effect=AssertionError("update check"),
             ),
             contextlib.redirect_stdout(io.StringIO()),
