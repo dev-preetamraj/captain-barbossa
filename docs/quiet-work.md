@@ -204,7 +204,7 @@ record type is already literally `"quiet"`.
 
 It cannot reuse `do._spawn`, which the build proved: `_spawn` returns
 `(stdout + stderr).strip()`, and anything the CLI writes to stderr would make the JSON
-result unparseable. The subprocess body is now `do._capture`, returning the
+result unparseable. The subprocess body is now `processes.capture`, returning the
 `CompletedProcess`; `_spawn` is a four-line wrapper over it that combines and checks, so
 no existing call site changed.
 
@@ -269,7 +269,7 @@ premise as `do.py`'s docstring (work the captain does itself, recorded), reusing
 It cannot reuse `do._spawn`, which the build proved: `_spawn` returns
 `(stdout + stderr).strip()`, and anything the CLI writes to stderr would make the result
 unparseable - codex writes a model-refresh error there on every run. The subprocess body
-is `do._capture`, returning the `CompletedProcess`; `_spawn` is a four-line wrapper over
+is `processes.capture`, returning the `CompletedProcess`; `_spawn` is a four-line wrapper over
 it that combines and checks, so no existing call site changed.
 
 ### Why an unwatched edit is allowed, and where it stops
