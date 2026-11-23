@@ -825,6 +825,7 @@ class PaneSplitTests(SessionCase):
         with (
             pinned(captain_tab=[1, 1]),
             patch.object(runtime, "herdr", side_effect=api) as calls,
+            patch.object(sessions, "herdr", side_effect=api),
             patch.object(Placement, "even_new_pane"),
             contextlib.redirect_stderr(io.StringIO()),
         ):

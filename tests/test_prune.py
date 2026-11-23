@@ -9,7 +9,7 @@ import time
 import unittest
 from unittest.mock import MagicMock, patch
 
-from captain_barbossa import agents, cli, launch, memory, retention, runtime, sessions, store
+from captain_barbossa import cli, launch, memory, retention, runtime, sessions, store
 from captain_barbossa.runtime import CaptainError
 from tests.home_isolation import HERDR, SessionCase
 
@@ -280,7 +280,7 @@ class PruneTests(SessionCase):
         with (
             patch.object(runtime, "herdr"),
             patched_herdr(return_value=agent_list()),
-            patch.object(agents, "executable", return_value="/bin/claude"),
+            patch.object(launch, "executable", return_value="/bin/claude"),
             patch.object(os, "execvpe") as execute,
             patch.object(sys.stdin, "isatty", return_value=True),
             contextlib.redirect_stdout(io.StringIO()),
@@ -292,7 +292,7 @@ class PruneTests(SessionCase):
         with (
             patch.object(runtime, "herdr"),
             patch.object(launch, "prune_sessions", side_effect=OSError("state is unreadable")),
-            patch.object(agents, "executable", return_value="/bin/claude"),
+            patch.object(launch, "executable", return_value="/bin/claude"),
             patch.object(os, "execvpe") as execute,
             patch.object(sys.stdin, "isatty", return_value=True),
             contextlib.redirect_stdout(io.StringIO()),
@@ -327,7 +327,7 @@ class PruneTests(SessionCase):
         with (
             patch.object(runtime, "herdr"),
             patched_herdr(return_value=agent_list()),
-            patch.object(agents, "executable", return_value="/bin/claude"),
+            patch.object(launch, "executable", return_value="/bin/claude"),
             patch.object(os, "execvpe"),
             patch.object(sys.stdin, "isatty", return_value=True),
             contextlib.redirect_stdout(io.StringIO()),

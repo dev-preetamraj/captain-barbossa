@@ -322,7 +322,7 @@ class LaunchTeardownTests(SessionCase):
         )
         with (
             patch.object(agents.runtime, "herdr", return_value={}),
-            patch.object(agents, "executable", return_value="/bin/claude"),
+            patch.object(launch, "executable", return_value="/bin/claude"),
             patch.object(launch, "close_panes_on_exit", side_effect=OSError("no fork")),
             patch.object(agents.sys.stdin, "isatty", return_value=True),
             patch.object(os, "execvpe") as execute,
