@@ -82,9 +82,8 @@ class MirrorPublicationTests(SessionCase):
 
     def test_a_held_lock_skips_the_sync(self):
         with store.lock(self.mirror / "lock"):
-            with self.assertRaises(plugins.PluginError) as caught:
+            with self.assertRaisesRegex(store.CaptainError, "lock"):
                 plugins.sync("example")
-        self.assertEqual(caught.exception.code, "locked")
         self.assertEqual(self.plugin.requests(), [])
 
     def test_crash_leftovers_are_collected_and_never_served(self):

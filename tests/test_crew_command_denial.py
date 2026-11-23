@@ -154,7 +154,7 @@ class ClaudeHookDenialTests(SessionCase):
                 "agent": "jack",
                 "incarnation_id": "first",
                 "provider": "claude",
-                "plugins": {"version": 1, "denials": DENIALS, "generations": {}},
+                "plugins": {"denials": DENIALS, "generations": {}},
             },
             self.current,
         )
@@ -199,7 +199,7 @@ class ClaudeHookDenialTests(SessionCase):
 
     def test_session_denials_apply_to_a_crew_record_without_a_binding(self):
         self.crew.record.pop("plugins")
-        self.current.meta["plugins"] = {"version": 1, "active": [], "denials": DENIALS}
+        self.current.meta["plugins"] = {"active": [], "denials": DENIALS}
         store.write_json(self.current.meta_path, self.current.meta)
         native = self.hook("example proposals approve")["hookSpecificOutput"]
         self.assertEqual(native["permissionDecision"], "deny")
@@ -219,7 +219,7 @@ class LaunchPathMatrixTests(SessionCase):
         self.enterContext(contextlib.redirect_stderr(io.StringIO()))
 
     def bind(self, provider, path, denials=DENIALS, managed=True):
-        meta = {"plugins": {"version": 1, "active": [], "denials": denials}}
+        meta = {"plugins": {"active": [], "denials": denials}}
         record = {"id": "jack", "incarnation_id": "i1", "provider": provider}
         agents.bind_plugins(meta, record, provider, path, self.current.directory, managed=managed)
         return record
@@ -274,7 +274,7 @@ class LaunchPathMatrixTests(SessionCase):
 
     def quiet(self, provider, *extra):
         store.write_json(self.current.directory / "captain.json", {"provider": provider})
-        self.current.meta["plugins"] = {"version": 1, "active": [], "denials": DENIALS}
+        self.current.meta["plugins"] = {"active": [], "denials": DENIALS}
         store.write_json(self.current.meta_path, self.current.meta)
         args = cli.parser().parse_args(["quiet", "--task", "look", *extra])
         seen = {}

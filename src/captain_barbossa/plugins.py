@@ -7,7 +7,6 @@ only cached state and never waits on a plugin; docs/plugin-design.md is the wire
 """
 
 import contextlib
-import fcntl
 import hashlib
 import json
 import os
@@ -208,10 +207,6 @@ def _options(entry):
     return entry.get("options") if isinstance(entry.get("options"), dict) else {}
 
 
-def _stamp(timestamp):
-    return datetime.fromtimestamp(timestamp, UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
 def render(name, files, role, synced_at, stale):
     """One plugin's section for one role; '' when it has no file for that role.
 
@@ -222,7 +217,8 @@ def render(name, files, role, synced_at, stale):
     if not chosen:
         return ""
     freshness = "stale" if stale else "fresh"
-    text = f"## Plugin context: {name}\nSynced {_stamp(synced_at)} ({freshness}).\n"
+    stamp = datetime.fromtimestamp(synced_at, UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    text = f"## Plugin context: {name}\nSynced {stamp} ({freshness}).\n"
     return text + "".join(f"\n### {item['path']}\n{item['text']}" for item in chosen)
 
 
@@ -301,17 +297,6 @@ def section(name, generation, role, now=None):
     return render(name, files, role, found["synced_at"], stale)
 
 
-def _locked(root):
-    """Hold the mirror's lock without waiting; a sync already running wins."""
-    handle = open(os.open(root / "lock", os.O_CREAT | os.O_WRONLY, 0o600), "a")
-    try:
-        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError as exc:
-        handle.close()
-        raise PluginError("locked", f"another sync of {root.name} is running") from exc
-    return handle
-
-
 def _publish(root, snapshot):
     generation = f"{time.time_ns()}-{secrets.token_hex(4)}"
     synced_at = time.time()
@@ -378,7 +363,7 @@ def sync(name):
     if entry is None:
         raise CaptainError(f"No plugin named {name} is registered in home settings.")
     root = private_dir(directory(name))
-    with _locked(root):
+    with lock(root / "lock", timeout=0):
         try:
             generation = _sync(name, entry, root)
         except PluginError as exc:
@@ -448,7 +433,7 @@ def binding():
             print(f"captain: plugin {name} skipped: {found.mismatch}", file=sys.stderr)
         elif "context" in found.versions:
             active.append(name)
-    return {"version": 1, "active": active, "denials": denials}
+    return {"active": active, "denials": denials}
 
 
 def refresh():
@@ -476,7 +461,7 @@ def spawn(argv):
         pass  # the next launch, or the org scheduler, tries again
 
 
-def context(bound, role, now=None):
+def context(bound, role):
     """Every bound plugin's section for this role, within the aggregate ceiling.
 
     A captain binding names active plugins and reads their current generations; a crew
@@ -488,7 +473,7 @@ def context(bound, role, now=None):
         chosen = {name: (pointer(name) or {}).get("generation") for name in bound["active"]}
     parts, total = [], 0
     for name, generation in chosen.items():
-        body = section(name, generation, role, now) if generation else ""
+        body = section(name, generation, role) if generation else ""
         if not body:
             continue
         text = "\n" + body
@@ -534,7 +519,7 @@ def bind(bound, record, provider, path, session_directory, managed=True):
         pinned = current and pin(name, current["generation"], session_directory)
         if pinned:
             generations[name] = pinned
-    record["plugins"] = {"version": 1, "denials": denials, "generations": generations}
+    record["plugins"] = {"denials": denials, "generations": generations}
     return context(record["plugins"], "crew")
 
 
@@ -637,11 +622,11 @@ def remove(name):
     root = directory(name)
     if root.is_dir():
         try:
-            with _locked(root):
+            with lock(root / "lock", timeout=0):
                 for stale in ("current.json", "hello.json"):
                     (root / stale).unlink(missing_ok=True)
                 collect(root)
-        except PluginError:
+        except CaptainError:
             pass  # a running sync finishes; the next collection takes what is unpinned
     print(f"Removed plugin {name}.")
 

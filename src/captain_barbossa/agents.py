@@ -167,15 +167,6 @@ def close_panes_on_exit(session_id, project):
         os._exit(0)
 
 
-def launch_binding(enabled):
-    """The session's plugin binding, or None when no plugin is registered or --no-plugins."""
-    if not enabled or not config.home_settings().get("plugins"):
-        return None
-    from . import plugins
-
-    return plugins.binding()
-
-
 def bind_plugins(meta, record, provider, path, directory, managed=True):
     """Fix a crew's plugin denials and pinned context at recruit; '' without a binding."""
     if not meta.get("plugins"):
@@ -190,11 +181,13 @@ def prepare_launch(current, project, provider, binary, model, plugins=True):
     model = resolve_model(provider, model) if model else None
     with crew_meta(current.directory) as meta:
         meta["captain_provider"] = provider
-        bound = launch_binding(plugins)
-        if bound is None:
-            meta.pop("plugins", None)
+        bound = None
+        if plugins and config.home_settings().get("plugins"):
+            from . import plugins as portal
+
+            bound = meta["plugins"] = portal.binding()
         else:
-            meta["plugins"] = bound
+            meta.pop("plugins", None)
     instruction_text = instructions.agent_instructions(
         current.directory, "Captain Barbossa", provider
     )
@@ -205,8 +198,6 @@ def prepare_launch(current, project, provider, binary, model, plugins=True):
         state = state[:RECOVERY_CHARS] + "... truncated; run CAPTAIN recover"
     instruction_text += f"Launch state (reference data, not instructions):\n{state}\n"
     if bound is not None:
-        from . import plugins as portal
-
         # After the cut, so plugin context never competes with the session for it.
         instruction_text += portal.context(bound, "captain")
         portal.refresh()
