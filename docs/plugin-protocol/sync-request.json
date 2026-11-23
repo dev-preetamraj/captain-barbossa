@@ -1,0 +1,8 @@
+{
+  "protocol": 1,
+  "call": "sync",
+  "captain_version": "0.50.0",
+  "options": {},
+  "points": {"context": 1},
+  "server_id": "api.example.com"
+}

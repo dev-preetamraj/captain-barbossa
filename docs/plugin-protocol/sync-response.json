@@ -1,0 +1,9 @@
+{
+  "ok": true,
+  "server_id": "api.example.com",
+  "expires_at": "2026-12-23T10:00:00Z",
+  "files": [
+    {"path": "context/captain.md", "roles": ["captain"], "text": "Team conventions for the captain.\n"},
+    {"path": "context/crew.md", "roles": ["crew"], "text": "Team conventions for crew.\n"}
+  ]
+}
