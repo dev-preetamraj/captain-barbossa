@@ -1,17 +1,16 @@
-"""Launch native captain and crew sessions in Herdr."""
+"""Crew recruitment and the crew commands: create, wait, tell, model, focus, status, dismiss."""
 
 import json
-import os
 import re
 import shlex
 import sys
-import time
 from itertools import cycle
 from pathlib import Path
 from uuid import uuid4
 
 from . import (
     background,
+    background_state,
     config,
     execution,
     instructions,
@@ -19,30 +18,20 @@ from . import (
     native_history,
     profiles,
     protocol,
-    recovery,
     results,
+    retirement,
     runtime,
     worktrees,
 )
 from .crew import Crew, CrewState
-from .dashboard import dashboard_pane, renest_dashboard, start_dashboard
+from .dashboard import dashboard_pane, renest_dashboard
 from .memory import add_memory, truncate_label
-from .models import HOOKLESS, PROVIDERS, claude_label, model_names, resolve_model
+from .models import HOOKLESS, claude_label, model_names, resolve_model
 from .pane import MODEL_TIMEOUT, PROMPT_TIMEOUT, shell_ready_for_input
-from .pi_captain import captain_extension
 from .placement import Placement, launch_choices
-from .prompts import choose
 from .runtime import HERDR_ERRORS, CaptainError, check_text, executable
-from .sessions import agent_name, crew_meta, is_durable, prune_sessions, read_session, session
+from .sessions import agent_name, crew_meta, is_durable, read_session, session
 from .store import private_dir, read_json, state_root, temp_root, write_json
-from .update_check import check_for_update
-
-# How often the exit watcher checks whether the captain's CLI is still its parent. A pane
-# that outlives the captain by a second costs nothing.
-EXIT_POLL_SECONDS = 1.0
-
-# The launch digest rides in one argv string, which Linux caps at 128 KiB.
-RECOVERY_CHARS = 32_000
 
 # One word each: the roster name is the crew ID, the display name, and the agent suffix.
 CREW_NAMES = (
@@ -58,251 +47,40 @@ CREW_NAMES = (
     "tia",
     "davy",
     "sao",
+    "james",
+    "weatherby",
+    "cutler",
+    "henry",
+    "carina",
+    "angelica",
+    "philip",
+    "syrena",
+    "scrum",
+    "murtogg",
+    "mullroy",
+    "bill",
+    "maccus",
+    "koehler",
+    "shansa",
+    "ian",
+    "theodore",
+    "gillette",
+    "giselle",
+    "scarlett",
+    "twigg",
+    "crash",
+    "edward",
+    "ammand",
 )
 
 
-def close_session_panes(session_id, project):
-    """Close this session's live crew panes and its dashboard pane, and nothing else.
+def bind_plugins(meta, record, provider, path, directory, managed=True):
+    """Fix a crew's plugin denials and pinned context at recruit; '' without a binding."""
+    if not meta.get("plugins"):
+        return ""
+    from . import plugins
 
-    Every pane id comes from this session's own records, so a pane the session never
-    opened is never touched. One already gone is not news, and Herdr closes a tab whose
-    last pane goes with it. A crew whose owned work Git shows unlanded keeps its pane:
-    no user is present at exit to confirm leaving it behind.
-    """
-    current = read_session(project, session_id)
-    with crew_meta(current.directory) as meta:
-        closing = []
-        live = [
-            crew
-            for crew in Crew.members(current._replace(meta=meta))
-            if not crew.is_dismissed and crew.record.get("pane")
-        ]
-        with protocol.checkpoint(current.directory) as state:
-            for crew in live:
-                try:
-                    assignment = protocol.active(state, crew)
-                    if crew.record.get("worktree_id"):
-                        results.collect(
-                            current,
-                            crew.record["worktree_id"],
-                            assignment["paths"],
-                            assignment.get("report") or "",
-                        )
-                        reasons = []
-                    else:
-                        reasons = protocol.unlanded(project, assignment)
-                except CaptainError as exc:
-                    # A crew never assigned owns nothing; any other failure is unverified.
-                    unassigned = state["active"].get(crew.crew_id) is None
-                    reasons = [] if unassigned else [str(exc)]
-                if reasons:
-                    try:
-                        print(
-                            f"captain: kept {crew.display_name}'s pane open; its owned work "
-                            f"has not landed: {'; '.join(reasons)}. {protocol.UNSAVED_CAVEAT}",
-                            file=sys.stderr,
-                        )
-                    except OSError:  # the terminal went with the captain; keep closing
-                        pass
-                else:
-                    closing.append((crew.record["pane"], crew.record))
-        board = dashboard_pane(current)
-        if board:
-            closing.append((board, None))
-        for pane_id, record in closing:
-            stopped = False
-            try:
-                if record is not None and record.get("lifetime_id"):
-                    crew = Crew(record["id"], record, current._replace(meta=meta))
-                    record["cleanup"] = execution.retire(crew)
-                    stopped = record["cleanup"]["lifetime"]["ok"]
-                else:
-                    runtime.herdr("pane", "close", pane_id)
-                    stopped = True
-            except HERDR_ERRORS as exc:
-                stopped = not (record and record.get("lifetime_id")) and bool(
-                    re.search(r"\bpane_not_found\b", str(exc))
-                )
-            if record is not None:
-                if not stopped:
-                    record["status"] = "cleanup_pending"
-                    continue
-                crew = Crew(record["id"], record, current._replace(meta=meta))
-                for message in protocol.unread(crew):
-                    protocol.bounce(crew, message["id"], "Captain exited before mail was read.")
-                with protocol.checkpoint(current.directory) as state:
-                    assignment = state["assignments"].get(state["active"].get(crew.crew_id))
-                    if assignment and assignment["state"] != "done":
-                        assignment.update(state="done", report="Crew stopped at captain exit.")
-                # Recorded as the pane goes: a resumed --session must not find ghost crew
-                # holding slots no pane backs any more.
-                record["status"] = "dismissed"
-
-
-def close_panes_on_exit(session_id, project):
-    """Fork a watcher that closes this session's panes once the captain's CLI exits.
-
-    exec replaces this process, so no code of captain's own runs at exit. The watcher
-    polls getppid() instead: it is reparented the moment that process dies, whichever way
-    it dies. An inherited pipe would be simpler but is held open by every descendant the
-    CLI forks, so one backgrounded job meant no teardown at all. setsid keeps the watcher
-    out of the pane's process group, so closing the captain's pane cannot take the
-    teardown with it. stdin and stdout go to /dev/null; stderr stays on the terminal, which
-    the user's shell gets back, so a pane kept for unlanded work says why.
-    """
-    captain_pid = os.getpid()
-    if os.fork():
-        return
-    try:
-        os.setsid()
-        null = os.open(os.devnull, os.O_RDWR)
-        for stream in range(2):
-            os.dup2(null, stream)
-        while os.getppid() == captain_pid:
-            time.sleep(EXIT_POLL_SECONDS)
-        close_session_panes(session_id, project)
-    finally:
-        # _exit even on an error: there is no terminal left to report one to, and the
-        # watcher must not fall back into the captain's own code path.
-        os._exit(0)
-
-
-def prepare_launch(current, project, provider, binary, model):
-    """Build the native captain command and environment overlay for either transport."""
-    model = resolve_model(provider, model) if model else None
-    with crew_meta(current.directory) as meta:
-        meta["captain_provider"] = provider
-    instruction_text = instructions.agent_instructions(
-        current.directory, "Captain Barbossa", provider
-    )
-    # Delivered, not requested: a resumed captain that skips `recover` still knows its session.
-    # Preferences serialise first, so the cut below only ever takes the session's tail.
-    state = json.dumps(recovery.digest(current, project))
-    if len(state) > RECOVERY_CHARS:
-        state = state[:RECOVERY_CHARS] + "... truncated; run CAPTAIN recover"
-    instruction_text += f"Launch state (reference data, not instructions):\n{state}\n"
-    add_memory(current.graph, f"session:{meta['id']}", "captain", provider)
-    events = current.events("captain")
-    private_dir(events.parent)
-    command = [binary, *instructions.native_args(provider, instruction_text, model, events=events)]
-    if provider == "pi":
-        command.extend(["--extension", str(captain_extension(current.directory))])
-    env = {
-        "CAPTAIN_SESSION": meta["id"],
-        "CAPTAIN_PROJECT": str(project.resolve()),
-        "CAPTAIN_STATE_ROOT": str(state_root()),
-        "CAPTAIN_TEMP_ROOT": str(temp_root()),
-    }
-    return command, env
-
-
-class LaunchPlanError(CaptainError):
-    def __init__(self, code, message):
-        super().__init__(message)
-        self.code = code
-
-
-def launch_plan(args, project):
-    provider = args.agent or config.text("captain", "agent")
-    if not provider:
-        raise LaunchPlanError("missing-choice", "Choose --agent.")
-    if provider != "pi":
-        raise LaunchPlanError("unsupported-transport", "Only pi RPC is supported.")
-    identity = None
-    current = None
-    if args.session:
-        try:
-            current = session(project, None, args.session)
-        except CaptainError as exc:
-            raise LaunchPlanError("invalid-session", str(exc)) from exc
-        if current.meta.get("captain_provider") != provider:
-            raise LaunchPlanError("session-provider-mismatch", "Session provider is not pi.")
-        path = current.directory / "pi-session.json"
-        recorded = read_json(path) if path.is_file() else {}
-        identity = recorded.get("sessionFile") if isinstance(recorded, dict) else None
-        if (
-            not isinstance(identity, str)
-            or not identity
-            or not Path(identity).is_absolute()
-            or not Path(identity).is_file()
-        ):
-            raise LaunchPlanError(
-                "resume-unavailable", "No exact existing pi session file recorded."
-            )
-    model = args.model or (None if current else config.text("captain", "model"))
-    if not model and current is None:
-        raise LaunchPlanError("missing-choice", "Choose --model.")
-    binary = executable(provider)
-    current = current or session(project, None, create=True)
-    command, env = prepare_launch(current, project, provider, binary, model)
-    command[1:1] = ["--mode", "rpc"]
-    if args.effort:
-        command.extend(["--thinking", args.effort])
-    if identity:
-        command.extend(["--session", identity])
-    # Values are an overlay, never a copy of the caller's credentials or crew identity.
-    for key in os.environ:
-        if key.startswith("CAPTAIN_") and key not in (*env, "CAPTAIN_MEMORY_ROOT"):
-            env[key] = None
-    if "CAPTAIN_MEMORY_ROOT" in os.environ:
-        env["CAPTAIN_MEMORY_ROOT"] = os.environ["CAPTAIN_MEMORY_ROOT"]
-    return {
-        "version": 1,
-        "provider": provider,
-        "transport": "rpc",
-        "argv": command,
-        "cwd": str(project.resolve()),
-        "env": env,
-        "captainSessionId": current.meta["id"],
-        "nativeResumeIdentity": identity,
-    }
-
-
-def launch(args, pane, project):
-    if not sys.stdin.isatty():
-        raise CaptainError("Launch captain from an interactive Herdr terminal.")
-    check_for_update()
-    wanted = args.agent or config.text("captain", "agent")
-    if wanted and wanted not in PROVIDERS:
-        where = config.source("captain", "agent") or config.SETTINGS_PATH
-        raise CaptainError(
-            f"[captain] agent is '{wanted}', which is not one of {', '.join(PROVIDERS)}. "
-            f"Fix it in {where}."
-        )
-    provider = choose(wanted, PROVIDERS, "Choose your captain", "--agent")
-    binary = executable(provider)
-    current = session(project, pane, args.session, create=args.session is None)
-    meta = current.meta
-    try:
-        prune_sessions(project, current=meta["id"])
-    except HERDR_ERRORS:
-        pass  # retention is housekeeping; never block a launch on it
-    model = config.text("captain", "model")
-    command, overrides = prepare_launch(current, project, provider, binary, model)
-    runtime.herdr("tab", "rename", pane["tab_id"], "Captain Barbossa")
-    env = dict(os.environ, **overrides)
-    if args.prompt:
-        command.extend(["--", args.prompt])
-    board = None
-    if config.flag("dashboard", "enabled") and not args.no_dashboard:
-        try:
-            board = start_dashboard(current, pane, project)
-        except Exception as exc:  # a dashboard pane must never cost the captain its launch
-            print(f"captain: no dashboard pane: {exc}", file=sys.stderr)
-    write_json(
-        current.directory / "captain.json",
-        {
-            "provider": provider,
-            "pane": pane["pane_id"],
-            "terminal_id": pane.get("terminal_id"),
-            "dashboard": board,
-        },
-    )
-    try:
-        close_panes_on_exit(meta["id"], project)
-    except OSError as exc:  # teardown must never cost the captain its launch
-        print(f"captain: no exit teardown: {exc}", file=sys.stderr)
-    os.execvpe(binary, command, env)
+    return plugins.bind(meta["plugins"], record, provider, path, directory, managed)
 
 
 def wait_crew(args, pane, project):
@@ -320,7 +98,7 @@ def wait_crew(args, pane, project):
         # A recruiter can publish the roster and die before begin reserves anything.
         # These failures have no assignment to acknowledge; never adopt a stale one.
         orphans = [
-            protocol.result(crew, None, "error", background.UNRESERVED)
+            protocol.result(crew, None, "error", background_state.UNRESERVED)
             for crew in Crew.members(current)
             if not crew.is_dismissed and unreserved(crew)
         ]
@@ -361,6 +139,8 @@ def wait_crew(args, pane, project):
         + (
             f"(delivery {response['delivery_id']}; acknowledge with wait --ack)"
             if response["delivery_id"]
+            else "(done acknowledged; dismiss or hand off)"
+            if response["status"] == "idle"
             else "(nothing pending to acknowledge)"
         )
     )
@@ -441,7 +221,7 @@ def status_crew(args, pane, project):
         current_state = (
             CrewState("cleanup_pending", "cleanup", "shutdown unconfirmed; retry dismiss")
             if crew.record.get("status") == "cleanup_pending"
-            else CrewState("failed", "process", background.UNRESERVED)
+            else CrewState("failed", "process", background_state.UNRESERVED)
             if orphan
             else crew.current_state()
         )
@@ -588,11 +368,11 @@ def dismiss_blocker(crew, assignment, project, confirmed=False, *, allow_unrepor
             f"{crew.display_name} has {unacked} unacknowledged notification(s); "
             "acknowledge them with wait --ack before dismissal."
         )
+    reported = assignment["state"] == "done" and not unacked
     if confirmed or crew.record.get("worktree_id"):
         return
-    reasons = protocol.unlanded(project, assignment)
+    reasons = protocol.unlanded(project, assignment, ignore_uncommitted=reported)
     if reasons:
-        # A done report is not consent: only the user can let owned work go unlanded.
         raise CaptainError(
             f"{crew.display_name}'s owned work has not landed: {'; '.join(reasons)}. "
             f"{protocol.UNSAVED_CAVEAT} Have it committed, or rerun dismiss with "
@@ -610,6 +390,7 @@ def dismiss_crew(args, pane, project):
         if crew.is_dismissed:
             raise CaptainError(f"{crew.display_name} was already dismissed.")
         retrying = crew.record.get("status") == "cleanup_pending"
+        forced = getattr(args, "force", False)
         # Read while the crew still holds its slot; applied once Herdr has closed the pane.
         placement = Placement(pane, current, dashboard_pane(current))
         try:
@@ -628,8 +409,8 @@ def dismiss_crew(args, pane, project):
                     crew,
                     assignment,
                     project,
-                    getattr(args, "confirm_unlanded", False),
-                    allow_unreported=dead_workspace or retrying,
+                    getattr(args, "confirm_unlanded", False) or forced,
+                    allow_unreported=dead_workspace or retrying or forced,
                 )
                 untracked = [path for path in assignment["paths"] if Path(path).is_absolute()]
                 if untracked:
@@ -640,7 +421,7 @@ def dismiss_crew(args, pane, project):
             raise CaptainError(f"{crew.display_name} has no recorded pane to close.")
         try:
             if crew.record.get("lifetime_id"):
-                crew.record["cleanup"] = execution.retire(crew)
+                crew.record["cleanup"] = retirement.retire(crew)
                 if not crew.record["cleanup"]["lifetime"]["ok"]:
                     raise CaptainError("shutdown unconfirmed")
             elif crew.is_background and dead_workspace:
@@ -670,7 +451,7 @@ def dismiss_crew(args, pane, project):
         except HERDR_ERRORS as exc:  # geometry is cosmetic; never lose the dismissal over it
             print(f"captain: tab not re-evened: {exc}", file=sys.stderr)
         if undelivered or (
-            (dead_workspace or retrying)
+            (dead_workspace or retrying or forced)
             and crew.record.get("incarnation_id")
             and not unreserved(crew)
         ):
@@ -685,6 +466,8 @@ def dismiss_crew(args, pane, project):
                         if dead_workspace
                         else "Dismissed after shutdown retry."
                         if retrying
+                        else "Dismissed without a report (--force)."
+                        if forced
                         else "Dismissed before any message was read."
                     )
         if crew.record.get("worktree_id") and not crew.record.get("lifetime_id"):
@@ -706,10 +489,45 @@ def dismiss_crew(args, pane, project):
     # Rename after the roster write: a stale tab id must not cost the dismissal record.
     if label:
         runtime.herdr("tab", "rename", tab_id, label)
+    if not dead_workspace:
+        relayout_session(current)
     add_memory(current.graph, f"session:{meta['id']}", "dismissed", crew.record["agent"])
     for message in bounced:
         print(f"Bounced unread mail to {crew.display_name}: {message['id']}.")
     print(f"Dismissed {crew.display_name}.")
+
+
+def relayout_session(current):
+    """Repack only after dismissal is durable; layout failures are cosmetic."""
+    try:
+        captain = read_json(current.directory / "captain.json")
+        origin = (
+            runtime.herdr("pane", "get", captain["pane"]).get("pane", {})
+            if captain.get("pane")
+            else {}
+        )
+        if not (
+            origin.get("pane_id") == captain.get("pane")
+            and origin.get("workspace_id") == current.meta["workspace"]
+            and origin.get("tab_id")
+            and (
+                not captain.get("terminal_id")
+                or origin.get("terminal_id") == captain["terminal_id"]
+            )
+        ):
+            return
+        with crew_meta(current.directory) as meta:
+            current = current._replace(meta=meta)
+            try:
+                Placement(origin, current, dashboard_pane(current)).relayout(current)
+            except HERDR_ERRORS as exc:
+                print(f"captain: tabs not relaid out: {exc}", file=sys.stderr)
+    except HERDR_ERRORS as exc:
+        print(f"captain: tabs not relaid out: {exc}", file=sys.stderr)
+
+
+def relayout_crew(args, pane, project):
+    relayout_session(session(project, pane, args.session))
 
 
 def begin_recruitment(crew, project, args):
@@ -755,7 +573,7 @@ def begin_recruitment(crew, project, args):
         raise
 
 
-def launch_background(crew, current, project, provider, binary, model, args):
+def launch_background(crew, current, project, provider, binary, model, args, context=""):
     """Start a paneless crew. The roster entry is written before the assignment is
     reserved, so a recruiter that dies at any later point leaves a crew status shows
     (failed, if nothing ran), wait reconciles, and dismiss can retire."""
@@ -774,12 +592,12 @@ def launch_background(crew, current, project, provider, binary, model, args):
     try:
         # Held before begin publishes the assignment, so a wait in between sees a live
         # recruiter rather than a lost run.
-        with background.launching(crew):
+        with background_state.launching(crew):
             assignment = begin_recruitment(crew, project, args)
             record["assignment_id"] = assignment["id"]
             write_json(current.meta_path, current.meta)
             files = background.prepare(
-                crew, project, provider, binary, model, task, assignment["id"]
+                crew, project, provider, binary, model, task, assignment["id"], context=context
             )
             background.start(files)
     except (CaptainError, OSError) as exc:
@@ -787,7 +605,7 @@ def launch_background(crew, current, project, provider, binary, model, args):
             with protocol.checkpoint(current.directory, timeout=background.LOCK_WAIT) as state:
                 assignment = protocol.active(state, crew)
                 if assignment["state"] != "done":
-                    background.close(assignment, "failed", f"[background-start] {exc}")
+                    protocol.close_unreported(assignment, "failed", f"[background-start] {exc}")
         except CaptainError:
             pass  # nothing reserved, or the lock stayed held: the next wait reconciles it
         record.update(status="dismissed", startup_error=str(exc))
@@ -969,8 +787,16 @@ def create_crew(args, pane, project):
             },
             current,
         )
+        plugin_context = bind_plugins(
+            meta,
+            crew.record,
+            provider,
+            "background" if paneless else "foreground",
+            current.directory,
+            managed=managed,
+        )
         if paneless:
-            launch_background(crew, current, project, provider, binary, model, args)
+            launch_background(crew, current, project, provider, binary, model, args, plugin_context)
             return
         assignment = begin_recruitment(crew, project, args)
         # Reserve ownership before launch; failures before native startup release it below.
@@ -1020,6 +846,7 @@ def create_crew(args, pane, project):
             instruction_text = instructions.agent_instructions(
                 current.directory, f"crew member {display_name}", provider
             )
+            instruction_text += plugin_context
             events = crew.events
             private_dir(events.parent)
             events.write_text("", encoding="utf-8")

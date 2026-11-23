@@ -1,4 +1,5 @@
 import contextlib
+import io
 import json
 import os
 import time
@@ -8,7 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from captain_barbossa import agents, protocol, sessions, store
+from captain_barbossa import agents, eventlog, protocol, sessions, store
 from captain_barbossa.crew import Crew
 from captain_barbossa.pane import DRAFT_GATE, UNREADABLE_EXPIRY, UNREADABLE_GATE, Pane
 from captain_barbossa.runtime import CaptainError
@@ -571,6 +572,21 @@ class ProtocolTests(SessionCase):
         self.assertEqual(final["status"], "idle")
         self.assertIsNone(final["delivery_id"])
 
+    def test_wait_text_after_an_acked_done_says_to_dismiss_or_hand_off(self):
+        self.command("done", report="src/a.py changed; checks pass; nothing left")
+        report = protocol.wait(self.crew, 0)
+        args = SimpleNamespace(
+            name="Jack", all=False, json=False, timeout=0, ack=report["delivery_id"], session=None
+        )
+        out = io.StringIO()
+        with (
+            patch.object(agents.Crew, "for_args", return_value=(self.current, self.crew)),
+            contextlib.redirect_stdout(out),
+        ):
+            agents.wait_crew(args, self.pane, self.project)
+        self.assertIn("Jack idle:  (done acknowledged; dismiss or hand off)", out.getvalue())
+        self.assertNotIn("nothing pending", out.getvalue())
+
     def test_check_refusals_carry_codes(self):
         for action, path, code in (
             ("commit", ["src/a"], "action-not-granted"),
@@ -632,7 +648,7 @@ class ProtocolTests(SessionCase):
             "will", {"name": "Will", "agent": "will", "incarnation_id": "second"}, self.current
         )
         # Another execution root still writes the same absolute file.
-        self.enterContext(patch("captain_barbossa.execution.root", return_value=self.root / "wt"))
+        self.enterContext(patch("captain_barbossa.protocol.root", return_value=self.root / "wt"))
         with self.assertRaisesRegex(CaptainError, "owned-path-conflict"):
             protocol.begin(other, self.project, "task", [str(outside / "a.md")], ["edit"])
         other.record["worktree_id"] = "w"
@@ -777,6 +793,25 @@ class ProtocolTests(SessionCase):
         refuse("Jack has no done report")
         self.command("done", report="src/a.py changed; checks pass; nothing left")
         refuse(r"Jack has 1 unacknowledged notification\(s\)")
+
+    def test_dismiss_of_acked_done_shared_crew_ignores_dirty_owned_files(self):
+        self.crew.record.update(pane="w1:p2", assignment_id=self.assignment["id"])
+        store.write_json(self.current.meta_path, self.current.meta)
+        args = SimpleNamespace(session=self.current.meta["id"], name="Jack", confirm_unlanded=False)
+        message_id = protocol.deliver(self.crew, "original", initial=True)
+        protocol.receipt(self.crew.session.directory, self.crew.crew_id, [message_id])
+        self.finish()
+        (self.project / "src").mkdir(exist_ok=True)
+        (self.project / "src" / "a.py").write_text("a = 2\n")
+        with (
+            patch.object(protocol, "unlanded", return_value=[]) as landing,
+            patch.object(agents.runtime, "herdr", return_value={}) as send,
+        ):
+            agents.dismiss_crew(args, self.pane, self.project)
+        send.assert_any_call("pane", "close", "w1:p2")
+        self.assertEqual(landing.call_args.kwargs, {"ignore_uncommitted": True})
+        meta = store.read_json(self.current.meta_path)
+        self.assertEqual(meta["crew"]["jack"]["status"], "dismissed")
 
 
 class HookDeliveryTests(unittest.TestCase):
@@ -1189,7 +1224,7 @@ class ApprovalDedupeTests(unittest.TestCase):
         with patch.object(events.native_history, "observe") as observe:
             events.append_event([str(self.crew.events), json.dumps(event)])
         self.assertEqual(observe.call_args.args[1]["tool_input"], event["tool_input"])
-        records, offset = events.read_events(self.crew.events, 0, max_bytes=65536)
+        records, offset = eventlog.read_events(self.crew.events, 0, max_bytes=65536)
         self.assertLessEqual(offset, 65536)
         self.assertTrue(records[0]["payload_truncated"])
         self.assertNotIn("tool_input", records[0])

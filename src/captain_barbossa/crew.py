@@ -3,7 +3,8 @@
 import re
 from dataclasses import dataclass
 
-from .events import event_incarnation, read_events
+from .background_state import describe
+from .eventlog import event_incarnation, read_events
 from .pane import Pane, modal_start
 from .runtime import HERDR_ERRORS, CaptainError
 from .sessions import Session, read_session
@@ -106,8 +107,6 @@ class Crew:
         if assignment and assignment.get("incarnation_id") != incarnation:
             return CrewState("unknown", "none", "stale incarnation")
         if self.is_background:
-            from .background import describe
-
             return CrewState(*describe(self, assignment))
         pane_status = None
         try:

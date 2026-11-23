@@ -1,0 +1,14 @@
+{
+  "ok": true,
+  "name": "example",
+  "protocol": [1],
+  "refresh_interval": 900,
+  "points": {
+    "context": {"versions": [1], "required": true},
+    "crew_denials": {
+      "versions": [1],
+      "required": true,
+      "commands": [["example", "proposals", "approve"], ["example_cli", "proposals", "approve"]]
+    }
+  }
+}

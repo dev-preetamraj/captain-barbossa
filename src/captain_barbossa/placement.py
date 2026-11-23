@@ -1,10 +1,12 @@
 """Workspace pane discovery, and the slot a crew takes in a declared tab shape."""
 
+import contextlib
 import sys
 from dataclasses import dataclass
 
 from . import config, runtime
 from .crew import Crew
+from .dashboard import renest_dashboard
 from .layout import (
     HERDR_DIRECTIONS,
     RESIZE_RATIO_BOUNDS,
@@ -17,7 +19,7 @@ from .layout import (
 )
 from .models import PROVIDERS, chosen_model
 from .prompts import PLACEMENTS, choose
-from .runtime import CaptainError
+from .runtime import HERDR_ERRORS, CaptainError
 from .store import read_json
 
 
@@ -103,6 +105,7 @@ class Placement:
         self.dashboard = dashboard
         self.active = [crew.record for crew in Crew.members(current) if not crew.is_dismissed]
         self.crew_tabs = []
+        self.verified = set()
         for crew in self.active:
             if crew.get("tab") and crew["tab"] not in self.crew_tabs:
                 self.crew_tabs.append(crew["tab"])
@@ -322,6 +325,222 @@ class Placement:
             column=1,
             row=1,
         )
+
+    def terminal_matches(self, record):
+        """Whether the record's pane still hosts the terminal the crew was recruited into."""
+        key = (record["pane"], record.get("terminal_id"))
+        if key not in self.verified and key[1]:
+            try:
+                actual = runtime.herdr("pane", "get", key[0]).get("pane", {})
+            except HERDR_ERRORS:
+                return False
+            if actual.get("terminal_id") == key[1]:
+                self.verified.add(key)
+        return key in self.verified
+
+    def mapped_tabs(self):
+        """Keep unknown tabs untouched and relabel splits Herdr has collapsed."""
+        groups = self.workspace_panes()
+        self.active = [
+            crew
+            for crew in self.active
+            if crew.get("pane") in groups.get(crew.get("tab"), (None, {}))[1]
+        ]
+        tabs = []
+        for tab in self.tab_order():
+            if tab not in groups:
+                continue
+            live = groups[tab][1]
+            records = [
+                crew for crew in self.active if crew.get("tab") == tab and crew.get("pane") in live
+            ]
+            if any(
+                crew.get("execution") == "background"
+                or type(crew.get("column")) is not int
+                or type(crew.get("row")) is not int
+                for crew in records
+            ):
+                continue
+            known = {crew["pane"] for crew in records}
+            if tab == self.pane["tab_id"]:
+                known.add(self.pane["pane_id"])
+            if set(live) - known:
+                continue
+            if not all(self.terminal_matches(crew) for crew in records):
+                continue
+            tabs.append(tab)
+            columns = sorted({crew["column"] for crew in records})
+            start = 2 if tab == self.pane["tab_id"] else 1
+            for column, old in enumerate(columns, start):
+                members = sorted(
+                    (crew for crew in records if crew["column"] == old),
+                    key=lambda crew: crew["row"],
+                )
+                for row, crew in enumerate(members, 1):
+                    crew.update(column=column, row=row)
+        return tabs
+
+    def relayout_plan(self, skipped=()):
+        """Collapse vanished splits, then fill the first deficit from the last surplus."""
+        if not self.active:
+            return []
+        tabs = self.mapped_tabs()
+        records = [crew for crew in self.active if crew.get("tab") in tabs and crew.get("pane")]
+        remaining = len(records)
+        desired = {}
+        for tab in tabs:
+            captain = tab == self.pane["tab_id"]
+            columns = shape("captain_tab" if captain else "crew_tab")
+            counts = {}
+            if not captain and remaining:
+                counts[1] = 1
+                remaining -= 1
+            while remaining:
+                slot = next_slot(columns, counts, captain)
+                if slot is None:
+                    break
+                counts[slot[0]] = counts.get(slot[0], 0) + 1
+                remaining -= 1
+            desired[tab] = counts
+        for tab in tabs:
+            counts, panes = self.occupancy(tab)
+            gaps = [
+                (column, counts.get(column, 0) + 1)
+                for column, count in desired[tab].items()
+                if counts.get(column, 0) < count
+            ]
+            if not gaps:
+                continue
+            slot = min(gaps, key=lambda slot: (slot[1], slot[0]))
+            candidates = [
+                crew
+                for crew in records
+                if crew["pane"] not in skipped
+                and crew["row"] > desired[crew["tab"]].get(crew["column"], 0)
+            ]
+            if not candidates:
+                continue
+            crew = max(
+                candidates, key=lambda crew: (tabs.index(crew["tab"]), crew["column"], crew["row"])
+            )
+            captain = tab == self.pane["tab_id"]
+            target, direction = split_for(slot, panes, self.pane["pane_id"])
+            chain = tuple(
+                self.column_tops(panes, captain)
+                if direction == "vertical"
+                else self.column_stack(panes, slot[0], captain)
+            )
+            chain = tuple(pane for pane in chain if pane != crew["pane"])
+            if target not in chain:
+                chain = ()
+            return [(crew, Spot(direction, target, tab, column=slot[0], row=slot[1], chain=chain))]
+        if remaining:
+            candidates = [
+                crew
+                for crew in records
+                if crew["pane"] not in skipped
+                and crew["row"] > desired[crew["tab"]].get(crew["column"], 0)
+            ]
+            if candidates:
+                crew = max(
+                    candidates,
+                    key=lambda crew: (tabs.index(crew["tab"]), crew["column"], crew["row"]),
+                )
+                return [(crew, Spot(column=1, row=1))]
+        return []
+
+    def move(self, current, record, spot):
+        adjustments = self.even_after_close(record)
+        source_tab = record["tab"]
+        actual = runtime.herdr("pane", "get", record["pane"]).get("pane", {})
+        if not record.get("terminal_id") or actual.get("terminal_id") != record["terminal_id"]:
+            raise CaptainError("Crew terminal identity changed before move.")
+        if spot.tab is None:
+            runtime.herdr("pane", "move", record["pane"], "--new-tab", "--no-focus")
+            self.land_in_new_tab(record)
+            self.even_after_move(current, record, source_tab, adjustments, spot)
+            return
+        if source_tab == spot.tab:
+            runtime.herdr("pane", "move", record["pane"], "--new-tab", "--no-focus")
+            moved = self.land_in_new_tab(record)
+            if moved.get("terminal_id") != record["terminal_id"]:
+                raise CaptainError("Crew terminal identity not confirmed in temporary tab.")
+        runtime.herdr(
+            "pane",
+            "move",
+            record["pane"],
+            "--tab",
+            spot.tab,
+            "--target-pane",
+            spot.pane,
+            "--split",
+            HERDR_DIRECTIONS[spot.direction],
+            "--ratio",
+            "0.5",
+            "--no-focus",
+        )
+        record.update(
+            tab=spot.tab,
+            column=spot.column,
+            row=spot.row,
+            direction=spot.direction,
+            split_pane=spot.pane,
+        )
+        self.even_after_move(current, record, source_tab, adjustments, spot)
+
+    def land_in_new_tab(self, record):
+        """Record the tab a moved pane opened, from pane get or else the workspace listing.
+
+        The record is updated before any identity check so a later relayout still finds it.
+        """
+        moved = {}
+        with contextlib.suppress(*HERDR_ERRORS):
+            moved = runtime.herdr("pane", "get", record["pane"]).get("pane", {})
+        tab = moved.get("tab_id") or next(
+            (tab for tab, (_, live) in self.workspace_panes().items() if record["pane"] in live),
+            None,
+        )
+        if not tab:
+            raise CaptainError("Herdr did not identify the new crew tab.")
+        record.update(tab=tab, column=1, row=1, direction=None, split_pane=None)
+        if tab not in self.crew_tabs:
+            self.crew_tabs.append(tab)
+        return moved
+
+    def even_after_move(self, current, record, source_tab, adjustments, spot):
+        label = Crew.tab_label(current, source_tab) if source_tab != self.pane["tab_id"] else None
+        if label:
+            try:
+                runtime.herdr("tab", "rename", source_tab, label)
+            except HERDR_ERRORS as exc:
+                print(f"Could not relabel source tab: {exc}", file=sys.stderr)
+        for source, direction, amount in adjustments:
+            try:
+                self.resize(source, direction, amount)
+            except HERDR_ERRORS as exc:
+                print(f"Could not even source tab: {exc}", file=sys.stderr)
+        try:
+            if self.dashboard and spot.tab == self.pane["tab_id"]:
+                renest_dashboard(self.dashboard, self.pane)
+            self.even_new_pane(spot, record["pane"])
+        except HERDR_ERRORS as exc:
+            print(f"Could not even destination tab: {exc}", file=sys.stderr)
+
+    def relayout(self, current):
+        """Attempt each crew at most once, replanning against each completed move."""
+        skipped = set()
+        for _ in range(len(self.active)):
+            plan = self.relayout_plan(skipped)
+            if not plan:
+                return
+            record, spot = plan[0]
+            skipped.add(record["pane"])
+            try:
+                self.move(current, record, spot)
+            except HERDR_ERRORS as exc:
+                print(f"Could not move pane {record['pane']}: {exc}", file=sys.stderr)
+        if self.active:
+            self.mapped_tabs()
 
     def auto_split(self, direction=None, target=None, tab_id=None):
         """Where the next crew opens, from the roster alone; no pane is ever measured."""

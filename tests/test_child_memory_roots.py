@@ -9,7 +9,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from captain_barbossa import agents, cli, memory, runtime, sessions, store
+from captain_barbossa import agents, cli, launch, memory, runtime, sessions, store
 from captain_barbossa import pane as panes
 
 
@@ -54,11 +54,11 @@ class ChildMemoryRootTests(unittest.TestCase):
     def test_launch_forwards_the_parents_distinct_state_and_temp_roots(self):
         with (
             patch.object(runtime, "herdr", return_value={}),
-            patch.object(agents, "executable", return_value="/bin/claude"),
+            patch.object(launch, "executable", return_value="/bin/claude"),
             patch.object(agents.sys.stdin, "isatty", return_value=True),
             patch.object(os, "execvpe") as execute,
         ):
-            agents.launch(self.args("--agent", "claude"), self.pane, self.project)
+            launch.launch(self.args("--agent", "claude"), self.pane, self.project)
         _, _, env = execute.call_args.args
         self.assertEqual(env["CAPTAIN_STATE_ROOT"], str(store.state_root()))
         self.assertEqual(env["CAPTAIN_TEMP_ROOT"], str(store.temp_root()))
@@ -102,11 +102,11 @@ class ChildMemoryRootTests(unittest.TestCase):
     def test_child_env_resolves_project_graph_under_the_parents_state_root_not_temp(self):
         with (
             patch.object(runtime, "herdr", return_value={}),
-            patch.object(agents, "executable", return_value="/bin/claude"),
+            patch.object(launch, "executable", return_value="/bin/claude"),
             patch.object(agents.sys.stdin, "isatty", return_value=True),
             patch.object(os, "execvpe") as execute,
         ):
-            agents.launch(self.args("--agent", "claude"), self.pane, self.project)
+            launch.launch(self.args("--agent", "claude"), self.pane, self.project)
         _, _, parent_env = execute.call_args.args
         parent_state_storage = store.state_storage(self.project)
         memory.add_memory(parent_state_storage / "graph.json", "project", "uses", "Python")

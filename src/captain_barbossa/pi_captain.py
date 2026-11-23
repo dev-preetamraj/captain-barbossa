@@ -215,7 +215,7 @@ export default function (pi) {
       details: { identity } }, { triggerTurn: true, deliverAs: "steer" });
   }
 
-  // Same precedence as background.describe; a lost owner reads working until its watch
+  // Same precedence as background_state.describe; a lost owner reads working until its watch
   // closes the assignment, which the next refresh shows.
   function show() {
     if (!ui) return;

@@ -35,12 +35,17 @@ class GridHarness(unittest.TestCase):
         self.pane = {"workspace_id": "w1", "tab_id": "captain", "pane_id": "captain"}
         self.meta = {"crew": {}}
         self.tabs = 0
+        self.moves = []
+        self.failed_moves = set()
+        self.failed_gets = set()
+        self.live_tabs = {}
+        self.closed_tabs = []
         self.enterContext(contextlib.redirect_stderr(io.StringIO()))
         self.api = self.enterContext(patch.object(runtime, "herdr", side_effect=self._herdr))
 
     def _herdr(self, *args, **_):
         panes = [self.pane] + [
-            {"pane_id": crew["pane"], "tab_id": crew["tab"]}
+            {"pane_id": crew["pane"], "tab_id": self.live_tabs.get(crew["pane"], crew["tab"])}
             for crew in self.meta["crew"].values()
             if crew.get("pane") and crew.get("tab")
         ]
@@ -48,6 +53,27 @@ class GridHarness(unittest.TestCase):
             return {"panes": panes}
         if args == ("tab", "list", "--workspace", "w1"):
             return {"tabs": [{"tab_id": pane["tab_id"]} for pane in panes]}
+        if args[:2] == ("pane", "get"):
+            if args[2] in self.failed_gets and args[2] in self.live_tabs:
+                raise CaptainError("get refused")
+            tab = next(pane["tab_id"] for pane in panes if pane["pane_id"] == args[2])
+            return {"pane": {"terminal_id": f"terminal-{args[2]}", "tab_id": tab}}
+        if args[:2] == ("tab", "rename"):
+            return {}
+        if args[:2] == ("pane", "move"):
+            if args[2] in self.failed_moves:
+                raise CaptainError("move refused")
+            self.moves.append(args)
+            source = next(pane["tab_id"] for pane in panes if pane["pane_id"] == args[2])
+            target = (
+                f"scratch{len(self.moves)}"
+                if "--new-tab" in args
+                else args[args.index("--tab") + 1]
+            )
+            self.live_tabs[args[2]] = target
+            if not any(pane["tab_id"] == source and pane["pane_id"] != args[2] for pane in panes):
+                self.closed_tabs.append(source)
+            return {}
         raise AssertionError(f"placement asked Herdr: {args}")
 
     def choose(self, direction=None, target="auto"):
@@ -75,6 +101,7 @@ class GridHarness(unittest.TestCase):
         """Write a crew straight into a slot, to set a roster up without walking to it."""
         self.meta["crew"][name] = {
             "pane": pane or name,
+            "terminal_id": f"terminal-{pane or name}",
             "tab": tab,
             "status": "started",
             "column": column,
@@ -89,6 +116,232 @@ class GridHarness(unittest.TestCase):
                 spot, _, tab = self.recruit()
                 placed.append(((spot.column, spot.row), spot.pane, spot.direction, tab))
         return placed
+
+
+class RelayoutTests(GridHarness):
+    def setUp(self):
+        super().setUp()
+        self.even = self.enterContext(patch.object(Placement, "even_new_pane"))
+        self.resize = self.enterContext(patch.object(Placement, "resize"))
+
+    def relayout(self, board=None):
+        current = Session(None, self.meta)
+        placement = Placement(self.pane, current, board)
+        placement.relayout(current)
+        return placement
+
+    def test_relayout_bounds_attempts_when_moves_make_no_progress(self):
+        self.place("crew", "other", 1, 1)
+        current = Session(None, self.meta)
+        placement = Placement(self.pane, current)
+        with pinned(captain_tab=[1, 1]):
+            plan = placement.relayout_plan()
+            with (
+                patch.object(placement, "relayout_plan", return_value=plan),
+                patch.object(placement, "move") as move,
+            ):
+                placement.relayout(current)
+        self.assertEqual(move.call_count, 1)
+
+    def test_relayout_smaller_shape_opens_only_needed_tabs(self):
+        self.place("a", "other", 1, 1)
+        self.place("b", "other", 2, 1)
+        with pinned(captain_tab=[1], crew_tab=[1]):
+            self.relayout()
+        self.assertEqual(len(self.moves), 1)
+        self.assertIn("--new-tab", self.moves[0])
+        self.assertNotEqual(self.meta["crew"]["a"]["tab"], self.meta["crew"]["b"]["tab"])
+
+    def test_relayout_collapsed_uneven_columns_moves_only_surplus(self):
+        for row, name in enumerate(("a", "b", "c"), 1):
+            self.place(name, "other", 2, row)
+        self.place("d", "other", 3, 1)
+        with pinned(captain_tab=[1], crew_tab=[1, 3, 1]):
+            placement = self.relayout()
+        self.assertEqual([move[2] for move in self.moves], ["c", "c", "b", "b"])
+        self.assertEqual(placement.occupancy("other")[0], {1: 1, 2: 2, 3: 1})
+        self.assertEqual(self.meta["crew"]["d"]["column"], 2)
+
+    def test_relayout_non_crew_pane_prevents_draining_tab(self):
+        self.place("crew", "other", 1, 1)
+        groups = {
+            "captain": ("Captain", {"captain": "Captain"}),
+            "other": ("Other", {"crew": "Crew", "user": "User"}),
+        }
+        with (
+            pinned(captain_tab=[1, 1]),
+            patch.object(Placement, "workspace_panes", return_value=groups),
+        ):
+            self.relayout()
+        self.assertEqual(self.moves, [])
+
+    def test_relayout_middle_tab_gap_drains_last_tab(self):
+        for name, tab, column in (
+            ("a", "first", 1),
+            ("b", "first", 2),
+            ("c", "middle", 1),
+            ("d", "last", 1),
+        ):
+            self.place(name, tab, column, 1)
+        with pinned(captain_tab=[1], crew_tab=[1, 1]):
+            self.relayout()
+        self.assertEqual([move[2] for move in self.moves], ["d"])
+        self.assertEqual(self.meta["crew"]["d"]["tab"], "middle")
+        self.assertIn("last", self.closed_tabs)
+
+    def test_relayout_same_tab_gap_uses_temporary_tab(self):
+        self.place("a", "other", 1, 1)
+        self.place("b", "other", 2, 1)
+        self.place("c", "other", 2, 2)
+        with pinned(captain_tab=[1], crew_tab=[2, 1]):
+            self.relayout()
+        self.assertEqual(len(self.moves), 2)
+        self.assertIn("--new-tab", self.moves[0])
+        self.assertEqual(self.moves[1][2], "c")
+        self.assertEqual((self.meta["crew"]["c"]["column"], self.meta["crew"]["c"]["row"]), (1, 2))
+        self.assertIn("scratch1", self.closed_tabs)
+
+    def test_relayout_emptied_column_relabels_without_moving(self):
+        self.place("a", "other", 2, 2)
+        self.place("b", "other", 3, 1)
+        with pinned(captain_tab=[1], crew_tab=[1, 1]):
+            self.relayout()
+        self.assertEqual(self.moves, [])
+        self.assertEqual((self.meta["crew"]["a"]["column"], self.meta["crew"]["a"]["row"]), (1, 1))
+        self.assertEqual(self.meta["crew"]["b"]["column"], 2)
+
+    def test_relayout_unmapped_destination_and_source_are_untouched(self):
+        self.place("manual", "captain", None, None)
+        self.place("auto", "captain", 2, 1)
+        self.place("other", "elsewhere", 1, 1)
+        with pinned(captain_tab=[1, 2], crew_tab=[1]):
+            self.relayout()
+        self.assertEqual(self.moves, [])
+        self.assertEqual(self.meta["crew"]["auto"]["column"], 2)
+
+    def test_relayout_fills_slots_and_reverses_source_order(self):
+        self.place("old", "older", 1, 1)
+        self.place("top", "newer", 2, 1)
+        self.place("bottom", "newer", 2, 2)
+        self.place("left", "newer", 1, 1)
+        with pinned(captain_tab=[1, 2, 2]):
+            self.relayout()
+        self.assertEqual([move[2] for move in self.moves], ["bottom", "top", "left", "old"])
+        self.assertEqual(
+            [
+                (self.meta["crew"][name]["column"], self.meta["crew"][name]["row"])
+                for name in ("bottom", "top", "left", "old")
+            ],
+            [(2, 1), (3, 1), (2, 2), (3, 2)],
+        )
+        self.assertEqual([move[6] for move in self.moves], ["captain", "bottom", "bottom", "top"])
+        self.assertEqual(self.even.call_count, 4)
+
+    def test_relayout_re_evens_source_column(self):
+        for row in range(1, 4):
+            self.place(f"crew{row}", "other", 1, row)
+        with pinned(captain_tab=[1, 1]):
+            self.relayout()
+        self.resize.assert_called_once_with("crew1", "down", 1 / 2 - 1 / 3)
+
+    def test_relayout_skips_background_handplaced_dashboard_and_missing_panes(self):
+        for name in ("background", "manual", "board", "missing", "valid"):
+            self.place(name, "other", 1, 1)
+        self.meta["crew"]["background"]["execution"] = "background"
+        self.meta["crew"]["manual"]["column"] = None
+        self.meta["crew"]["missing"]["pane"] = None
+        with pinned(captain_tab=[1, 2]), patch("captain_barbossa.placement.renest_dashboard"):
+            self.relayout("board")
+        self.assertEqual(self.moves, [])
+
+    def test_relayout_captain_only_shape_moves_nothing(self):
+        self.place("other", "other", 1, 1)
+        with pinned(captain_tab=[1]):
+            self.relayout()
+        self.assertEqual(self.moves, [])
+
+    def test_relayout_failed_move_reuses_slot_without_failed_target(self):
+        self.place("good", "older", 1, 1)
+        self.place("bad", "newer", 1, 1)
+        self.failed_moves.add("bad")
+        with pinned(captain_tab=[1, 2, 2]):
+            self.relayout()
+        self.assertEqual([move[2] for move in self.moves], ["good"])
+        self.assertEqual(self.moves[0][6], "captain")
+        self.assertEqual(self.meta["crew"]["bad"]["tab"], "newer")
+
+    def test_relayout_skips_tabs_missing_from_recorded_order(self):
+        self.place("crew", "other", 1, 1)
+        current = Session(None, self.meta)
+        placement = Placement(self.pane, current)
+        placement.crew_tabs = []
+        with pinned(captain_tab=[1, 2]):
+            self.assertEqual(placement.relayout_plan(), [])
+
+    def test_relayout_rejects_reused_terminal(self):
+        self.place("crew", "other", 1, 1)
+        self.meta["crew"]["crew"]["terminal_id"] = "old-terminal"
+        with pinned(captain_tab=[1, 2]):
+            self.relayout()
+        self.assertEqual(self.moves, [])
+
+    def test_relayout_shrunk_captain_tab_surplus_fills_later_tab_gap(self):
+        for index, column in enumerate((2, 3, 2, 3)):
+            self.place(f"c{index}", "captain", column, 1 if index < 2 else 2)
+        self.place("far", "other", 1, 1)
+        with pinned(captain_tab=[1, 1], crew_tab=[2, 2]):
+            placement = self.relayout()
+        self.assertEqual(len(self.moves), 3)
+        self.assertEqual(placement.occupancy("captain")[0], {2: 1})
+        self.assertEqual(sum(placement.occupancy("other")[0].values()), 4)
+        self.assertNotIn("far", [move[2] for move in self.moves])
+
+    def test_relayout_failed_pane_get_after_move_recovers_on_next_relayout(self):
+        self.place("a", "other", 1, 1)
+        self.place("b", "other", 2, 1)
+        self.place("c", "other", 2, 2)
+        self.failed_gets.add("c")
+        with pinned(captain_tab=[1], crew_tab=[2, 1]):
+            self.relayout()
+        self.assertEqual(self.meta["crew"]["c"]["tab"], "scratch1")
+        self.failed_gets.clear()
+        with pinned(captain_tab=[1], crew_tab=[2, 1]):
+            self.relayout()
+        crew = self.meta["crew"]["c"]
+        self.assertEqual((crew["tab"], crew["column"], crew["row"]), ("other", 1, 2))
+
+    def test_relayout_tab_with_foreign_terminal_is_neither_source_nor_destination(self):
+        self.place("x", "other", 1, 1)
+        self.place("y", "other", 1, 2)
+        self.meta["crew"]["x"]["terminal_id"] = "foreign-terminal"
+        with pinned(captain_tab=[1, 1]):
+            self.relayout()
+        self.assertEqual(self.moves, [])
+
+    def test_relayout_omits_chain_when_split_target_is_not_in_it(self):
+        self.place("crew", "other", 1, 1)
+        with pinned(captain_tab=[1, 2]), patch.object(Placement, "column_tops", return_value=[]):
+            plan = Placement(self.pane, Session(None, self.meta)).relayout_plan()
+        self.assertEqual(plan[0][1].chain, ())
+
+    def test_relayout_relabels_source_tab(self):
+        self.place("stays", "other", 1, 1)
+        self.place("moves", "other", 1, 2)
+        with pinned(captain_tab=[1, 1]):
+            self.relayout()
+        self.assertIn(
+            ("tab", "rename", "other", "stays"), [call.args for call in self.api.call_args_list]
+        )
+
+    def test_relayout_renests_dashboard(self):
+        self.place("crew", "other", 1, 1)
+        self.meta["crew"]["crew"]["lifetime_id"] = "ref"
+        with (
+            pinned(captain_tab=[1, 2]),
+            patch("captain_barbossa.placement.renest_dashboard") as renest,
+        ):
+            self.relayout("board")
+        renest.assert_called_once_with("board", self.pane)
 
 
 class FillOrderTests(GridHarness):
@@ -520,6 +773,120 @@ class PaneSplitTests(SessionCase):
     EMPTY_COMPOSER = "› Ask Codex to do anything"
 
     LISTING_CALLS = (("tab", "list", "--workspace", "w1"), ("pane", "list", "--workspace", "w1"))
+
+    def dismiss_with_overflow(self, *, crew_tab=False, dead=False, failure=None, captain=True):
+        self.meta["crew"] = {
+            "jack": {
+                "agent": "codex",
+                "pane": "w1:p5",
+                "tab": "w1:t2" if crew_tab else "w1:t1",
+                "column": 2,
+                "row": 1,
+                "status": "started",
+            },
+            "will": {
+                "agent": "codex",
+                "pane": "w1:p9",
+                "terminal_id": "will-terminal",
+                "tab": "w1:t2",
+                "column": 1,
+                "row": 1,
+                "status": "started",
+            },
+        }
+        store.write_json(self.directory / "session.json", self.meta)
+        store.write_json(
+            self.directory / "captain.json",
+            {"pane": self.pane["pane_id"] if captain else "different"},
+        )
+
+        def api(*call, **kwargs):
+            if call[:2] == ("workspace", "list"):
+                return {"workspaces": []}
+            if call[:2] == ("pane", "list"):
+                origin = self.pane["pane_id"] if captain else "different"
+                return {
+                    "panes": [
+                        {"pane_id": origin, "tab_id": "w1:t1"},
+                        {"pane_id": "w1:p9", "tab_id": "w1:t2"},
+                    ]
+                }
+            if call[:2] == ("pane", "get"):
+                if call[2] != "w1:p9":
+                    return {"pane": {**self.pane, "pane_id": call[2]}}
+                return {"pane": {"terminal_id": "will-terminal"}}
+            if call[:2] == ("pane", "move"):
+                saved = store.read_json(self.directory / "session.json")
+                self.assertEqual(saved["crew"]["jack"]["status"], "dismissed")
+                if failure:
+                    raise failure
+            return self.listing(*call, **kwargs) or {}
+
+        with (
+            pinned(captain_tab=[1, 1]),
+            patch.object(runtime, "herdr", side_effect=api) as calls,
+            patch.object(Placement, "even_new_pane"),
+            contextlib.redirect_stderr(io.StringIO()),
+        ):
+            pane = {**self.pane, "workspace_id": "other"} if dead else self.pane
+            agents.dismiss_crew(self.args("dismiss", "Jack"), pane, self.project)
+        records = store.read_json(self.directory / "session.json")["crew"]
+        self.assertEqual(records["jack"]["status"], "dismissed")
+        return records, [
+            call.args for call in calls.call_args_list if call.args[:2] == ("pane", "move")
+        ]
+
+    def test_manual_relayout_packed_session_moves_nothing(self):
+        store.write_json(self.directory / "captain.json", {"pane": self.pane["pane_id"]})
+
+        def api(*call, **kwargs):
+            if call[:2] == ("pane", "get"):
+                return {"pane": self.pane}
+            return {}
+
+        with patch.object(runtime, "herdr", side_effect=api) as calls:
+            agents.relayout_crew(self.args("relayout"), self.pane, self.project)
+        self.assertFalse(any(call.args[:2] == ("pane", "move") for call in calls.call_args_list))
+
+    def test_dismiss_captain_tab_crew_moves_overflow_and_saves_slot(self):
+        records, moves = self.dismiss_with_overflow()
+        self.assertEqual(len(moves), 1)
+        self.assertEqual(moves[0][2], "w1:p9")
+        self.assertEqual(
+            (records["will"]["tab"], records["will"]["column"], records["will"]["row"]),
+            ("w1:t1", 2, 1),
+        )
+
+    def test_dismiss_from_non_captain_pane_uses_session_captain(self):
+        records, moves = self.dismiss_with_overflow(captain=False)
+        self.assertEqual(len(moves), 1)
+        self.assertEqual(moves[0][6], "different")
+        self.assertEqual(records["will"]["tab"], "w1:t1")
+
+    def test_dismiss_relayout_failure_keeps_persisted_dismissal(self):
+        def fail(current):
+            self.assertEqual(
+                store.read_json(current.meta_path)["crew"]["jack"]["status"], "dismissed"
+            )
+            raise OSError("listing failed")
+
+        with patch.object(Placement, "relayout", side_effect=fail):
+            self.dismiss_with_overflow()
+
+    def test_dismiss_crew_tab_repacks_captain_tab(self):
+        records, moves = self.dismiss_with_overflow(crew_tab=True)
+        self.assertEqual(len(moves), 1)
+        self.assertEqual(records["will"]["tab"], "w1:t1")
+
+    def test_dismiss_dead_workspace_moves_nothing(self):
+        records, moves = self.dismiss_with_overflow(dead=True)
+        self.assertEqual(moves, [])
+        self.assertEqual(records["will"]["tab"], "w1:t2")
+
+    def test_dismiss_failed_move_still_saves_dismissal(self):
+        records, moves = self.dismiss_with_overflow(failure=OSError("move failed"))
+        self.assertEqual(len(moves), 1)
+        self.assertEqual(records["will"]["tab"], "w1:t2")
 
     def test_a_named_pane_outside_the_workspace_lists_the_real_ones(self):
         for direction in ("vertical", "horizontal"):

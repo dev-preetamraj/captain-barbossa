@@ -96,7 +96,7 @@ class VerifiedDoneTests(SessionCase):
     def test_revoked_lifetime_verification_is_not_run(self):
         with (
             patch.object(protocol.lifetime, "revoked", return_value=True),
-            patch("captain_barbossa.do._capture") as capture,
+            patch("captain_barbossa.protocol.capture") as capture,
         ):
             response, delivered = self.done("test")
         capture.assert_not_called()
@@ -106,7 +106,7 @@ class VerifiedDoneTests(SessionCase):
         self.assertTrue(delivered["summary"].startswith("[verify] make test NOT RUN"))
 
     def test_verification_timeout_leaves_time_for_the_receipt(self):
-        with patch("captain_barbossa.do._capture") as capture:
+        with patch("captain_barbossa.protocol.capture") as capture:
             capture.side_effect = CaptainError("make exceeded 540s.")
             response, delivered = self.done("test")
         capture.assert_called_once_with(str(self.project.resolve()), ["make", "test"], timeout=540)

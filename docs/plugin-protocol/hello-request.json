@@ -1,0 +1,10 @@
+{
+  "protocol": 1,
+  "call": "hello",
+  "captain_version": "0.50.0",
+  "options": {},
+  "supported": {
+    "protocol": [1],
+    "points": {"context": [1], "crew_denials": [1]}
+  }
+}

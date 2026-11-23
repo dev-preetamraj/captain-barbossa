@@ -19,29 +19,36 @@ plain-text refresh loop in a Herdr pane, not a TUI.
 ```text
 src/captain_barbossa/
   cli.py          argparse entry point and dispatch: captain, crew, wait, tell, model,
-                  focus, session, init, status, dashboard, dismiss, memory, recover
-  agents.py       native launch, dashboard pane, crew create/wait/tell/model/focus/status/dismiss
+                  focus, session, init, status, dashboard, dismiss, relayout, memory, recover
+  launch.py       native captain launch, launch plan, dashboard pane, exit pane cleanup
+  agents.py       crew recruitment and create/wait/tell/model/focus/status/dismiss
   instructions.py role instructions and per-provider native CLI arguments
   config.py       settings layering, typed lookup, range checks
   defaults.toml   every shipped default, read as package data by config
   placement.py    recruitment defaults/sources, workspace discovery, and crew Spot
   profiles.py     explicit recruitment presets and flag precedence
-  execution.py    crew launch roots and managed retirement
+  execution.py    crew execution roots and the active project (cwd guard)
+  retirement.py   crew retirement, worktree disposal, worktree/result artifact commands
   worktrees.py    isolated crew checkout identity, creation and cleanup
   results.py      isolated result snapshots, preview, apply and discard
   lifetime.py     managed native-writer ownership, exit receipts, terminal closure
   native_history.py crew-incarnation native-history ownership and conservative cleanup
-  pi_history.py   crew-only pi session-boundary/identity extension
+  history_manifest.py bounded, validated native-history manifest reads
+  pi_history.py   crew-only pi session-boundary/identity extension and plugin denial gate
+  plugins.py      plugin registry, protocol, mirror generations, launch context and denials
   layout.py       declared tab shapes: slot order, split target, even ratios
   crew.py         crew identities, roster queries, evidence-based state, native events
   pane.py         native agent terminal interaction and pane parsing
   protocol.py     assignment state, crew mail (enqueue/unread/mark_read/bounce), wait polling
-  inspection.py   bounded local file, state and Git reads for `inspect`
+  inspection.py   the `inspect` command: local file, state and Git reads
+  safe_read.py    bounded no-follow file reads and hardened read-only Git
   recovery.py     read-only memory, assignment and pending-delivery digest for `recover`
   store.py        state and temp roots, storage dirs, atomic JSON read/write, locks
-  events.py       native CLI hook event stream, permission decisions, and mail delivery
+  events.py       native CLI hook entry, permission decisions, and mail delivery
+  eventlog.py     hook event files: bounded lines, incarnation stamps, offset reads
   approval.py     pure assignment-scoped approval verdicts and reason codes
-  sessions.py     session dirs, Session, crew naming, live agents, prune
+  sessions.py     session dirs, Session, crew naming
+  retention.py    pruning old sessions with no live agent or unresolved work
   memory.py       graph memory in four scopes, repo rulebook, literal search
   models.py       provider-neutral model tiers and free-text matching
   runtime.py      herdr subprocess wrapper, JSON validation, current pane discovery
@@ -50,7 +57,9 @@ src/captain_barbossa/
   prompts.py      keyboard selectors for agent and placement choices
   onboarding.py   bootstrap Herdr when captain runs outside a workspace
   pi_captain.py   pi delivery bridge, shipped inside the wheel
-  background.py   paneless read-only crew: detached owner process, liveness, cancel, outcome
+  background.py   paneless read-only crew: detached owner process, cancel, outcome
+  background_state.py background run files, owner liveness and status
+  processes.py    bounded subprocess runs (process-group reaping), declared Makefile targets
   update_check.py startup PyPI update check and `captain update`
 tests/            unittest suite; Herdr and model sessions are mocked, a real PTY is used
 docs/             plan.md is current scope; settings, placement, dashboard, memory,
@@ -79,7 +88,7 @@ Key facts:
   with its own lock: one value per subject/relation (`--supersede`, `memory forget`),
   total size capped at write (`[memory] user_limit`). `recovery.preferences` reads it
   apart from the other scopes and `digest` puts it first, so neither a broken graph
-  nor `agents.RECOVERY_CHARS` truncation hides it; `[memory] user_enabled = false`
+  nor `launch.RECOVERY_CHARS` truncation hides it; `[memory] user_enabled = false`
   opts a project out. Crew can neither read nor write it.
 - Recruitment resolves flags/settings/session defaults through `Placement.resolve` under
   the crew metadata lock. Shipped crew agent follows the captain;
@@ -163,6 +172,9 @@ Key facts:
   re-read before edit, stage only owned hunks). Nothing locks files or authorizes commits.
 - Generated instructions are token-budgeted. Every added line costs context in every
   captain and crew session; prefer short rules over explanations.
+- Plugins (`docs/plugins.md`) are registered only in home settings and read through
+  `config.home_settings()`. Without a registration or a session `plugins` binding nothing
+  imports `plugins.py`; hooks read crew denials from session meta, never home settings.
 - The version is defined once in `pyproject.toml` and read via `importlib.metadata`.
 
 ## Rules
@@ -186,6 +198,8 @@ Key facts:
   (2) if two things that must be read together sit more than ~400 lines apart, the
   file is two subjects; (3) if splitting makes the halves import each other's
   internals, leave it whole. Line count is a prompt for these checks, never a limit.
+- Internal imports stay acyclic, local imports included; `tests/test_modules_import_without_cycles.py`
+  enforces it. Move a shared piece down instead of importing upward.
 - The package stays flat: no subpackages. Moved names get no re-export shim; every
   caller moves in the same commit.
 - Tests: one file per behaviour, named for what it checks, never for a component or

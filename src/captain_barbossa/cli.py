@@ -9,14 +9,12 @@ from pathlib import Path
 
 from . import __version__, config, dashboard, do, events, inspection, protocol, recovery
 from .agents import (
-    LaunchPlanError,
     create_crew,
     dismiss_crew,
     focus_crew,
     interrupt_crew,
-    launch,
-    launch_plan,
     protocol_command,
+    relayout_crew,
     status_crew,
     switch_model,
     tell_crew,
@@ -24,22 +22,17 @@ from .agents import (
 )
 from .crew import Crew
 from .events import mail_context, receipt_for
-from .execution import artifact_command
+from .execution import active_project
+from .launch import LaunchPlanError, launch, launch_plan
 from .layout import HERDR_DIRECTIONS
 from .memory import REPO_RELATIONS, RULEBOOK_FILES, memory
 from .models import PROVIDERS, TIER_NAMES, models_for, tiers_for
 from .onboarding import bootstrap
 from .prompts import PLACEMENTS, pick_session
+from .retention import PRUNE_DAYS
+from .retirement import artifact_command
 from .runtime import HERDR_ERRORS, CaptainError, current_pane
-from .sessions import (
-    PRUNE_DAYS,
-    find_session,
-    project_sessions,
-    read_session,
-    rename_session,
-    session_card,
-)
-from .store import project_root
+from .sessions import find_session, project_sessions, read_session, rename_session, session_card
 from .update_check import upgrade
 
 VERIFY_HELP = "Makefile target captain runs at done; its receipt rides the report"
@@ -75,6 +68,11 @@ def parser(*, plan=False):
         "--if-unnamed", action="store_true", help="with --rename, keep an existing name"
     )
     root.add_argument(
+        "--no-plugins",
+        action="store_true",
+        help="launch with no plugin context and no plugin crew denials this session",
+    )
+    root.add_argument(
         "--no-dashboard",
         action="store_true",
         help="skip the crew token-usage pane even when [dashboard] enabled is set",
@@ -96,6 +94,21 @@ def parser(*, plan=False):
         command.add_argument("result_id")
         if action == "discard":
             command.add_argument("--reason", required=True)
+    plugin = commands.add_parser("plugin", help="register, sync and inspect captain plugins")
+    plugin_actions = plugin.add_subparsers(dest="plugin_command", required=True)
+    add = plugin_actions.add_parser("add", help="register an executable in home settings")
+    add.add_argument("name")
+    add.add_argument("executable")
+    add.add_argument(
+        "--required", action="store_true", help="block captain launch on a version mismatch"
+    )
+    plugin_actions.add_parser("remove", help="unregister a plugin").add_argument("name")
+    for action, text in (
+        ("list", "registered plugins and what they negotiated"),
+        ("sync", "refresh plugin mirrors now"),
+        ("status", "mirror freshness, expiry and last failure as JSON"),
+    ):
+        plugin_actions.add_parser(action, help=text).add_argument("name", nargs="?")
     worktree = commands.add_parser("worktree", help="retained isolated crew checkouts")
     worktree_actions = worktree.add_subparsers(dest="worktree_command", required=True)
     worktree_actions.add_parser("list")
@@ -243,12 +256,18 @@ def parser(*, plan=False):
         action="store_true",
         help="print one frame and exit, for a token and cost reading with no pane",
     )
+    commands.add_parser("relayout", help="repack auto-placed crew into the declared tab shapes")
     dismiss = commands.add_parser("dismiss", help="close an existing crew's pane and retire it")
     dismiss.add_argument("name", help="crew name or ID (case-insensitive)")
     dismiss.add_argument(
         "--confirm-unlanded",
         action="store_true",
         help="the user agreed to dismiss although Git shows the crew's owned work unlanded",
+    )
+    dismiss.add_argument(
+        "--force",
+        action="store_true",
+        help="the user said to dismiss without a report; skips report, ack and unlanded checks",
     )
     mem = commands.add_parser(
         "memory", help="session, project, committed repo, and user preference graph memory"
@@ -353,7 +372,7 @@ def print_session(args):
 
 def resume_target(args):
     """Choose the session to resume and chdir to its project; None after only listing."""
-    current = project_root()
+    current = active_project()
     if args.resume:
         row = find_session(current, args.resume)
     else:
@@ -440,7 +459,7 @@ def paneless_target(args):
     if args.command not in ("wait", "interrupt") or not args.session:
         return False
     try:
-        current = read_session(project_root(), args.session)
+        current = read_session(active_project(), args.session)
         if args.name:
             crews = [Crew.resolve(current, args.name)]
         else:
@@ -491,10 +510,10 @@ def main(argv=None):
             # guard_crew passes crew subcommands, so a flag riding one must not run.
             raise LaunchPlanError("invalid-arguments", "--rename and --resume take no subcommand.")
         if args.command == "launch-plan":
-            print(json.dumps(launch_plan(args, project_root())))
+            print(json.dumps(launch_plan(args, active_project())))
             return 0
         if args.rename is not None:
-            directory = read_session(project_root(), args.session).directory
+            directory = read_session(active_project(), args.session).directory
             rename_session(directory, args.rename, if_unnamed=args.if_unnamed)
             return 0
         if args.resume is not None:
@@ -512,22 +531,32 @@ def main(argv=None):
             print_session(args)
             return 0
         if args.command in ("result", "worktree"):
-            print(json.dumps(artifact_command(args, read_session(project_root(), args.session))))
+            print(json.dumps(artifact_command(args, read_session(active_project(), args.session))))
             return 0
         if args.command == "recover":
-            project = project_root()
-            print(json.dumps(recovery.digest(read_session(project, args.session), project)))
+            project = active_project()
+            current = read_session(project, args.session)
+            digest = recovery.digest(current, project)
+            if current.meta.get("plugins"):
+                from .plugins import context
+
+                digest["plugins"] = context(current.meta["plugins"], "captain")
+            print(json.dumps(digest))
             return 0
+        if args.command == "plugin":
+            from .plugins import command
+
+            return command(args)
         if args.command == "update":
             return upgrade()
         if args.command == "inspect":
-            inspection.run(args, project_root())
+            inspection.run(args, active_project())
             return 0
         if args.command == "status":
-            status_crew(args, None, project_root())
+            status_crew(args, None, active_project())
             return 0
         if args.command == "memory" and args.memory_command in ("show", "path"):
-            memory(args, None, project_root())
+            memory(args, None, active_project())
             return 0
         if args.command == "models":
             print_models(args)
@@ -535,7 +564,7 @@ def main(argv=None):
         if args.command == "memory" and args.memory_command == "prune":
             config.in_range(args.older_than, "--older-than", below=float("inf"))
         pane = None if paneless_target(args) else current_pane()
-        project = project_root()
+        project = active_project()
         if pane is not None:
             pump_mail(args, pane, project)
         if args.command == "crew":
@@ -555,7 +584,8 @@ def main(argv=None):
         elif args.command == "interrupt":
             interrupt_crew(args, pane, project)
         elif args.command in ("do", "quiet"):
-            do.run(args, read_session(project, args.session, pane).directory, project)
+            current = read_session(project, args.session, pane)
+            do.run(args, current.directory, project, current.meta)
         elif args.command == "dashboard":
             if args.once:
                 print(dashboard.render(read_session(project, args.session, pane)))
@@ -563,6 +593,8 @@ def main(argv=None):
                 dashboard.run_dashboard(args, pane, project)
         elif args.command == "dismiss":
             dismiss_crew(args, pane, project)
+        elif args.command == "relayout":
+            relayout_crew(args, pane, project)
         elif args.command == "memory":
             memory(args, pane, project)
         else:

@@ -13,8 +13,9 @@ from . import config
 # Sessions launched before 0.30.0 baked `from captain_barbossa.memory import append_event`
 # into their native CLI hook settings; that string outlives the upgrade that moved it.
 from .events import append_event as append_event
+from .retention import prune_sessions
 from .runtime import CaptainError, check_text
-from .sessions import prune_sessions, read_session, session
+from .sessions import read_session, session
 from .store import (
     USER_NAMESPACE,
     lock,
@@ -476,7 +477,7 @@ def add_user_memory(subject, relation, target, supersede=False):
         graph["nodes"] = live_nodes(graph["links"], labels)
         # Measured as the launch serialises it, so the cap is the context it costs.
         size = len(json.dumps(user_rows(graph)))
-        # Half of agents.RECOVERY_CHARS, so the launch digest's cut never reaches them.
+        # Half of launch.RECOVERY_CHARS, so the launch digest's cut never reaches them.
         limit = config.number("memory", "user_limit", kind=int, below=16_000)
         if size > limit:
             raise CaptainError(

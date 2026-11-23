@@ -180,7 +180,7 @@ class DashboardRenderTests(DashboardCase):
                         "assignments": {"a1": {"incarnation_id": "i1", **fields}},
                     },
                 )
-                with patch("captain_barbossa.background.alive", return_value=True):
+                with patch("captain_barbossa.background_state.alive", return_value=True):
                     row = self.line(self.render(), "Elizabeth")
                 self.assertIn(expected, row.split())
                 self.assertNotIn("started", row)

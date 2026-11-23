@@ -10,7 +10,16 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from captain_barbossa import execution, inspection, lifetime, results, sessions, store, worktrees
+from captain_barbossa import (
+    execution,
+    lifetime,
+    results,
+    retirement,
+    safe_read,
+    sessions,
+    store,
+    worktrees,
+)
 from captain_barbossa.runtime import CaptainError
 from tests.home_isolation import SessionCase
 
@@ -57,14 +66,14 @@ class WorktreeLifecycleTests(SessionCase):
             subprocess, "run", return_value=SimpleNamespace(returncode=0, stdout=b"ok")
         ) as run:
             self.assertEqual(worktrees.git(self.project, "status"), b"ok")
-        self.assertEqual(run.call_args.args[0], [*inspection.git_command(inspection.GIT), "status"])
-        self.assertEqual(run.call_args.kwargs["env"], inspection.git_environment())
+        self.assertEqual(run.call_args.args[0], [*safe_read.git_command(safe_read.GIT), "status"])
+        self.assertEqual(run.call_args.kwargs["env"], safe_read.git_environment())
         for name in ("alternates", "http-alternates", "config.worktree", "pack.promisor"):
-            self.assertTrue(inspection.unsupported_git_metadata(Path(".git") / name))
-        self.assertTrue(inspection.unsupported_git_metadata(Path(".git/commondir")))
-        self.assertFalse(inspection.unsupported_git_metadata(Path(".git/worktrees/crew/gitdir")))
+            self.assertTrue(safe_read.unsupported_git_metadata(Path(".git") / name))
+        self.assertTrue(safe_read.unsupported_git_metadata(Path(".git/commondir")))
+        self.assertFalse(safe_read.unsupported_git_metadata(Path(".git/worktrees/crew/gitdir")))
 
-    def test_project_root_accepts_only_launch_bound_registered_worktree(self):
+    def test_active_project_accepts_only_launch_bound_registered_worktree(self):
         record = worktrees.create(self.session, self.reserve()["id"])
         self.session.meta["crew"] = {"Elizabeth": {**record, "worktree_id": record["id"]}}
         store.write_json(self.session.directory / "session.json", self.session.meta)
@@ -80,16 +89,16 @@ class WorktreeLifecycleTests(SessionCase):
             "CAPTAIN_ASSIGNMENT": record["assignment_id"],
         }
         with patch.dict(os.environ, env), patch.object(Path, "cwd", return_value=nested):
-            self.assertEqual(store.project_root(), self.project)
+            self.assertEqual(execution.active_project(), self.project)
             with patch.dict(os.environ, {"CAPTAIN_ASSIGNMENT": uuid.uuid4().hex}):
                 with self.assertRaisesRegex(CaptainError, "worktree-identity"):
-                    store.project_root()
+                    execution.active_project()
             with patch.object(Path, "cwd", return_value=self.root):
                 with self.assertRaisesRegex(CaptainError, "outside the active"):
-                    store.project_root()
+                    execution.active_project()
             with patch.dict(os.environ, {"CAPTAIN_WORKTREE_ID": ""}):
                 with self.assertRaisesRegex(CaptainError, "outside the active"):
-                    store.project_root()
+                    execution.active_project()
 
     def test_pins_exact_commit_without_copying_dirty_inputs(self):
         record = self.reserve()
@@ -152,7 +161,7 @@ class WorktreeLifecycleTests(SessionCase):
         record = worktrees.create(self.session, self.reserve()["id"])
         with self.assertRaises(CaptainError):
             worktrees.read(self.session, record["id"], deadline=time.monotonic() - 1)
-        with patch("captain_barbossa.inspection.MAX_ENTRIES", 1):
+        with patch("captain_barbossa.safe_read.MAX_ENTRIES", 1):
             with self.assertRaises(CaptainError):
                 worktrees.validate_registration(record)
         with patch.object(worktrees, "git", side_effect=AssertionError("validation invoked Git")):
@@ -184,7 +193,7 @@ class WorktreeLifecycleTests(SessionCase):
         self.assertTrue(manifest["unresolved"])
         results.discard(self.session, manifest["id"], "discard requested")
         with self.assertRaises(CaptainError):
-            worktrees.dispose(self.session, record["id"])
+            retirement.dispose(self.session, record["id"])
 
     def test_rejects_stale_record_and_forged_reciprocal_pointer(self):
         record = worktrees.create(self.session, self.reserve()["id"])
@@ -201,14 +210,14 @@ class WorktreeLifecycleTests(SessionCase):
         record = worktrees.create(self.session, self.reserve()["id"])
         results.collect(self.session, record["id"], ["."])
         with self.assertRaises(CaptainError):
-            worktrees.dispose(self.session, record["id"])
+            retirement.dispose(self.session, record["id"])
         self.assertTrue(Path(record["execution_root"]).exists())
 
     def test_empty_final_result_can_be_removed_and_journal_is_retained(self):
         check = self.verified_lifetime()
         record = worktrees.create(self.session, self.reserve()["id"])
         manifest = results.collect(self.session, record["id"], ["."])
-        removed = worktrees.dispose(self.session, record["id"])
+        removed = retirement.dispose(self.session, record["id"])
         self.assertEqual(removed["phase"], "removed")
         self.assertFalse(Path(record["execution_root"]).exists())
         self.assertEqual(results.read(self.session, manifest["id"]), manifest)
@@ -236,7 +245,7 @@ class WorktreeLifecycleTests(SessionCase):
         self.assertFalse(manifest["provisional"])
         check.return_value = SimpleNamespace(ok=False)
         with self.assertRaises(CaptainError):
-            worktrees.dispose(self.session, record["id"])
+            retirement.dispose(self.session, record["id"])
         self.assertTrue(Path(record["execution_root"]).exists())
 
     def test_post_collection_edit_blocks_cleanup_even_after_discard(self):
@@ -246,7 +255,7 @@ class WorktreeLifecycleTests(SessionCase):
         results.discard(self.session, manifest["id"], "user explicitly discarded")
         (Path(record["execution_root"]) / "new").write_text("later")
         with self.assertRaises(CaptainError):
-            worktrees.dispose(self.session, record["id"])
+            retirement.dispose(self.session, record["id"])
 
     def test_interrupted_remove_is_reconciled_without_repeating_deletion(self):
         self.verified_lifetime()
@@ -261,11 +270,11 @@ class WorktreeLifecycleTests(SessionCase):
 
         with patch.object(worktrees, "durable", side_effect=interrupt):
             with self.assertRaises(OSError):
-                worktrees.dispose(self.session, record["id"])
+                retirement.dispose(self.session, record["id"])
         self.assertEqual(
             worktrees.read(self.session, record["id"], validate=False)["phase"], "removing"
         )
-        self.assertEqual(worktrees.dispose(self.session, record["id"])["phase"], "removed")
+        self.assertEqual(retirement.dispose(self.session, record["id"])["phase"], "removed")
 
     def test_dismissal_keeps_settled_final_result_and_cleans_up(self):
         self.verified_lifetime()
@@ -286,14 +295,16 @@ class WorktreeLifecycleTests(SessionCase):
                 )
                 with (
                     patch.object(
-                        execution, "stop", return_value=execution.lifetime.Verdict(True, "stopped")
+                        retirement,
+                        "stop",
+                        return_value=retirement.lifetime.Verdict(True, "stopped"),
                     ),
-                    patch.object(execution.native_history, "cleanup", return_value={}),
+                    patch.object(retirement.native_history, "cleanup", return_value={}),
                     patch.object(
-                        execution.protocol, "active_assignment", return_value={"paths": ["."]}
+                        retirement.protocol, "active_assignment", return_value={"paths": ["."]}
                     ),
                 ):
-                    state = execution.retire(crew)
+                    state = retirement.retire(crew)
                 self.assertEqual(state["result_id"], manifest["id"])
                 self.assertEqual(state["worktree"], "removed")
                 collected = [
@@ -311,11 +322,11 @@ class WorktreeLifecycleTests(SessionCase):
             record={"lifetime_id": record["incarnation_id"], "worktree_id": record["id"]},
         )
         with (
-            patch.object(execution, "stop", return_value=execution.lifetime.Verdict(True, "ok")),
-            patch.object(execution.native_history, "cleanup", return_value={}),
-            patch.object(execution.protocol, "active_assignment", return_value={"paths": ["."]}),
+            patch.object(retirement, "stop", return_value=retirement.lifetime.Verdict(True, "ok")),
+            patch.object(retirement.native_history, "cleanup", return_value={}),
+            patch.object(retirement.protocol, "active_assignment", return_value={"paths": ["."]}),
         ):
-            return execution.retire(crew)
+            return retirement.retire(crew)
 
     def test_process_working_inside_worktree_retains_it_alive(self):
         self.verified_lifetime()
@@ -332,7 +343,7 @@ class WorktreeLifecycleTests(SessionCase):
         self.assertTrue(state["worktree"].startswith("retained:"))
         self.assertIsNone(holder.poll())
         self.assertTrue(Path(record["execution_root"]).exists())
-        with patch.object(execution.lifetime, "cwd_holders", side_effect=CaptainError("no lsof")):
+        with patch.object(retirement.lifetime, "cwd_holders", side_effect=CaptainError("no lsof")):
             self.assertEqual(self.retire(record)["worktree"], "retained: no lsof")
 
     def test_leftover_after_removal_is_a_failure_not_clean_removal(self):

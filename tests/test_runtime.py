@@ -106,7 +106,7 @@ class HerdrResponseTests(SessionCase):
                 with self.assertRaisesRegex(runtime.CaptainError, "unexpected response"):
                     Pane("builder").wait_for_crew("w1:p2", "codex")
                 with (
-                    patch.object(cli, "project_root", return_value=self.project),
+                    patch.object(cli, "active_project", return_value=self.project),
                     contextlib.redirect_stderr(io.StringIO()) as error,
                 ):
                     self.assertEqual(cli.main(["--session", self.meta["id"], "focus", "Jack"]), 1)

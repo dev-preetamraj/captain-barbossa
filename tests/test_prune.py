@@ -7,15 +7,23 @@ import subprocess
 import sys
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
-from captain_barbossa import agents, cli, memory, runtime, sessions, store
+from captain_barbossa import agents, cli, launch, memory, retention, runtime, sessions, store
 from captain_barbossa.runtime import CaptainError
 from tests.home_isolation import HERDR, SessionCase
 
 
 def agent_list(*agents_):
     return {"agents": list(agents_)}
+
+
+@contextlib.contextmanager
+def patched_herdr(**kwargs):
+    """One Herdr stub for both session lookup and retention's liveness query."""
+    api = MagicMock(**kwargs)
+    with patch.object(sessions, "herdr", api), patch.object(retention, "herdr", api):
+        yield api
 
 
 class PruneTests(SessionCase):
@@ -55,8 +63,8 @@ class PruneTests(SessionCase):
         current = self.make_session("c" * 32, 30)
         project_graph = store.state_storage(self.project) / "graph.json"
         memory.add_memory(project_graph, "project", "test command", "python -m unittest")
-        with patch.object(sessions, "herdr", return_value=agent_list()) as api:
-            removed = sessions.prune_sessions(self.project, current="c" * 32)
+        with patched_herdr(return_value=agent_list()) as api:
+            removed = retention.prune_sessions(self.project, current="c" * 32)
         api.assert_called_once_with("agent", "list", timeout=10)
         self.assertEqual(removed, [stale])
         self.assertFalse(stale.exists())
@@ -66,8 +74,8 @@ class PruneTests(SessionCase):
 
     def test_prune_queries_herdr_once_for_multiple_stale_sessions(self):
         stale = [self.make_session(letter * 32, 30) for letter in ("a", "b")]
-        with patch.object(sessions, "herdr", return_value=agent_list()) as api:
-            self.assertEqual(sessions.prune_sessions(self.project), stale)
+        with patched_herdr(return_value=agent_list()) as api:
+            self.assertEqual(retention.prune_sessions(self.project), stale)
         api.assert_called_once_with("agent", "list", timeout=10)
 
     def test_keeps_stale_sessions_that_still_hold_a_live_agent(self):
@@ -85,8 +93,8 @@ class PruneTests(SessionCase):
             },
             {"pane_id": "w1:p4", "agent": "claude", "terminal_id": "term_live"},
         )
-        with patch.object(sessions, "herdr", return_value=live):
-            removed = sessions.prune_sessions(self.project, days=7)
+        with patched_herdr(return_value=live):
+            removed = retention.prune_sessions(self.project, days=7)
         self.assertEqual(removed, [gone])
         self.assertTrue(by_name.is_dir())
         self.assertTrue(by_terminal.is_dir())
@@ -106,13 +114,13 @@ class PruneTests(SessionCase):
         )
         no_terminal_recorded = self.make_session("c" * 32, 30, captain_pane="w1:p4")
         live = agent_list({"pane_id": "w1:p4", "agent": "claude", "terminal_id": "term_new"})
-        with patch.object(sessions, "herdr", return_value=live):
-            removed = sessions.prune_sessions(self.project, days=7)
+        with patched_herdr(return_value=live):
+            removed = retention.prune_sessions(self.project, days=7)
         self.assertEqual(removed, [recycled_a, recycled_b, no_terminal_recorded])
 
     def test_prune_rechecks_session_activity_after_acquiring_the_startup_lock(self):
         resumed = self.make_session("a" * 32, 30)
-        real_lock = sessions.lock
+        real_lock = retention.lock
 
         @contextlib.contextmanager
         def resumed_before_prune(path):
@@ -122,10 +130,10 @@ class PruneTests(SessionCase):
                 yield
 
         with (
-            patch.object(sessions, "lock", side_effect=resumed_before_prune) as acquire,
-            patch.object(sessions, "herdr", return_value=agent_list()),
+            patch.object(retention, "lock", side_effect=resumed_before_prune) as acquire,
+            patched_herdr(return_value=agent_list()),
         ):
-            self.assertEqual(sessions.prune_sessions(self.project), [])
+            self.assertEqual(retention.prune_sessions(self.project), [])
         acquire.assert_called_once_with(resumed / "session.lock")
         self.assertTrue(resumed.is_dir())
 
@@ -138,10 +146,10 @@ class PruneTests(SessionCase):
             subprocess.TimeoutExpired("herdr", 10),
         ):
             with self.subTest(failure=failure):
-                with patch.object(sessions, "herdr", side_effect=failure):
-                    self.assertIsNone(sessions.live_agents())
-        with patch.object(sessions, "herdr", side_effect=CaptainError("herdr is not installed")):
-            removed = sessions.prune_sessions(self.project, days=7)
+                with patched_herdr(side_effect=failure):
+                    self.assertIsNone(retention.live_agents())
+        with patched_herdr(side_effect=CaptainError("herdr is not installed")):
+            removed = retention.prune_sessions(self.project, days=7)
         self.assertEqual(removed, [old])
         self.assertTrue(young.is_dir())
 
@@ -153,14 +161,14 @@ class PruneTests(SessionCase):
         stamp = time.time() - 90 * 86400
         for path in (stray, loose):
             os.utime(path, (stamp, stamp))
-        with patch.object(sessions, "herdr", return_value=agent_list()):
-            self.assertEqual(sessions.prune_sessions(self.project), [])
+        with patched_herdr(return_value=agent_list()):
+            self.assertEqual(retention.prune_sessions(self.project), [])
         self.assertTrue(stray.is_dir())
         self.assertTrue(loose.is_file())
 
     def test_missing_sessions_directory_prunes_nothing(self):
-        with patch.object(sessions, "herdr") as api:
-            self.assertEqual(sessions.prune_sessions(self.project), [])
+        with patched_herdr() as api:
+            self.assertEqual(retention.prune_sessions(self.project), [])
         api.assert_not_called()
 
     def test_unresolved_work_is_kept_at_any_age_and_dismissed_work_is_not(self):
@@ -193,8 +201,8 @@ class PruneTests(SessionCase):
         corrupt = self.make_session("f" * 32, 365)
         (corrupt / "protocol.json").write_text("{", encoding="utf-8")
         os.utime(corrupt, (time.time() - 365 * 86400,) * 2)
-        with patch.object(sessions, "herdr", return_value=agent_list()):
-            removed = sessions.prune_sessions(self.project)
+        with patched_herdr(return_value=agent_list()):
+            removed = retention.prune_sessions(self.project)
         self.assertEqual(sorted(removed), [directories["d" * 32], directories["e" * 32]])
         self.assertTrue(corrupt.is_dir())
 
@@ -205,8 +213,8 @@ class PruneTests(SessionCase):
         store.write_json(orphan / "protocol.json", state)
         os.utime(orphan, (time.time() - 365 * 86400,) * 2)
         os.utime(orphan / "protocol.json", (time.time() - 365 * 86400,) * 2)
-        with patch.object(sessions, "herdr", return_value=agent_list()):
-            self.assertEqual(sessions.prune_sessions(self.project), [])
+        with patched_herdr(return_value=agent_list()):
+            self.assertEqual(retention.prune_sessions(self.project), [])
         self.assertTrue(orphan.is_dir())
 
     def test_prunes_stale_sessions_in_both_the_durable_and_the_legacy_root(self):
@@ -219,8 +227,8 @@ class PruneTests(SessionCase):
         legacy = self.make_session("a" * 32, 30)
         self.sessions = store.state_storage(self.project) / "sessions"
         durable = self.make_session("b" * 32, 30)
-        with patch.object(sessions, "herdr", return_value=agent_list()):
-            removed = sessions.prune_sessions(self.project)
+        with patched_herdr(return_value=agent_list()):
+            removed = retention.prune_sessions(self.project)
         self.assertEqual(sorted(removed), sorted([legacy, durable]))
 
     def test_command_reports_what_it_removed_without_an_active_session(self):
@@ -229,8 +237,8 @@ class PruneTests(SessionCase):
         out = io.StringIO()
         with (
             patch.object(cli, "current_pane", return_value=self.pane),
-            patch.object(cli, "project_root", return_value=self.project),
-            patch.object(sessions, "herdr", return_value=agent_list()),
+            patch.object(cli, "active_project", return_value=self.project),
+            patched_herdr(return_value=agent_list()),
             contextlib.redirect_stdout(out),
         ):
             self.assertEqual(cli.main(["memory", "prune"]), 0)
@@ -243,8 +251,8 @@ class PruneTests(SessionCase):
         out = io.StringIO()
         with (
             patch.object(cli, "current_pane", return_value=self.pane),
-            patch.object(cli, "project_root", return_value=self.project),
-            patch.object(sessions, "herdr", return_value=agent_list()),
+            patch.object(cli, "active_project", return_value=self.project),
+            patched_herdr(return_value=agent_list()),
             contextlib.redirect_stdout(out),
         ):
             self.assertEqual(cli.main(["memory", "prune", "--older-than", "5"]), 0)
@@ -259,8 +267,8 @@ class PruneTests(SessionCase):
             with (
                 self.subTest(value=value),
                 patch.object(cli, "current_pane", return_value=self.pane),
-                patch.object(cli, "project_root", return_value=self.project),
-                patch.object(sessions, "herdr", return_value=agent_list()),
+                patch.object(cli, "active_project", return_value=self.project),
+                patched_herdr(return_value=agent_list()),
                 contextlib.redirect_stderr(io.StringIO()),
             ):
                 self.assertEqual(cli.main(["memory", "prune", "--older-than", value]), 1)
@@ -271,46 +279,46 @@ class PruneTests(SessionCase):
         args = cli.parser().parse_args(["--agent", "claude"])
         with (
             patch.object(runtime, "herdr"),
-            patch.object(sessions, "herdr", return_value=agent_list()),
+            patched_herdr(return_value=agent_list()),
             patch.object(agents, "executable", return_value="/bin/claude"),
             patch.object(os, "execvpe") as execute,
             patch.object(sys.stdin, "isatty", return_value=True),
             contextlib.redirect_stdout(io.StringIO()),
         ):
-            agents.launch(args, self.pane, self.project)
+            launch.launch(args, self.pane, self.project)
         execute.assert_called_once()
         self.assertFalse(stale.exists())
         blocked = self.make_session("b" * 32, 30)
         with (
             patch.object(runtime, "herdr"),
-            patch.object(agents, "prune_sessions", side_effect=OSError("state is unreadable")),
+            patch.object(launch, "prune_sessions", side_effect=OSError("state is unreadable")),
             patch.object(agents, "executable", return_value="/bin/claude"),
             patch.object(os, "execvpe") as execute,
             patch.object(sys.stdin, "isatty", return_value=True),
             contextlib.redirect_stdout(io.StringIO()),
         ):
-            agents.launch(args, self.pane, self.project)
+            launch.launch(args, self.pane, self.project)
         execute.assert_called_once()
         self.assertTrue(blocked.is_dir())
 
     def test_backfills_a_missing_captain_terminal_id_from_the_captain_pane(self):
         directory = self.make_session("a" * 32, 30, captain_pane="w1:p1")
         sessions.session(self.project, dict(self.pane, terminal_id="term_live"), "a" * 32)
-        self.assertEqual(sessions.session_terminal_id(directory), "term_live")
+        self.assertEqual(retention.session_terminal_id(directory), "term_live")
 
         stamp = time.time() - 30 * 86400
         for path in (*directory.rglob("*"), directory):
             os.utime(path, (stamp, stamp))
         live = agent_list({"pane_id": "w1:p1", "agent": "claude", "terminal_id": "term_live"})
-        with patch.object(sessions, "herdr", return_value=live):
-            self.assertEqual(sessions.prune_sessions(self.project, days=7), [])
+        with patched_herdr(return_value=live):
+            self.assertEqual(retention.prune_sessions(self.project, days=7), [])
         self.assertTrue(directory.is_dir())
 
     def test_crew_pane_never_claims_the_captain_terminal_id(self):
         directory = self.make_session("a" * 32, 30, captain_pane="w1:p4")
         crew = dict(self.pane, pane_id="w1:p9", terminal_id="term_crew")
         sessions.session(self.project, crew, "a" * 32)
-        self.assertIsNone(sessions.session_terminal_id(directory))
+        self.assertIsNone(retention.session_terminal_id(directory))
 
     def test_launch_records_captain_terminal_id(self):
         pane = dict(self.pane, terminal_id="term_captain")
@@ -318,13 +326,13 @@ class PruneTests(SessionCase):
         before = set(self.sessions.iterdir()) if self.sessions.is_dir() else set()
         with (
             patch.object(runtime, "herdr"),
-            patch.object(sessions, "herdr", return_value=agent_list()),
+            patched_herdr(return_value=agent_list()),
             patch.object(agents, "executable", return_value="/bin/claude"),
             patch.object(os, "execvpe"),
             patch.object(sys.stdin, "isatty", return_value=True),
             contextlib.redirect_stdout(io.StringIO()),
         ):
-            agents.launch(args, pane, self.project)
+            launch.launch(args, pane, self.project)
         (new_session,) = set(self.sessions.iterdir()) - before
         captain = store.read_json(new_session / "captain.json")
         self.assertEqual(captain["terminal_id"], "term_captain")

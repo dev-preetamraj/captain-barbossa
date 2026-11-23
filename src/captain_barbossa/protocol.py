@@ -11,11 +11,14 @@ from contextlib import contextmanager
 from pathlib import Path
 from uuid import uuid4
 
-from . import lifetime
-from .approval import Request, Verdict, decide, recipe_flag
-from .events import MAX_EVENT_BYTES, read_events
+from . import background_state, lifetime
+from .approval import REASONS, Request, Verdict, decide, recipe_flag
+from .crew import Crew, event_status
+from .eventlog import MAX_EVENT_BYTES, read_events
+from .execution import root
 from .models import HOOK_DELIVERED, HOOKLESS
 from .pane import DRAFT_GATE, HOLD_EXPIRY, UNREADABLE_EXPIRY, UNREADABLE_GATE
+from .processes import TARGET, capture, makefile_targets
 from .runtime import HERDR_ERRORS, CaptainError, check_text, inside_project
 from .sessions import session_directories
 from .store import lock, read_json, state_root, state_storage, temp_root, write_json
@@ -204,8 +207,6 @@ def begin(
     check_text(task, "task")
     if PLACEHOLDER.search(task) or any(PATH_PLACEHOLDER.search(str(path)) for path in paths):
         raise CaptainError("[placeholder] Replace assignment placeholder text.")
-    # execution imports protocol for assignment lookup.
-    from .execution import root
 
     execution_root = root(crew.session, crew.record)
     if verify is not None:
@@ -348,12 +349,8 @@ def _git(project, *args):
     return result
 
 
-def unlanded(project, assignment):
-    """Reason codes for owned work Git shows as not landed; empty when Git shows none.
-
-    A report is evidence, not proof: every commit it names must be reachable from a ref,
-    and the owned paths must hold no uncommitted or untracked change.
-    """
+def unlanded(project, assignment, *, ignore_uncommitted=False):
+    """Acknowledged reports may retain dirty paths, but still require verifiable commits."""
     # Paths outside the checkout are not Git's to vouch for; dismiss names them instead.
     paths = [path for path in assignment["paths"] if not Path(path).is_absolute()]
     if not paths:
@@ -373,7 +370,7 @@ def unlanded(project, assignment):
                 if "R" in entry[:2] or "C" in entry[:2]:
                     # -z gives a rename or copy its source path as the next, unprefixed field.
                     next(fields, None)
-        if changed:
+        if changed and not ignore_uncommitted:
             reasons.append(f"[uncommitted] {', '.join(sorted(changed))}")
     missing, unverified = [], []
     for token in dict.fromkeys(COMMIT_TOKEN.findall(assignment.get("report") or "")):
@@ -412,9 +409,6 @@ def change(crew, args, project):
             state, crew, None if args.command == "ask" else assignment_id, incarnation
         )
         if args.command == "check":
-            # execution imports protocol for assignment lookup.
-            from .execution import root
-
             if lifetime.revoked(crew.session, crew.record):
                 raise CaptainError("[action-not-granted] Crew lifetime was revoked.")
             check_action(assignment, root(crew.session, crew.record), args.action, args.path)
@@ -456,11 +450,10 @@ def change(crew, args, project):
 
 def check_target(root, target):
     """A target validated as `captain do run` validates one."""
-    from .do import TARGET, _targets  # do imports protocol
 
     if not isinstance(target, str) or not TARGET.fullmatch(target):
         raise CaptainError(f"Not a usable target name: {target}")
-    if target not in _targets(Path(root)):
+    if target not in makefile_targets(Path(root)):
         raise CaptainError(f"The project's Makefile declares no {target} target.")
 
 
@@ -472,7 +465,6 @@ def verified(crew, assignment_id):
     the Makefile as it stands. The recipe check also covers `make test`, which the gate
     grants by name.
     """
-    from .do import _capture  # do imports protocol
 
     assignment = active_assignment(crew)
     if (
@@ -507,7 +499,7 @@ def verified(crew, assignment_id):
     started = time.monotonic()
     try:
         # Leave time for process cleanup and the receipt within the crew's 10-minute call.
-        ran = _capture(root, command, timeout=540)
+        ran = capture(root, command, timeout=540)
         code, output = ran.returncode, ran.stdout + ran.stderr
     except (CaptainError, OSError) as exc:
         code, output = None, str(exc)
@@ -1029,8 +1021,6 @@ def modal_summary(crew, assignment):
 
 
 def poll(crew, ack=None, modal=True):
-    from .approval import REASONS
-    from .crew import event_status
 
     drain(crew)
     with checkpoint(crew.session.directory) as state:
@@ -1066,9 +1056,7 @@ def poll(crew, ack=None, modal=True):
             return pending["result"]
         paneless = crew.is_background
         if paneless:
-            from .background import reconcile
-
-            reconcile(crew, assignment)
+            reconcile_background(crew, assignment)
         seq, offset = assignment["ack_seq"], assignment.get("scan_offset", assignment["offset"])
         native_status, cleared = assignment["native_status"], False
         if seq < len(assignment["notices"]):
@@ -1199,7 +1187,6 @@ def wait_ticks(timeout):
 
 def wait_all(current, timeout):
     """Return every crew's pending delivery without advancing any acknowledgement."""
-    from .crew import Crew
 
     for modal in wait_ticks(timeout):
         current = current._replace(meta=read_json(current.meta_path))
@@ -1247,3 +1234,26 @@ def wait(crew, timeout, ack=None):
             return response
     response["status"] = "timeout"
     return response
+
+
+def close_unreported(assignment, outcome, summary):
+    """End an assignment that produced no report: visibly an error, never a done."""
+    notice(assignment, "error", summary)
+    assignment.update(state="done", outcome=outcome, report=summary)
+
+
+def reconcile_background(crew, assignment):
+    """Close an unfinished assignment whose owner is gone; the caller holds the checkpoint."""
+    if assignment["state"] == "done" or background_state.alive(crew):
+        return
+    if background_state.paths(background_state.stem(crew))["abandoned"].exists():
+        close_unreported(
+            assignment, "failed", "[background-start] The run was withdrawn before it started."
+        )
+        return
+    close_unreported(
+        assignment,
+        "lost",
+        "[background-lost] The owner process ended without recording an outcome; "
+        f"nothing was restarted. Evidence: {background_state.stem(crew).parent}",
+    )

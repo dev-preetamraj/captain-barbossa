@@ -5,6 +5,7 @@ the lexer cannot classify defers to the native permission mode unless it names a
 destructive or outward verb; nothing here grants more than one call.
 """
 
+import fnmatch
 import glob
 import os
 import posixpath
@@ -55,8 +56,17 @@ REASONS = {
         "edit owned files with your Edit tool, not shell or inline scripts",
     ),
     "captain-do": (Verdict.DENY, "`captain do` is captain-only; report back to the captain"),
+    "plugin-denied": (
+        Verdict.DENY,
+        "a captain plugin forbids crew this command; report back to the captain instead",
+    ),
     "outside-grant": (Verdict.ESCALATE, "a write outside the owned paths or inside .git"),
 }
+# Shell text split into words wherever a quote, operator or expansion could join or hide one.
+# pi_history embeds this same source, so the pi gate and the Python one split identically.
+WORD_BREAKS = r"[\s;&|()<>`$'\"{}=\\,]+"
+# The shell joins quoted and escaped pieces into one word, so the matcher drops them first.
+QUOTING = r"['\"\\]"
 SEVERITY = {Verdict.ALLOW_ONCE: 0, Verdict.DEFER: 1, Verdict.ESCALATE: 2, Verdict.DENY: 3}
 
 READ_TOOLS = {"Read", "Glob", "Grep", "LS", "NotebookRead"}
@@ -176,6 +186,42 @@ class _Use:
     inert: bool = False
 
 
+def denied(denials, command):
+    """The first plugin-declared command this tool input runs, or None.
+
+    Deliberately textual and over-broad: a declared program, by basename, ignoring case,
+    quoting and any extension, or a glob that names it, followed anywhere later by the rest
+    of its words in order. It does not see through variables, encoded text or script files.
+    """
+    text = " ".join(map(str, command)) if isinstance(command, list) else command
+    if not denials or not isinstance(text, str):
+        return None
+    text = re.sub(QUOTING, "", text.lower())
+    words = [posixpath.basename(word).split(".")[0] for word in re.split(WORD_BREAKS, text)]
+    for rule in denials:
+        program, *rest = (word.lower() for word in rule)
+        for index, word in enumerate(words):
+            if _names(word, program) and _in_order(rest, words[index + 1 :]):
+                return list(rule)
+    return None
+
+
+def _names(word, wanted):
+    """A word is the wanted name, or a glob with a literal character that matches it."""
+    if word == wanted:
+        return True
+    return (
+        bool(GLOB & set(word))
+        and bool(re.search("[a-z0-9]", word))
+        and (fnmatch.fnmatchcase(wanted, word))
+    )
+
+
+def _in_order(needed, words):
+    remaining = iter(words)
+    return all(any(_names(word, item) for word in remaining) for item in needed)
+
+
 def decide(request):
     decision = _decide(request)
     # Lexed commands were flagged one by one in _judge_one; only unlexed text is scanned whole.
@@ -191,7 +237,7 @@ def _text(request):
 def _flagged(text):
     """Escalate unclassified shell or a recipe that names a destructive, outward or captain
     verb, or an interpreter delete/write/network API, anywhere in its text."""
-    paths = re.split(r"[\s;&|()<>`$'\"{}=\\,]+", text)
+    paths = re.split(WORD_BREAKS, text)
     names = {posixpath.basename(word) for word in paths}
     if re.search(r"-m\s+captain_barbossa|captain_barbossa\.", text) or any(
         name == "captain" or word == name == "captain_barbossa"

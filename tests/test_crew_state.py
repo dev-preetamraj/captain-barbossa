@@ -7,7 +7,7 @@ from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
-from captain_barbossa import events, instructions
+from captain_barbossa import eventlog, events, instructions
 from captain_barbossa.agents import unreserved
 from captain_barbossa.crew import Crew, CrewState, declared_state, event_status
 from captain_barbossa.runtime import CaptainError
@@ -124,7 +124,7 @@ class CrewStateTests(unittest.TestCase):
         self.append(status="done", seq=5)
         self.append(status="done", seq=True)
         self.append(status="working")
-        batch, _ = events.read_events(self.crew.events, 0)
+        batch, _ = eventlog.read_events(self.crew.events, 0)
         self.assertEqual([event["seq"] for event in batch], [1, 5, 6])
         self.assertTrue(all(event["incarnation_id"] == "first" for event in batch))
 
@@ -146,7 +146,7 @@ class CrewStateTests(unittest.TestCase):
         self.assertFalse(old_path.exists())
         self.delivery.assert_not_called()
         self.append(status="working")
-        batch, _ = events.read_events(self.crew.events, 0)
+        batch, _ = eventlog.read_events(self.crew.events, 0)
         self.assertEqual(batch[0]["seq"], 1)
 
     def test_reader_filters_stale_and_backward_events_across_offsets(self):
@@ -159,7 +159,7 @@ class CrewStateTests(unittest.TestCase):
                 {"status": "blocked", "seq": 4, "incarnation_id": "first"},
             ):
                 stream.write(json.dumps(event) + "\n")
-        batch, end = events.read_events(self.crew.events, offset, incarnation="first")
+        batch, end = eventlog.read_events(self.crew.events, offset, incarnation="first")
         self.assertEqual([event["seq"] for event in batch], [4])
         self.assertEqual(end, self.crew.events.stat().st_size)
         self.assertEqual(self.crew.current_state().state, "blocked")
@@ -167,14 +167,14 @@ class CrewStateTests(unittest.TestCase):
     def test_captain_and_legacy_logs_remain_supported(self):
         captain = self.crew.events.parent / "captain.jsonl"
         events.append_event([str(captain), '{"type": "agent-turn-complete"}'])
-        event = events.read_events(captain, 0)[0][0]
+        event = eventlog.read_events(captain, 0)[0][0]
         self.assertEqual(event["type"], "agent-turn-complete")
         self.assertIsNotNone(datetime.fromisoformat(event["timestamp"]).tzinfo)
 
     def test_native_timestamp_is_preserved(self):
         self.append(timestamp="2026-10-13T00:00:00Z", hook_event_name="SessionStart")
         self.assertEqual(
-            events.read_events(self.crew.events, 0)[0][0]["timestamp"],
+            eventlog.read_events(self.crew.events, 0)[0][0]["timestamp"],
             "2026-10-13T00:00:00Z",
         )
 

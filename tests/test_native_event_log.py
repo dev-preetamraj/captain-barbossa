@@ -9,7 +9,7 @@ import tomllib
 import unittest
 from unittest.mock import patch
 
-from captain_barbossa import events, sessions, store
+from captain_barbossa import eventlog, sessions, store
 from captain_barbossa import instructions as instruction_prompts
 from tests.home_isolation import HERDR, SessionCase
 
@@ -116,16 +116,16 @@ class NativeEventLogTests(SessionCase):
 
     def test_event_reader_skips_bad_records_and_retries_a_partial_unicode_line(self):
         log = self.event_path()
-        self.assertEqual(events.read_events(log, 0), ([], 0))
+        self.assertEqual(eventlog.read_events(log, 0), ([], 0))
         prefix = b"invalid\n[]\nnull\n\xff\n"
         event = {"hook_event_name": "Stop", "message": "雪"}
         encoded = (json.dumps(event, ensure_ascii=False) + "\n").encode()
         cut = encoded.index("雪".encode()) + 1
         log.write_bytes(prefix + encoded[:cut])
-        self.assertEqual(events.read_events(log, 0), ([], len(prefix)))
+        self.assertEqual(eventlog.read_events(log, 0), ([], len(prefix)))
         with log.open("ab") as file:
             file.write(encoded[cut:])
-        self.assertEqual(events.read_events(log, len(prefix)), ([event], log.stat().st_size))
+        self.assertEqual(eventlog.read_events(log, len(prefix)), ([event], log.stat().st_size))
 
 
 if __name__ == "__main__":

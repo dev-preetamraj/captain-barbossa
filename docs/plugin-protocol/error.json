@@ -1,0 +1,4 @@
+{
+  "ok": false,
+  "error": {"code": "login_required", "message": "Run example login."}
+}

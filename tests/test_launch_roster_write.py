@@ -7,7 +7,7 @@ import sys
 import unittest
 from unittest.mock import patch
 
-from captain_barbossa import agents, cli, runtime, sessions, store
+from captain_barbossa import cli, launch, runtime, sessions, store
 from tests.home_isolation import HERDR, SessionCase
 
 
@@ -19,7 +19,7 @@ class LaunchRosterWriteTests(SessionCase):
         self.enterContext(contextlib.redirect_stdout(io.StringIO()))
 
     def test_launch_keeps_a_crew_recorded_after_its_session_read(self):
-        real_session = agents.session
+        real_session = launch.session
 
         def session_then_recruit(*args, **kwargs):
             current = real_session(*args, **kwargs)
@@ -30,15 +30,15 @@ class LaunchRosterWriteTests(SessionCase):
 
         args = cli.parser().parse_args(["--session", self.meta["id"], "--no-dashboard"])
         with (
-            patch.object(agents, "session", side_effect=session_then_recruit),
+            patch.object(launch, "session", side_effect=session_then_recruit),
             patch.object(runtime, "herdr"),
-            patch.object(agents, "executable", return_value="/bin/claude"),
-            patch.object(agents, "close_panes_on_exit"),
+            patch.object(launch, "executable", return_value="/bin/claude"),
+            patch.object(launch, "close_panes_on_exit"),
             patch.object(os, "execvpe"),
             patch.object(sys.stdin, "isatty", return_value=True),
         ):
             args.agent = "claude"
-            agents.launch(args, self.pane, self.project)
+            launch.launch(args, self.pane, self.project)
         meta = store.read_json(self.directory / "session.json")
         self.assertEqual(meta["captain_provider"], "claude")
         self.assertIn("jack", meta["crew"])

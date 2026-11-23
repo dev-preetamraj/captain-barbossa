@@ -9,7 +9,6 @@ also requires output readers to finish before publishing that receipt; an escape
 holder leaves cleanup pending. Cancellation is requested through a file.
 """
 
-import fcntl
 import json
 import math
 import os
@@ -17,15 +16,15 @@ import subprocess
 import sys
 import threading
 import time
-from contextlib import contextmanager
 from pathlib import Path
 
 from . import config, execution, lifetime, native_history, protocol
+from .background_state import alive, held, paths, stem
 from .do import QUIET_PROMPT
 from .models import headless_argv, headless_report
 from .runtime import CaptainError
 from .sessions import Session
-from .store import lock, private_dir, read_json, state_root, temp_root, write_json, write_text
+from .store import read_json, state_root, temp_root, write_json, write_text
 
 # Seconds `crew --background` waits for the owner's startup receipt.
 STARTUP = 10
@@ -42,8 +41,6 @@ STDERR_LIMIT = 64 * 1024
 REPORT_LIMIT = 4000
 TAIL = 1000
 READ_ONLY = {"read", "search"}
-FAILED = ("failed", "cancelled", "lost")
-UNRESERVED = "[background-start] recruitment stopped before it was reserved"
 # Providers whose read-only gate holds against the user's own configuration: codex
 # ignores it under an OS read-only sandbox; pi drops extensions, MCP and skills by flag
 # (models.headless_argv isolated=True). claude keeps user hooks and settings allow rules
@@ -92,109 +89,7 @@ def refuse_flags(args):
         )
 
 
-def stem(crew):
-    return crew.session.directory / "background" / f"{crew.crew_id}-{crew.record['incarnation_id']}"
-
-
-def paths(base):
-    return {
-        kind: base.with_name(f"{base.name}{suffix}")
-        for kind, suffix in (
-            ("record", ".json"),
-            ("lock", ".lock"),
-            ("cancel", ".cancel"),
-            ("stdout", ".out"),
-            ("stderr", ".err"),
-            ("report", ".report.md"),
-            ("log", ".owner.log"),
-            ("launch", ".launch"),
-            ("intent", ".intent"),
-            ("claimed", ".claimed"),
-            ("abandoned", ".abandoned"),
-        )
-    }
-
-
-@contextmanager
-def held(path):
-    """Yield True when this process took the lock, False when someone else holds it."""
-    with path.open("a") as handle:
-        try:
-            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            yield False
-            return
-        yield True
-
-
-@contextmanager
-def launching(crew):
-    """The recruiter's lock until claim or withdrawal, so `alive` can tell a recruiter still
-    deciding from one that died before any owner took over."""
-    base = stem(crew)
-    private_dir(base.parent)
-    with lock(paths(base)["launch"]):
-        yield
-
-
-def alive(crew):
-    """Whether a recruiter or an owner still holds this crew's run."""
-    files = paths(stem(crew))
-    try:
-        record = read_json(files["record"])
-    except CaptainError:
-        # Preparation publishes the assignment before writing the run record.
-        if files["launch"].exists():
-            with held(files["launch"]) as free:
-                return not free
-        return False
-    if record["state"] not in ("launching", "running"):
-        return False
-    for name in ("launch", "lock") if record["state"] == "launching" else ("lock",):
-        with held(files[name]) as free:
-            if not free:
-                return True
-    # A launch nobody holds was left by a dead recruiter; a late owner's claim finds its
-    # assignment closed and withdraws.
-    return False
-
-
-def close(assignment, outcome, summary):
-    """End an assignment that produced no report: visibly an error, never a done."""
-    protocol.notice(assignment, "error", summary)
-    assignment.update(state="done", outcome=outcome, report=summary)
-
-
-def reconcile(crew, assignment):
-    """Close an unfinished assignment whose owner is gone; the caller holds the checkpoint."""
-    if assignment["state"] == "done" or alive(crew):
-        return
-    if paths(stem(crew))["abandoned"].exists():
-        close(assignment, "failed", "[background-start] The run was withdrawn before it started.")
-        return
-    close(
-        assignment,
-        "lost",
-        "[background-lost] The owner process ended without recording an outcome; "
-        f"nothing was restarted. Evidence: {stem(crew).parent}",
-    )
-
-
-def describe(crew, assignment):
-    """(state, source, detail) for status, from the assignment first, then the owner."""
-    if not assignment:
-        return "failed", "process", UNRESERVED
-    if assignment.get("outcome") in FAILED:
-        return "failed", "process", assignment["report"]
-    if assignment["state"] == "done":
-        return "done", "mail", assignment.get("report") or "assignment completed"
-    if alive(crew):
-        return "working", "process", "background owner running"
-    # A read path records nothing; the next wait closes it as lost and delivers that.
-    return "failed", "process", "[background-lost] owner gone without an outcome"
-
-
-def prepare(crew, project, provider, binary, model, task, assignment_id):
+def prepare(crew, project, provider, binary, model, task, assignment_id, context=""):
     """Queue the task and record launch intent before any process exists."""
     directory = crew.session.directory
     files = paths(stem(crew))
@@ -217,7 +112,8 @@ def prepare(crew, project, provider, binary, model, task, assignment_id):
         crew, incarnation=crew.record["incarnation_id"], project=project, background=True
     )
     environment.update(history["env"])
-    argv = headless_argv(provider, binary, f"{QUIET_PROMPT}\n\n{task}", model=model, isolated=True)
+    prompt = f"{QUIET_PROMPT}{context}\n\n{task}"
+    argv = headless_argv(provider, binary, prompt, model=model, isolated=True)
     argv[-1:-1] = history["argv"]
     ref = lifetime.prepare(crew.session, crew.record, argv, environment, execution_root)
     crew.record["lifetime_id"] = ref
@@ -284,7 +180,7 @@ def abandon(files, reason):
         with protocol.checkpoint(Path(record["session"]), timeout=LOCK_WAIT) as state:
             assignment = state["assignments"].get(record["assignment_id"])
             if assignment and assignment["state"] != "done":
-                close(assignment, "failed", f"[background-start] {reason}")
+                protocol.close_unreported(assignment, "failed", f"[background-start] {reason}")
     except CaptainError:
         pass
     return True
@@ -349,7 +245,7 @@ def _settle(record, outcome, text):
             assignment.update(state="done", report=text)
             protocol.notice(assignment, "done", text)
         else:
-            close(assignment, outcome, text)
+            protocol.close_unreported(assignment, outcome, text)
 
 
 def _claim(files):

@@ -23,7 +23,7 @@ class SessionCommandTests(unittest.TestCase):
     def run_main(self, *args):
         with (
             patch.object(cli, "current_pane", return_value=self.pane),
-            patch.object(cli, "project_root", return_value=self.project),
+            patch.object(cli, "active_project", return_value=self.project),
             contextlib.redirect_stdout(io.StringIO()) as out,
             contextlib.redirect_stderr(io.StringIO()) as err,
         ):

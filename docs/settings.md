@@ -23,6 +23,10 @@ when a captain set it, otherwise the enclosing Git repository, otherwise the cur
 directory. Crew share its project settings, session namespace, and memory identity;
 their execution checkout may be shared or isolated.
 
+`[plugins.NAME]` tables are a registry, not settings: only the home file is read for
+them, `captain plugin add` writes them, and a project file's `[plugins]` is ignored.
+See [plugins.md](plugins.md).
+
 ## Precedence
 
 Settings resolve **per key**, not per file or per table:

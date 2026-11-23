@@ -9,7 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from captain_barbossa import cli, events, protocol, sessions, store
+from captain_barbossa import cli, eventlog, events, protocol, sessions, store
 from captain_barbossa.crew import Crew
 from tests.home_isolation import SessionCase
 
@@ -250,7 +250,7 @@ class StopHookTests(SessionCase):
         with (
             patch.object(cli, "parser", side_effect=AssertionError("hook built the parser")),
             patch(
-                "captain_barbossa.agents.check_for_update",
+                "captain_barbossa.launch.check_for_update",
                 side_effect=AssertionError("update check"),
             ),
             contextlib.redirect_stdout(io.StringIO()),
@@ -278,8 +278,8 @@ class HookRegistrationTests(unittest.TestCase):
 
     def test_every_delivery_hook_is_registered_with_the_native_cli(self):
         self.assertTrue(
-            set(events.DELIVERY_HOOKS) <= self.registered(),
-            f"unregistered delivery hooks: {set(events.DELIVERY_HOOKS) - self.registered()}",
+            set(eventlog.DELIVERY_HOOKS) <= self.registered(),
+            f"unregistered delivery hooks: {set(eventlog.DELIVERY_HOOKS) - self.registered()}",
         )
 
     def test_the_lifecycle_hooks_survive_alongside_them(self):

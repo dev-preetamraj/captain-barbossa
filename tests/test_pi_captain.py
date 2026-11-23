@@ -12,7 +12,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from captain_barbossa import agents, cli, models, runtime, sessions
+from captain_barbossa import cli, launch, models, runtime, sessions
 from captain_barbossa import instructions as instruction_prompts
 from captain_barbossa import pane as panes
 from captain_barbossa.pane import Pane
@@ -1073,11 +1073,11 @@ class PiCaptainLaunchTests(SessionCase):
     def test_pi_captain_loads_private_extension_and_automatic_coverage_guidance(self):
         with (
             patch.object(runtime, "herdr"),
-            patch.object(agents, "executable", return_value="/bin/pi"),
+            patch.object(launch, "executable", return_value="/bin/pi"),
             patch.object(os, "execvpe") as execute,
             patch.object(sys.stdin, "isatty", return_value=True),
         ):
-            agents.launch(
+            launch.launch(
                 self.args("--agent", "pi", "--prompt", "Inspect"), self.pane, self.project
             )
         binary, argv, env = execute.call_args.args

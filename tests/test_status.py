@@ -202,7 +202,7 @@ class FocusTests(SessionCase):
             with (
                 self.subTest(name=name),
                 patch.object(cli, "current_pane", return_value=self.pane),
-                patch.object(cli, "project_root", return_value=self.project),
+                patch.object(cli, "active_project", return_value=self.project),
                 patch.object(
                     runtime, "herdr", side_effect=lambda *call, **_: live.get(call[2], {})
                 ) as api,
@@ -218,7 +218,7 @@ class FocusTests(SessionCase):
         self.assertEqual(store.read_json(self.directory / "session.json"), self.meta)
         with (
             patch.object(cli, "current_pane", return_value=self.pane),
-            patch.object(cli, "project_root", return_value=self.project),
+            patch.object(cli, "active_project", return_value=self.project),
             patch.object(
                 runtime, "herdr", side_effect=runtime.CaptainError("agent_not_found")
             ) as api,

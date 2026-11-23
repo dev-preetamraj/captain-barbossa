@@ -163,7 +163,7 @@ class InstructionTests(SessionCase):
 
             with (
                 patch.object(cli, "current_pane", return_value=self.pane),
-                patch.object(cli, "project_root", return_value=self.project),
+                patch.object(cli, "active_project", return_value=self.project),
                 patch.object(cli, "memory") as show,
             ):
                 self.assertEqual(cli.main(["memory", "show", "--scope", "session", "--json"]), 0)
@@ -199,7 +199,10 @@ class InstructionTests(SessionCase):
             "after reading the pane",
             "Send only the requested key for that one command",
             "CAPTAIN dismiss 'NAME'",
-            "Confirm with the user first if work is unreported or uncommitted",
+            "dismiss it yourself without asking",
+            "Ask the user only before discarding results or dismissing unreported crew",
+            "use dismiss --force only when the user explicitly says to dismiss without a report",
+            "Worktree crew: before dismissing, CAPTAIN result collect WORKTREE_ID",
             "CAPTAIN focus 'NAME'",
             "Names are case-insensitive; ask about unknown/ambiguous names",
             "do not recruit or send a task",

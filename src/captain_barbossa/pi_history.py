@@ -2,10 +2,63 @@
 
 import json
 
+from .approval import QUOTING, WORD_BREAKS
 
-def extension(directory, events, incarnation):
-    """Record identities, and prevent resuming a session outside the exclusive directory."""
-    return """import { closeSync, constants, openSync, realpathSync, writeSync } from 'node:fs';
+# A JavaScript port of approval.denied; the matrix test runs both over the same commands.
+GATE = r"""const DENIALS = __RULES__;
+const WORD_BREAKS = new RegExp(__BREAKS__);
+const QUOTING = new RegExp(__QUOTING__, 'g');
+function names(word, wanted) {
+  if (word === wanted) return true;
+  if (!/[*?[]/.test(word) || !/[a-z0-9]/.test(word)) return false;
+  const source = word.replace(/[.+^${}()|\\]/g, '\\$&').replace(/\*/g, '.*')
+    .replace(/\?/g, '.').replace(/\[!/g, '[^');
+  try { return new RegExp(`^${source}$`, 's').test(wanted); } catch { return false; }
+}
+function inOrder(needed, words) {
+  let at = 0;
+  for (const item of needed) {
+    while (at < words.length && !names(words[at], item)) at += 1;
+    if (at >= words.length) return false;
+    at += 1;
+  }
+  return true;
+}
+function denied(command) {
+  const raw = Array.isArray(command) ? command.map(String).join(' ') : command;
+  if (typeof raw !== 'string') return null;
+  const text = raw.toLowerCase().replace(QUOTING, '');
+  const words = text.split(WORD_BREAKS).map((word) => word.split('/').pop().split('.')[0]);
+  for (const rule of DENIALS) {
+    const [program, ...rest] = rule.map((word) => word.toLowerCase());
+    for (let index = 0; index < words.length; index += 1) {
+      if (names(words[index], program) && inOrder(rest, words.slice(index + 1))) return rule;
+    }
+  }
+  return null;
+}
+"""
+
+BLOCK = """  pi.on('tool_call', async (event) => {
+    if (denied(event.input?.command) === null) return;
+    return { block: true, reason: 'Captain approval [plugin-denied]: a captain plugin forbids crew this command; report back to the captain instead' };
+  });
+"""
+
+
+def gate(denials):
+    """The JavaScript matcher with these denials and approval's word breaks baked in."""
+    fixed = GATE.replace("__BREAKS__", json.dumps(WORD_BREAKS))
+    # Rules go in last, so a declared word can never match a later placeholder.
+    return fixed.replace("__QUOTING__", json.dumps(QUOTING)).replace(
+        "__RULES__", json.dumps(denials)
+    )
+
+
+def extension(directory, events, incarnation, denials=()):
+    """Record identities, prevent resuming a session outside the exclusive directory, and,
+    when a plugin forbids crew any command, block every tool call that would run one."""
+    source = """import { closeSync, constants, openSync, realpathSync, writeSync } from 'node:fs';
 import { dirname } from 'node:path';
 export default function(pi) {
   const { root, events, incarnation } = CONFIG;
@@ -31,3 +84,7 @@ export default function(pi) {
         "CONFIG",
         json.dumps({"root": str(directory), "events": str(events), "incarnation": incarnation}),
     )
+    if not denials:
+        return source
+    head, body = source.split("export default function(pi) {\n", 1)
+    return f"{head}{gate(list(denials))}export default function(pi) {{\n{BLOCK}{body}"

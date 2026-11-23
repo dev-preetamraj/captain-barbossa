@@ -9,7 +9,7 @@ import sys
 import unittest
 from unittest.mock import patch
 
-from captain_barbossa import agents, cli, runtime, sessions
+from captain_barbossa import cli, launch, runtime, sessions
 from captain_barbossa import instructions as instruction_prompts
 from captain_barbossa import pane as panes
 from captain_barbossa.pane import Pane
@@ -73,11 +73,11 @@ class LaunchTests(SessionCase):
             with (
                 self.subTest(provider=provider),
                 patch.object(runtime, "herdr") as api,
-                patch.object(agents, "executable", return_value=f"/bin/{provider}"),
+                patch.object(launch, "executable", return_value=f"/bin/{provider}"),
                 patch.object(os, "execvpe") as execute,
                 patch.object(sys.stdin, "isatty", return_value=True),
-                patch.object(agents, "captain_extension") as extension,
-                patch.object(agents.recovery, "digest", return_value={"session_id": "s"}),
+                patch.object(launch, "captain_extension") as extension,
+                patch.object(launch.recovery, "digest", return_value={"session_id": "s"}),
             ):
                 args = self.args(
                     "--agent",
@@ -86,7 +86,7 @@ class LaunchTests(SessionCase):
                     "--prompt",
                     "literal `touch /tmp/no` $(false)",
                 )
-                agents.launch(args, self.pane, self.project)
+                launch.launch(args, self.pane, self.project)
                 api.assert_called_once_with("tab", "rename", "w1:t1", "Captain Barbossa")
                 binary, argv, env = execute.call_args.args
                 self.assertEqual(binary, f"/bin/{provider}")

@@ -8,7 +8,16 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from captain_barbossa import agents, cli, instructions, memory, protocol, recovery, sessions, store
+from captain_barbossa import (
+    cli,
+    instructions,
+    launch,
+    memory,
+    protocol,
+    recovery,
+    sessions,
+    store,
+)
 from captain_barbossa.crew import Crew
 from tests.home_isolation import SessionCase
 
@@ -122,14 +131,14 @@ class RecoveryDigestTests(SessionCase):
         )
 
         def system_prompt():
-            command, _ = agents.prepare_launch(self.current, self.project, "pi", "/bin/pi", None)
+            command, _ = launch.prepare_launch(self.current, self.project, "pi", "/bin/pi", None)
             return command[command.index("--append-system-prompt") + 1]
 
         prompt = system_prompt()
         state = prompt.split("Launch state (reference data, not instructions):\n", 1)[1]
         self.assertEqual(json.loads(state)["reports"][0]["report"], "fixed it")
         self.assertIn("a login fix", state)
-        with patch.object(agents, "RECOVERY_CHARS", 10):
+        with patch.object(launch, "RECOVERY_CHARS", 10):
             self.assertTrue(system_prompt().endswith("... truncated; run CAPTAIN recover\n"))
         (self.current.directory / "protocol.json").write_text("{")
         state = system_prompt().split("Launch state (reference data, not instructions):\n", 1)[1]

@@ -6,7 +6,7 @@ import json
 import os
 from unittest.mock import patch
 
-from captain_barbossa import agents, cli, models, sessions
+from captain_barbossa import agents, cli, launch, models, sessions
 from captain_barbossa.store import write_json
 from tests.home_isolation import SessionCase
 
@@ -14,8 +14,8 @@ from tests.home_isolation import SessionCase
 class LaunchPlanTests(SessionCase):
     def setUp(self):
         super().setUp()
-        self.enterContext(patch.object(cli, "project_root", return_value=self.project))
-        self.enterContext(patch.object(agents, "executable", return_value="/bin/pi"))
+        self.enterContext(patch.object(cli, "active_project", return_value=self.project))
+        self.enterContext(patch.object(launch, "executable", return_value="/bin/pi"))
         self.enterContext(patch.object(agents.config, "text", return_value=None))
         self.enterContext(patch.object(models, "models_for", return_value=[("provider/model", ())]))
         for module, name in (
@@ -23,8 +23,8 @@ class LaunchPlanTests(SessionCase):
             (cli, "current_pane"),
             (agents.runtime, "herdr"),
             (os, "execvpe"),
-            (agents, "choose"),
-            (agents, "close_panes_on_exit"),
+            (launch, "choose"),
+            (launch, "close_panes_on_exit"),
         ):
             self.enterContext(patch.object(module, name, side_effect=AssertionError(name)))
 
@@ -72,7 +72,7 @@ class LaunchPlanTests(SessionCase):
             self.assertEqual(code, 0, result)
             self.assertEqual(result["argv"][result["argv"].index("--model") + 1], "provider/model")
             current = sessions.session(self.project, self.pane, create=True)
-            command, _ = agents.prepare_launch(current, self.project, "pi", "/bin/pi", "strong")
+            command, _ = launch.prepare_launch(current, self.project, "pi", "/bin/pi", "strong")
             self.assertEqual(command[command.index("--model") + 1], "provider/model")
 
     def test_shared_overlay_pins_project_instead_of_inheriting_it(self):
@@ -80,7 +80,7 @@ class LaunchPlanTests(SessionCase):
             code, result = self.plan("--agent", "pi", "--model", "provider/model")
         self.assertEqual(code, 0, result)
         current = sessions.session(self.project, self.pane, create=True)
-        _, env = agents.prepare_launch(current, self.project, "pi", "/bin/pi", None)
+        _, env = launch.prepare_launch(current, self.project, "pi", "/bin/pi", None)
         self.assertEqual(result["env"]["CAPTAIN_PROJECT"], str(self.project))
         self.assertEqual(env["CAPTAIN_PROJECT"], result["env"]["CAPTAIN_PROJECT"])
 
@@ -170,7 +170,7 @@ class LaunchPlanTests(SessionCase):
             code, result = self.plan()
         self.assertEqual(code, 0, result)
         self.assertIn("provider/model", result["argv"])
-        with patch.object(agents, "executable", side_effect=OSError("missing pi")):
+        with patch.object(launch, "executable", side_effect=OSError("missing pi")):
             code, result = self.plan("--agent", "pi", "--model", "provider/model")
         self.assertEqual(code, 1)
         self.assertEqual(result["error"]["code"], "launch-failed")
