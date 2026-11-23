@@ -56,10 +56,22 @@ def project_settings():
         return None
 
 
+_home_layer = {}
+
+
+def home_settings():
+    """The home layer settings() merged, so the plugin registry costs no extra read and a
+    repo's settings can never register a plugin."""
+    settings()
+    return _home_layer
+
+
 @lru_cache(maxsize=1)
 def settings():
     """defaults.toml under the home file under the project's; both user files are optional."""
-    merged = merge(defaults(), read(Path.home() / SETTINGS_PATH))
+    global _home_layer
+    _home_layer = read(Path.home() / SETTINGS_PATH)
+    merged = merge(defaults(), _home_layer)
     project = project_settings()
     return merge(merged, read(project)) if project else merged
 
