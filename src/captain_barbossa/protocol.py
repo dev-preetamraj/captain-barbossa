@@ -13,7 +13,7 @@ from uuid import uuid4
 
 from . import lifetime
 from .approval import Request, Verdict, decide, recipe_flag
-from .events import MAX_EVENT_BYTES, read_events
+from .eventlog import MAX_EVENT_BYTES, read_events
 from .models import HOOK_DELIVERED, HOOKLESS
 from .pane import DRAFT_GATE, HOLD_EXPIRY, UNREADABLE_EXPIRY, UNREADABLE_GATE
 from .runtime import HERDR_ERRORS, CaptainError, check_text, inside_project

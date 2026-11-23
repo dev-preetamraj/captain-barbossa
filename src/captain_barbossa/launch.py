@@ -9,11 +9,11 @@ from pathlib import Path
 
 from . import (
     config,
-    execution,
     instructions,
     protocol,
     recovery,
     results,
+    retirement,
     runtime,
 )
 from .crew import Crew
@@ -22,8 +22,9 @@ from .memory import add_memory
 from .models import PROVIDERS, resolve_model
 from .pi_captain import captain_extension
 from .prompts import choose
+from .retention import prune_sessions
 from .runtime import HERDR_ERRORS, CaptainError, executable
-from .sessions import crew_meta, prune_sessions, read_session, session
+from .sessions import crew_meta, read_session, session
 from .store import private_dir, read_json, state_root, temp_root, write_json
 from .update_check import check_for_update
 
@@ -88,7 +89,7 @@ def close_session_panes(session_id, project):
             try:
                 if record is not None and record.get("lifetime_id"):
                     crew = Crew(record["id"], record, current._replace(meta=meta))
-                    record["cleanup"] = execution.retire(crew)
+                    record["cleanup"] = retirement.retire(crew)
                     stopped = record["cleanup"]["lifetime"]["ok"]
                 else:
                     runtime.herdr("pane", "close", pane_id)

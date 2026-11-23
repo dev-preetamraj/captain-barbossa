@@ -8,7 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from captain_barbossa import agents, protocol, sessions, store
+from captain_barbossa import agents, eventlog, protocol, sessions, store
 from captain_barbossa.crew import Crew
 from captain_barbossa.pane import DRAFT_GATE, UNREADABLE_EXPIRY, UNREADABLE_GATE, Pane
 from captain_barbossa.runtime import CaptainError
@@ -1189,7 +1189,7 @@ class ApprovalDedupeTests(unittest.TestCase):
         with patch.object(events.native_history, "observe") as observe:
             events.append_event([str(self.crew.events), json.dumps(event)])
         self.assertEqual(observe.call_args.args[1]["tool_input"], event["tool_input"])
-        records, offset = events.read_events(self.crew.events, 0, max_bytes=65536)
+        records, offset = eventlog.read_events(self.crew.events, 0, max_bytes=65536)
         self.assertLessEqual(offset, 65536)
         self.assertTrue(records[0]["payload_truncated"])
         self.assertNotIn("tool_input", records[0])

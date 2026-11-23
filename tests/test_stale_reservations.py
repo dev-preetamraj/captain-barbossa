@@ -6,7 +6,15 @@ import os
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from captain_barbossa import agents, execution, lifetime, protocol, runtime, sessions, store
+from captain_barbossa import (
+    agents,
+    lifetime,
+    protocol,
+    retirement,
+    runtime,
+    sessions,
+    store,
+)
 from captain_barbossa.crew import Crew
 from tests.home_isolation import SessionCase
 
@@ -152,13 +160,13 @@ class StaleReservationsTests(SessionCase):
             ) as api,
             patch.object(lifetime, "_duration", return_value=0),
         ):
-            self.assertFalse(execution.stop(self.old, ref).ok)
+            self.assertFalse(retirement.stop(self.old, ref).ok)
             self.assertEqual(lifetime.read(self.old, ref)["close_state"], "failed")
             api.assert_not_called()
             with self.assertRaisesRegex(runtime.CaptainError, "owned-path-conflict"):
                 self.recruit()
             self.exited(ref)
-            self.assertTrue(execution.stop(self.old, ref).ok)
+            self.assertTrue(retirement.stop(self.old, ref).ok)
             api.assert_called_once_with("pane", "get", "w1:p2", timeout=5)
         self.assertEqual(lifetime.read(self.old, ref)["close_state"], "closed")
 

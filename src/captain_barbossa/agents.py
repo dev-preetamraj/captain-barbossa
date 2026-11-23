@@ -18,6 +18,7 @@ from . import (
     profiles,
     protocol,
     results,
+    retirement,
     runtime,
     worktrees,
 )
@@ -392,7 +393,7 @@ def dismiss_crew(args, pane, project):
             raise CaptainError(f"{crew.display_name} has no recorded pane to close.")
         try:
             if crew.record.get("lifetime_id"):
-                crew.record["cleanup"] = execution.retire(crew)
+                crew.record["cleanup"] = retirement.retire(crew)
                 if not crew.record["cleanup"]["lifetime"]["ok"]:
                     raise CaptainError("shutdown unconfirmed")
             elif crew.is_background and dead_workspace:

@@ -93,7 +93,7 @@ class DismissMailTests(SessionCase):
         args = SimpleNamespace(session=self.current.meta["id"], name="Jack")
         with (
             patch.object(runtime, "herdr", return_value={}),
-            patch.object(agents.execution, "retire", return_value={"lifetime": {"ok": False}}),
+            patch.object(agents.retirement, "retire", return_value={"lifetime": {"ok": False}}),
             self.assertRaisesRegex(runtime.CaptainError, "cleanup-pending"),
         ):
             agents.dismiss_crew(args, self.pane, self.project)
@@ -102,7 +102,7 @@ class DismissMailTests(SessionCase):
         self.assertEqual(
             store.read_json(self.current.meta_path)["crew"]["jack"]["status"], "cleanup_pending"
         )
-        with patch.object(agents.execution, "retire", return_value={"lifetime": {"ok": True}}):
+        with patch.object(agents.retirement, "retire", return_value={"lifetime": {"ok": True}}):
             self.assertIn("Dismissed Jack.", self.dismiss())
         self.assertEqual(protocol.active_assignment(self.crew)["state"], "done")
         self.assertEqual(self.mail(message)["state"], "bounced")
@@ -233,7 +233,7 @@ class DismissCrewTests(SessionCase):
         crew = Crew("jack", record, sessions.Session(self.directory, self.meta))
         self.assertTrue(protocol.unread(crew))
         with (
-            patch.object(agents.execution, "retire", return_value={"lifetime": {"ok": True}}),
+            patch.object(agents.retirement, "retire", return_value={"lifetime": {"ok": True}}),
             patch.object(runtime, "herdr", return_value={}),
             contextlib.redirect_stdout(io.StringIO()) as output,
         ):

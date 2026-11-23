@@ -115,7 +115,7 @@ class CloseSessionPanesTests(SessionCase):
         assignment = protocol.begin(crew, self.project, "edit", ["src"], ["edit"])
         with (
             patch.object(protocol, "unlanded", return_value=[]),
-            patch.object(agents.execution, "retire", return_value={"lifetime": {"ok": False}}),
+            patch.object(agents.retirement, "retire", return_value={"lifetime": {"ok": False}}),
         ):
             self.close(lambda *args, **_: {})
         saved = store.read_json(self.current.directory / "protocol.json")
@@ -126,7 +126,7 @@ class CloseSessionPanesTests(SessionCase):
         with (
             patch.object(protocol, "unlanded", return_value=[]),
             patch.object(
-                agents.execution, "retire", return_value={"lifetime": {"ok": True}}
+                agents.retirement, "retire", return_value={"lifetime": {"ok": True}}
             ) as retire,
         ):
             self.close(lambda *args, **_: {})

@@ -13,8 +13,9 @@ from . import config
 # Sessions launched before 0.30.0 baked `from captain_barbossa.memory import append_event`
 # into their native CLI hook settings; that string outlives the upgrade that moved it.
 from .events import append_event as append_event
+from .retention import prune_sessions
 from .runtime import CaptainError, check_text
-from .sessions import prune_sessions, read_session, session
+from .sessions import read_session, session
 from .store import (
     USER_NAMESPACE,
     lock,

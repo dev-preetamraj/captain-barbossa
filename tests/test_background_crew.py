@@ -15,7 +15,17 @@ import time
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from captain_barbossa import agents, background, cli, lifetime, protocol, runtime, sessions, store
+from captain_barbossa import (
+    agents,
+    background,
+    cli,
+    lifetime,
+    protocol,
+    retention,
+    runtime,
+    sessions,
+    store,
+)
 from captain_barbossa.crew import Crew
 from captain_barbossa.runtime import CaptainError
 from tests.home_isolation import HERDR, SessionCase
@@ -382,7 +392,7 @@ class BackgroundCrewTests(SessionCase):
             response = deliveries[0]
             self.assertEqual(response["status"], "error")
             if name != "begin":
-                self.assertTrue(sessions.unresolved(self.directory))
+                self.assertTrue(retention.unresolved(self.directory))
                 self.assertIsNotNone(response["delivery_id"])
                 self.assertIn("[background-lost]", response["summary"])
                 self.assertEqual(self.assignment(crew)["outcome"], "lost")

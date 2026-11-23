@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 from home_isolation import SessionCase
 
-from captain_barbossa import execution, lifetime, sessions, store
+from captain_barbossa import lifetime, retirement, sessions, store
 from captain_barbossa.runtime import CaptainError
 
 
@@ -102,7 +102,7 @@ class LostOwnerDismissTests(SessionCase):
         with patch.object(
             lifetime.runtime, "herdr", side_effect=CaptainError("pane_not_found")
         ) as herdr:
-            verdict = execution.stop(self.session, ref)
+            verdict = retirement.stop(self.session, ref)
         self.assertEqual(verdict, lifetime.Verdict(True, "owner-lost-group-absent"))
         self.assertEqual(herdr.call_args.args, ("pane", "get", "crew-pane"))
         self.assertEqual(lifetime.read(self.session, ref)["close_state"], "closed")
@@ -160,7 +160,7 @@ class LostOwnerDismissTests(SessionCase):
         ):
             self.assertEqual(self.verdict(ref, "group").reason, "exit-unknown")
         with patch.object(lifetime.runtime, "herdr", side_effect=CaptainError("pane_not_found")):
-            verdict = execution.stop(self.session, ref)
+            verdict = retirement.stop(self.session, ref)
         self.assertEqual(verdict, lifetime.Verdict(True, "owner-lost-no-carrier"))
 
     def test_legacy_sweep_skips_only_the_environ_a_non_dumpable_process_hides(self):

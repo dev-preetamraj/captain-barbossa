@@ -7,9 +7,10 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from captain_barbossa import cli, prompts, sessions
+from captain_barbossa import cli, prompts, retention, sessions
+from captain_barbossa.retention import prune_sessions
 from captain_barbossa.runtime import CaptainError
-from captain_barbossa.sessions import all_sessions, prune_sessions, session
+from captain_barbossa.sessions import all_sessions, session
 from captain_barbossa.store import write_json
 
 PANE = {"workspace_id": "w1", "tab_id": "w1:t1", "pane_id": "w1:p1"}
@@ -66,7 +67,7 @@ class SessionResumeTests(unittest.TestCase):
         self.run_main("--session", old.meta["id"], "--rename", "alpha")
         self.run_main("--session", old.meta["id"], "--rename", "beta", "--if-unnamed")
         self.assertEqual(all_sessions(self.here)[0][1:4], ("alpha", old.meta["id"], before))
-        with patch.object(sessions, "live_agents", return_value=(set(), set())):
+        with patch.object(retention, "live_agents", return_value=(set(), set())):
             removed = prune_sessions(self.here)
         self.assertEqual([path.name for path in removed], [old.meta["id"]])
 

@@ -21,22 +21,17 @@ from .agents import (
 )
 from .crew import Crew
 from .events import mail_context, receipt_for
-from .execution import active_project, artifact_command
+from .execution import active_project
 from .launch import LaunchPlanError, launch, launch_plan
 from .layout import HERDR_DIRECTIONS
 from .memory import REPO_RELATIONS, RULEBOOK_FILES, memory
 from .models import PROVIDERS, TIER_NAMES, models_for, tiers_for
 from .onboarding import bootstrap
 from .prompts import PLACEMENTS, pick_session
+from .retention import PRUNE_DAYS
+from .retirement import artifact_command
 from .runtime import HERDR_ERRORS, CaptainError, current_pane
-from .sessions import (
-    PRUNE_DAYS,
-    find_session,
-    project_sessions,
-    read_session,
-    rename_session,
-    session_card,
-)
+from .sessions import find_session, project_sessions, read_session, rename_session, session_card
 from .update_check import upgrade
 
 VERIFY_HELP = "Makefile target captain runs at done; its receipt rides the report"

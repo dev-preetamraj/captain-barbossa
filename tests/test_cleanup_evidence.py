@@ -11,7 +11,7 @@ from unittest.mock import Mock, patch
 
 from home_isolation import SessionCase
 
-from captain_barbossa import execution, lifetime, sessions, store
+from captain_barbossa import lifetime, retirement, sessions, store
 from captain_barbossa.runtime import CaptainError
 
 
@@ -235,12 +235,12 @@ class CleanupEvidenceTests(SessionCase):
         self.stopped()
         pane = lifetime.read(self.session, self.ref)["pane"]
         with patch.object(lifetime.runtime, "herdr", return_value={"pane": pane}):
-            self.assertTrue(execution.stop(self.session, self.ref).ok)
+            self.assertTrue(retirement.stop(self.session, self.ref).ok)
         self.session.meta["crew"]["will"] = {**self.crew, "incarnation_id": "c" * 32}
         store.write_json(self.session.meta_path, self.session.meta)
         for _ in range(2):
             with patch.object(lifetime.runtime, "herdr", side_effect=CaptainError("gone")) as herdr:
-                self.assertTrue(execution.stop(self.session, self.ref).ok)
+                self.assertTrue(retirement.stop(self.session, self.ref).ok)
                 self.assertTrue(lifetime.close(self.session, self.ref).ok)
                 herdr.assert_not_called()
         self.assertEqual(lifetime.read(self.session, self.ref)["close_state"], "closed")
@@ -285,13 +285,13 @@ class CleanupEvidenceTests(SessionCase):
         record["shutdown"]["escape_state"] = "observed"
         store.write_json(path, record)
         with patch.object(lifetime.runtime, "herdr", side_effect=CaptainError("pane_not_found")):
-            self.assertTrue(execution.stop(self.session, self.ref).ok)
-            self.assertTrue(execution.stop(self.session, self.ref).ok)
+            self.assertTrue(retirement.stop(self.session, self.ref).ok)
+            self.assertTrue(retirement.stop(self.session, self.ref).ok)
         record = store.read_json(path)
         record["worktree_id"] = self.ref
         store.write_json(path, record)
         self.assertEqual(
-            execution.stop(self.session, self.ref).reason, "descendant-escape-unexcluded"
+            retirement.stop(self.session, self.ref).reason, "descendant-escape-unexcluded"
         )
 
     def test_vanished_pane_requires_shutdown_receipt_and_can_retry(self):
@@ -304,12 +304,12 @@ class CleanupEvidenceTests(SessionCase):
             ) as herdr,
             patch.object(lifetime.time, "monotonic", side_effect=[0, 100]),
         ):
-            self.assertFalse(execution.stop(self.session, self.ref).ok)
+            self.assertFalse(retirement.stop(self.session, self.ref).ok)
             herdr.assert_not_called()
         self.assertEqual(lifetime.read(self.session, self.ref)["state"], "claimed")
         self.stopped()
         with patch.object(lifetime.runtime, "herdr", side_effect=CaptainError("pane_not_found")):
-            self.assertTrue(execution.stop(self.session, self.ref).ok)
+            self.assertTrue(retirement.stop(self.session, self.ref).ok)
         self.assertEqual(lifetime.read(self.session, self.ref)["close_state"], "closed")
 
     def test_native_history_needs_the_reaped_native_exit(self):

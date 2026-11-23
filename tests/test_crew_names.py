@@ -163,7 +163,7 @@ class CrewNameTests(SessionCase):
         protocol.poll(crew, delivery["delivery_id"])
         with (
             patch.object(runtime, "herdr", return_value={}),
-            patch.object(agents.execution, "retire", return_value={"lifetime": {"ok": True}}),
+            patch.object(agents.retirement, "retire", return_value={"lifetime": {"ok": True}}),
             contextlib.redirect_stdout(io.StringIO()) as dismissed,
         ):
             agents.dismiss_crew(self.args("dismiss", "Jack"), self.pane, self.project)
@@ -322,7 +322,7 @@ class CrewNameTests(SessionCase):
         protocol.poll(crew, delivery["delivery_id"])
         with (
             patch.object(runtime, "herdr", return_value={}),
-            patch.object(agents.execution, "retire", return_value={"lifetime": {"ok": True}}),
+            patch.object(agents.retirement, "retire", return_value={"lifetime": {"ok": True}}),
         ):
             agents.dismiss_crew(self.args("dismiss", "Jack"), self.pane, self.project)
         with (
@@ -379,7 +379,7 @@ class CrewNameTests(SessionCase):
         protocol.poll(crew, delivery["delivery_id"])
         with (
             patch.object(runtime, "herdr", return_value={}),
-            patch.object(agents.execution, "retire", return_value={"lifetime": {"ok": True}}),
+            patch.object(agents.retirement, "retire", return_value={"lifetime": {"ok": True}}),
         ):
             agents.dismiss_crew(self.args("dismiss", "Jack"), self.pane, self.project)
         with (

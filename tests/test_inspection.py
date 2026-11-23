@@ -12,7 +12,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from captain_barbossa import inspection, store
+from captain_barbossa import inspection, safe_read, store
 from captain_barbossa.runtime import CaptainError
 
 
@@ -40,7 +40,7 @@ class InspectionTests(unittest.TestCase):
         argv = (["--session", session] if session else []) + ["inspect", *args]
         with contextlib.redirect_stdout(io.StringIO()) as out:
             inspection.run(self.parser.parse_args(argv), self.project)
-        self.assertLessEqual(len(out.getvalue().encode()), inspection.MAX_BYTES)
+        self.assertLessEqual(len(out.getvalue().encode()), safe_read.MAX_BYTES)
         return json.loads(out.getvalue())
 
     def test_read_bytes_bounds_and_descriptor_ownership(self):
@@ -49,7 +49,7 @@ class InspectionTests(unittest.TestCase):
             with self.subTest(size=size):
                 path.write_bytes(b"x" * size)
                 self.assertEqual(
-                    inspection.read_bytes(self.project, Path("bounded"), limit=4),
+                    safe_read.read_bytes(self.project, Path("bounded"), limit=4),
                     (b"x" * min(size, 4), size > 4),
                 )
 
@@ -128,13 +128,13 @@ class InspectionTests(unittest.TestCase):
         with patch.object(inspection, "MAX_RESULTS", 2):
             self.assertEqual(self.inspect("files"), {"paths": ["a", "b"], "truncated": True})
         with (
-            patch.object(inspection, "MAX_ENTRIES", 2),
+            patch.object(safe_read, "MAX_ENTRIES", 2),
             self.assertRaisesRegex(CaptainError, "limit"),
         ):
             self.inspect("files")
 
     def test_output_size_and_deadline_have_stable_failures(self):
-        (self.project / "big").write_text("x" * (inspection.MAX_BYTES + 1))
+        (self.project / "big").write_text("x" * (safe_read.MAX_BYTES + 1))
         with self.assertRaisesRegex(CaptainError, "Inspection limit"):
             self.inspect("read", "big")
         with (
@@ -170,7 +170,7 @@ class InspectionTests(unittest.TestCase):
         meta.write_text(json.dumps({"project": str(self.root)}))
         with self.assertRaisesRegex(CaptainError, "another project"):
             self.inspect("state", "session", session=session)
-        meta.write_text(" " * (inspection.MAX_BYTES + 1))
+        meta.write_text(" " * (safe_read.MAX_BYTES + 1))
         with self.assertRaisesRegex(CaptainError, "exceeds"):
             self.inspect("state", "session", session=session)
 
@@ -217,7 +217,7 @@ class InspectionTests(unittest.TestCase):
             "GIT_CONFIG_GLOBAL": "/dev/null",
         }
         return subprocess.run(
-            [str(inspection.GIT), *args],
+            [str(safe_read.GIT), *args],
             cwd=self.project,
             env=env,
             check=True,
@@ -367,7 +367,7 @@ class InspectionTests(unittest.TestCase):
         for metadata in (False, True):
             with self.subTest(metadata=metadata), self.assertRaises(FileNotFoundError):
                 list(
-                    inspection.walk_files(
+                    safe_read.walk_files(
                         self.project, Path("missing"), float("inf"), metadata=metadata
                     )
                 )
@@ -475,7 +475,7 @@ class InspectionTests(unittest.TestCase):
 
             with (
                 self.subTest(error=error),
-                patch.object(inspection, "TIMEOUT", timeout),
+                patch.object(safe_read, "TIMEOUT", timeout),
                 patch.object(inspection.subprocess, "Popen", side_effect=launch),
                 self.assertRaisesRegex(CaptainError, error),
             ):
@@ -485,7 +485,7 @@ class InspectionTests(unittest.TestCase):
         (self.project / "regular.txt").write_text("keep this")
         (self.project / "node_modules").mkdir()
         (self.project / "node_modules" / "junk.txt").write_text("skip this")
-        for skip_dir in inspection.SKIP_DIRS:
+        for skip_dir in safe_read.SKIP_DIRS:
             if skip_dir == "node_modules":
                 continue
             d = self.project / skip_dir
@@ -496,7 +496,7 @@ class InspectionTests(unittest.TestCase):
         paths = result["paths"]
         self.assertIn("regular.txt", paths)
         self.assertNotIn("node_modules/junk.txt", paths)
-        self.assertFalse(any(skip_dir in p for skip_dir in inspection.SKIP_DIRS for p in paths))
+        self.assertFalse(any(skip_dir in p for skip_dir in safe_read.SKIP_DIRS for p in paths))
 
         result = self.inspect("search", "skip")
         self.assertEqual(result["matches"], [])

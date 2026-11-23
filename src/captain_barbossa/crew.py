@@ -3,7 +3,7 @@
 import re
 from dataclasses import dataclass
 
-from .events import event_incarnation, read_events
+from .eventlog import event_incarnation, read_events
 from .pane import Pane, modal_start
 from .runtime import HERDR_ERRORS, CaptainError
 from .sessions import Session, read_session

@@ -5,7 +5,7 @@ import shlex
 import sys
 from pathlib import Path
 
-from .events import DELIVERY_HOOKS
+from .eventlog import DELIVERY_HOOKS
 from .models import HOOK_DELIVERED, codex_stop_hooks, native_model_args
 from .sessions import session_name
 

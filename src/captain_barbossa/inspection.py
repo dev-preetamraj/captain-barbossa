@@ -7,45 +7,32 @@ Filesystem deadlines are cooperative; a stalled filesystem still needs OS isolat
 
 import json
 import os
-import re
 import selectors
-import stat
 import subprocess
-import sys
 import time
-from contextlib import ExitStack, contextmanager
 from pathlib import Path
 
 from . import memory, protocol, sessions, store
 from .runtime import CaptainError
+from .safe_read import (
+    GIT,
+    MAX_BYTES,
+    TIMEOUT,
+    check_deadline,
+    decode_text,
+    fail,
+    git_command,
+    git_environment,
+    read_bytes,
+    relative,
+    unsupported_git_metadata,
+    validate_git_config,
+    walk_files,
+)
 
-MAX_BYTES = 64 * 1024
-MAX_ENTRIES = 10_000
 MAX_RESULTS = 200
 MAX_SCAN_BYTES = 8 * 1024 * 1024
 MAX_PATTERN = 512
-TIMEOUT = 5
-SKIP_DIRS = {
-    ".git",
-    ".venv",
-    "venv",
-    "build",
-    "dist",
-    "__pycache__",
-    ".ruff_cache",
-    ".mypy_cache",
-    ".pytest_cache",
-    ".tox",
-    "target",
-    ".next",
-    "node_modules",
-}
-# /usr/bin/git on macOS is a launcher for the mutable xcode-select toolchain.
-GIT = Path(
-    "/Library/Developer/CommandLineTools/usr/bin/git"
-    if sys.platform == "darwin"
-    else "/usr/bin/git"
-)
 
 
 def add_arguments(subparsers):
@@ -80,146 +67,18 @@ def add_arguments(subparsers):
     git.add_argument("--text", help="literal, case-sensitive text for git grep")
 
 
-def _fail(code, message):
-    raise CaptainError(f"Inspection {code}: {message}")
-
-
-def check_deadline(deadline):
-    if time.monotonic() >= deadline:
-        _fail("timeout", f"read exceeded {TIMEOUT} seconds.")
-
-
-def _relative(root, value):
-    path = Path(value)
-    if path.is_absolute():
-        try:
-            path = path.relative_to(root)
-        except ValueError:
-            _fail("outside-root", "path must stay inside the selected scope.")
-    if ".." in path.parts or "\0" in str(path):
-        _fail("outside-root", "parent traversal and NUL bytes are not allowed.")
-    return path
-
-
 def _outside(target):
     """An absolute path outside the project as its own canonical root and relative path."""
     if "\0" in str(target) or ".." in target.parts:
-        _fail("outside-root", "parent traversal and NUL bytes are not allowed.")
+        fail("outside-root", "parent traversal and NUL bytes are not allowed.")
     # Only the parent is resolved; the leaf is still opened without following a symlink.
     root, leaf = target.parent.resolve(strict=True), Path(target.name or ".")
     if os.environ.get("CAPTAIN_ROLE") == "crew":
         target = root / leaf
         for stored in (store.state_root(), store.temp_root()):
             if protocol.overlaps(target, stored.resolve()):
-                _fail("forbidden-scope", "crew may inspect only repo state.")
+                fail("forbidden-scope", "crew may inspect only repo state.")
     return root, leaf
-
-
-@contextmanager
-def _open_root(root):
-    """Open an absolute directory without following a symlink in any component."""
-    root = Path(root)
-    if not root.is_absolute():
-        _fail("outside-root", "inspection roots must be absolute.")
-    fd = os.open(root.anchor, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-    try:
-        for part in root.parts[1:]:
-            next_fd = os.open(
-                part,
-                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
-                dir_fd=fd,
-            )
-            os.close(fd)
-            fd = next_fd
-        yield fd
-    finally:
-        os.close(fd)
-
-
-@contextmanager
-def _open(root, path):
-    """Walk from an authorized canonical root without following swapped-in symlinks."""
-    path = _relative(root, path)
-    with _open_root(root) as root_fd:
-        fd = root_fd
-        try:
-            for index, part in enumerate(path.parts):
-                flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
-                if index < len(path.parts) - 1:
-                    flags |= os.O_DIRECTORY
-                next_fd = os.open(part, flags, dir_fd=fd)
-                if fd != root_fd:
-                    os.close(fd)
-                fd = next_fd
-            yield fd
-        finally:
-            if fd != root_fd:
-                os.close(fd)
-
-
-def read_bytes(root, path, limit=MAX_BYTES):
-    with _open(root, path) as fd:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
-            _fail("unsupported-file", "only regular files can be read.")
-        with os.fdopen(fd, "rb", closefd=False) as file:
-            data = file.read(limit + 1)
-    return data[:limit], len(data) > limit
-
-
-def walk_files(root, path, deadline, *, metadata=False):
-    pending, scanned = [path], 0
-    while pending:
-        check_deadline(deadline)
-        current = pending.pop()
-        if len(current.parts) > 64:
-            _fail("limit", "directory nesting exceeds 64 levels.")
-        with ExitStack() as stack:
-            try:
-                fd = stack.enter_context(_open(root, current))
-            except FileNotFoundError:
-                # Git maintenance can remove discovered metadata before we open it.
-                if metadata and current != path:
-                    continue
-                raise
-            mode = os.fstat(fd).st_mode
-            if stat.S_ISREG(mode):
-                yield current
-                continue
-            if not stat.S_ISDIR(mode):
-                _fail("unsupported-file", "only regular files and directories can be inspected.")
-            entries = []
-            with os.scandir(fd) as iterator:
-                for entry in iterator:
-                    check_deadline(deadline)
-                    scanned += 1
-                    if scanned > MAX_ENTRIES:
-                        _fail("limit", f"scan exceeds {MAX_ENTRIES} directory entries.")
-                    if not metadata and entry.name in SKIP_DIRS:
-                        continue
-                    try:
-                        mode = entry.stat(follow_symlinks=False).st_mode
-                    except FileNotFoundError:
-                        if metadata:
-                            continue
-                        raise
-                    if stat.S_ISLNK(mode):
-                        if metadata:
-                            _fail("unsupported-git", "Git metadata contains a symlink.")
-                        continue
-                    if stat.S_ISREG(mode) or stat.S_ISDIR(mode):
-                        entries.append(current / entry.name)
-                    elif metadata:
-                        _fail("unsupported-git", "Git metadata contains a special file.")
-            pending.extend(sorted(entries, reverse=True))
-
-
-def decode_text(data):
-    try:
-        if b"\0" in data:
-            raise UnicodeError
-        return data.decode("utf-8")
-    except UnicodeError:
-        _fail("binary", "file is not UTF-8 text.")
 
 
 def _files(root, path, deadline):
@@ -233,14 +92,14 @@ def _files(root, path, deadline):
 
 def _search(root, path, text, deadline):
     if not text or len(text.encode("utf-8")) > MAX_BYTES:
-        _fail("invalid-text", "search text must be nonempty and at most 65536 bytes.")
+        fail("invalid-text", "search text must be nonempty and at most 65536 bytes.")
     matches, scanned, truncated = [], 0, False
     for item in walk_files(root, path, deadline):
         check_deadline(deadline)
         data, cut = read_bytes(root, item)
         scanned += len(data)
         if scanned > MAX_SCAN_BYTES:
-            _fail("limit", "search exceeds 8 MiB of file content.")
+            fail("limit", "search exceeds 8 MiB of file content.")
         truncated |= cut
         try:
             content = decode_text(data)
@@ -262,87 +121,6 @@ def _state_root(project, scope, session_id):
     return sessions.read_session(project, session_id, max_bytes=MAX_BYTES).directory
 
 
-def validate_git_config(root):
-    data, cut = read_bytes(root, Path(".git/config"))
-    if cut:
-        _fail("unsupported-git", "Git config exceeds 65536 bytes.")
-    # Accept a small literal subset; never ask Git to parse includes before validation.
-    allowed = {
-        "core": {
-            "repositoryformatversion",
-            "filemode",
-            "bare",
-            "logallrefupdates",
-            "ignorecase",
-            "precomposeunicode",
-        },
-        "remote": {"url", "fetch"},
-        "branch": {"remote", "merge", "vscode-merge-base"},
-        "user": {"name", "email"},
-    }
-    section = None
-    for line in decode_text(data).splitlines():
-        line = line.strip()
-        if not line or line.startswith(("#", ";")):
-            continue
-        header = re.fullmatch(r'\[([a-zA-Z]+)(?: "[^"\\\x00-\x1f]+")?\]', line)
-        if header:
-            section = header[1].lower()
-            if section not in allowed:
-                _fail("unsupported-git", "Git config contains an unsupported section.")
-            continue
-        entry = re.fullmatch(r"([a-zA-Z][a-zA-Z0-9-]*)\s*=\s*([^\\\x00-\x1f]*)", line)
-        if not entry or entry[1].lower() not in allowed.get(section, set()):
-            _fail("unsupported-git", "Git config contains an unsupported setting or syntax.")
-        key, value = entry[1].lower(), entry[2].strip().lower()
-        if section == "core":
-            valid = value == "0" if key == "repositoryformatversion" else value in ("true", "false")
-            if not valid or (key == "bare" and value != "false"):
-                _fail("unsupported-git", "only ordinary format-0 worktrees are supported.")
-
-
-def unsupported_git_metadata(path):
-    return (
-        (path.name in ("commondir", "gitdir") and path.parts[:2] != (".git", "worktrees"))
-        or path.name in ("config.worktree", "alternates", "http-alternates")
-        or path.suffix == ".promisor"
-    )
-
-
-def git_environment():
-    return {
-        "PATH": "/usr/bin:/bin",
-        "HOME": "/dev/null",
-        "XDG_CONFIG_HOME": "/dev/null",
-        "LANG": "C",
-        "LC_ALL": "C",
-        "TZ": "UTC",
-        "GIT_CONFIG_NOSYSTEM": "1",
-        "GIT_CONFIG_SYSTEM": "/dev/null",
-        "GIT_CONFIG_GLOBAL": "/dev/null",
-        "GIT_ATTR_NOSYSTEM": "1",
-        "GIT_OPTIONAL_LOCKS": "0",
-        "GIT_TERMINAL_PROMPT": "0",
-        "GIT_NO_REPLACE_OBJECTS": "1",
-        "GIT_NO_LAZY_FETCH": "1",
-        "GIT_LITERAL_PATHSPECS": "1",
-    }
-
-
-def git_command(executable):
-    command = [str(executable), "--no-pager", "--no-optional-locks"]
-    for setting in (
-        "core.fsmonitor=false",
-        "core.hooksPath=/dev/null",
-        "core.attributesFile=/dev/null",
-        "protocol.allow=never",
-        "maintenance.auto=false",
-        "gc.auto=0",
-    ):
-        command.extend(("-c", setting))
-    return command
-
-
 def git_text(root, operation, *, staged=False):
     """One hardened Git read for another module, as plain text."""
     return _git(Path(root), operation, staged, time.monotonic() + TIMEOUT)["text"]
@@ -350,12 +128,12 @@ def git_text(root, operation, *, staged=False):
 
 def _git(root, operation, staged, deadline, text=None, registration=None):
     if staged and operation != "diff":
-        _fail("invalid-option", "--staged applies only to git diff.")
+        fail("invalid-option", "--staged applies only to git diff.")
     if operation == "grep":
         if not text or len(text.encode("utf-8")) > MAX_PATTERN:
-            _fail("invalid-text", f"git grep needs literal text of 1 to {MAX_PATTERN} bytes.")
+            fail("invalid-text", f"git grep needs literal text of 1 to {MAX_PATTERN} bytes.")
     elif text is not None:
-        _fail("invalid-option", "--text applies only to git grep.")
+        fail("invalid-option", "--text applies only to git grep.")
     metadata_root = root
     if registration is not None:
         # worktrees imports bounded inspection helpers.
@@ -363,19 +141,19 @@ def _git(root, operation, staged, deadline, text=None, registration=None):
 
         validate_registration(registration, deadline=deadline)
         if root != Path(registration["execution_root"]):
-            _fail("unsupported-git", "registered execution root does not match.")
+            fail("unsupported-git", "registered execution root does not match.")
         metadata_root = Path(registration["project"])
     elif (root / ".git").is_symlink() or not (root / ".git").is_dir():
-        _fail("unsupported-git", "an ordinary or registered .git directory is required.")
+        fail("unsupported-git", "an ordinary or registered .git directory is required.")
     for path in walk_files(metadata_root, Path(".git"), deadline, metadata=True):
         if unsupported_git_metadata(path):
-            _fail("unsupported-git", "linked, alternate and partial object stores are unsupported.")
+            fail("unsupported-git", "linked, alternate and partial object stores are unsupported.")
     validate_git_config(metadata_root)
     executable = GIT.resolve(strict=True)
     for item in (executable, *executable.parents):
         info = item.stat()
         if info.st_uid != 0 or info.st_mode & 0o022:
-            _fail("unsupported-git", "Git must be a root-owned system executable.")
+            fail("unsupported-git", "Git must be a root-owned system executable.")
     env = git_environment()
     commands = {
         "status": [
@@ -436,12 +214,12 @@ def _git(root, operation, staged, deadline, text=None, registration=None):
                             continue
                         size += len(chunk)
                         if size > MAX_BYTES:
-                            _fail("limit", "Git output exceeds 65536 bytes.")
+                            fail("limit", "Git output exceeds 65536 bytes.")
                         output[key.fileobj].extend(chunk)
             process.wait(timeout=max(0.001, deadline - time.monotonic()))
             # git grep reports "nothing matched" as status 1, which is an answer, not a fault.
             if process.returncode and not (operation == "grep" and process.returncode == 1):
-                _fail("git-failed", f"Git exited with status {process.returncode}.")
+                fail("git-failed", f"Git exited with status {process.returncode}.")
         finally:
             if process.poll() is None:
                 process.kill()
@@ -473,17 +251,17 @@ def run(args, project):
         else:
             if command == "state":
                 if os.environ.get("CAPTAIN_ROLE") == "crew" and args.scope != "repo":
-                    _fail("forbidden-scope", "crew may inspect only repo state.")
+                    fail("forbidden-scope", "crew may inspect only repo state.")
                 root = _state_root(root, args.scope, getattr(args, "session", None))
                 if not root.exists():
-                    _fail("missing", "selected state scope does not exist.")
+                    fail("missing", "selected state scope does not exist.")
                 if root.resolve() != root.absolute():
-                    _fail("outside-root", "stored scope must not contain symlinks.")
+                    fail("outside-root", "stored scope must not contain symlinks.")
             target = Path(args.path)
             if command != "state" and target.is_absolute() and not target.is_relative_to(root):
                 root, path = _outside(target)
             else:
-                path = _relative(root, args.path)
+                path = relative(root, args.path)
             if command == "files":
                 result = _files(root, path, deadline)
             elif command == "search":
@@ -500,7 +278,7 @@ def run(args, project):
         check_deadline(deadline)
         encoded = json.dumps(result, sort_keys=True, ensure_ascii=True)
         if len(encoded) + 1 > MAX_BYTES:
-            _fail("limit", "encoded output exceeds 65536 bytes; select a narrower path.")
+            fail("limit", "encoded output exceeds 65536 bytes; select a narrower path.")
         print(encoded)
     except FileNotFoundError as exc:
         raise CaptainError("Inspection missing: file, scope or system Git does not exist.") from exc
