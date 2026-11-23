@@ -2,27 +2,37 @@
 
 import json
 
-from .approval import WORD_BREAKS
+from .approval import QUOTING, WORD_BREAKS
 
 # A JavaScript port of approval.denied; the matrix test runs both over the same commands.
-GATE = """const DENIALS = __RULES__;
+GATE = r"""const DENIALS = __RULES__;
 const WORD_BREAKS = new RegExp(__BREAKS__);
+const QUOTING = new RegExp(__QUOTING__, 'g');
+function names(word, wanted) {
+  if (word === wanted) return true;
+  if (!/[*?[]/.test(word) || !/[a-z0-9]/.test(word)) return false;
+  const source = word.replace(/[.+^${}()|\\]/g, '\\$&').replace(/\*/g, '.*')
+    .replace(/\?/g, '.').replace(/\[!/g, '[^');
+  try { return new RegExp(`^${source}$`, 's').test(wanted); } catch { return false; }
+}
 function inOrder(needed, words) {
   let at = 0;
-  for (const word of needed) {
-    at = words.indexOf(word, at);
-    if (at < 0) return false;
+  for (const item of needed) {
+    while (at < words.length && !names(words[at], item)) at += 1;
+    if (at >= words.length) return false;
     at += 1;
   }
   return true;
 }
 function denied(command) {
-  const text = Array.isArray(command) ? command.map(String).join(' ') : command;
-  if (typeof text !== 'string') return null;
+  const raw = Array.isArray(command) ? command.map(String).join(' ') : command;
+  if (typeof raw !== 'string') return null;
+  const text = raw.toLowerCase().replace(QUOTING, '');
   const words = text.split(WORD_BREAKS).map((word) => word.split('/').pop().split('.')[0]);
-  for (const [program, ...rest] of DENIALS) {
+  for (const rule of DENIALS) {
+    const [program, ...rest] = rule.map((word) => word.toLowerCase());
     for (let index = 0; index < words.length; index += 1) {
-      if (words[index] === program && inOrder(rest, words.slice(index + 1))) return [program, ...rest];
+      if (names(words[index], program) && inOrder(rest, words.slice(index + 1))) return rule;
     }
   }
   return null;
@@ -38,8 +48,10 @@ BLOCK = """  pi.on('tool_call', async (event) => {
 
 def gate(denials):
     """The JavaScript matcher with these denials and approval's word breaks baked in."""
-    return GATE.replace("__RULES__", json.dumps(denials)).replace(
-        "__BREAKS__", json.dumps(WORD_BREAKS)
+    fixed = GATE.replace("__BREAKS__", json.dumps(WORD_BREAKS))
+    # Rules go in last, so a declared word can never match a later placeholder.
+    return fixed.replace("__QUOTING__", json.dumps(QUOTING)).replace(
+        "__RULES__", json.dumps(denials)
     )
 
 

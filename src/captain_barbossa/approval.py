@@ -5,6 +5,7 @@ the lexer cannot classify defers to the native permission mode unless it names a
 destructive or outward verb; nothing here grants more than one call.
 """
 
+import fnmatch
 import glob
 import os
 import posixpath
@@ -64,6 +65,8 @@ REASONS = {
 # Shell text split into words wherever a quote, operator or expansion could join or hide one.
 # pi_history embeds this same source, so the pi gate and the Python one split identically.
 WORD_BREAKS = r"[\s;&|()<>`$'\"{}=\\,]+"
+# The shell joins quoted and escaped pieces into one word, so the matcher drops them first.
+QUOTING = r"['\"\\]"
 SEVERITY = {Verdict.ALLOW_ONCE: 0, Verdict.DEFER: 1, Verdict.ESCALATE: 2, Verdict.DENY: 3}
 
 READ_TOOLS = {"Read", "Glob", "Grep", "LS", "NotebookRead"}
@@ -186,25 +189,37 @@ class _Use:
 def denied(denials, command):
     """The first plugin-declared command this tool input runs, or None.
 
-    Deliberately textual and over-broad: a declared program, by basename and ignoring any
-    extension, followed anywhere later by the rest of its words in order. It sees through
-    paths, wrappers, nested shells and quoting, not through encoded text or a script file.
+    Deliberately textual and over-broad: a declared program, by basename, ignoring case,
+    quoting and any extension, or a glob that names it, followed anywhere later by the rest
+    of its words in order. It does not see through variables, encoded text or script files.
     """
     text = " ".join(map(str, command)) if isinstance(command, list) else command
     if not denials or not isinstance(text, str):
         return None
+    text = re.sub(QUOTING, "", text.lower())
     words = [posixpath.basename(word).split(".")[0] for word in re.split(WORD_BREAKS, text)]
     for rule in denials:
-        program, *rest = rule
+        program, *rest = (word.lower() for word in rule)
         for index, word in enumerate(words):
-            if word == program and _in_order(rest, words[index + 1 :]):
+            if _names(word, program) and _in_order(rest, words[index + 1 :]):
                 return list(rule)
     return None
 
 
+def _names(word, wanted):
+    """A word is the wanted name, or a glob with a literal character that matches it."""
+    if word == wanted:
+        return True
+    return (
+        bool(GLOB & set(word))
+        and bool(re.search("[a-z0-9]", word))
+        and (fnmatch.fnmatchcase(wanted, word))
+    )
+
+
 def _in_order(needed, words):
     remaining = iter(words)
-    return all(word in remaining for word in needed)
+    return all(any(_names(word, item) for word in remaining) for item in needed)
 
 
 def decide(request):

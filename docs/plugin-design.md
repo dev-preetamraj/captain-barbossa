@@ -303,14 +303,14 @@ Raising a ceiling later is compatible, since a section admitted under a smaller 
 
 A plugin declares `commands`, each an argv prefix whose first word is a program name.
 `hello.json` keeps them, so a skipped optional plugin's denials still apply; only `--no-plugins` and `plugin remove` drop them.
-At launch captain copies every registered plugin's denials into session meta, and at recruit into the crew record, so hooks read only the crew record, never home settings or the plugin.
+At launch captain copies every registered plugin's denials into session meta, and at recruit into the crew record, so hooks read the session meta and crew record, never home settings or the plugin.
 The check runs before assignment grants, so no grant can allow a denied command.
 
 A tool request is checked when its input has a `command` string or list, whatever the tool's name.
-Its text is split on whitespace, quotes and shell punctuation, and each word is reduced to its basename.
-The request is denied when a word equals a declared program name, or that name with a `.py` or other extension, and the remaining words of that command follow it in order anywhere later in the text.
+Its text is lowercased, quotes and backslashes are dropped as the shell joins those pieces into one word, then it is split on whitespace and shell punctuation and each word is reduced to its basename.
+The request is denied when a word equals a declared program name, or that name with a `.py` or other extension, or is a glob with a literal character that matches it, and the remaining words of that command follow it in order anywhere later in the text.
 That deliberately over-denies, for example `echo "example proposals approve"`, and catches paths, `env`, `uv run`, `uvx`, `xargs`, `sh -c`, `bash -lc`, quoting, pipes, `&&`, `$(...)`, `python -m` and `a=example; $a proposals approve`.
-It cannot see a command assembled from encoded text or run from a script file the crew wrote; the plugin's server remains the authority for who may act.
+It cannot see a command assembled from variables such as `${x}h` or encoded text, or run from a script file the crew wrote; the plugin's server remains the authority for who may act.
 
 Where a provider or path has no verified gate, captain refuses rather than hoping:
 

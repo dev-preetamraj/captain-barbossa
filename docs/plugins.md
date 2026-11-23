@@ -73,9 +73,9 @@ When several plugins pass the total, later ones are omitted whole and replaced b
 ## Crew command denial
 
 A plugin may declare commands crew must never run, such as `["example", "proposals", "approve"]`.
-A crew's shell request is refused when a declared program name appears in it, by basename and ignoring any extension, followed later by the rest of that command's words in order.
+A crew's shell request is refused when a declared program name appears in it, by basename, ignoring case, quoting and any extension, or as a glob such as `exampl?` that matches it, followed later by the rest of that command's words in order.
 That covers full paths, `env`, `uv run`, `uvx`, `xargs`, `sh -c`, quoting, pipes, `$(...)` and `python -m module` when the module is declared as its own command.
-It over-refuses on purpose, for example `echo "example proposals approve"`, and it cannot see commands built from encoded text or run from a script file; the plugin's server stays the authority.
+It over-refuses on purpose, for example `echo "example proposals approve"`, and it cannot see commands built from variables or encoded text, or run from a script file; the plugin's server stays the authority.
 
 | Launch path | claude | codex | pi | grok |
 | --- | --- | --- | --- | --- |

@@ -46,6 +46,15 @@ DENIED = (
     "a=example; $a proposals approve",
     "example.exe proposals approve",
     "nohup example proposals approve &",
+    "e'x'ample proposals approve",
+    'ex"am"ple proposals approve',
+    "ex\\ample proposals approve",
+    "example proposals appr''ove",
+    "eval 'exa''mple proposals approve'",
+    "EXAMPLE proposals Approve",
+    "/usr/local/bin/exampl? proposals approve",
+    "/opt/bin/ex*le proposals approve",
+    "./[e]xample proposals approve",
 )
 
 ALLOWED = (
@@ -55,6 +64,8 @@ ALLOWED = (
     "git status",
     "examples proposals approve",
     "cat README.md",
+    "ls * proposals approve",
+    "cat *.md proposals approve",
 )
 
 
@@ -113,6 +124,19 @@ console.log(JSON.stringify([deny, pass ?? null]));
         self.assertTrue(deny["block"])
         self.assertIn("plugin", deny["reason"])
         self.assertIsNone(allowed)
+
+    @unittest.skipUnless(shutil.which("node"), "node is not installed")
+    def test_declared_words_cannot_reach_the_gate_placeholders(self):
+        rules = [["__BREAKS__", "__QUOTING__", "__RULES__"]]
+        harness = pi_history.gate(rules) + "console.log(JSON.stringify(denied(process.argv[1])));"
+        done = subprocess.run(
+            ["node", "--input-type=module", "-e", harness, " ".join(rules[0])],
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(json.loads(done.stdout), rules[0])
 
     def test_extension_without_denials_has_no_gate(self):
         source = pi_history.extension("/tmp/r", "/tmp/e.jsonl", "i1")
