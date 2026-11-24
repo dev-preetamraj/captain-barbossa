@@ -71,6 +71,21 @@ PANE_STATUS_BAR_PREFIXES = ("•", "⏺", "└", "│", "✻", "✳", "?", "…"
 PANE_MODAL_CONFIRM = re.compile(r"^Press enter to confirm or esc to \w+")
 PANE_MODAL_OPTION = re.compile(r"^[›»]?\s*([1-9])\.\s+(\S+)")
 PANE_MODAL_LINES = 20
+# Codex's footer: a status row (model, directory or context use), up to two wrapped
+# continuation rows, then a hint row with an optional "← for agents ·" prefix.
+CODEX_STATUS = re.compile(r"^gpt-\S+ .* · (?:[~/]|Context \d+% used(?: ·|$))", re.IGNORECASE)
+CODEX_STATUS_WRAP = 3
+# Codex startup screens (update, hook trust): a numbered selection under a short header.
+STARTUP_OPTION = re.compile(r"^[›»]?\s*(\d)\.\s+(.+?)\s*$")
+STARTUP_HEADER_ROWS = 4
+# A wrapped tail holds only the status row's own words, numbers and separators.
+CODEX_STATUS_TAIL = re.compile(
+    r"(?:(?:[\d.]+[KMkm%]?|in|out|used|left|weekly|context|·)(?:\s+|$))+"
+)
+CODEX_HINT = re.compile(
+    r"(?:← for agents · )?\? for shortcuts(?:\s+⚠ \d+ warnings? · f2 to view)?"
+    r"|esc again to edit previous message"
+)
 # A contextual suggestion is drawn dim (SGR 2); a typed draft carries no styling at all.
 # Group captures the whole parameter list so a multi-parameter code (a truecolor prefix,
 # "38;2;153;153;153") is consumed as one sequence instead of failing to match at all.
@@ -118,6 +133,53 @@ def modal_start(lines):
     window = range(max(len(lines) - PANE_MODAL_LINES, 0), len(lines) - 1)
     options = [index for index in window if PANE_MODAL_OPTION.match(lines[index])]
     return options[0] if options else None
+
+
+def codex_without_footer(lines):
+    """Codex's bottom block removed: status row, wrapped continuations, then the hint row.
+
+    Anything unrecognised is left in place, so the composer check fails closed on it.
+    """
+    end = len(lines)
+    hint = end > 0 and CODEX_HINT.fullmatch(lines[-1])
+    if hint:
+        end -= 1
+    # A narrow pane wraps the status row; its continuation rows can never be a composer.
+    for start in range(end - 1, max(end - 1 - CODEX_STATUS_WRAP, -1), -1):
+        if CODEX_STATUS.match(lines[start]):
+            return lines[:start]
+        if not CODEX_STATUS_TAIL.fullmatch(lines[start]):
+            break
+    return lines
+
+
+def startup_screen_name(lines):
+    """Which Codex startup screen is the bottom block of `lines`, or None.
+
+    The header, a contiguous numbered selection and the key hint must be the last rows, so
+    a transcript that merely discusses hooks or lists numbered steps never matches.
+    """
+    if not lines:
+        return None
+    hint = lines[-1].casefold()
+    trust = hint.startswith("enter confirm") and "esc" in hint
+    update = hint.startswith("press enter to continue")
+    if not (trust or update):
+        return None
+    end = len(lines) - 1
+    start = end
+    while start and STARTUP_OPTION.match(lines[start - 1]):
+        start -= 1
+    options = [STARTUP_OPTION.match(line) for line in lines[start:end]]
+    if len(options) < 2 or [int(o.group(1)) for o in options] != list(range(1, len(options) + 1)):
+        return None
+    first = options[0].group(2).casefold()
+    header = " ".join(lines[max(start - STARTUP_HEADER_ROWS, 0) : start]).casefold()
+    if trust and first.startswith("review hooks") and "hooks need review" in header:
+        return "Codex hook trust prompt"
+    if update and first.startswith("update now") and "update available" in header:
+        return "Codex update prompt"
+    return None
 
 
 def claude_picker_rows(lines):
@@ -196,12 +258,15 @@ class Pane:
     def __init__(self, agent_name):
         self.agent_name = agent_name
 
-    def lines(self, keep_status=False, keep_blank=False):
+    def lines(self, keep_status=False, keep_blank=False, source=None):
         """The non-blank tail of the crew's pane, as stripped lines, without the status bar.
 
         Composer checks retain chrome and blank rows to avoid mistaking a draft for a footer.
+        source="visible" reads the screen as drawn, which works while the agent is not idle.
         """
         try:
+            if source == "visible":
+                raise CaptainError("agent_not_idle")
             output = runtime.herdr(
                 "agent", "read", self.agent_name, "--lines", str(TAIL_LINES), raw=True, timeout=10
             )
@@ -228,6 +293,13 @@ class Pane:
         ):
             lines = lines[:-1]
         return lines
+
+    def startup_screen(self):
+        """Name of a Codex update or hook-trust screen awaiting a human, else None."""
+        try:
+            return startup_screen_name(self.lines(keep_status=True, source="visible"))
+        except HERDR_ERRORS:
+            return None
 
     def draft_pending(self, provider=None):
         """Whether the composer must not be typed into: any gate, including an unreadable one."""
@@ -311,9 +383,14 @@ class Pane:
                 return row.group(1), styled
             return None, styled
         if provider == "pi":
-            # Markdown rules are draft text; extra native rulers make the boundary ambiguous.
+            # Anchor to the footer; transcript rulers across a blank gap are not editor rows.
+            start = max(0, len(lines) - 5)
+            while start and lines[start - 1]:
+                start -= 1
             borders = [
-                index for index, line in enumerate(lines) if re.fullmatch(r"─{3,}|── .+─+", line)
+                index
+                for index in range(start, len(lines))
+                if re.fullmatch(r"─{3,}|── .+─+", lines[index])
             ]
             # The startup update notice has two rulers of its own, before the editor.
             if len(borders) == 4:
@@ -358,18 +435,8 @@ class Pane:
                 and sum(bool(re.fullmatch(r"─{3,}", line)) for line in lines) == 2
             ):
                 return "", styled
-        if (
-            provider == "codex"
-            and len(lines) >= 3
-            and re.fullmatch(r"\? for shortcuts(?:\s+⚠ \d+ warnings? · f2 to view)?", lines[-1])
-            and re.match(r"^gpt-\S+ .* · [~/]", lines[-2], re.IGNORECASE)
-        ):
-            lines.pop()
-        if lines and (
-            re.match(r"^gpt-\S+ .* · [~/]", lines[-1], re.IGNORECASE)
-            or (len(lines) > 1 and PANE_RULE.fullmatch(lines[-2]) and lines[-1].startswith("⏵⏵ "))
-        ):
-            lines.pop()
+        if provider == "codex":
+            lines = codex_without_footer(lines)
         # ponytail: recognize only an unobscured, single-line composer; fail closed otherwise.
         while lines and (PANE_RULE.fullmatch(lines[-1]) or lines[-1] == "? for shortcuts"):
             lines.pop()

@@ -89,9 +89,11 @@ class VerifiedDoneTests(SessionCase):
     def test_a_flagged_recipe_is_recorded_as_not_run(self):
         response, delivered = self.done("test", recipe="rm -rf build; touch ran")
         receipt = response["verification"]
-        self.assertEqual((receipt["refused"], receipt["exit"]), ("destructive", None))
+        self.assertEqual((receipt["refused"], receipt["exit"]), ("flagged-loss", None))
         self.assertFalse((self.project / "ran").exists())
-        self.assertTrue(delivered["summary"].startswith("[verify] make test NOT RUN [destructive]"))
+        self.assertTrue(
+            delivered["summary"].startswith("[verify] make test NOT RUN [flagged-loss]")
+        )
 
     def test_revoked_lifetime_verification_is_not_run(self):
         with (

@@ -57,13 +57,31 @@ def artifact_command(args, session):
     return results.discard(session, args.result_id, args.reason)
 
 
+def gone(crew):
+    """Observe managed shutdown without revoking a live crew's launch."""
+    record = crew.record
+    if not record.get("lifetime_id"):
+        return False
+    return lifetime.check(
+        crew.session,
+        record["lifetime_id"],
+        crew_id=crew.crew_id,
+        incarnation_id=record.get("incarnation_id"),
+        root=record.get("execution_root") or crew.session.meta["project"],
+        worktree=record.get("worktree_id"),
+        closure=False,
+        scope="group",
+        require_revoked=False,
+    ).ok
+
+
 def retire(crew):
     """Stop the registered incarnation; keep unresolved artifacts independently."""
 
     if crew.is_background and background_state.alive(crew):
         background.cancel(crew, "Crew dismissed.")
     ref = crew.record["lifetime_id"]
-    verdict = stop(crew.session, ref)
+    verdict = stop(crew.session, ref, scope="group")
     state = {"lifetime": {"ok": verdict.ok, "reason": verdict.reason}}
     state["history"] = native_history.cleanup(crew)
     if crew.record.get("worktree_id"):
@@ -115,7 +133,7 @@ def _final_result(session, worktree_id):
     return None if manifest["provisional"] else manifest
 
 
-def stop(session, ref):
+def stop(session, ref, *, scope=None):
     """Revoke a launch and consult authoritative exit evidence after any terminal close."""
     record = lifetime.read(session, ref)
     if record["pane"]:
@@ -129,7 +147,7 @@ def stop(session, ref):
         incarnation_id=record["incarnation_id"],
         root=record["root"],
         worktree=record["worktree_id"],
-        scope="worktree" if record["worktree_id"] else "group",
+        scope=scope or ("worktree" if record["worktree_id"] else "group"),
     )
 
 

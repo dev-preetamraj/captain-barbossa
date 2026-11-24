@@ -173,8 +173,9 @@ shared (never in a worktree), is passed to Codex as `--add-dir` and to Claude as
 additional directory, and is left out of Git's unlanded check. `.git` anywhere, `/`,
 home, a project ancestor, captain state, `~/.captain` and native CLI config homes are
 refused.
-These checks do not intercept all native tools. Claude PermissionRequest hooks
-add assignment-scoped approval decisions; other providers retain native permissions.
+These checks do not intercept all native tools. Claude, supported Codex and pi crew
+run through assignment-scoped hook decisions; grok has no hook, so its auto mode is
+the only gate. Grants are a guard-rail, not a security boundary.
 
 Here `check`, `ask`, and `done` run in Jack's new crew environment; `answer`
 and `assign` run as captain:
@@ -231,19 +232,46 @@ For protocol crew, `wait` returns a notification with `status`, `delivery_id`,
 selects JSON output. Statuses distinguish `working`, `idle`, `asked`,
 `awaiting_approval`, `done`, `held`, `bounced`, `timeout`, and `error`. Native
 idle is activity evidence only; assignment completion requires explicit `done`.
-Approval notifications never approve the underlying native prompt. Claude's
-PermissionRequest hook passes the tool, command/paths, cwd, and active assignment
-grants to `approval.decide`. An allow-once returns a native `allow` decision with
-no permission updates; deny returns `deny` and its reason. Both are logged as
-PermissionDecision so they do not leave a pending approval notification.
-Escalation (destructive verbs, network/push/publish, writes outside the owned
-paths) logs the reason code, displays a user message, and leaves the native
-prompt and wait notification pending for user review. Reads pass wherever they
-point. A request the policy cannot classify, including missing or malformed input
-and unreadable grants, gets no hook decision, so the native permission mode
-decides as if no gate ran; stale incarnation hooks are ignored.
-The captain must relay escalations to the user, not type an approval over them.
-See the [native hook contract](https://code.claude.com/docs/en/hooks#permissionrequest-decision-control).
+Crew never stop at a native permission prompt, so there is nothing to approve by
+keystroke. Claude crew launch with `--permission-mode auto`; the PreToolUse hook
+passes the tool, command/paths, cwd, and active assignment grants to
+`approval.decide`. A writer (edit grant) edits, builds and tests inside the checkout
+unasked, and native Edit/Write claim unowned checkout paths under the recruitment
+lock; later crew collide just as with `--owns`. Read-only crew get a deny on writes.
+
+Only risky effects are flagged, and a flagged call is denied with a reason, never
+prompted: loss of work the assignment did not create (delete or overwrite, `reset
+--hard`, `clean -f`, stash, discarding changes), history or shared-ref rewrite (force
+push, amend/rebase, branch/tag delete), leaving the machine (push, PR, publish,
+deploy, package install), boundary escape (sudo, writes outside the checkout and
+temp, protected files, captain state, `captain do`/`grant`), and another crew's
+files. The deny is logged as a resolved PermissionDecision, so `wait` reports no
+blocked or `awaiting_approval` state. The crew runs `captain ask`; once the user
+authorizes, the captain either runs the action with `captain do` or grants that exact
+command once:
+
+```sh
+captain grant Jack --command 'git push origin feature' --assignment <id>
+```
+
+The grant is consumed on first exact match and never inherited by handoff.
+PermissionRequest is total for Claude and Codex: allow when granted, otherwise deny.
+Recruit-time `--allow` is unchanged. Reads pass wherever they point.
+
+Codex crew above the version floor (`models.py`) launch with
+`check_for_update_on_startup=false` and no `approvals_reviewer`, and register four
+identical hook commands: SessionStart, Stop, PreToolUse and PermissionRequest. The
+user trusts them once in the pane (`wait` reports untrusted hooks); captain never
+writes Codex's trust store. Below the floor, or with untrusted hooks, Codex falls back
+to its native prompts and sandbox flags. pi's managed extension pipes a Claude-shaped
+PreToolUse to the same hook command and blocks the call on a deny, staying
+prompt-free; it fails closed, so a missing hook, timeout, non-zero exit or invalid
+output blocks the call with a reason. pi extension tools outside the tool map pass
+(a known gap). Grok has no hooks: its auto mode is the only gate, a documented gap.
+Owned paths authorize overwrite, since the captain assigned them. Temp is shared
+scratch across crew (a known ceiling). Hook and captain commands are written with the
+`python3` sibling of the interpreter, since Codex trust hashes the literal command.
+See the [native hook contract](https://code.claude.com/docs/en/hooks#pretooluse-decision-control).
 
 `wait` returns only when a notification carries a delivery ID. Native `working`
 never notifies, and a native idle notifies at most once per message delivered, so

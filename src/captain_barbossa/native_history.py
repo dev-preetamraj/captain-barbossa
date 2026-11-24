@@ -12,6 +12,7 @@ from pathlib import Path
 
 from . import lifetime, pi_history, store, usage
 from .history_manifest import plain, read_manifest
+from .instructions import hook_command
 from .runtime import CaptainError
 
 _KEY = re.compile(r"[A-Za-z0-9_-]+")
@@ -116,6 +117,9 @@ def prepare(crew, *, incarnation, project, background=False):
                     path.with_suffix(".pi.jsonl"),
                     incarnation,
                     (crew.record.get("plugins") or {}).get("denials", ()),
+                    hook_command(
+                        path.parent.parent / "events" / f"{crew.crew_id}-{incarnation}.jsonl"
+                    ),
                 ),
             )
             argv = [

@@ -51,7 +51,7 @@ class NativeEventLogTests(SessionCase):
                 for kind, entries in settings["hooks"].items():
                     event = {"hook_event_name": kind, "message": "quotes '\"\n雪"}
                     if kind == "PreToolUse":
-                        # Claude always names the tool; with no crew state the native mode decides.
+                        # Claude always names the tool; off a crew incarnation nothing gates it.
                         event |= {"tool_name": "Bash", "tool_input": {"command": "ls"}}
                     command = entries[0]["hooks"][0]["command"]
                     result = subprocess.run(
@@ -62,17 +62,8 @@ class NativeEventLogTests(SessionCase):
                         timeout=10,
                     )
                     self.assertEqual(result.returncode, 0, result.stderr)
+                    # No crew incarnation owns this path, so every native prompt stays.
                     self.assertEqual(result.stdout, "")
-                    if kind == "PermissionRequest":
-                        event["approval"] = {"verdict": "defer", "code": "unparsed"}
-                    elif kind == "PreToolUse":
-                        event["approval"] = {
-                            "verdict": "defer",
-                            "code": "unparsed",
-                            "source": "PreToolUse",
-                        }
-                        event["hook_event_name"] = "PermissionDecision"
-                        event["status"] = "working: approval defer [unparsed]"
                     expected.append(event)
             else:
                 command = tomllib.loads(next(arg for arg in args if arg.startswith("notify=")))[

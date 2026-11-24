@@ -126,6 +126,50 @@ class ProtocolTests(SessionCase):
         with self.crew.events.open("a") as stream:
             stream.write(json.dumps(event) + "\n")
 
+    def notices(self, code):
+        assignment = protocol.active_assignment(self.crew)
+        return [n for n in assignment["notices"] if code in n["summary"]]
+
+    def test_a_codex_startup_screen_holds_the_ring_and_is_noticed_once(self):
+        message_id = protocol.deliver(self.crew, "go", queue_only=True)
+        with (
+            patch.object(Pane, "nudge_block", return_value=UNREADABLE_GATE),
+            patch.object(Pane, "startup_screen", return_value="Codex hook trust prompt"),
+            patch.object(Pane, "nudge") as nudge,
+        ):
+            for _ in range(3):
+                protocol.ring(self.crew, message_id)
+        nudge.assert_not_called()
+        self.assertEqual(protocol.last_ring(self.crew)["gate"], protocol.STARTUP_GATE)
+        self.assertEqual(len(self.notices("[codex-hooks-untrusted]")), 1)
+        self.assertEqual([m["id"] for m in protocol.unread(self.crew)], [message_id])
+        # Once the screen clears the held mail rings as usual.
+        with patch.object(Pane, "nudge") as nudge:
+            protocol.ring(self.crew, message_id)
+        nudge.assert_called_once()
+
+    def turns(self, count):
+        for _ in range(count):
+            self.event({"type": "agent-turn-complete", "input-messages": ["go"]})
+            while (response := protocol.poll(self.crew))["delivery_id"]:
+                protocol.poll(self.crew, response["delivery_id"])
+
+    def test_a_codex_turn_without_session_start_is_noticed_once(self):
+        self.turns(3)
+        self.assertEqual(len(self.notices("[codex-hooks-not-live]")), 1)
+
+    def test_live_codex_hooks_are_not_noticed_even_across_a_handoff(self):
+        self.event({"hook_event_name": "SessionStart"})
+        self.turns(1)
+        self.assertEqual(self.notices("[codex-hooks-not-live]"), [])
+        self.finish()
+        self.assignment = protocol.begin(
+            self.crew, self.project, "next", handoff=self.assignment["id"]
+        )
+        # The native session's SessionStart predates the new assignment's offset.
+        self.turns(1)
+        self.assertEqual(self.notices("[codex-hooks-not-live]"), [])
+
     def finish(self, report="src/a.py changed; checks pass; nothing left"):
         """Done with its notification acknowledged, which is what dismissal requires."""
         self.command("done", report=report)
@@ -433,22 +477,21 @@ class ProtocolTests(SessionCase):
         with self.assertRaisesRegex(CaptainError, "dismiss the crew or hand off"):
             protocol.wait(self.crew, 0)
 
-    def test_claude_is_never_pane_read_but_codex_and_pi_modals_keep_notifying(self):
-        with patch.object(Pane, "agent_status", side_effect=AssertionError("pane read")):
-            self.crew.record["provider"] = "claude"
-            with patch.object(Pane, "choice_modal", side_effect=AssertionError("pane read")):
-                self.assertEqual(protocol.poll(self.crew)["status"], "working")
-            for provider in ("codex", "pi"):
-                with self.subTest(provider=provider):
-                    self.crew.record["provider"] = provider
-                    # A modal cleared and raised again is news twice; codex signals nothing else.
-                    for _ in range(2):
-                        with patch.object(Pane, "choice_modal", return_value=True):
-                            blocked = protocol.poll(self.crew)
-                        self.assertEqual(blocked["status"], "awaiting_approval")
-                        protocol.poll(self.crew, blocked["delivery_id"])
-                        with patch.object(Pane, "choice_modal", return_value=False):
-                            self.assertIsNone(protocol.poll(self.crew)["delivery_id"])
+    def test_claude_modal_is_never_read_but_codex_and_pi_modals_keep_notifying(self):
+        self.crew.record["provider"] = "claude"
+        with patch.object(Pane, "choice_modal", side_effect=AssertionError("pane read")):
+            self.assertEqual(protocol.poll(self.crew)["status"], "working")
+        for provider in ("codex", "pi"):
+            with self.subTest(provider=provider):
+                self.crew.record["provider"] = provider
+                # A modal cleared and raised again is news twice; codex signals nothing else.
+                for _ in range(2):
+                    with patch.object(Pane, "choice_modal", return_value=True):
+                        blocked = protocol.poll(self.crew)
+                    self.assertEqual(blocked["status"], "awaiting_approval")
+                    protocol.poll(self.crew, blocked["delivery_id"])
+                    with patch.object(Pane, "choice_modal", return_value=False):
+                        self.assertIsNone(protocol.poll(self.crew)["delivery_id"])
 
     def test_a_wait_loop_reads_the_pane_once_a_half_minute_but_starts_at_once(self):
         self.crew.record["provider"] = "codex"
@@ -715,6 +758,22 @@ class ProtocolTests(SessionCase):
         self.assertNotEqual(new["id"], self.assignment["id"])
         self.assertEqual(self.saved()["original_task"], "original")
 
+    def test_handoff_carries_claimed_paths(self):
+        with protocol.checkpoint(self.directory) as state:
+            state["assignments"][self.assignment["id"]]["claimed"] = ["src/a.py"]
+        self.command("done", report="handoff: no files changed; checks passed")
+        response = protocol.poll(self.crew)
+        protocol.poll(self.crew, response["delivery_id"])
+        new = protocol.begin(self.crew, self.project, "next", handoff=self.assignment["id"])
+        self.assertEqual(new["claimed"], ["src/a.py"])
+        fresh = protocol.begin(
+            Crew("will", {"name": "Will", "agent": "will", "incarnation_id": "w"}, self.current),
+            self.project,
+            "other",
+            ["docs"],
+        )
+        self.assertEqual(fresh["claimed"], [])
+
     def test_symlink_escape_legacy_and_partial_events(self):
         (self.project / "escape").symlink_to(self.root, target_is_directory=True)
         # A symlink out of the project is recorded as where it resolves, never as itself.
@@ -786,7 +845,8 @@ class ProtocolTests(SessionCase):
             with patch.object(agents.runtime, "herdr") as send:
                 with self.assertRaisesRegex(CaptainError, pattern):
                     agents.dismiss_crew(args, self.pane, self.project)
-            send.assert_not_called()
+            for call in send.call_args_list:
+                self.assertEqual(call.args[:2], ("pane", "get"))
 
         message_id = protocol.deliver(self.crew, "original", initial=True)
         protocol.receipt(self.crew.session.directory, self.crew.crew_id, [message_id])

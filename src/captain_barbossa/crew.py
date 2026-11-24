@@ -142,6 +142,10 @@ class Crew:
                 break
         try:
             status = pane_status
+            # A native startup screen reads as blocked or idle; it is not a tool approval.
+            screen = self.pane.startup_screen() if status in ("blocked", "idle") else None
+            if screen:
+                return CrewState("blocked", "pane", f"startup attention, not approval: {screen}")
             if status in ("working", "blocked"):
                 return CrewState(status, "pane", "native agent status")
             if status is not None and modal_start(self.pane.lines()) is not None:

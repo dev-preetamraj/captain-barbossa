@@ -10,6 +10,7 @@ from captain_barbossa import pane as panes
 from captain_barbossa.pane import Pane
 from captain_barbossa.runtime import CaptainError
 from tests.home_isolation import HERDR, SessionCase
+from tests.test_submit import codex_context_screen, pi_update_screen
 
 CODEX_PICKER = """
 Select Model and Effort
@@ -464,6 +465,39 @@ class SwitchModelTests(SessionCase):
         return patch.object(
             models, "pi_models", return_value=(("openai-codex/gpt-5.5", ("gpt-5.5",)),)
         )
+
+    def test_current_codex_and_pi_screens_allow_switches_but_protect_drafts(self):
+        for provider, capture, target, screens in (
+            (
+                "codex",
+                codex_context_screen,
+                "mid",
+                ["", CODEX_PICKER, CODEX_EFFORT, "• Model changed to gpt-5.6-sol medium"],
+            ),
+            ("pi", pi_update_screen, "gpt-5.5", ["", "Model: openai-codex/gpt-5.5"]),
+        ):
+            with self.subTest(provider=provider), self.pi_catalog():
+                agent_name = self.crew(provider, "gpt-6-astra")
+                herdr = self.switch(self.reader(screens, composer=capture()), target)
+                self.assertTrue(
+                    any(call.args[:2] == ("agent", "prompt") for call in herdr.call_args_list)
+                )
+                for draft in ("Important user draft", "user\nmultiline draft"):
+                    herdr = self.switch(
+                        self.reader([], composer=capture(draft)),
+                        target,
+                        refuses="composer|draft",
+                    )
+                    self.assertFalse(
+                        any(
+                            call.args[:3]
+                            in (
+                                ("agent", "prompt", agent_name),
+                                ("agent", "send-keys", agent_name),
+                            )
+                            for call in herdr.call_args_list
+                        )
+                    )
 
     def test_pi_switch_sends_the_exact_id_and_needs_no_picker_or_enter(self):
         with self.pi_catalog():

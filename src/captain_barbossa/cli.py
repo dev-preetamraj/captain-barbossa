@@ -33,6 +33,7 @@ from .retention import PRUNE_DAYS
 from .retirement import artifact_command
 from .runtime import HERDR_ERRORS, CaptainError, current_pane
 from .sessions import find_session, project_sessions, read_session, rename_session, session_card
+from .store import project_root
 from .update_check import upgrade
 
 VERIFY_HELP = "Makefile target captain runs at done; its receipt rides the report"
@@ -207,6 +208,17 @@ def parser(*, plan=False):
         elif verb == "check":
             command.add_argument("action", choices=protocol.ACTIONS)
             command.add_argument("path", nargs="*")
+    grant = commands.add_parser(
+        "grant", help="let a crew assignment run one exact flagged command once"
+    )
+    grant.add_argument("name", help="crew name or ID (case-insensitive)")
+    grant.add_argument(
+        "--command",
+        dest="command_text",
+        required=True,
+        help="the exact command text, matched once",
+    )
+    grant.add_argument("--assignment", required=True, help="the crew's live assignment ID")
     model = commands.add_parser("model", help="switch a running crew to another model")
     model.add_argument("name", help="crew name or ID (case-insensitive)")
     model.add_argument("model", help=f"tier ({'|'.join(TIER_NAMES)}), model name, or alias")
@@ -340,11 +352,14 @@ def parser(*, plan=False):
     return root
 
 
+CREW_VERBS = ("ask", "done", "check", "inbox")
+
+
 def guard_crew(args):
     """Refuse captain-only commands and hide other scopes when running as crew."""
     if os.environ.get("CAPTAIN_ROLE") != "crew":
         return
-    if args.command in ("ask", "done", "check", "inbox"):
+    if args.command in CREW_VERBS:
         if args.name.casefold() != os.environ.get("CAPTAIN_CREW", "").casefold():
             raise CaptainError("Crew may act only on its own assignment.")
         return
@@ -563,8 +578,12 @@ def main(argv=None):
             return 0
         if args.command == "memory" and args.memory_command == "prune":
             config.in_range(args.older_than, "--older-than", below=float("inf"))
-        pane = None if paneless_target(args) else current_pane()
-        project = active_project()
+        # Crew protocol verbs resolve identity from CAPTAIN_* env, so any cwd works, and need
+        # no pane: a sandboxed crew cannot reach the Herdr socket at all.
+        as_crew = os.environ.get("CAPTAIN_ROLE") == "crew"
+        paneless = as_crew and args.command in (*CREW_VERBS, "memory")
+        pane = None if paneless or paneless_target(args) else current_pane()
+        project = project_root() if as_crew and args.command in CREW_VERBS else active_project()
         if pane is not None:
             pump_mail(args, pane, project)
         if args.command == "crew":
@@ -577,6 +596,9 @@ def main(argv=None):
             print_inbox(args, pane, project)
         elif args.command in ("assign", "ask", "answer", "done", "check"):
             protocol_command(args, pane, project)
+        elif args.command == "grant":
+            _, member = Crew.for_args(args, pane, project)
+            print(json.dumps(protocol.grant(member, args.assignment, args.command_text)))
         elif args.command == "model":
             switch_model(args, pane, project)
         elif args.command == "focus":

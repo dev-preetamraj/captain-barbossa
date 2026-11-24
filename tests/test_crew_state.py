@@ -59,7 +59,10 @@ class CrewStateTests(unittest.TestCase):
         self.assertEqual(self.crew.current_state(), CrewState("done", "mail", "complete"))
         self.pane_status.return_value = "working"
         self.assertEqual(self.crew.current_state().source, "pane")
+        # The gate resolves every PermissionRequest; only a native prompt notice blocks.
         self.append(hook_event_name="PermissionRequest")
+        self.assertEqual(self.crew.current_state().state, "working")
+        self.append(hook_event_name="Notification", notification_type="permission_prompt")
         self.assertEqual(self.crew.current_state().state, "blocked")
         self.assertEqual(self.crew.current_state().source, "hook")
         self.append(status="mystery: investigate")
