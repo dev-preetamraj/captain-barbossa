@@ -160,7 +160,7 @@ class CliCommandTests(SessionCase):
         with patch.dict(os.environ, crew_env):
             self.assertEqual(self.run_cli("check", "Jack", "edit", "src/a.py")[0], 0)
             with contextlib.redirect_stderr(io.StringIO()):
-                self.assertEqual(self.run_cli("check", "Jack", "edit", "docs/a.md")[0], 1)
+                self.assertEqual(self.run_cli("check", "Jack", "edit", "AGENTS.md")[0], 1)
         self.assertEqual(self.saved()["original_task"], "original")
 
     def test_handoff_named_owns_and_allow_replace_inherited_ones(self):
@@ -501,7 +501,7 @@ class CliCommandTests(SessionCase):
         for header in ("claude:", "codex:", "pi:", "grok:"):
             self.assertIn(header, text)
         self.assertIn("pi --list-models failed", text)
-        self.assertIn("gpt-6-astra (astra)", text)
+        self.assertIn("gpt-6.2-astra (astra)", text)
 
     def test_status_read_does_not_create_state_or_call_native_done_completion(self):
         before = {p: p.read_bytes() for p in self.directory.rglob("*") if p.is_file()}

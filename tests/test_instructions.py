@@ -58,6 +58,18 @@ class InstructionTests(SessionCase):
     def args(self, *args):
         return cli.parser().parse_args(["--session", self.meta["id"], *args])
 
+    def test_only_codex_crew_are_told_to_escalate_make_test_up_front(self):
+        def text(role, provider):
+            return instruction_prompts.agent_instructions(self.directory, role, provider)
+
+        codex = text("crew member Jack", "codex")
+        self.assertIn("retry it once with escalation", codex)
+        line = next(line for line in codex.splitlines() if "the sandbox blocks" in line)
+        self.assertNotIn("make test", line)
+        self.assertNotIn("uv", line.split())
+        for role, provider in (("crew member Jack", "claude"), ("captain", "codex")):
+            self.assertNotIn("with escalation", text(role, provider))
+
     def test_instructions_describe_deny_ask_and_one_shot_grants_not_keystrokes(self):
         instructions = " ".join(
             instruction_prompts.agent_instructions(self.directory, "captain").split()
@@ -327,7 +339,7 @@ class InstructionTests(SessionCase):
                 )
                 for phrase in (
                     "Use your launch checkout",
-                    "Edit only files in your assignment",
+                    "Edit only files the task needs",
                     "Re-read a file right before each edit",
                     "keep others' unexpected changes in place",
                     "Stage and commit only your own files/hunks",
@@ -489,7 +501,7 @@ class InstructionTests(SessionCase):
                 else:
                     prompt = argv[argv.index("--append-system-prompt") + 1]
                 self.assertIn(f"You are crew member {record['name']}", prompt)
-                self.assertIn("Edit only files in your assignment", prompt)
+                self.assertIn("Edit only files the task needs", prompt)
                 self.assertIn("Print the same report as your final message", prompt)
                 self.assertIn(
                     "Complete your assignment yourself; do not delegate or use subagents", prompt

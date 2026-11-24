@@ -60,6 +60,34 @@ class ProtocolTests(SessionCase):
         store.write_json(self.current.meta_path, self.current.meta)
         self.assertEqual(protocol.queued(self.directory, "jack"), [])
 
+    def test_check_edit_gives_the_hook_verdict_for_unowned_checkout_files(self):
+        assignment = {"state": "active", "actions": ["edit", "delete"], "paths": ["src"]}
+        protocol.check_action(assignment, self.project, "edit", ["docs/new.md"])
+        for path in ("AGENTS.md", str(self.project.parent / "elsewhere.txt")):
+            with self.assertRaisesRegex(CaptainError, "outside-grant"):
+                protocol.check_action(assignment, self.project, "edit", [path])
+        with self.assertRaisesRegex(CaptainError, "outside-grant"):
+            protocol.check_action(assignment, self.project, "delete", ["docs/new.md"])
+        with self.assertRaisesRegex(CaptainError, "flagged-crew"):
+            protocol.check_action(
+                assignment, self.project, "edit", ["docs/new.md"], lambda paths: True
+            )
+
+    def test_held_by_other_ignores_self_and_finished_assignments(self):
+        state = {
+            "assignments": {
+                "me": {"id": "me", "state": "active", "paths": ["docs"]},
+                "old": {"id": "old", "state": "done", "paths": ["docs"]},
+                "them": {"id": "them", "state": "active", "paths": ["src"]},
+            }
+        }
+        root = self.project.resolve()
+        held = lambda path: protocol.held_by_other(  # noqa: E731
+            self.project, state, self.directory, "me", root, [path]
+        )
+        self.assertFalse(held("docs/a.md"))
+        self.assertTrue(held("src/a.py"))
+
     def test_isolated_ownership_uses_registered_root_and_identity(self):
         from captain_barbossa import execution, worktrees
 
@@ -633,7 +661,7 @@ class ProtocolTests(SessionCase):
     def test_check_refusals_carry_codes(self):
         for action, path, code in (
             ("commit", ["src/a"], "action-not-granted"),
-            ("edit", ["docs/a"], "outside-grant"),
+            ("edit", ["AGENTS.md"], "outside-grant"),
         ):
             with self.subTest(code=code), self.assertRaisesRegex(CaptainError, rf"^\[{code}\]"):
                 self.command("check", action=action, path=path)
@@ -723,7 +751,7 @@ class ProtocolTests(SessionCase):
     def test_paths_actions_overlap_and_reported_handoff(self):
         self.command("check", action="edit", path=["src/file.py"])
         for action, path in (
-            ("edit", ["docs/a"]),
+            ("edit", ["AGENTS.md"]),
             ("commit", ["src/a"]),
             ("edit", ["../escape"]),
             ("edit", []),

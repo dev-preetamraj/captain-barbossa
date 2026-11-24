@@ -443,7 +443,7 @@ class FitTests(DashboardCase):
     def test_narrow_panes_alias_the_model_then_drop_the_bar_then_agent(self):
         usages = self.crowd(3)
         aliased = self.render(usages, size=(64, 6))
-        self.assertIn("codex/terra", aliased)
+        self.assertIn("codex/gpt-5~", aliased)
         self.assertIn("#....", aliased)
 
         no_bar = self.render(usages, size=(52, 6))

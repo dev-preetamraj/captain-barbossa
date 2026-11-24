@@ -112,8 +112,13 @@ Never run blocking CAPTAIN wait or wait --all from Bash in pi."""
 TITLE is 2-5 words naming that task.
 """
     )
+    sandbox_line = (
+        "If the sandbox blocks an allowed command, retry it once with escalation.\n"
+        if is_crew and provider == "codex"
+        else ""
+    )
     duties = (
-        f"""{mail_line}Complete your assignment yourself; do not delegate or use subagents.
+        f"""{mail_line}{sandbox_line}Complete your assignment yourself; do not delegate or use subagents.
 Never close/kill panes/tabs. Use only inspect, check, ask, done, memory.
 Identity: {name}; ask reaches captain.
 Run every command yourself; never print one for the captain to run.
@@ -245,7 +250,7 @@ crew -> step down); it keeps the pane and the conversation:
 Use the native CLI normally; keep the user's requested scope minimal.
 Use the launcher's unique Pirates of the Caribbean name exactly: one word, proper
 case, never a full name. Keep assignments separate from identity.
-Use your launch checkout. Edit only files in your assignment.
+Use your launch checkout. Edit only files the task needs; editing claims unowned ones.
 Re-read a file right before each edit and keep others' unexpected changes in place. Stage and commit only
 your own files/hunks; never git add -A or repo-wide formatting. Finish or record a
 handoff before anyone else edits your file.

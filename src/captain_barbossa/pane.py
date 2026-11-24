@@ -5,7 +5,7 @@ import time
 
 from . import runtime
 from .instructions import captain_command
-from .models import HOOK_DELIVERED
+from .models import HOOK_DELIVERED, normalized
 from .runtime import HERDR_ERRORS, CaptainError
 
 POLL_INTERVAL = 0.2
@@ -20,6 +20,10 @@ MODEL_TIMEOUT = 20
 MODEL_CONFIRMATIONS = ("set model to", "model changed to", "switched to")
 # pi instead echoes "Model: <id>" at line start; its status bar never carries "model:".
 PI_MODEL_CONFIRMATION = re.compile(r"^\s*Model:\s")
+CODEX_PICKER_HEADER = "Select Model and Effort"
+CODEX_PICKER_FOOTER = "enter select · esc back"
+# A single space can be part of the label; the description is in a separate column.
+CODEX_PICKER_ROW = re.compile(r"^[›»]?\s*([1-9])\.\s+(.+?)(?: \(current\))?(?:\s{2,}|$)")
 CODEX_EFFORT_HEADER = "Select Reasoning Level"
 # Claude Code says which of its two switches it made, and a retier may only ever be the
 # one that left the user's own settings alone.
@@ -711,18 +715,39 @@ class Pane:
     def codex_pick_model(self, model, timeout):
         """Drive Codex's /model picker, which takes no argument and lists models by number."""
 
+        wanted = normalized(model)
+        scroll_marker = None
+
         def option(lines):
-            for line in lines:
-                found = PANE_MODAL_OPTION.match(line)
-                if found and found.group(2) == model:
-                    return found.group(1)
+            nonlocal scroll_marker
+            scroll_marker = None
+            if not lines or not (
+                lines[-1] == CODEX_PICKER_FOOTER or PANE_MODAL_CONFIRM.match(lines[-1])
+            ):
+                return None
+            digit = marker = None
+            for line in reversed(lines[:-1]):
+                if line == CODEX_PICKER_HEADER:
+                    scroll_marker = marker
+                    return digit
+                if line in ("↓", "↑"):
+                    marker = line
+                row = CODEX_PICKER_ROW.match(line)
+                if row and normalized(row.group(2)) == wanted:
+                    digit = row.group(1)
             return None
 
         def effort(lines):
             return any(line.startswith(CODEX_EFFORT_HEADER) for line in lines) or None
 
-        digit = self.await_(option, timeout)
+        digit = self.await_(option, timeout, keep_status=True)
         if digit is None:
+            if scroll_marker:
+                raise CaptainError(
+                    f"Codex's /model picker has more rows off-screen ({scroll_marker}); "
+                    f"{model} is not in the visible rows. Scroll the picker in Codex to "
+                    f"check for it: herdr agent read {self.agent_name}"
+                )
             raise CaptainError(
                 f"Codex did not list {model} in its /model picker. Read the pane and close "
                 f"the picker with esc: herdr agent read {self.agent_name}"

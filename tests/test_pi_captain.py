@@ -1116,5 +1116,10 @@ class PiCaptainLaunchTests(SessionCase):
                     crew.splitlines(),
                     [line for line in default_crew.splitlines() if fetch not in line],
                 )
+            elif provider == "codex":
+                self.assertEqual(
+                    [line for line in crew.splitlines() if "the sandbox blocks" not in line],
+                    default_crew.splitlines(),
+                )
             else:
                 self.assertEqual(crew, default_crew)

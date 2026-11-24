@@ -12,7 +12,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from . import background_state, lifetime
-from .approval import REASONS, Request, Verdict, decide, recipe_flag
+from .approval import REASONS, Request, Verdict, decide, protected, recipe_flag
 from .crew import Crew, event_status
 from .eventlog import MAX_EVENT_BYTES, read_events
 from .execution import root
@@ -169,6 +169,18 @@ def project_assignments(project, state, directory):
         if other != directory and path.exists():
             assignments.extend(read_json(path)["assignments"].values())
     return assignments
+
+
+def held_by_other(project, state, directory, assignment_id, root, paths):
+    """Whether another unfinished assignment owns any of paths (the flagged-crew test)."""
+    return any(
+        overlaps(a, b)
+        for other in project_assignments(project, state, directory)
+        if other["id"] != assignment_id and other["state"] != "done"
+        for a in paths
+        for b in other["paths"]
+        if Path(a).is_absolute() or Path(other.get("execution_root", project)).resolve() == root
+    )
 
 
 def occupant(project, directory, paths):
@@ -336,7 +348,7 @@ def validate_actor(crew, args):
     return assignment_id, incarnation
 
 
-def check_action(assignment, project, action, paths):
+def check_action(assignment, project, action, paths, held=lambda paths: False):
     if assignment["state"] == "done":
         raise CaptainError("Assignment is already done.")
     if action not in assignment["actions"]:
@@ -345,8 +357,18 @@ def check_action(assignment, project, action, paths):
         if not paths:
             raise CaptainError("This action requires explicit owned paths.")
         for path in owned_paths(project, paths):
-            if not any(Path(path).is_relative_to(Path(owner)) for owner in assignment["paths"]):
-                raise CaptainError(f"[outside-grant] Path is not owned by this assignment: {path}")
+            if any(Path(path).is_relative_to(Path(owner)) for owner in assignment["paths"]):
+                continue
+            # The edit hook auto-claims unowned, unprotected checkout files.
+            if (
+                action == "edit"
+                and not Path(path).is_absolute()
+                and not protected(Path(path).parts)
+            ):
+                if held([path]):
+                    raise CaptainError(f"[flagged-crew] Path is owned by another crew: {path}")
+                continue
+            raise CaptainError(f"[outside-grant] Path is not owned by this assignment: {path}")
 
 
 def _git(project, *args):
@@ -447,7 +469,21 @@ def change(crew, args, project):
         if args.command == "check":
             if lifetime.revoked(crew.session, crew.record):
                 raise CaptainError("[action-not-granted] Crew lifetime was revoked.")
-            check_action(assignment, root(crew.session, crew.record), args.action, args.path)
+            execution_root = root(crew.session, crew.record)
+            check_action(
+                assignment,
+                execution_root,
+                args.action,
+                args.path,
+                lambda paths: held_by_other(
+                    project,
+                    state,
+                    crew.session.directory,
+                    assignment["id"],
+                    Path(execution_root).resolve(),
+                    paths,
+                ),
+            )
             return {"assignment_id": assignment["id"], "allowed": True}
         if assignment["state"] == "done":
             raise CaptainError("Assignment is already done.")

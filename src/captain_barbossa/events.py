@@ -379,9 +379,9 @@ def claim_decision(events_path, current, record, assignment_id, request):
     """Reserve unowned native-edit targets under the same locks as recruitment."""
     from .protocol import (
         checkpoint,
+        held_by_other,
         overlaps,
         owned_paths,
-        project_assignments,
         protected_paths,
     )
 
@@ -429,17 +429,8 @@ def claim_decision(events_path, current, record, assignment_id, request):
         allowed = judged(proposed)
         if allowed.verdict != Verdict.ALLOW_ONCE:
             return allowed if allowed.code in FLAGGED else decision
-        for other in project_assignments(project, state, directory):
-            if other["id"] == assignment_id or other["state"] == "done":
-                continue
-            if any(
-                overlaps(a, b)
-                for a in paths
-                for b in other["paths"]
-                if Path(a).is_absolute()
-                or Path(other.get("execution_root", project)).resolve() == root
-            ):
-                return Decision("flagged-crew")
+        if held_by_other(project, state, directory, assignment_id, root, paths):
+            return Decision("flagged-crew")
         state["assignments"][assignment_id]["paths"] = list(proposed.owned)
         claimed = state["assignments"][assignment_id].setdefault("claimed", [])
         claimed.extend(path for path in paths if path not in claimed)
