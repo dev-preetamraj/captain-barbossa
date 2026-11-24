@@ -1,5 +1,5 @@
 version = 1
-revision = 5
+revision = 3
 requires-python = ">=3.11"
 
 [[package]]
@@ -13,7 +13,7 @@ wheels = [
 
 [[package]]
 name = "captain-barbossa"
-version = "0.50.1"
+version = "0.51.0"
 source = { editable = "." }
 dependencies = [
     { name = "questionary" },
