@@ -12,6 +12,7 @@ from home_isolation import SessionCase
 
 from captain_barbossa import lifetime, native_history, pi_history, sessions, store, usage
 from captain_barbossa.crew import Crew
+from captain_barbossa.instructions import hook_command
 from captain_barbossa.runtime import CaptainError
 
 
@@ -500,6 +501,11 @@ class NativeHistoryCleanupTests(unittest.TestCase):
                 self.record()["native_root"],
                 native_history._path(self.crew).with_suffix(".pi.jsonl"),
                 self.incarnation,
+                hook=hook_command(
+                    native_history._path(self.crew).parent.parent
+                    / "events"
+                    / f"{self.crew.crew_id}-{self.incarnation}.jsonl"
+                ),
             ),
         )
 

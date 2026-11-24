@@ -248,9 +248,11 @@ Claude Code crew, and Codex crew on 0.164.0+ once the user trusts the launch
 hooks in Codex's review prompt, block their own turn via a `Stop` hook until
 mail is read and the assignment finishes or asks a question; untrusted or older
 Codex falls back to `notify`, and pi cannot block.
-Claude PermissionRequest hooks validate assignment grants: known scoped requests
-are allowed once, ungranted actions are denied, and uncertain or destructive
-requests remain at the native user prompt. No persistent permission is granted.
+Crew never stop at a native permission prompt: Claude crew run in auto mode and
+hooks deny only risky effects (losing others' work, history rewrites, push/publish,
+writes outside the checkout) with a reason. The crew then asks; with your OK the
+captain runs it or issues a one-shot `captain grant`. Grants are a guard-rail, not a
+security boundary; grok has no hooks, so only its auto mode applies.
 Notifications repeat until acknowledged with `--ack`; `--json` returns a stable
 envelope with status, delivery ID, crew, assignment ID, and summary.
 `--timeout SECONDS` overrides the 86400-second default. It follows native

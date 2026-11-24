@@ -5,7 +5,7 @@ import time
 
 from . import runtime
 from .instructions import captain_command
-from .models import HOOK_DELIVERED
+from .models import HOOK_DELIVERED, normalized
 from .runtime import HERDR_ERRORS, CaptainError
 
 POLL_INTERVAL = 0.2
@@ -20,6 +20,10 @@ MODEL_TIMEOUT = 20
 MODEL_CONFIRMATIONS = ("set model to", "model changed to", "switched to")
 # pi instead echoes "Model: <id>" at line start; its status bar never carries "model:".
 PI_MODEL_CONFIRMATION = re.compile(r"^\s*Model:\s")
+CODEX_PICKER_HEADER = "Select Model and Effort"
+CODEX_PICKER_FOOTER = "enter select · esc back"
+# A single space can be part of the label; the description is in a separate column.
+CODEX_PICKER_ROW = re.compile(r"^[›»]?\s*([1-9])\.\s+(.+?)(?: \(current\))?(?:\s{2,}|$)")
 CODEX_EFFORT_HEADER = "Select Reasoning Level"
 # Claude Code says which of its two switches it made, and a retier may only ever be the
 # one that left the user's own settings alone.
@@ -71,6 +75,21 @@ PANE_STATUS_BAR_PREFIXES = ("•", "⏺", "└", "│", "✻", "✳", "?", "…"
 PANE_MODAL_CONFIRM = re.compile(r"^Press enter to confirm or esc to \w+")
 PANE_MODAL_OPTION = re.compile(r"^[›»]?\s*([1-9])\.\s+(\S+)")
 PANE_MODAL_LINES = 20
+# Codex's footer: a status row (model, directory or context use), up to two wrapped
+# continuation rows, then a hint row with an optional "← for agents ·" prefix.
+CODEX_STATUS = re.compile(r"^gpt-\S+ .* · (?:[~/]|Context \d+% used(?: ·|$))", re.IGNORECASE)
+CODEX_STATUS_WRAP = 3
+# Codex startup screens (update, hook trust): a numbered selection under a short header.
+STARTUP_OPTION = re.compile(r"^[›»]?\s*(\d)\.\s+(.+?)\s*$")
+STARTUP_HEADER_ROWS = 4
+# A wrapped tail holds only the status row's own words, numbers and separators.
+CODEX_STATUS_TAIL = re.compile(
+    r"(?:(?:[\d.]+[KMkm%]?|in|out|used|left|weekly|context|·)(?:\s+|$))+"
+)
+CODEX_HINT = re.compile(
+    r"(?:← for agents · )?\? for shortcuts(?:\s+⚠ \d+ warnings? · f2 to view)?"
+    r"|esc again to edit previous message"
+)
 # A contextual suggestion is drawn dim (SGR 2); a typed draft carries no styling at all.
 # Group captures the whole parameter list so a multi-parameter code (a truecolor prefix,
 # "38;2;153;153;153") is consumed as one sequence instead of failing to match at all.
@@ -118,6 +137,53 @@ def modal_start(lines):
     window = range(max(len(lines) - PANE_MODAL_LINES, 0), len(lines) - 1)
     options = [index for index in window if PANE_MODAL_OPTION.match(lines[index])]
     return options[0] if options else None
+
+
+def codex_without_footer(lines):
+    """Codex's bottom block removed: status row, wrapped continuations, then the hint row.
+
+    Anything unrecognised is left in place, so the composer check fails closed on it.
+    """
+    end = len(lines)
+    hint = end > 0 and CODEX_HINT.fullmatch(lines[-1])
+    if hint:
+        end -= 1
+    # A narrow pane wraps the status row; its continuation rows can never be a composer.
+    for start in range(end - 1, max(end - 1 - CODEX_STATUS_WRAP, -1), -1):
+        if CODEX_STATUS.match(lines[start]):
+            return lines[:start]
+        if not CODEX_STATUS_TAIL.fullmatch(lines[start]):
+            break
+    return lines
+
+
+def startup_screen_name(lines):
+    """Which Codex startup screen is the bottom block of `lines`, or None.
+
+    The header, a contiguous numbered selection and the key hint must be the last rows, so
+    a transcript that merely discusses hooks or lists numbered steps never matches.
+    """
+    if not lines:
+        return None
+    hint = lines[-1].casefold()
+    trust = hint.startswith("enter confirm") and "esc" in hint
+    update = hint.startswith("press enter to continue")
+    if not (trust or update):
+        return None
+    end = len(lines) - 1
+    start = end
+    while start and STARTUP_OPTION.match(lines[start - 1]):
+        start -= 1
+    options = [STARTUP_OPTION.match(line) for line in lines[start:end]]
+    if len(options) < 2 or [int(o.group(1)) for o in options] != list(range(1, len(options) + 1)):
+        return None
+    first = options[0].group(2).casefold()
+    header = " ".join(lines[max(start - STARTUP_HEADER_ROWS, 0) : start]).casefold()
+    if trust and first.startswith("review hooks") and "hooks need review" in header:
+        return "Codex hook trust prompt"
+    if update and first.startswith("update now") and "update available" in header:
+        return "Codex update prompt"
+    return None
 
 
 def claude_picker_rows(lines):
@@ -196,12 +262,15 @@ class Pane:
     def __init__(self, agent_name):
         self.agent_name = agent_name
 
-    def lines(self, keep_status=False, keep_blank=False):
+    def lines(self, keep_status=False, keep_blank=False, source=None):
         """The non-blank tail of the crew's pane, as stripped lines, without the status bar.
 
         Composer checks retain chrome and blank rows to avoid mistaking a draft for a footer.
+        source="visible" reads the screen as drawn, which works while the agent is not idle.
         """
         try:
+            if source == "visible":
+                raise CaptainError("agent_not_idle")
             output = runtime.herdr(
                 "agent", "read", self.agent_name, "--lines", str(TAIL_LINES), raw=True, timeout=10
             )
@@ -228,6 +297,13 @@ class Pane:
         ):
             lines = lines[:-1]
         return lines
+
+    def startup_screen(self):
+        """Name of a Codex update or hook-trust screen awaiting a human, else None."""
+        try:
+            return startup_screen_name(self.lines(keep_status=True, source="visible"))
+        except HERDR_ERRORS:
+            return None
 
     def draft_pending(self, provider=None):
         """Whether the composer must not be typed into: any gate, including an unreadable one."""
@@ -311,9 +387,14 @@ class Pane:
                 return row.group(1), styled
             return None, styled
         if provider == "pi":
-            # Markdown rules are draft text; extra native rulers make the boundary ambiguous.
+            # Anchor to the footer; transcript rulers across a blank gap are not editor rows.
+            start = max(0, len(lines) - 5)
+            while start and lines[start - 1]:
+                start -= 1
             borders = [
-                index for index, line in enumerate(lines) if re.fullmatch(r"─{3,}|── .+─+", line)
+                index
+                for index in range(start, len(lines))
+                if re.fullmatch(r"─{3,}|── .+─+", lines[index])
             ]
             # The startup update notice has two rulers of its own, before the editor.
             if len(borders) == 4:
@@ -358,18 +439,8 @@ class Pane:
                 and sum(bool(re.fullmatch(r"─{3,}", line)) for line in lines) == 2
             ):
                 return "", styled
-        if (
-            provider == "codex"
-            and len(lines) >= 3
-            and re.fullmatch(r"\? for shortcuts(?:\s+⚠ \d+ warnings? · f2 to view)?", lines[-1])
-            and re.match(r"^gpt-\S+ .* · [~/]", lines[-2], re.IGNORECASE)
-        ):
-            lines.pop()
-        if lines and (
-            re.match(r"^gpt-\S+ .* · [~/]", lines[-1], re.IGNORECASE)
-            or (len(lines) > 1 and PANE_RULE.fullmatch(lines[-2]) and lines[-1].startswith("⏵⏵ "))
-        ):
-            lines.pop()
+        if provider == "codex":
+            lines = codex_without_footer(lines)
         # ponytail: recognize only an unobscured, single-line composer; fail closed otherwise.
         while lines and (PANE_RULE.fullmatch(lines[-1]) or lines[-1] == "? for shortcuts"):
             lines.pop()
@@ -644,18 +715,39 @@ class Pane:
     def codex_pick_model(self, model, timeout):
         """Drive Codex's /model picker, which takes no argument and lists models by number."""
 
+        wanted = normalized(model)
+        scroll_marker = None
+
         def option(lines):
-            for line in lines:
-                found = PANE_MODAL_OPTION.match(line)
-                if found and found.group(2) == model:
-                    return found.group(1)
+            nonlocal scroll_marker
+            scroll_marker = None
+            if not lines or not (
+                lines[-1] == CODEX_PICKER_FOOTER or PANE_MODAL_CONFIRM.match(lines[-1])
+            ):
+                return None
+            digit = marker = None
+            for line in reversed(lines[:-1]):
+                if line == CODEX_PICKER_HEADER:
+                    scroll_marker = marker
+                    return digit
+                if line in ("↓", "↑"):
+                    marker = line
+                row = CODEX_PICKER_ROW.match(line)
+                if row and normalized(row.group(2)) == wanted:
+                    digit = row.group(1)
             return None
 
         def effort(lines):
             return any(line.startswith(CODEX_EFFORT_HEADER) for line in lines) or None
 
-        digit = self.await_(option, timeout)
+        digit = self.await_(option, timeout, keep_status=True)
         if digit is None:
+            if scroll_marker:
+                raise CaptainError(
+                    f"Codex's /model picker has more rows off-screen ({scroll_marker}); "
+                    f"{model} is not in the visible rows. Scroll the picker in Codex to "
+                    f"check for it: herdr agent read {self.agent_name}"
+                )
             raise CaptainError(
                 f"Codex did not list {model} in its /model picker. Read the pane and close "
                 f"the picker with esc: herdr agent read {self.agent_name}"

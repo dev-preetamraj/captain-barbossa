@@ -58,24 +58,37 @@ class InstructionTests(SessionCase):
     def args(self, *args):
         return cli.parser().parse_args(["--session", self.meta["id"], *args])
 
-    def test_instructions_delegate_routine_crew_approvals_to_captain(self):
+    def test_only_codex_crew_are_told_to_escalate_make_test_up_front(self):
+        def text(role, provider):
+            return instruction_prompts.agent_instructions(self.directory, role, provider)
+
+        codex = text("crew member Jack", "codex")
+        self.assertIn("retry it once with escalation", codex)
+        line = next(line for line in codex.splitlines() if "the sandbox blocks" in line)
+        self.assertNotIn("make test", line)
+        self.assertNotIn("uv", line.split())
+        for role, provider in (("crew member Jack", "claude"), ("captain", "codex")):
+            self.assertNotIn("with escalation", text(role, provider))
+
+    def test_instructions_describe_deny_ask_and_one_shot_grants_not_keystrokes(self):
         instructions = " ".join(
             instruction_prompts.agent_instructions(self.directory, "captain").split()
         )
         for phrase in (
-            "Claude PreToolUse hooks enforce assignment grants",
-            "anything they cannot classify is left to the native permission mode",
-            "Read every pending prompt in the crew pane and judge that exact action",
-            "never override a deny",
-            "Handle native permission prompts yourself",
-            "herdr agent send-keys <name> y",
-            "Approve reads anywhere",
-            "Escalate to the user only destructive verbs, git history rewrites, "
-            "push/network/publish, and writes outside the owned paths",
+            "Crew never stop at a native permission prompt; never type into a crew pane",
+            "claim unowned files themselves",
+            "denied with a reason",
+            "The crew then runs ask",
+            "CAPTAIN grant 'NAME' --command 'TEXT' --assignment ID",
+            "not inherited by handoff",
+            "guard-rail, not a security boundary",
+            "grok has no hook",
             "Never grant global shell/Python approval",
             "Never type over the user's draft in the captain pane",
         ):
             self.assertIn(phrase, instructions)
+        for gone in ("send-keys", "Handle native permission prompts yourself", "Approve reads"):
+            self.assertNotIn(gone, instructions)
 
     def test_instructions_require_captain_to_delegate_user_tasks_to_new_crew(self):
         rule = (
@@ -195,9 +208,6 @@ class InstructionTests(SessionCase):
             "CAPTAIN wait 'NAME' [--timeout <seconds>]",
             "Run every wait in the background; never block on a foreground wait",
             "herdr agent read <name>",
-            "herdr agent send-keys <name> y",
-            "after reading the pane",
-            "Send only the requested key for that one command",
             "CAPTAIN dismiss 'NAME'",
             "dismiss it yourself without asking",
             "Ask the user only before discarding results or dismissing unreported crew",
@@ -329,7 +339,7 @@ class InstructionTests(SessionCase):
                 )
                 for phrase in (
                     "Use your launch checkout",
-                    "Edit only files in your assignment",
+                    "Edit only files the task needs",
                     "Re-read a file right before each edit",
                     "keep others' unexpected changes in place",
                     "Stage and commit only your own files/hunks",
@@ -344,7 +354,6 @@ class InstructionTests(SessionCase):
             "Name the files each crew owns",
             "Give simultaneous writers disjoint files",
             "wait for the current owner's report before reassigning a file",
-            "owned edits/formatting",
             "commit the user's leftover edits after crew have committed their own",
         ):
             self.assertIn(phrase, captain)
@@ -492,13 +501,13 @@ class InstructionTests(SessionCase):
                 else:
                     prompt = argv[argv.index("--append-system-prompt") + 1]
                 self.assertIn(f"You are crew member {record['name']}", prompt)
-                self.assertIn("Edit only files in your assignment", prompt)
+                self.assertIn("Edit only files the task needs", prompt)
                 self.assertIn("Print the same report as your final message", prompt)
                 self.assertIn(
                     "Complete your assignment yourself; do not delegate or use subagents", prompt
                 )
                 command_prefix = [
-                    sys.executable,
+                    instruction_prompts.python_command(),
                     "-m",
                     "captain_barbossa",
                     "--session",
@@ -604,7 +613,13 @@ class InstructionTests(SessionCase):
                         command = tomllib.loads(stops[0])["hooks"]["Stop"][0]["hooks"][0]
                         self.assertEqual(
                             shlex.split(command["command"]),
-                            [sys.executable, "-m", "captain_barbossa", "hook", "--environment"],
+                            [
+                                instruction_prompts.python_command(),
+                                "-m",
+                                "captain_barbossa",
+                                "hook",
+                                "--environment",
+                            ],
                         )
                         self.assertIn("features.hooks=true", args)
 
@@ -642,7 +657,13 @@ class InstructionTests(SessionCase):
         models.codex_stop_hooks.cache_clear()
 
     def test_native_hook_runs_the_module_entry_point_not_an_internal_path(self):
-        hook = [sys.executable, "-m", "captain_barbossa", "hook", "/tmp/events"]
+        hook = [
+            instruction_prompts.python_command(),
+            "-m",
+            "captain_barbossa",
+            "hook",
+            "/tmp/events",
+        ]
         codex_args = instruction_prompts.native_args("codex", "instructions", events="/tmp/events")
         notify = next(arg for arg in codex_args if arg.startswith("notify="))
         codex_hook = [*hook[:-1], "--environment"]

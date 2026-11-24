@@ -46,6 +46,29 @@ BLOCK = """  pi.on('tool_call', async (event) => {
 """
 
 
+# The same Claude-shaped PreToolUse the other providers' hook command answers. It fails
+# closed: a missing hook, timeout, non-zero exit or invalid output blocks the call.
+HOOK_BLOCK = """  pi.on('tool_call', async (event, ctx) => {
+    const stop = (why) => ({ block: true, reason: `Captain hook failed (${why}): the call is blocked; run captain ask.` });
+    const run = spawnSync(HOOK[0], HOOK.slice(1), { encoding: 'utf8', timeout: 30000, input: JSON.stringify({
+      hook_event_name: 'PreToolUse', tool_name: event.toolName, tool_input: event.input,
+      tool_use_id: event.toolCallId, session_id: ctx.sessionManager.getSessionId(), cwd: ctx.cwd
+    }) });
+    if (run.error) return stop(run.error.code || 'could not run');
+    if (run.status !== 0) return stop(run.signal ? `signal ${run.signal}` : `exit ${run.status}`);
+    // A clean run that prints nothing is the hook's own "no verdict"; anything else must parse.
+    if (!run.stdout.trim()) return;
+    let verdict = null;
+    try { verdict = JSON.parse(run.stdout).hookSpecificOutput; } catch {}
+    const decision = verdict?.permissionDecision;
+    if (decision === 'deny') {
+      return { block: true, reason: verdict.permissionDecisionReason || 'Denied by the captain: run captain ask.' };
+    }
+    if (decision !== 'allow') return stop('invalid output');
+  });
+"""
+
+
 def gate(denials):
     """The JavaScript matcher with these denials and approval's word breaks baked in."""
     fixed = GATE.replace("__BREAKS__", json.dumps(WORD_BREAKS))
@@ -55,10 +78,12 @@ def gate(denials):
     )
 
 
-def extension(directory, events, incarnation, denials=()):
+def extension(directory, events, incarnation, denials=(), hook=None):
     """Record identities, prevent resuming a session outside the exclusive directory, and,
-    when a plugin forbids crew any command, block every tool call that would run one."""
-    source = """import { closeSync, constants, openSync, realpathSync, writeSync } from 'node:fs';
+    when a plugin forbids crew any command, block every tool call that would run one.
+    hook: argv of the captain hook command, which then answers every tool call too."""
+    source = """import { spawnSync } from 'node:child_process';
+import { closeSync, constants, openSync, realpathSync, writeSync } from 'node:fs';
 import { dirname } from 'node:path';
 export default function(pi) {
   const { root, events, incarnation } = CONFIG;
@@ -84,7 +109,11 @@ export default function(pi) {
         "CONFIG",
         json.dumps({"root": str(directory), "events": str(events), "incarnation": incarnation}),
     )
-    if not denials:
+    if not denials and not hook:
         return source
     head, body = source.split("export default function(pi) {\n", 1)
-    return f"{head}{gate(list(denials))}export default function(pi) {{\n{BLOCK}{body}"
+    prefix = f"{head}const HOOK = {json.dumps(list(hook))};\n" if hook else head
+    if denials:
+        prefix += gate(list(denials))
+    blocks = (BLOCK if denials else "") + (HOOK_BLOCK if hook else "")
+    return f"{prefix}export default function(pi) {{\n{blocks}{body}"

@@ -10,7 +10,15 @@ from pathlib import Path
 from unittest.mock import patch
 
 from captain_barbossa import events, protocol, sessions, store
-from captain_barbossa.approval import REASONS, Decision, Request, Verdict, decide, recipe_flag
+from captain_barbossa.approval import (
+    FLAGGED,
+    REASONS,
+    Decision,
+    Request,
+    Verdict,
+    decide,
+    recipe_flag,
+)
 from captain_barbossa.crew import Crew, event_status
 from captain_barbossa.runtime import CaptainError
 from tests.home_isolation import SessionCase
@@ -61,7 +69,7 @@ class ApprovalTests(unittest.TestCase):
             )
             self.assertEqual(decide(request).code, "granted")
 
-    def test_recursive_copy_to_existing_destination_escalates(self):
+    def test_recursive_copy_to_existing_destination_is_refused(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()
             (root / "source" / "sub").mkdir(parents=True)
@@ -88,7 +96,7 @@ class ApprovalTests(unittest.TestCase):
                     request = Request(
                         "Bash", str(root), str(root), ("owned",), ("edit",), command=command
                     )
-                    self.assertEqual(decide(request).verdict, Verdict.ESCALATE)
+                    self.assertEqual(decide(request).code, "outside-grant")
             request = Request(
                 "Bash",
                 str(root),
@@ -174,7 +182,8 @@ class ApprovalTests(unittest.TestCase):
                 return Request("Bash", str(root), str(root), ("owned",), ("edit",), command=command)
 
             bare = "cd owned && echo marker > victim"
-            self.assertEqual(decide(request(bare)).code, "unsupported-syntax")
+            # The redirect's directory is unknowable, so its write is refused, not deferred.
+            self.assertEqual(decide(request(bare)).code, "outside-grant")
             run(bare)
             self.assertTrue((root / "decoy" / "owned" / "victim").exists())
             self.assertFalse((root / "owned" / "victim").exists())
@@ -201,8 +210,12 @@ class ApprovalTests(unittest.TestCase):
     def test_every_code_has_one_closed_verdict(self):
         self.assertEqual({verdict for verdict, _ in REASONS.values()}, set(Verdict))
         self.assertEqual(Decision("granted").verdict, Verdict.ALLOW_ONCE)
-        self.assertEqual(Decision("destructive").verdict, Verdict.ESCALATE)
         self.assertEqual(Decision("action-not-granted").verdict, Verdict.DENY)
+        # A flag is a reasoned deny that routes the crew to the captain, never a prompt.
+        for code in FLAGGED:
+            self.assertEqual(Decision(code).verdict, Verdict.DENY)
+            self.assertIn("Flagged:", Decision(code).reason)
+            self.assertIn("run captain ask", Decision(code).reason)
 
     def test_shell_inside_grants_is_allowed_once(self):
         self.check(
@@ -260,7 +273,7 @@ class ApprovalTests(unittest.TestCase):
             "git -C /repo reflog expire --all",
         ):
             with self.subTest(command=command):
-                self.assertEqual(bash(command).code, "destructive")
+                self.assertIn(bash(command).code, FLAGGED)
         self.assertEqual(bash("ls 2>/tmp/output", actions=()).code, "action-not-granted")
 
     def test_reads_anywhere_and_routine_edits_pass_without_a_prompt(self):
@@ -291,24 +304,27 @@ class ApprovalTests(unittest.TestCase):
         )
         self.assertEqual(bash("ls", cwd="/tmp").code, "granted")
 
-    def test_unclassified_commands_still_escalate_writes_deletes_and_recipes(self):
+    def test_unclassified_commands_still_flag_writes_deletes_and_recipes(self):
         self.check(
             [
-                ("sed -i s/a/b/ /etc/hosts", "outside-grant"),
-                ("cp -f a /etc/hosts", "outside-grant"),
-                ("jq . a > /etc/hosts", "outside-grant"),
+                ("sed -i s/a/b/ /etc/hosts", "flagged-boundary"),
+                ("cp -f a /etc/hosts", "flagged-boundary"),
+                ("jq . a > /etc/hosts", "flagged-boundary"),
                 ("python3 -c 'import os; os.remove(\"x\")'", "inline-write"),
                 ("python3 -c 'import shutil; shutil.rmtree(\"x\")'", "inline-write"),
                 ('python3 -c \'open("x", "w").write("y")\'', "inline-write"),
                 ('node -e \'require("fs").unlinkSync("x")\'', "inline-write"),
-                ("python3 -c 'import urllib.request as u; u.urlopen(\"http://x\")'", "outward"),
+                (
+                    "python3 -c 'import urllib.request as u; u.urlopen(\"http://x\")'",
+                    "flagged-outward",
+                ),
                 ("python3 -c 'print(open(\"x\").read())'", "shell"),
                 ("jq . a > docs/notes/out.json", "unknown-command"),
             ],
             bash,
         )
 
-    def test_make_targets_escalate_when_their_recipe_pushes_tags_or_deletes(self):
+    def test_make_targets_are_flagged_when_their_recipe_pushes_tags_or_deletes(self):
         with tempfile.TemporaryDirectory() as root:
             Path(root, "Makefile").write_text(
                 ".DEFAULT_GOAL := help\nhelp: ## usage\n\t@echo help\n"
@@ -322,22 +338,22 @@ class ApprovalTests(unittest.TestCase):
 
             self.check(
                 [
-                    ("make release", "destructive"),
-                    ("make ship", "destructive"),
-                    ("make -C . clean", "destructive"),
+                    ("make release", "flagged-outward"),
+                    ("make ship", "flagged-outward"),
+                    ("make -C . clean", "flagged-loss"),
                     ("make lint", "unknown-command"),
                     ("make", "unknown-command"),
                 ],
                 make,
             )
             # `done --verify` runs make outside the gate and reuses this same recipe check.
-            self.assertEqual(recipe_flag(root, ["ship"]), "destructive")
+            self.assertEqual(recipe_flag(root, ["ship"]), "flagged-outward")
             self.assertIsNone(recipe_flag(root, ["lint"]))
 
     def test_make_inline_recipes_and_unresolved_variables_escalate(self):
         with tempfile.TemporaryDirectory() as root:
             for text, code in (
-                ("test: ; rm -rf build\n", "destructive"),
+                ("test: ; rm -rf build\n", "flagged-loss"),
                 ("DELETE = rm -rf build\ntest:\n\t$(DELETE)\n", "unparsed"),
                 ("test: $(OTHER)\n\t@echo safe\n", "unparsed"),
             ):
@@ -368,40 +384,38 @@ class ApprovalTests(unittest.TestCase):
                     self.assertEqual(decision.code, "unparsed")
                     preferred.unlink()
 
-    def test_outward_actions_escalate(self):
+    def test_outward_actions_are_flagged(self):
         self.check(
             [
-                ("curl https://example.com", "outward"),
-                ("gh pr create --fill", "outward"),
-                ("gh api repos/x/y", "outward"),
-                ("npm publish", "outward"),
-                ("uv publish", "outward"),
-                ("sh -c 'curl https://example.com'", "outward"),
-                ("for f in a; do curl -d @$f x; done", "outward"),
+                ("curl https://example.com", "flagged-outward"),
+                ("gh pr create --fill", "flagged-outward"),
+                ("gh api repos/x/y", "flagged-outward"),
+                ("npm publish", "flagged-outward"),
+                ("uv publish", "flagged-outward"),
+                ("sh -c 'curl https://example.com'", "flagged-outward"),
+                ("for f in a; do curl -d @$f x; done", "flagged-outward"),
             ],
             bash,
         )
 
-    def test_destructive_verbs_escalate_whatever_the_grants(self):
+    def test_risky_verbs_are_flagged_by_effect_whatever_the_grants(self):
         grants = (*ALL_ACTIONS, "delete", "version")
         self.check(
             [
-                ("rm src/mine.py", "destructive"),
-                ("rm -rf docs/notes", "destructive"),
-                ("git push", "destructive"),
-                ("git reset --hard", "destructive"),
-                ("git checkout -- src/mine.py", "destructive"),
-                ("git commit --amend -m x -- src/mine.py", "destructive"),
-                ("git branch -D old", "destructive"),
-                ("find docs -delete", "destructive"),
-                ("cat src/mine.py; rm src/mine.py", "destructive"),
-                ("ls\nrm -rf /", "destructive"),
-                ("sh -c 'rm -rf beta.txt'", "destructive"),
-                ("find . -exec rm {} +", "destructive"),
-                ("ls | xargs rm", "destructive"),
-                ("echo $(git reset --hard)", "destructive"),
-                ("sudo ls", "destructive"),
-                ("git pull", "destructive"),
+                ("git push", "flagged-outward"),
+                ("git reset --hard", "flagged-loss"),
+                ("git checkout -- src/other.py", "outside-grant"),
+                ("git checkout main", "flagged-loss"),
+                ("git commit --amend -m x -- src/mine.py", "flagged-history"),
+                ("git branch -D old", "flagged-history"),
+                ("find docs -delete", "flagged-loss"),
+                ("ls\nrm -rf /", "flagged-loss"),
+                ("sh -c 'rm -rf beta.txt'", "flagged-loss"),
+                ("find . -exec rm {} +", "flagged-loss"),
+                ("ls | xargs rm", "flagged-loss"),
+                ("echo $(git reset --hard)", "flagged-loss"),
+                ("sudo ls", "flagged-boundary"),
+                ("git pull", "flagged-loss"),
             ],
             lambda command: bash(command, grants),
         )
@@ -432,7 +446,7 @@ class ApprovalTests(unittest.TestCase):
         )
         self.check(
             [
-                ("herdr pane close x; rm -rf y --help", "destructive"),
+                ("herdr pane close x; rm -rf y --help", "flagged-loss"),
                 ("herdr api schema x | python3 -c 'import os; os.remove(\"f\")'", "inline-write"),
                 ("echo 'import os; os.remove(1)' | python3", "inline-write"),
                 ('python3 -c "import captain_barbossa.cli as c; c.main()"', "captain-inline"),
@@ -444,8 +458,8 @@ class ApprovalTests(unittest.TestCase):
                     f"{heredoc.replace('python3 -', 'python3 -m captain_barbossa do push')}",
                     "captain-inline",
                 ),
-                ("git branch --show-current -D old", "destructive"),
-                ("git push --force; git branch --show-current", "destructive"),
+                ("git branch --show-current -D old", "flagged-history"),
+                ("git push --force; git branch --show-current", "flagged-history"),
                 (f'uv run --locked python -c "{probe}"', "captain-inline"),
                 (
                     'python3 -c "import captain_barbossa.protocol as p; p.bounce(1)"',
@@ -453,8 +467,8 @@ class ApprovalTests(unittest.TestCase):
                 ),
                 ('python3 -c "from captain_barbossa.agents import crew"', "captain-inline"),
                 ("./evil.sh --help", "unknown-command"),
-                ("mytool --help; rm -rf x", "destructive"),
-                ("mytool rm --help | python3 -c 'import os; os.remove(1)'", "destructive"),
+                ("mytool --help; rm -rf x", "flagged-loss"),
+                ("mytool rm --help | python3 -c 'import os; os.remove(1)'", "flagged-loss"),
                 ("python3 evil.py --help", "shell"),
                 ("uv run evil --help", "unknown-command"),
                 ("herdr api schema x > out.json", "outside-grant"),
@@ -489,17 +503,16 @@ class ApprovalTests(unittest.TestCase):
                 ("sed -n '/[/]/p;w x' src/mine.py", "unknown-command"),
                 ("sed 1r/etc/passwd src/mine.py", "unknown-command"),
                 ("git log --output=src/mine.py", "unknown-command"),
-                ("git commit -a -m x", "unknown-command"),
             ],
             bash,
         )
         self.assertEqual(bash("make gate").verdict, Verdict.DEFER)
 
-    def test_paths_outside_the_grants_escalate(self):
+    def test_paths_outside_the_grants_are_refused(self):
         self.check(
             [
                 ("echo x > src/other.py", "outside-grant"),
-                ("echo x > ~/x", "outside-grant"),
+                ("echo x > ~/x", "flagged-boundary"),
                 ("echo x > docs/notes/{a,../../b}", "outside-grant"),
                 ("echo x > docs/notes/.*", "outside-grant"),
                 ("cd .. && echo x > repo/src/mine.py.bak", "outside-grant"),
@@ -527,8 +540,8 @@ class ApprovalTests(unittest.TestCase):
             ],
             lambda command: bash(command, actions=()),
         )
-        # Deny outranks escalate when one command of many is not granted.
-        self.assertEqual(bash("rm x; make test", actions=()).code, "action-not-granted")
+        # A flag outranks a plain deny when one command of many is not granted.
+        self.assertEqual(bash("curl x; make test", actions=()).code, "flagged-outward")
 
     def test_native_tools_are_judged_by_their_paths(self):
         def tool(name, paths, actions=ALL_ACTIONS):
@@ -544,8 +557,8 @@ class ApprovalTests(unittest.TestCase):
         self.assertEqual(tool("Edit", ("/repo/src/other.py",)), "outside-grant")
         self.assertEqual(tool("Edit", ("/repo/src/mine.py",), ()), "action-not-granted")
         self.assertEqual(tool("Edit", ()), "unparsed")
-        self.assertEqual(tool("WebFetch", ()), "unknown-tool")
-        self.assertEqual(Decision(tool("mcp__x__write", ())).verdict, Verdict.ESCALATE)
+        self.assertEqual(tool("WebFetch", ()), "granted")
+        self.assertEqual(Decision(tool("mcp__x__write", ())).verdict, Verdict.DEFER)
 
     def test_an_owned_path_outside_the_project_is_writable_but_never_its_git(self):
         owned = (*OWNED, "/elsewhere/site")
@@ -560,16 +573,18 @@ class ApprovalTests(unittest.TestCase):
 
         self.assertEqual(tool(("/elsewhere/site/index.md",)), "granted")
         self.assertEqual(shell("echo x > /elsewhere/site/index.md"), "granted")
-        self.assertEqual(tool(("/elsewhere/other.md",)), "outside-grant")
-        self.assertEqual(tool(("/elsewhere/site/.git/config",)), "outside-grant")
-        self.assertEqual(tool(("/elsewhere/site/.GIT/config",)), "outside-grant")
-        self.assertEqual(tool(("/elsewhere/site/.captain/config",)), "outside-grant")
-        self.assertEqual(tool(("/elsewhere/site/.CAPTAIN/config",)), "outside-grant")
-        self.assertEqual(shell("echo x > /elsewhere/site/.git/HEAD"), "outside-grant")
-        self.assertEqual(shell("echo x > /elsewhere/site/.Git/HEAD"), "outside-grant")
-        self.assertEqual(shell("echo x > /elsewhere/site/.captain/settings.toml"), "outside-grant")
+        for path in (
+            "/elsewhere/other.md",
+            "/elsewhere/site/.git/config",
+            "/elsewhere/site/.GIT/config",
+            "/elsewhere/site/.captain/config",
+            "/elsewhere/site/.CAPTAIN/config",
+        ):
+            self.assertEqual(tool((path,)), "flagged-boundary")
+        for path in (".git/HEAD", ".Git/HEAD", ".captain/settings.toml"):
+            self.assertEqual(shell(f"echo x > /elsewhere/site/{path}"), "flagged-boundary")
         # The gates that never depended on ownership stay where they were.
-        self.assertEqual(shell("rm /elsewhere/site/index.md"), "destructive")
+        self.assertEqual(shell("git push"), "flagged-outward")
 
     def test_project_captain_settings_are_refused_like_assignment_ownership(self):
         for owned, path in (
@@ -579,7 +594,7 @@ class ApprovalTests(unittest.TestCase):
         ):
             request = Request("Edit", PROJECT, PROJECT, owned, ALL_ACTIONS, paths=(path,))
             with self.subTest(path=path):
-                self.assertEqual(decide(request).code, "outside-grant")
+                self.assertEqual(decide(request).code, "flagged-boundary")
                 with self.assertRaisesRegex(CaptainError, "protected-path"):
                     protocol.owned_path(Path(PROJECT), path)
 
@@ -592,7 +607,8 @@ class ApprovalTests(unittest.TestCase):
                 (f"{captain} ask Tia 'which file?' 2>&1", "granted"),
                 (f"{captain} inbox Tia", "granted"),
                 (f"{captain} memory show --scope repo", "granted"),
-                (f"{captain} memory add Tia report 'summary'", "captain-verb"),
+                (f"{captain} memory add Tia report 'summary'", "granted"),
+                (f"{captain} memory add a b c --sco=project", "captain-verb"),
                 (f"{captain} memory add a decided b --because c --scope repo", "captain-verb"),
                 (f"{captain} do commit --message fix", "captain-do"),
                 (f"{captain} do run test", "captain-do"),
@@ -621,7 +637,7 @@ class ApprovalTests(unittest.TestCase):
                 (f"{show}; git -C {PROJECT} status --short; git -C {PROJECT} log -3", "granted"),
                 (f"{show}; git -C /tmp status", "captain-inline"),
                 (f"git -C {PROJECT} status --short", "granted"),
-                (f"{show}; git -C {PROJECT} push", "destructive"),
+                (f"{show}; git -C {PROJECT} push", "flagged-outward"),
                 (f"{show}; git -C {PROJECT} commit -m x", "outside-grant"),
                 (f"{show}; {captain} crew --task x", "captain-verb"),
                 (f"{show}; git -C {PROJECT} status --output=x", "unknown-command"),
@@ -672,8 +688,8 @@ class ApprovalTests(unittest.TestCase):
                 (report("x\nEOF\nrm -rf y\n", quote="'"), "captain-inline"),
                 (report("ok", f'{captain} crew --task "$REPORT"'), "captain-verb"),
                 (report("ok", f'{captain} do commit --message "$REPORT"'), "captain-do"),
-                (report("rm -rf y", 'sh -c "$REPORT"', "'"), "destructive"),
-                (report("ok", 'rm -rf "$REPORT"'), "destructive"),
+                (report("rm -rf y", 'sh -c "$REPORT"', "'"), "flagged-loss"),
+                (report("ok", 'rm -rf "$REPORT"'), "flagged-loss"),
                 (report("ok", f"{captain} done Jack --report $REPORT"), "captain-inline"),
             ],
             bash,
@@ -686,7 +702,7 @@ class ApprovalTests(unittest.TestCase):
                 ("command -v captain", "granted"),
                 ("whereis git", "granted"),
                 ("cat ~/.zshrc /etc/hosts", "granted"),
-                ("echo 'rm -rf x' | sh", "destructive"),
+                ("echo 'rm -rf x' | sh", "flagged-loss"),
             ],
             lambda command: bash(command, actions=()),
         )
@@ -696,7 +712,7 @@ class ApprovalTests(unittest.TestCase):
             return decide(Request("Bash", PROJECT, PROJECT, OWNED, ALL_ACTIONS, argv=words)).code
 
         self.assertEqual(argv("bash", "-lc", "git status && make test"), "granted")
-        self.assertEqual(argv("zsh", "-c", "rm -rf src"), "destructive")
+        self.assertEqual(argv("zsh", "-c", "rm -rf src"), "flagged-loss")
         self.assertEqual(argv("fish", "-c", "ls"), "shell")
         self.assertEqual(argv("git", "status"), "granted")
         # An exec argv has no shell, so operators are plain arguments.
@@ -709,7 +725,7 @@ class ApprovalTests(unittest.TestCase):
         request = Request("Bash", PROJECT, PROJECT, argv=("/repo/bash", "-c", "cat file"))
         self.assertEqual(decide(request).verdict, Verdict.DEFER)
         request = Request("Bash", PROJECT, PROJECT, argv=("/repo/bash", "-c", "rm file"))
-        self.assertEqual(decide(request).code, "destructive")
+        self.assertEqual(decide(request).code, "flagged-loss")
 
 
 class ApprovalHookTests(SessionCase):
@@ -778,6 +794,115 @@ class ApprovalHookTests(SessionCase):
         self.assertIsNone(event_status(event))
         self.assertEqual(self.crew.current_state().state, "working")
 
+    def test_granted_and_non_edit_calls_do_not_lock_or_rewrite_protocol(self):
+        path = self.current.directory / "protocol.json"
+        before = path.stat()
+        contents = path.read_bytes()
+        for tool, inputs, code in (
+            ("Read", {"file_path": "other.py"}, "granted"),
+            ("Grep", {"pattern": "needle"}, "granted"),
+            ("Edit", {"file_path": "src/a.py"}, "granted"),
+            ("Bash", {"command": "echo x > other.py"}, "outside-grant"),
+        ):
+            with (
+                self.subTest(tool=tool),
+                patch.object(events, "lock") as lock,
+                patch.object(protocol, "checkpoint") as checkpoint,
+            ):
+                decision = events.permission_decision(
+                    self.crew.events,
+                    {"cwd": str(self.project), "tool_name": tool, "tool_input": inputs},
+                )
+                self.assertEqual(decision.code, code)
+                lock.assert_not_called()
+                checkpoint.assert_not_called()
+        self.assertEqual(path.read_bytes(), contents)
+        self.assertEqual(path.stat().st_mtime_ns, before.st_mtime_ns)
+        self.assertEqual(path.stat().st_ino, before.st_ino)
+
+    def other_writer(self, paths):
+        crew = Crew("will", {"name": "Will", "incarnation_id": "second"}, self.current)
+        self.current.meta["crew"]["will"] = crew.record
+        store.write_json(self.current.meta_path, self.current.meta)
+        protocol.begin(crew, self.project, "edit other files", paths, ["edit"])
+        return crew
+
+    def test_native_edit_claims_unowned_paths_and_blocks_later_recruits(self):
+        for tool, path in (("Edit", "other.py"), ("Write", "new.py")):
+            with self.subTest(tool=tool):
+                output, event = self.pretool({"file_path": path}, tool)
+                self.assertEqual(output["hookSpecificOutput"]["permissionDecision"], "allow")
+                self.assertEqual(event["approval"]["code"], "granted")
+                assignment = protocol.active_assignment(self.crew)
+                self.assertIn(path, assignment["paths"])
+                self.assertIn("src", assignment["paths"])
+        with self.assertRaisesRegex(CaptainError, "owned-path-conflict"):
+            self.other_writer(["other.py"])
+
+    def test_native_edit_does_not_claim_another_active_writers_path(self):
+        self.other_writer(["other"])
+        output, event = self.pretool({"file_path": "other/file.py"}, "Edit")
+        self.assertEqual(output["hookSpecificOutput"]["permissionDecision"], "deny")
+        self.assertEqual(event["approval"]["code"], "flagged-crew")
+        self.assertEqual(protocol.active_assignment(self.crew)["paths"], ["src"])
+
+    def test_native_edit_can_claim_a_finished_assignments_path(self):
+        self.other_writer(["other"])
+        with protocol.checkpoint(self.current.directory) as state:
+            state["assignments"][state["active"]["will"]]["state"] = "done"
+        _, event = self.pretool({"file_path": "other/file.py"}, "Edit")
+        self.assertEqual(event["approval"]["code"], "granted")
+        self.assertIn("other/file.py", protocol.active_assignment(self.crew)["paths"])
+
+    def test_native_edit_never_claims_protected_or_outside_paths(self):
+        for path in (".git/config", ".captain/settings.toml", str(self.root / "outside.py")):
+            with self.subTest(path=path):
+                _, event = self.pretool({"file_path": path}, "Write")
+                self.assertEqual(event["approval"]["code"], "flagged-boundary")
+        self.assertEqual(protocol.active_assignment(self.crew)["paths"], ["src"])
+
+    def test_native_edit_never_claims_agent_config_in_the_checkout(self):
+        for path in (".claude/settings.json", ".codex/config.toml", "lib/.pi/x", ".mcp.json"):
+            with self.subTest(path=path):
+                _, event = self.pretool({"file_path": path}, "Write")
+                self.assertEqual(event["approval"]["code"], "flagged-boundary")
+        self.assertEqual(protocol.active_assignment(self.crew)["paths"], ["src"])
+
+    def test_native_edit_without_edit_grant_does_not_claim(self):
+        with protocol.checkpoint(self.current.directory) as state:
+            state["assignments"][self.assignment["id"]]["actions"] = ["read"]
+        _, event = self.pretool({"file_path": "other.py"}, "Edit")
+        self.assertEqual(event["approval"]["code"], "action-not-granted")
+        self.assertEqual(protocol.active_assignment(self.crew)["paths"], ["src"])
+
+    def test_two_native_writers_racing_claim_only_one_path(self):
+        from concurrent.futures import ThreadPoolExecutor
+        from threading import Barrier
+
+        other = self.other_writer(["other"])
+        barrier = Barrier(2)
+
+        def claim(crew):
+            barrier.wait(timeout=10)
+            return events.permission_decision(
+                crew.events,
+                {
+                    "cwd": str(self.project),
+                    "tool_name": "Edit",
+                    "tool_input": {"file_path": "contended.py"},
+                },
+            ).code
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(claim, (self.crew, other)))
+        self.assertCountEqual(results, ["granted", "flagged-crew"])
+        owners = [
+            crew
+            for crew in (self.crew, other)
+            if "contended.py" in protocol.active_assignment(crew)["paths"]
+        ]
+        self.assertEqual(len(owners), 1)
+
     def test_revoked_lifetime_refuses_native_tool_grants(self):
         from captain_barbossa import lifetime
 
@@ -795,36 +920,41 @@ class ApprovalHookTests(SessionCase):
         self.assertIn("action-not-granted", decision["message"])
         self.assertIsNone(event_status(event))
 
-    def test_escalation_reaches_the_native_user_prompt_and_wait(self):
-        for command in ("rm src/a.py", "curl https://example.com", "echo x > /etc/hosts"):
+    def test_a_flag_is_a_resolved_deny_that_routes_the_crew_to_ask(self):
+        (self.project / "other.py").write_text("someone's work")
+        for command in ("rm other.py", "curl https://example.com", "echo x > /etc/hosts"):
             with self.subTest(command=command):
                 output, event = self.hook(inputs={"command": command})
-                self.assertNotIn("hookSpecificOutput", output)
-                self.assertIn("User approval required", output["systemMessage"])
-                self.assertEqual(event["approval"]["verdict"], "escalate")
-                self.assertEqual(event_status(event), "blocked")
+                decision = output["hookSpecificOutput"]["decision"]
+                self.assertEqual(decision["behavior"], "deny")
+                self.assertIn("Flagged:", decision["message"])
+                self.assertIn("run captain ask", decision["message"])
+                self.assertEqual(event["approval"]["verdict"], "deny")
+                self.assertEqual(event["hook_event_name"], "PermissionDecision")
+                self.assertIsNone(event_status(event))
 
     def test_malformed_missing_and_stale_requests_never_allow(self):
         for extra in ({"tool_input": []}, {"cwd": None}, {"tool_input": {"command": []}}):
             with self.subTest(extra=extra):
                 output, event = self.hook(**extra)
-                self.assertNotIn("hookSpecificOutput", output)
+                # PermissionRequest is total: an unreadable request is denied, never prompted.
+                self.assertEqual(output["hookSpecificOutput"]["decision"]["behavior"], "deny")
                 self.assertEqual(event["approval"]["code"], "unparsed")
         store.write_json(self.current.directory / "protocol.json", {})
         output, _ = self.hook()
-        self.assertNotIn("hookSpecificOutput", output)
+        self.assertEqual(output["hookSpecificOutput"]["decision"]["behavior"], "deny")
         old = self.crew.events.with_name("jack-old.jsonl")
         with contextlib.redirect_stdout(io.StringIO()) as output:
             events.append_event([str(old), '{"hook_event_name": "PermissionRequest"}'])
         self.assertEqual(output.getvalue(), "")
         self.assertFalse(old.exists())
 
-    def test_symlink_tool_path_outside_the_project_escalates(self):
+    def test_symlink_tool_path_outside_the_project_is_flagged(self):
         (self.project / "src").mkdir()
         (self.project / "src" / "outside").symlink_to(self.project.parent, target_is_directory=True)
         output, event = self.hook("Edit", {"file_path": "src/outside/file.py"})
-        self.assertNotIn("hookSpecificOutput", output)
-        self.assertEqual(event["approval"]["code"], "outside-grant")
+        self.assertEqual(output["hookSpecificOutput"]["decision"]["behavior"], "deny")
+        self.assertEqual(event["approval"]["code"], "flagged-boundary")
 
     def test_shell_symlinks_cannot_escape_read_or_write_grants(self):
         (self.project / "src").mkdir()
@@ -833,7 +963,7 @@ class ApprovalHookTests(SessionCase):
         (self.project / "secret").symlink_to(self.root / "secret")
         output, event = self.pretool({"command": "echo x > src/link/file"})
         self.assertEqual(event["approval"]["code"], "outside-grant")
-        self.assertEqual(output["hookSpecificOutput"]["permissionDecision"], "ask")
+        self.assertEqual(output["hookSpecificOutput"]["permissionDecision"], "deny")
         # Reads pass wherever a link points; only writes are bound to the owned paths.
         _, event = self.pretool({"command": "cat ./secret"})
         self.assertEqual(event["approval"]["code"], "granted")
@@ -859,14 +989,15 @@ class ApprovalHookTests(SessionCase):
         self.assertIn(
             "action-not-granted", output["hookSpecificOutput"]["permissionDecisionReason"]
         )
+        (self.project / "beta.txt").write_text("beta")
         for command in ("rm -rf beta.txt", "curl https://example.com"):
             with self.subTest(command=command):
                 output, event = self.pretool({"command": command})
-                self.assertEqual(output["hookSpecificOutput"]["permissionDecision"], "ask")
-                self.assertEqual(event["hook_event_name"], "PreToolUse")
-                self.assertEqual(self.crew.current_state().state, "blocked")
+                self.assertEqual(output["hookSpecificOutput"]["permissionDecision"], "deny")
+                self.assertEqual(event["hook_event_name"], "PermissionDecision")
+                self.assertEqual(self.crew.current_state().state, "working")
 
-    def test_pretooluse_denies_unverifiable_shell_with_guidance_and_asks_only_for_risk(self):
+    def test_pretooluse_denies_unverifiable_shell_with_guidance_and_flags_risk(self):
         heredoc = (
             "python3 - <<'EOF'\nfrom pathlib import Path\nPath('src/a.py').write_text('x')\nEOF"
         )
@@ -880,31 +1011,27 @@ class ApprovalHookTests(SessionCase):
                 native = output["hookSpecificOutput"]
                 self.assertEqual(native["permissionDecision"], "deny")
                 self.assertIn(guidance, native["permissionDecisionReason"])
+        (self.project / "beta.txt").write_text("beta")
         for command in ("rm -rf beta.txt", "git push", "git reset --hard", "echo x > /elsewhere/f"):
             with self.subTest(command=command):
                 output, _ = self.pretool({"command": command})
-                self.assertEqual(output["hookSpecificOutput"]["permissionDecision"], "ask")
+                native = output["hookSpecificOutput"]
+                self.assertEqual(native["permissionDecision"], "deny")
+                self.assertIn("Flagged:", native["permissionDecisionReason"])
         for command in ("git status", "echo x > src/a.py"):
             with self.subTest(command=command):
                 output, _ = self.pretool({"command": command})
                 self.assertEqual(output["hookSpecificOutput"]["permissionDecision"], "allow")
 
-    def test_pretool_ask_reports_command_and_reason_before_permissionrequest(self):
-        command = "rm " + "x" * 1700
-        self.pretool({"command": command})
-        response = protocol.wait(self.crew, 0)
-        self.assertEqual(response["status"], "awaiting_approval")
-        self.assertIn(command, response["summary"])
-        self.assertIn(REASONS["destructive"][1], response["summary"])
-        self.assertIn("[destructive]", response["summary"])
-        protocol.poll(self.crew, response["delivery_id"])
+    def test_a_flagged_call_never_wakes_the_captain_as_an_approval(self):
+        command = "curl https://example.com/" + "x" * 1700
+        output, _ = self.pretool({"command": command})
+        self.assertIn(REASONS["flagged-outward"][1], str(output))
         self.hook(inputs={"command": command})
-        self.assertEqual(protocol.poll(self.crew)["status"], "working")
-        self.pretool({"command": "rm another-file"})
-        second = protocol.wait(self.crew, 0)
-        self.assertEqual(second["status"], "awaiting_approval")
-        self.assertIn("rm another-file", second["summary"])
-        self.assertNotEqual(second["delivery_id"], response["delivery_id"])
+        # The crew got the reason and runs captain ask; that question is what wakes wait.
+        response = protocol.wait(self.crew, 0)
+        self.assertNotEqual(response["status"], "awaiting_approval")
+        self.assertIsNone(response["delivery_id"])
 
     def test_unclassified_commands_leave_the_decision_to_the_native_mode(self):
         inputs = {"command": "make gate"}
@@ -912,41 +1039,39 @@ class ApprovalHookTests(SessionCase):
         self.assertEqual(output, {})
         self.assertEqual(event["hook_event_name"], "PermissionDecision")
         self.assertEqual(event["approval"]["verdict"], "defer")
-        # If the native mode prompts anyway, the prompt is pending for wait, with no verdict.
+        # If the native mode would prompt anyway, the crew is told to ask the captain instead.
         output, event = self.hook(inputs=inputs)
-        self.assertEqual(output, {})
-        self.assertEqual(event["hook_event_name"], "PermissionRequest")
-        self.assertEqual(event_status(event), "blocked")
+        decision = output["hookSpecificOutput"]["decision"]
+        self.assertEqual(decision["behavior"], "deny")
+        self.assertIn("run captain ask", decision["message"])
+        self.assertEqual(event["hook_event_name"], "PermissionDecision")
+        self.assertIsNone(event_status(event))
 
     def test_pretooluse_leaves_tools_without_policy_to_the_native_flow(self):
         with contextlib.redirect_stdout(io.StringIO()) as output:
             events.append_event([str(self.crew.events), json.dumps({
                 "hook_event_name": "PreToolUse", "cwd": str(self.project),
-                "tool_name": "WebFetch", "tool_input": {"url": "https://example.com"},
+                "tool_name": "mcp__x__fetch", "tool_input": {"url": "https://example.com"},
             })])  # fmt: skip
         self.assertEqual(output.getvalue(), "")
         recorded = [json.loads(line) for line in self.crew.events.read_text().splitlines()]
         self.assertEqual([event["hook_event_name"] for event in recorded], ["PreToolUse"])
         self.assertNotIn("approval", recorded[0])
 
-    def test_a_pretooluse_ask_is_revalidated_without_duplicate_notice(self):
-        inputs = {"command": "rm -rf beta.txt"}
+    def test_a_permission_request_after_a_flag_is_decided_afresh_and_denied(self):
+        inputs = {"command": "git push"}
         self.pretool(inputs)
         with patch.object(events, "decide", wraps=decide) as fresh:
             output, _ = self.hook(inputs=inputs)
         fresh.assert_called_once()
-        self.assertEqual(output, {})
+        self.assertEqual(output["hookSpecificOutput"]["decision"]["behavior"], "deny")
         logged = [json.loads(line) for line in self.crew.events.read_text().splitlines()]
         self.assertEqual(
-            [e["hook_event_name"] for e in logged], ["PreToolUse", "PermissionRequest"]
+            [e["hook_event_name"] for e in logged], ["PermissionDecision", "PermissionDecision"]
         )
-        self.assertEqual(logged[-1]["approval"]["pretool"], "toolu_1")
+        self.assertNotIn("pretool", logged[-1]["approval"])
         self.assertNotIn("source", logged[-1]["approval"])
-        self.assertEqual(event_status(logged[-1]), "blocked")
-        # A second prompt for the same command is a new call, decided afresh.
-        output, event = self.hook(inputs=inputs)
-        self.assertIn("User approval required", output["systemMessage"])
-        self.assertNotIn("pretool", event["approval"])
+        self.assertIsNone(event_status(logged[-1]))
 
     def test_a_reprompted_allow_is_revalidated_logged_and_consumed(self):
         inputs = {"file_path": "src/a.py"}
@@ -955,10 +1080,9 @@ class ApprovalHookTests(SessionCase):
             output, event = self.hook("Edit", inputs)
         fresh.assert_called_once()
         self.assertEqual(output["hookSpecificOutput"]["decision"], {"behavior": "allow"})
-        self.assertEqual(event["approval"]["pretool"], "toolu_1")
-        self.assertEqual(len(self.crew.events.read_text().splitlines()), 2)
-        _, event = self.hook("Edit", inputs)
+        # Only a spent captain grant is carried over; anything else is decided afresh.
         self.assertNotIn("pretool", event["approval"])
+        self.assertEqual(len(self.crew.events.read_text().splitlines()), 2)
 
     def test_cached_allow_cannot_survive_revocation_or_grant_changes(self):
         inputs = {"file_path": "src/a.py"}
@@ -974,6 +1098,8 @@ class ApprovalHookTests(SessionCase):
                 elif change in ("actions", "paths"):
                     assignment[change] = []
                 store.write_json(state_path, state)
+                if change == "paths":
+                    self.other_writer(["src"])
                 with patch.object(events.lifetime, "revoked", return_value=change == "revoked"):
                     output, event = self.hook("Edit", inputs)
                 self.assertNotEqual(event["approval"]["verdict"], "allow-once")

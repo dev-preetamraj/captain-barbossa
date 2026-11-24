@@ -17,16 +17,18 @@ MODELS = {
         ("claude-opus-5-5", ("opus",)),
         ("claude-fable-5-1", ("fable",)),
     ),
-    # Three codex generations now share the luna/sol names; the bare alias goes to
-    # the current generation's model only, so it never collides with an older one.
+    # Keep explicit IDs for older builds; bare aliases follow the newest picker entries.
     "codex": (
         ("gpt-5.6-luna", ()),
-        ("gpt-5.6-terra", ("terra",)),
+        ("gpt-5.6-terra", ()),
         ("gpt-5.6-sol", ()),
         ("gpt-6-luna", ("luna",)),
         ("gpt-6-sol", ()),
-        ("gpt-6.1-sol", ("sol",)),
-        ("gpt-6-astra", ("astra",)),
+        ("gpt-6.1-terra", ("terra",)),
+        ("gpt-6.1-sol", ()),
+        ("gpt-6-astra", ()),
+        ("gpt-6.2-sol", ("sol",)),
+        ("gpt-6.2-astra", ("astra",)),
     ),
     # Aliases are the labels Grok shows and echoes when it confirms a switch ("Grok 4.6").
     "grok": (

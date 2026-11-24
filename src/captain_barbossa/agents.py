@@ -380,10 +380,23 @@ def dismiss_blocker(crew, assignment, project, confirmed=False, *, allow_unrepor
         )
 
 
+def dismiss_gone(crew):
+    if retirement.gone(crew):
+        return True
+    if crew.is_background or not crew.record.get("pane"):
+        return False
+    try:
+        runtime.herdr("pane", "get", crew.record["pane"], timeout=5)
+    except HERDR_ERRORS as exc:
+        return bool(re.search(r"\bpane_not_found\b", str(exc)))
+    return False
+
+
 def dismiss_crew(args, pane, project):
     current = session(project, pane, args.session, allow_dead_workspace=True)
     dead_workspace = current.meta["workspace"] != pane["workspace_id"]
     bounced, undelivered = [], False
+    unreported = None
     with crew_meta(current.directory) as meta:
         current = current._replace(meta=meta)
         crew = Crew.resolve(current, args.name)
@@ -391,6 +404,7 @@ def dismiss_crew(args, pane, project):
             raise CaptainError(f"{crew.display_name} was already dismissed.")
         retrying = crew.record.get("status") == "cleanup_pending"
         forced = getattr(args, "force", False)
+        gone = False
         # Read while the crew still holds its slot; applied once Herdr has closed the pane.
         placement = Placement(pane, current, dashboard_pane(current))
         try:
@@ -405,12 +419,14 @@ def dismiss_crew(args, pane, project):
                 # Same question the blocker asks: an assignment nothing reached must not keep
                 # its paths reserved by lingering in "working" after the crew is gone.
                 undelivered = never_read(crew, assignment)
+                if assignment["state"] != "done" and not undelivered and not dead_workspace:
+                    gone = dismiss_gone(crew)
                 dismiss_blocker(
                     crew,
                     assignment,
                     project,
-                    getattr(args, "confirm_unlanded", False) or forced,
-                    allow_unreported=dead_workspace or retrying or forced,
+                    getattr(args, "confirm_unlanded", False) or forced or gone,
+                    allow_unreported=dead_workspace or retrying or forced or gone,
                 )
                 untracked = [path for path in assignment["paths"] if Path(path).is_absolute()]
                 if untracked:
@@ -451,7 +467,7 @@ def dismiss_crew(args, pane, project):
         except HERDR_ERRORS as exc:  # geometry is cosmetic; never lose the dismissal over it
             print(f"captain: tab not re-evened: {exc}", file=sys.stderr)
         if undelivered or (
-            (dead_workspace or retrying or forced)
+            (dead_workspace or retrying or forced or gone)
             and crew.record.get("incarnation_id")
             and not unreserved(crew)
         ):
@@ -460,9 +476,10 @@ def dismiss_crew(args, pane, project):
             with protocol.checkpoint(current.directory) as state:
                 assignment = protocol.active(state, crew)
                 if assignment["state"] != "done":
-                    assignment["state"] = "done"
-                    assignment["report"] = (
-                        "Dismissed after Herdr workspace disappeared."
+                    unreported = (
+                        "Dismissed without a report: crew pane or process is gone."
+                        if gone
+                        else "Dismissed after Herdr workspace disappeared."
                         if dead_workspace
                         else "Dismissed after shutdown retry."
                         if retrying
@@ -470,6 +487,7 @@ def dismiss_crew(args, pane, project):
                         if forced
                         else "Dismissed before any message was read."
                     )
+                    protocol.close_unreported(assignment, "lost", unreported)
         if crew.record.get("worktree_id") and not crew.record.get("lifetime_id"):
             assignment = protocol.active_assignment(crew)
             results.collect(
@@ -494,6 +512,8 @@ def dismiss_crew(args, pane, project):
     add_memory(current.graph, f"session:{meta['id']}", "dismissed", crew.record["agent"])
     for message in bounced:
         print(f"Bounced unread mail to {crew.display_name}: {message['id']}.")
+    if unreported:
+        print(f"{crew.display_name}: {unreported} Owned paths released.")
     print(f"Dismissed {crew.display_name}.")
 
 
@@ -1016,6 +1036,18 @@ def create_crew(args, pane, project):
         except HERDR_ERRORS as exc:
             record["status"] = "needs_attention"
             write_json(current.meta_path, meta)
+            try:
+                screen = crew.pane.startup_screen()
+            except Exception:  # a diagnostic read must never mask the startup failure
+                screen = None
+            if screen:
+                # The native CLI is running, held at its own screen: relaunching would duplicate it.
+                raise CaptainError(
+                    f"Crew pane {new_pane} is at a startup screen: {screen}. Startup needs "
+                    f"attention, not approval: the user must answer it in pane {new_pane}. "
+                    f"Do not rerun the launcher or type into the pane. The task for assignment "
+                    f"{assignment['id']} is queued and was not delivered."
+                ) from exc
             raise CaptainError(
                 f"Crew pane {new_pane} was created but startup needs attention: {exc}. "
                 f"Inspect pane {new_pane} in Herdr. The pane was preserved, and launcher "

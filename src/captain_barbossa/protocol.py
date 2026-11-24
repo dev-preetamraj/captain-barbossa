@@ -12,7 +12,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from . import background_state, lifetime
-from .approval import REASONS, Request, Verdict, decide, recipe_flag
+from .approval import REASONS, Request, Verdict, decide, protected, recipe_flag
 from .crew import Crew, event_status
 from .eventlog import MAX_EVENT_BYTES, read_events
 from .execution import root
@@ -42,6 +42,22 @@ REGISTRATION_GRACE = 300
 DRAIN_LANDED_INTERVAL = 600
 # A draft gate can hold mail all session, so one hold this long is escalated to the captain.
 HELD_NOTICE_INTERVAL = 300
+# Codex sends SessionStart only as its first turn begins, so a startup screen (update, hook
+# trust) holds the ring instead; untrusted hooks fall back to native on-request prompts.
+STARTUP_GATE = "startup screen"
+HOOKS_UNTRUSTED = (
+    "[codex-hooks-untrusted] Codex hooks untrusted: user must trust them in the pane. "
+    "Mail stays queued behind the startup screen; do not type into the pane."
+)
+UPDATE_PROMPT = (
+    "[codex-update-prompt] Codex is held at its update prompt: the user must answer it in the "
+    "pane. Mail stays queued behind the startup screen; do not type into the pane."
+)
+HOOKS_NOT_LIVE = (
+    "[codex-hooks-not-live] Codex hooks not live: a turn ran with no SessionStart, so the "
+    "permission gate and Stop hook are off and the crew falls back to native prompts. "
+    "The user must review and trust the hooks in the pane."
+)
 # A hook-delivered body lands in the crew's context without starting a turn, and the receipt
 # the hook stamps then empties drain's queue, so nothing else ever reports this crew.
 STALLED_SUMMARY = (
@@ -153,6 +169,18 @@ def project_assignments(project, state, directory):
         if other != directory and path.exists():
             assignments.extend(read_json(path)["assignments"].values())
     return assignments
+
+
+def held_by_other(project, state, directory, assignment_id, root, paths):
+    """Whether another unfinished assignment owns any of paths (the flagged-crew test)."""
+    return any(
+        overlaps(a, b)
+        for other in project_assignments(project, state, directory)
+        if other["id"] != assignment_id and other["state"] != "done"
+        for a in paths
+        for b in other["paths"]
+        if Path(a).is_absolute() or Path(other.get("execution_root", project)).resolve() == root
+    )
 
 
 def occupant(project, directory, paths):
@@ -276,6 +304,8 @@ def begin(
         assignment = {
             "id": assignment_id or uuid4().hex,
             "execution_root": str(execution_root),
+            # A claimed path stays claimed, so it never becomes delete-eligible on the successor.
+            "claimed": list(state["assignments"][handoff].get("claimed", ())) if handoff else [],
             "worktree_id": crew.record.get("worktree_id"),
             "incarnation_id": crew.record["incarnation_id"],
             "crew": crew.display_name,
@@ -318,7 +348,7 @@ def validate_actor(crew, args):
     return assignment_id, incarnation
 
 
-def check_action(assignment, project, action, paths):
+def check_action(assignment, project, action, paths, held=lambda paths: False):
     if assignment["state"] == "done":
         raise CaptainError("Assignment is already done.")
     if action not in assignment["actions"]:
@@ -327,8 +357,18 @@ def check_action(assignment, project, action, paths):
         if not paths:
             raise CaptainError("This action requires explicit owned paths.")
         for path in owned_paths(project, paths):
-            if not any(Path(path).is_relative_to(Path(owner)) for owner in assignment["paths"]):
-                raise CaptainError(f"[outside-grant] Path is not owned by this assignment: {path}")
+            if any(Path(path).is_relative_to(Path(owner)) for owner in assignment["paths"]):
+                continue
+            # The edit hook auto-claims unowned, unprotected checkout files.
+            if (
+                action == "edit"
+                and not Path(path).is_absolute()
+                and not protected(Path(path).parts)
+            ):
+                if held([path]):
+                    raise CaptainError(f"[flagged-crew] Path is owned by another crew: {path}")
+                continue
+            raise CaptainError(f"[outside-grant] Path is not owned by this assignment: {path}")
 
 
 def _git(project, *args):
@@ -392,6 +432,24 @@ def unlanded(project, assignment, *, ignore_uncommitted=False):
     return reasons
 
 
+def grant(crew, assignment_id, command):
+    """Captain-only: let this assignment run one exact command text once. The gate spends it
+    on the first exact match; a handoff starts a new assignment, so it is never inherited."""
+    if os.environ.get("CAPTAIN_ROLE") == "crew":
+        raise CaptainError("grant is captain-only; crew run captain ask instead.")
+    if not isinstance(command, str) or not command.strip():
+        raise CaptainError("[empty-grant] Grant one exact, non-empty command.")
+    check_text(command, "command")
+    with checkpoint(crew.session.directory) as state:
+        assignment = active(state, crew, assignment_id)
+        if assignment["state"] == "done":
+            raise CaptainError("Assignment is done; grant on its live successor instead.")
+        grants = assignment.setdefault("grants", [])
+        if not any(entry["command"] == command for entry in grants):
+            grants.append({"command": command, "at": time.time()})
+        return {"assignment_id": assignment["id"], "grants": len(grants)}
+
+
 def change(crew, args, project):
     assignment_id, incarnation = validate_actor(crew, args)
     if args.command == "done":
@@ -411,7 +469,21 @@ def change(crew, args, project):
         if args.command == "check":
             if lifetime.revoked(crew.session, crew.record):
                 raise CaptainError("[action-not-granted] Crew lifetime was revoked.")
-            check_action(assignment, root(crew.session, crew.record), args.action, args.path)
+            execution_root = root(crew.session, crew.record)
+            check_action(
+                assignment,
+                execution_root,
+                args.action,
+                args.path,
+                lambda paths: held_by_other(
+                    project,
+                    state,
+                    crew.session.directory,
+                    assignment["id"],
+                    Path(execution_root).resolve(),
+                    paths,
+                ),
+            )
             return {"assignment_id": assignment["id"], "allowed": True}
         if assignment["state"] == "done":
             raise CaptainError("Assignment is already done.")
@@ -750,6 +822,14 @@ def ring(crew, message_id):
     try:
         pane = crew.pane
         gate = pane.nudge_block(crew)
+        # Codex's update and hook-trust screens hide the composer; name that hold so it is
+        # reported once, and drain retries it like any other.
+        if gate is not None and provider == "codex" and (screen := pane.startup_screen()):
+            gate = STARTUP_GATE
+            if "update" in screen.casefold():
+                once(crew, "startup_update", UPDATE_PROMPT)
+            else:
+                once(crew, "hooks_untrusted", HOOKS_UNTRUSTED)
         if gate == DRAFT_GATE and echoing(prior):
             # Our own echo, not a human. Leave the prior stamp alone and let drain retry,
             # rather than starting a hold clock against a crew that has its doorbell.
@@ -797,6 +877,41 @@ def ring(crew, message_id):
     write_json(drain_stamp(crew), record)
     if unreachable is not None:
         bounce(crew, message_id, unreachable)
+
+
+def hooks_live(crew, assignment, events):
+    """Codex fires SessionStart as its first turn begins; a turn that ends without one since
+    the assignment began means its hooks never ran. Noticed once per assignment.
+
+    A handoff keeps the native session, whose SessionStart predates the new offset, so the
+    incarnation's whole log is consulted once before noticing."""
+    for event in events:
+        kind = event.get("hook_event_name", event.get("type"))
+        if kind == "SessionStart":
+            assignment["session_started"] = True
+        elif (
+            kind == "agent-turn-complete"
+            and event_status(event) == "done"  # not Codex's own title turn
+            and not assignment.get("session_started")
+        ):
+            if assignment.get("hooks_not_live"):
+                return
+            earlier, _ = read_events(crew.events, 0, max_bytes=MAX_EVENT_BYTES)
+            if any(e.get("hook_event_name") == "SessionStart" for e in earlier):
+                assignment["session_started"] = True
+                continue
+            assignment["hooks_not_live"] = True
+            notice(assignment, "error", HOOKS_NOT_LIVE)
+            return
+
+
+def once(crew, key, summary):
+    """Post one error notice per assignment for a startup condition, never a second."""
+    with checkpoint(crew.session.directory) as state:
+        assignment = state["assignments"].get(state["active"].get(crew.crew_id))
+        if assignment and not assignment.get(key):
+            assignment[key] = True
+            notice(assignment, "error", summary)
 
 
 def held_notice(crew, message_id, gate, held):
@@ -1006,11 +1121,54 @@ def result(crew, assignment, status, summary="", delivery_id=None):
     }
 
 
+def prompt_summary(crew):
+    """Never empty: the scrollback can be blank on a full-screen modal, so fall back to the
+    visible screen, then to a pointer at the pane."""
+    try:
+        lines = crew.pane.lines()
+    except HERDR_ERRORS as exc:
+        # Only a transient read falls back; a gone pane or agent must still surface.
+        if re.search(r"\b(pane_not_found|agent_not_found)\b|is not registered", str(exc)):
+            raise
+        lines = []
+    if not any(line.strip() for line in lines):
+        try:
+            lines = crew.pane.lines(source="visible")
+        except HERDR_ERRORS:
+            lines = []
+    body = "\n".join(lines).strip() or (
+        f"(pane text unreadable; inspect pane {crew.record.get('pane') or crew.record['agent']})"
+    )
+    return "Native permission prompt (no policy verdict):\n" + body
+
+
+def startup_attention(crew):
+    """A native startup screen (Codex update or hook trust) as a notice, or None. It is
+    startup attention for the user, never a tool approval and never a doorbell target."""
+    screen = crew.pane.startup_screen()
+    if not screen:
+        return None
+    pane = crew.record.get("pane") or crew.record["agent"]
+    return (
+        f"[startup-attention] {crew.display_name} is held at the {screen}: startup needs "
+        f"attention, not approval. The user must answer it in pane {pane}; do not type into "
+        "the pane or rerun the launcher. Queued mail stays queued until it clears."
+    )
+
+
+def herdr_status(crew):
+    """Herdr's own agent status, None when unreadable; hooks stay the fast path."""
+    try:
+        return crew.pane.agent_status()
+    except HERDR_ERRORS:
+        return None
+
+
 def modal_summary(crew, assignment):
     """Guard both modal reads; an unreadable pane is otherwise conservatively a modal."""
     try:
         if crew.pane.choice_modal():
-            return "Native permission prompt (no policy verdict):\n" + "\n".join(crew.pane.lines())
+            return prompt_summary(crew)
     except HERDR_ERRORS as exc:
         messages = unread(crew)
         if not messages or not awaiting_registration(
@@ -1058,7 +1216,7 @@ def poll(crew, ack=None, modal=True):
         if paneless:
             reconcile_background(crew, assignment)
         seq, offset = assignment["ack_seq"], assignment.get("scan_offset", assignment["offset"])
-        native_status, cleared = assignment["native_status"], False
+        native_status, cleared, blocked_id = assignment["native_status"], False, ""
         if seq < len(assignment["notices"]):
             entry = assignment["notices"][seq]
             seq += 1
@@ -1077,6 +1235,15 @@ def poll(crew, ack=None, modal=True):
                 # Liveness is a started turn, never a delivered body; this is committed
                 # outside the ack dance because it only ever goes one way.
                 assignment["turn_started"] = True
+            if crew.record.get("provider") == "codex":
+                hooks_live(crew, assignment, events)
+            held = assignment.get("blocked_notice")
+            if held is not None and any(
+                e.get("hook_event_name") in ("PostToolUse", "PermissionDecision")
+                and (not held or e.get("tool_use_id") == held)
+                for e in events
+            ):
+                assignment.pop("blocked_notice")
             notified = [
                 (i, NOTIFIED[s], e)
                 for i, e in enumerate(events)
@@ -1096,6 +1263,15 @@ def poll(crew, ack=None, modal=True):
                 _, status, event = notified[-1]
                 summary = str(event.get("message") or event.get("last-assistant-message") or "")
                 if status == "awaiting_approval":
+                    # A parallel tool event can follow a still-open escalation; Herdr knows.
+                    if (
+                        cleared
+                        and native_status != status
+                        and modal
+                        and not paneless
+                        and herdr_status(crew) == "blocked"
+                    ):
+                        cleared = False
                     # One approval arrives twice, as a PermissionRequest hook and a
                     # permission_prompt Notification, usually in separate polls.
                     new_ask = any(e.get("hook_event_name") == "PreToolUse" for _, _, e in notified)
@@ -1112,6 +1288,7 @@ def poll(crew, ack=None, modal=True):
                         ),
                         event,
                     )
+                    blocked_id = str(detail.get("tool_use_id") or "")
                     inputs = detail.get("tool_input")
                     command = inputs.get("command") if isinstance(inputs, dict) else None
                     command = (
@@ -1136,11 +1313,26 @@ def poll(crew, ack=None, modal=True):
                 read_pane = (
                     modal and not paneless and crew.record.get("provider") in MODAL_PROVIDERS
                 )
+                live = herdr_status(crew) if modal and not paneless else None
+                if live not in (None, "blocked"):
+                    assignment.pop("blocked_notice", None)
                 if not crew.record.get("pane") and crew.record.get("status") == "needs_attention":
                     status, summary = (
                         "error",
                         "Crew startup failed; inspect before explicit done/handoff.",
                     )
+                elif (
+                    live == "blocked" or (read_pane and crew.record.get("provider") == "codex")
+                ) and (screen := startup_attention(crew)):
+                    # A ring held at this screen already posted its own notice.
+                    held = assignment.get("hooks_untrusted") or assignment.get("startup_update")
+                    status = None if held else "error"
+                    summary = screen
+                elif live == "blocked":
+                    # One notice per block, even if a tool event cleared native_status.
+                    held = assignment.get("blocked_notice") is not None
+                    status = None if held else "awaiting_approval"
+                    summary = prompt_summary(crew) if status and native_status != status else ""
                 elif read_pane and (summary := modal_summary(crew, assignment)) is not None:
                     status = "awaiting_approval"
                 elif not paneless and stalled(crew, assignment):
@@ -1149,13 +1341,15 @@ def poll(crew, ack=None, modal=True):
                     status = None
                 if status is None or status == native_status:
                     assignment["scan_offset"] = offset
-                    if status is None and read_pane:
+                    if status is None and (read_pane or live not in (None, "blocked")):
                         # Only a pane we actually looked at clears the dedupe. Clearing on
                         # the absence of a read wiped it every poll for event-driven
                         # providers, which is how one approval surfaced once per event.
                         assignment["native_status"] = None
                     return result(crew, assignment, "working")
                 native_status = status
+        if status == "awaiting_approval":
+            assignment["blocked_notice"] = blocked_id
         generation = assignment.get("generation", 0) + 1
         assignment["generation"] = generation
         delivery_id = f"{assignment['id']}:{assignment['incarnation_id']}:{generation}"

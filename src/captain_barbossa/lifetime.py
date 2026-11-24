@@ -927,7 +927,18 @@ def _shutdown_verdict(record, scope):
     return Verdict(True, "managed-group-stopped")
 
 
-def check(session, ref, *, crew_id, incarnation_id, root, worktree, closure=True, scope="worktree"):
+def check(
+    session,
+    ref,
+    *,
+    crew_id,
+    incarnation_id,
+    root,
+    worktree,
+    closure=True,
+    scope="worktree",
+    require_revoked=True,
+):
     """Verify the receipt; history alone may omit closure and descendant escape proof."""
     try:
         session = _session(session)
@@ -941,7 +952,7 @@ def check(session, ref, *, crew_id, incarnation_id, root, worktree, closure=True
                     record["worktree_id"],
                 ) != (crew_id, incarnation_id, str(root), worktree):
                     return Verdict(False, "identity-mismatch")
-                if not record["revoked"]:
+                if require_revoked and not record["revoked"]:
                     return Verdict(False, "not-revoked")
                 if closure and record.get("close_state") not in {"not-requested", "closed"}:
                     return Verdict(False, "close-unconfirmed")

@@ -201,6 +201,9 @@ class PiModelDiscoveryTests(unittest.TestCase):
 class ModelTierTests(unittest.TestCase):
     """Regression tests for the provider-neutral tier scheme (models.resolve_model)."""
 
+    def setUp(self):
+        self.enterContext(patch.object(config, "settings", config.defaults))
+
     def test_every_tier_resolves_to_a_real_model_of_each_provider(self):
         for provider, tiers in models.TIERS.items():
             self.assertEqual(tuple(tiers), models.TIER_NAMES)
@@ -223,7 +226,7 @@ class ModelTierTests(unittest.TestCase):
     def test_free_text_matching_still_resolves_names_aliases_and_typos(self):
         self.assertEqual(models.resolve_model("claude", "opus"), "claude-opus-5-5")
         self.assertEqual(models.resolve_model("claude", "claude-haiku-5-5"), "claude-haiku-5-5")
-        self.assertEqual(models.resolve_model("codex", "astra"), "gpt-6-astra")
+        self.assertEqual(models.resolve_model("codex", "astra"), "gpt-6.2-astra")
         self.assertEqual(models.resolve_model("codex", "gpt 6.1 sol"), "gpt-6.1-sol")
 
     def test_unknown_text_lists_the_tiers_and_the_models(self):
@@ -268,10 +271,11 @@ class ModelTextTests(unittest.TestCase):
             ("claude", "fable 5.1", "claude-fable-5-1"),
             ("claude", "sonet", "claude-sonnet-5-5"),
             ("codex", "gpt-6-sol", "gpt-6-sol"),
-            ("codex", "astra", "gpt-6-astra"),
-            ("codex", "gpt-6.1", "gpt-6.1-sol"),
+            ("codex", "gpt-6-astra", "gpt-6-astra"),
+            ("codex", "sol", "gpt-6.2-sol"),
+            ("codex", "gpt-6.1-s", "gpt-6.1-sol"),
             ("codex", ".6-sol", "gpt-5.6-sol"),
-            ("codex", "terra", "gpt-5.6-terra"),
+            ("codex", "terra", "gpt-6.1-terra"),
         ):
             with self.subTest(provider=provider, text=text):
                 self.assertEqual(models.resolve_model(provider, text), expected)
@@ -281,6 +285,10 @@ class ModelTextTests(unittest.TestCase):
             models.resolve_model("claude", "gpt-6-astra")
         with self.assertRaisesRegex(CaptainError, "ambiguous for codex: gpt-5.6-luna"):
             models.resolve_model("codex", "gpt-5.6")
+        with self.assertRaisesRegex(
+            CaptainError, r"ambiguous for codex: gpt-6\.1-terra, gpt-6\.1-sol"
+        ):
+            models.resolve_model("codex", "gpt-6.1")
         for provider in models.MODELS:
             with self.subTest(provider=provider):
                 with self.assertRaises(CaptainError) as error:
@@ -289,8 +297,7 @@ class ModelTextTests(unittest.TestCase):
                     self.assertIn(model, str(error.exception))
 
     def test_a_near_miss_matching_several_models_is_unknown_not_ambiguous(self):
-        """Three codex generations now share the "sol" name, so a typo close to all three
-        must read as no real match, not as a choice between genuine candidates."""
+        """A typo close to several Sol versions is not a choice between genuine matches."""
         with self.assertRaisesRegex(CaptainError, "No codex model matches 'gpt-6-sel'") as error:
             models.resolve_model("codex", "gpt-6-sel")
         self.assertNotIn("ambiguous", str(error.exception))

@@ -243,7 +243,7 @@ class CaptainModelTests(LaunchTestCase):
             [captain]
             model = "terra"
         """)
-        self.assertEqual(self.launch(provider="codex")[-2:], ["-m", "gpt-5.6-terra"])
+        self.assertEqual(self.launch(provider="codex")[-2:], ["-m", "gpt-6.1-terra"])
 
     def test_captain_model_follows_a_configured_tier(self):
         self.write("""

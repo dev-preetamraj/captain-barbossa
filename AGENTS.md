@@ -93,17 +93,29 @@ Key facts:
 - Recruitment resolves flags/settings/session defaults through `Placement.resolve` under
   the crew metadata lock. Shipped crew agent follows the captain;
   `[crew] placement = "auto"` reports `defaults.toml`. `status` prints evidence only.
-- Claude PreToolUse and PermissionRequest hooks pass active incarnation grants to
-  `approval.decide`. PreToolUse is the gate, registered for crew only: it fires on every
-  tool call, so a deny blocks and an escalation returns `ask`, which reaches the user even
-  in auto mode. PermissionRequest alone could not enforce, because the native CLI only
-  raises it when it already decided to prompt. PermissionRequest revalidates the
-  current grant and may reuse the matching PreToolUse verdict only from a call-bound
-  cache entry, consumed once under the events lock. Crew reach the captain CLI
-  through the gate, limited to the protocol verbs and to the exact interpreter captain
-  wrote into their instructions; `do`, `crew` and any other interpreter escalate. Resolved
-  requests are logged as PermissionDecision, so wait does not announce an approval that is
-  already handled. Other providers retain native/manual permissions.
+- Crew never stop at a native permission prompt; the captain owns grants. Hooks pass active
+  incarnation grants to `approval.decide`, which stays pure. Claude crew launch with
+  `--permission-mode auto`; PreToolUse (crew only, fires on every call) denies a flagged
+  effect with a reason, never `ask`. PermissionRequest is total: allow when granted, else
+  deny. Flagged: loss of work the assignment did not create, history/shared-ref rewrite,
+  leaving the machine, boundary escape (sudo, outside checkout, protected files, captain
+  state), another crew's files. The crew runs `ask`; the captain, with user
+  authorization, runs `captain grant NAME --command TEXT --assignment ID`: a one-shot
+  exact-command grant, consumed on first match, never inherited by handoff. Grants are a
+  guard-rail, not a security boundary. Native edits with an edit grant claim unowned
+  checkout paths under the allocation and protocol locks. Crew reach the captain CLI
+  through the gate, limited to the protocol verbs and the exact interpreter in their
+  instructions. Codex crew (above the version floor in `models.py`) get
+  `check_for_update_on_startup=false` and four identical hooks (SessionStart, Stop,
+  PreToolUse, PermissionRequest), no `approvals_reviewer`. pi's managed extension pipes a
+  Claude-shaped PreToolUse to the same hook command and blocks on a deny. Grok has no hook:
+  its auto mode is the whole gate, a documented gap.
+  The pi extension fails closed (missing hook, timeout, non-zero exit or invalid output
+  blocks); pi extension tools outside the tool map pass (known gap). Codex below the
+  floor or with untrusted hooks falls back to native prompts. Owned paths authorize
+  overwrite; temp is shared scratch across crew (known ceiling). Hook and captain commands always use
+  the python3 sibling (`instructions.python_command`), since Codex trust hashes the literal
+  command.
 - Crew state is signalled by the native CLI's own hooks (Claude `--settings` hooks,
   Codex `notify`), which append JSON lines to `sessions/<id>/events/<crew>-<incarnation>.jsonl`.
   `wait` reads that file from the assignment's acknowledged offset; codex and pi panes

@@ -12,7 +12,126 @@ from captain_barbossa.pane import Pane
 from captain_barbossa.runtime import CaptainError
 
 
+def codex_context_screen(draft="Ask Codex to do anything"):
+    return (
+        f"Worked for 1m 3s • 4:12 PM\n\n› {draft}\n\n"
+        "GPT-5.6-Sol medium · Context 5% used · weekly 93% left · 229K in · 1.92K out\n"
+        "esc again to edit previous message\n"
+    )
+
+
+def pi_update_screen(draft=""):
+    rule = "─" * 86
+    return (
+        f"Earlier output\n{rule}\n\n"
+        f"{rule}\n Update Available\n"
+        " New version 1.6.0 is available. Run pi update\n"
+        f" Changelog: https://pi.dev/changelog\n{rule}\n"
+        f"{rule}\n{draft}\n{rule}\n"
+        "~/code/projects/captain-barbossa (fix/wait-herdr-blocked)\n"
+        "$0.000 (sub) 0.0%/272k (auto)    (openai-codex) gpt-6-astra • medium\n"
+    )
+
+
+def codex_held_screen(draft="Ask Codex to do anything", wrapped=True):
+    status = "GPT-5.6-Sol medium · Context 6% used · weekly 93% left · 124K in · 865"
+    status = f"{status}\n  out" if wrapped else f"{status} out"
+    return (
+        "• Asked the captain to pick red or blue; waiting for the answer.\n\n"
+        f"  Worked for 27s • 8:38 PM\n\n› {draft}\n\n  {status}\n"
+        "  ← for agents · ? for shortcuts                  ⚠ 1 warning · f2 to view\n"
+    )
+
+
+CODEX_TRUST_SCREEN = """  Hooks need review
+  5 hooks are new or changed.
+  Hooks can run outside the sandbox after you trust them.
+
+
+› 1. Review hooks
+  2. Trust all and continue
+  3. Continue without trusting (hooks won't run)
+
+  enter confirm · esc skip
+"""
+
+
+class CodexHeldFooterTests(unittest.TestCase):
+    def test_wrapped_and_unwrapped_footers_read_empty_and_protect_drafts(self):
+        for wrapped in (True, False):
+            for draft, held in (
+                ("Ask Codex to do anything", False),
+                ("Important user draft", True),
+                ("user\nmultiline draft", True),
+            ):
+                screen = codex_held_screen(draft, wrapped)
+                with (
+                    self.subTest(wrapped=wrapped, draft=draft),
+                    patch.object(runtime, "herdr", return_value=screen),
+                ):
+                    self.assertEqual(Pane("builder").draft_pending("codex"), held)
+
+    def test_unknown_footer_rows_and_modals_stay_held(self):
+        screen = codex_held_screen()
+        for broken in (
+            screen.replace("  out\n", "  out\n  surprise row\n"),
+            screen.replace("GPT-5.6-Sol medium", "unknown"),
+            screen + "› 1. Allow\nPress enter to confirm or esc to cancel\n",
+        ):
+            with self.subTest(screen=broken), patch.object(runtime, "herdr", return_value=broken):
+                self.assertTrue(Pane("builder").draft_pending("codex"))
+
+    def test_startup_screen_names_update_and_trust_screens_only(self):
+        update = (
+            "  Update available! 0.171.0 -> 0.172.0\n\n"
+            "› 1. Update now (runs `npm install -g @openai/codex`)\n"
+            "  2. Skip\n  3. Skip until next version\n\n  Press enter to continue\n"
+        )
+        for screen, expected in (
+            (CODEX_TRUST_SCREEN, "Codex hook trust prompt"),
+            (update, "Codex update prompt"),
+            (codex_held_screen(), None),
+            (codex_held_screen("Hooks need review", False), None),
+            # A transcript discussing hook trust, with numbered steps, above a normal composer.
+            (
+                "• Hooks need review. Plan to trust the hooks:\n"
+                "  1. Fix the bug\n  2. Review hooks\n\n" + codex_held_screen(),
+                None,
+            ),
+            # The same words as the last rows of a transcript, with no key hint below.
+            (CODEX_TRUST_SCREEN.rsplit("\n", 2)[0] + "\n\n› Ask Codex to do anything\n", None),
+            # A trust screen scrolled up, with output below it.
+            (CODEX_TRUST_SCREEN + "\n• more output\n", None),
+        ):
+            with (
+                self.subTest(screen=screen[:30]),
+                patch.object(runtime, "herdr", return_value=screen) as herdr,
+            ):
+                self.assertEqual(Pane("builder").startup_screen(), expected)
+                self.assertIn("visible", herdr.call_args.args)
+        with patch.object(runtime, "herdr", side_effect=OSError("x")):
+            self.assertIsNone(Pane("builder").startup_screen())
+
+    def test_visible_source_reads_the_screen_directly(self):
+        with patch.object(runtime, "herdr", return_value="a\nb\n") as herdr:
+            self.assertEqual(Pane("builder").lines(source="visible"), ["a", "b"])
+        self.assertEqual(herdr.call_count, 1)
+        self.assertIn("visible", herdr.call_args.args)
+
+
 class ComposerTests(unittest.TestCase):
+    def test_current_native_screens_accept_only_empty_editors(self):
+        for provider, capture, empty in (
+            ("codex", codex_context_screen, "Ask Codex to do anything"),
+            ("pi", pi_update_screen, ""),
+        ):
+            for draft in (empty, "Important user draft", "user\nmultiline draft"):
+                with (
+                    self.subTest(provider=provider, draft=draft),
+                    patch.object(runtime, "herdr", return_value=capture(draft)),
+                ):
+                    self.assertEqual(Pane("builder").draft_pending(provider), draft != empty)
+
     def test_captured_codex_footer_preserves_empty_composer_and_real_drafts(self):
         for composer, drafted in (
             ("› Ask Codex to do anything", False),
@@ -285,7 +404,7 @@ class ComposerTests(unittest.TestCase):
                         for provider in (None, "claude", "codex", "grok"):
                             self.assertTrue(Pane("builder").draft_pending(provider))
 
-        # An incomplete or edited notice, or a notice inside a draft, is not chrome.
+        # Separated transcript boxes do not define the editor, even if their text changed.
         for banner in (
             notice.replace("Update Available", "Update"),
             notice.replace("https://pi.dev/changelog", "https://example.com"),
@@ -296,6 +415,10 @@ class ComposerTests(unittest.TestCase):
         ):
             with self.subTest(banner=banner):
                 screen = f"{banner}\n{rule}\n\n{rule}\n{footer}"
+                with patch.object(runtime, "herdr", return_value=screen):
+                    self.assertFalse(Pane("builder").draft_pending("pi"))
+                # Without a gap, extra rulers could still belong to a multiline draft.
+                screen = f"{banner}{rule}\n\n{rule}\n{footer}"
                 with patch.object(runtime, "herdr", return_value=screen):
                     self.assertTrue(Pane("builder").draft_pending("pi"))
 

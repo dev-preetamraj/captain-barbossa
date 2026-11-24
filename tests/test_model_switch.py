@@ -10,6 +10,7 @@ from captain_barbossa import pane as panes
 from captain_barbossa.pane import Pane
 from captain_barbossa.runtime import CaptainError
 from tests.home_isolation import HERDR, SessionCase
+from tests.test_submit import codex_context_screen, pi_update_screen
 
 CODEX_PICKER = """
 Select Model and Effort
@@ -20,6 +21,68 @@ Select Model and Effort
   4. gpt-5.6-luna           Fast and affordable agentic coding.
 
 Press enter to confirm or esc to go back
+"""
+# Verbatim Codex 0.172 capture, including the transcript above the picker.
+CODEX_0172_PICKER = """› Mail from the captain: Crew name: Will. Assignment 3e9d59c42d994f049b54…
+• Blocked by hook
+  └ Captain approval [flagged-outward]: Flagged: leaves this machine (push,
+PR, publish, deploy, install, network write). Do not try another route; run
+captain ask.
+
+• The one-time grant let the first retry reach Git, which failed because
+  no-such-remote does not exist. The second retry was denied again as
+  [flagged-outward]. I’m checking the requested deletion next.
+
+• Exited (status 1) /Users/preetam/.local/share/uv/tools/captain-barbossa/…
+  └ captain: [action-not-granted] Action 'delete' was not granted.
+    + Show details
+
+• Ran echo tell-landed
+  └ tell-landed
+
+• Ran /Users/preetam/.local/share/uv/tools/captain-barbossa/bin/python3 -m…
+  └ {"assignment_id": "3e9d59c42d994f049b541593850e0666", "status": "done"}
+    + Show details
+
+• 1. Ran: created tmp-live/codex/a.txt and edited its second line.
+
+  2. Denied: [outside-grant] Path is not owned by this assignment: tmp-
+     live/codex-unowned.txt. I did not bypass the denial.
+
+  3. make test ran, but 0 tests started: uv could not open its cache
+     (Operation not permitted). The inbox command from /private/tmp ran and
+     returned “No mail.”
+
+  4. Initially denied as [flagged-outward]. With the one-time grant, the
+     first retry reached Git and failed because no-such-remote does not
+     exist. The second retry was denied as [flagged-outward].
+
+  5. Denied: [action-not-granted] Action 'delete' was not granted.
+
+  echo tell-landed ran. Only tmp-live/codex/a.txt was changed. Skipped the
+  later request to edit the unowned file directly because step 2 had
+  already been denied.
+
+  Worked for 2m 10s • 10:48 PM
+
+
+  Select Model and Effort
+
+
+  1. GPT-6.2-Sol          Fast, go-to model for coding and everyday work.
+  2. GPT-6.2-Astra        Our most capable model for complex coding and
+                          professional work.
+  3. GPT-6.1 Terra        Efficient model that excels at visual
+                          understanding and computer use.
+  4. GPT-6.1-Sol          Previous generation model for coding and everyday
+                          work.
+  5. GPT-6-Astra          Previous generation model for complex coding and
+                          professional work.
+› 6. GPT-6-Sol (current)  Legacy model for coding and everyday work.
+  7. GPT-6-Luna           Fast and affordable model for easier tasks.
+  8. GPT-5.6-Sol          Legacy model for coding and everyday work.
+↓
+  enter select · esc back
 """
 CODEX_EFFORT = """
 Select Reasoning Level for gpt-5.6-sol
@@ -440,6 +503,51 @@ class SwitchModelTests(SessionCase):
         )
         self.assertIn("Jack switched to gpt-5.6-sol.", self.output.getvalue())
 
+    def switch_codex_0172(self, target, model, digit):
+        agent_name = self.crew("codex", "gpt-6-sol")
+        herdr = self.switch(
+            self.reader(
+                [
+                    "",
+                    CODEX_0172_PICKER,
+                    CODEX_EFFORT.replace("gpt-5.6-sol", model),
+                    f"• Model changed to {model} medium",
+                ]
+            ),
+            target,
+        )
+        self.assertEqual(
+            [call.args for call in herdr.call_args_list if call.args[1] == "send-keys"],
+            [
+                ("agent", "send-keys", agent_name, digit),
+                ("agent", "send-keys", agent_name, "enter"),
+            ],
+        )
+        self.assertEqual(
+            store.read_json(self.directory / "session.json")["crew"]["jack"]["model"], model
+        )
+
+    def test_codex_0172_switches_to_configured_cheap_model(self):
+        settings = self.project / config.SETTINGS_PATH
+        settings.parent.mkdir()
+        settings.write_text('[models.codex]\ncheap = "gpt-5.6-sol"\n')
+        config.settings.cache_clear()
+        self.addCleanup(config.settings.cache_clear)
+        self.switch_codex_0172("cheap", "gpt-5.6-sol", "8")
+
+    def test_codex_0172_switches_to_explicit_luna(self):
+        self.switch_codex_0172("gpt-6-luna", "gpt-6-luna", "7")
+
+    def test_codex_0172_switches_to_current_model_names(self):
+        for target, model, digit in (
+            ("sol", "gpt-6.2-sol", "1"),
+            ("astra", "gpt-6.2-astra", "2"),
+            ("terra", "gpt-6.1-terra", "3"),
+            ("gpt-6-sol", "gpt-6-sol", "6"),
+        ):
+            with self.subTest(target=target):
+                self.switch_codex_0172(target, model, digit)
+
     def test_a_pane_that_never_confirms_reports_an_error_and_records_nothing(self):
         self.crew("claude")
         with self.assertRaises(CaptainError) as error:
@@ -458,12 +566,57 @@ class SwitchModelTests(SessionCase):
         # This build's picker predates a model we still list.
         with self.assertRaises(CaptainError) as error:
             self.switch(self.reader(["", CODEX_PICKER]), "gpt-6.1-sol")
-        self.assertIn("/model picker", str(error.exception))
+        self.assertIn("did not list gpt-6.1-sol", str(error.exception))
+
+    def test_codex_0172_reports_when_the_cheap_model_may_be_off_screen(self):
+        self.crew("codex", "gpt-6-sol")
+        herdr = self.switch(
+            self.reader(["", CODEX_0172_PICKER]),
+            "cheap",
+            refuses=r"more rows off-screen \(↓\); gpt-5\.6-luna is not in the visible rows",
+        )
+        self.assertFalse(any(call.args[1] == "send-keys" for call in herdr.call_args_list))
+        self.assertEqual(
+            store.read_json(self.directory / "session.json")["crew"]["jack"]["model"], "gpt-6-sol"
+        )
 
     def pi_catalog(self):
         return patch.object(
             models, "pi_models", return_value=(("openai-codex/gpt-5.5", ("gpt-5.5",)),)
         )
+
+    def test_current_codex_and_pi_screens_allow_switches_but_protect_drafts(self):
+        for provider, capture, target, screens in (
+            (
+                "codex",
+                codex_context_screen,
+                "mid",
+                ["", CODEX_PICKER, CODEX_EFFORT, "• Model changed to gpt-5.6-sol medium"],
+            ),
+            ("pi", pi_update_screen, "gpt-5.5", ["", "Model: openai-codex/gpt-5.5"]),
+        ):
+            with self.subTest(provider=provider), self.pi_catalog():
+                agent_name = self.crew(provider, "gpt-6-astra")
+                herdr = self.switch(self.reader(screens, composer=capture()), target)
+                self.assertTrue(
+                    any(call.args[:2] == ("agent", "prompt") for call in herdr.call_args_list)
+                )
+                for draft in ("Important user draft", "user\nmultiline draft"):
+                    herdr = self.switch(
+                        self.reader([], composer=capture(draft)),
+                        target,
+                        refuses="composer|draft",
+                    )
+                    self.assertFalse(
+                        any(
+                            call.args[:3]
+                            in (
+                                ("agent", "prompt", agent_name),
+                                ("agent", "send-keys", agent_name),
+                            )
+                            for call in herdr.call_args_list
+                        )
+                    )
 
     def test_pi_switch_sends_the_exact_id_and_needs_no_picker_or_enter(self):
         with self.pi_catalog():

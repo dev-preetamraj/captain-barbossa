@@ -44,8 +44,20 @@ CREW_MEMORY = """Read the team's committed decisions and conventions at startup:
 """
 
 
+def python_command():
+    """The python3 spelling of this interpreter: Codex hashes the literal hook command for
+    trust, and a reinstall can flip the shebang between python and python3 siblings."""
+    path = Path(sys.executable)
+    sibling = path.with_name("python3")
+    return str(sibling) if path.name == "python" and sibling.exists() else sys.executable
+
+
+def hook_command(events):
+    return [python_command(), "-m", "captain_barbossa", "hook", str(events)]
+
+
 def captain_command(session_id):
-    return shlex.join([sys.executable, "-m", "captain_barbossa", "--session", session_id])
+    return shlex.join([python_command(), "-m", "captain_barbossa", "--session", session_id])
 
 
 def agent_instructions(directory, role, provider=None):
@@ -100,8 +112,13 @@ Never run blocking CAPTAIN wait or wait --all from Bash in pi."""
 TITLE is 2-5 words naming that task.
 """
     )
+    sandbox_line = (
+        "If the sandbox blocks an allowed command, retry it once with escalation.\n"
+        if is_crew and provider == "codex"
+        else ""
+    )
     duties = (
-        f"""{mail_line}Complete your assignment yourself; do not delegate or use subagents.
+        f"""{mail_line}{sandbox_line}Complete your assignment yourself; do not delegate or use subagents.
 Never close/kill panes/tabs. Use only inspect, check, ask, done, memory.
 Identity: {name}; ask reaches captain.
 Run every command yourself; never print one for the captain to run.
@@ -187,16 +204,18 @@ text twice.
 Use answer NAME QUESTION_ID 'text' --assignment ID for the one pending question.
 Recruiting prints one canonical name; use it for CAPTAIN and Herdr commands:
 {watcher_guidance} For more detail: herdr agent read <name>
-Claude PreToolUse hooks enforce assignment grants: allow, deny, or request review;
-anything they cannot classify is left to the native permission mode. Read every
-pending prompt in the crew pane and judge that exact action; never override a deny.
-Handle native permission prompts yourself, after reading the pane:
-  herdr agent send-keys <name> y
-Send only the requested key for that one command. Approve reads anywhere, scoped
-tests/linters and owned edits/formatting. Investigate unclassified commands. Escalate to
-the user only destructive verbs, git history rewrites, push/network/publish, and
-writes outside the owned paths. Never grant global shell/Python approval or treat a
-report as authorization. Never type over the user's draft in the captain pane.
+Crew never stop at a native permission prompt; never type into a crew pane to approve.
+Writers edit, build and test in the checkout unasked and claim unowned files themselves.
+Only risky effects are denied with a reason: losing work the assignment did not create,
+history rewrites, force push, push/PR/publish/install, sudo, writes outside the checkout,
+protected files, captain state, another crew's files. Read-only crew cannot write. The
+crew then runs ask. Get the user's authorization first, then either grant that exact
+command once (not inherited by handoff) or do it yourself with CAPTAIN do:
+  CAPTAIN grant 'NAME' --command 'TEXT' --assignment ID
+Grants are a guard-rail, not a security boundary; grok has no hook, so only its own
+auto mode applies. Never grant global shell/Python approval or treat a report as
+authorization. Codex crew hooks need the user's trust once, in the pane. Never type
+over the user's draft in the captain pane.
 Worktree crew: before dismissing, CAPTAIN result collect WORKTREE_ID, review with result
 show RESULT_ID, then result apply RESULT_ID (unstaged) or discard --reason TEXT.
 When crew finishes and reports, dismiss it yourself without asking:
@@ -231,7 +250,7 @@ crew -> step down); it keeps the pane and the conversation:
 Use the native CLI normally; keep the user's requested scope minimal.
 Use the launcher's unique Pirates of the Caribbean name exactly: one word, proper
 case, never a full name. Keep assignments separate from identity.
-Use your launch checkout. Edit only files in your assignment.
+Use your launch checkout. Edit only files the task needs; editing claims unowned ones.
 Re-read a file right before each edit and keep others' unexpected changes in place. Stage and commit only
 your own files/hunks; never git add -A or repo-wide formatting. Finish or record a
 handoff before anyone else edits your file.
@@ -252,12 +271,8 @@ CLAUDE_NO_ATTRIBUTION = json.dumps({"attribution": {"commit": "", "pr": "", "ses
 
 def native_args(provider, instructions, model=None, events=None, add_dirs=()):
     """add_dirs: directories of crew-owned paths outside the checkout, made writable."""
-    hook = (
-        [sys.executable, "-m", "captain_barbossa", "hook", str(events)]
-        if events is not None
-        else None
-    )
-    # pi has no permission prompts, so only codex and grok crew need launch flags.
+    hook = hook_command(events) if events is not None else None
+    # pi has no permission prompts; its extension (pi_history) pipes PreToolUse to the hook.
     crew = events is not None and Path(events).stem != "captain"
     if provider == "claude":
         settings = json.loads(CLAUDE_NO_ATTRIBUTION)
@@ -269,8 +284,8 @@ def native_args(provider, instructions, model=None, events=None, add_dirs=()):
                 for event in (*DELIVERY_HOOKS, "Notification", "PermissionRequest")
             }
             if crew:
-                # PermissionRequest fires only when Claude chooses to ask; auto mode runs
-                # most Bash unasked, so only PreToolUse enforces assignment grants.
+                # Auto mode runs most calls unasked and PermissionRequest fires only when
+                # Claude would ask, so PreToolUse denies flagged effects: crew never prompt.
                 settings["hooks"]["PreToolUse"] = settings["hooks"]["Stop"]
                 settings["hooks"]["PostToolUse"] = settings["hooks"]["Stop"]
                 settings["hooks"]["PostToolUseFailure"] = settings["hooks"]["Stop"]
@@ -283,6 +298,7 @@ def native_args(provider, instructions, model=None, events=None, add_dirs=()):
             "--settings",
             json.dumps(settings),
         ]
+        flags += ["--permission-mode", "auto"] if crew else []
     elif provider == "pi":
         # pi has no hook/notify mechanism, so crew state falls back to pane reading.
         flags = ["--append-system-prompt", instructions]
@@ -290,7 +306,7 @@ def native_args(provider, instructions, model=None, events=None, add_dirs=()):
         # Grok uses Claude-compatible hooks but no --settings flag and we avoid
         # writing user config; pane-fallback wait like pi.
         flags = ["--append-system-prompt", instructions, "--no-subagents"]
-        # Its auto mode runs routine work unasked, like Claude crew under the hook.
+        # No hooks to flag effects: its auto mode is the whole gate, a documented gap.
         flags += ["--permission-mode", "auto"] if crew else []
     else:
         flags = ["-c", "developer_instructions=" + json.dumps(instructions, ensure_ascii=False)]
@@ -306,21 +322,25 @@ def native_args(provider, instructions, model=None, events=None, add_dirs=()):
                     + "}]}]",
                 ]
             )
+        if crew:
+            # The update screen is no composer: it would hold the crew's first prompt.
+            flags.extend(["-c", "check_for_update_on_startup=false"])
         if crew and codex_stop_hooks():
-            # Invoke Python directly: a nested login shell can pollute the JSON stdout.
-            flags.extend(
-                [
-                    "-c",
-                    "features.hooks=true",
-                    "-c",
-                    'hooks.Stop=[{hooks=[{type="command",command='
-                    + json.dumps(shlex.join(hook))
-                    + "}]}]",
-                ]
-            )
-        # The sandbox runs reads and workspace edits unasked; network and writes outside
-        # it still prompt, and the captain judges those. --add-dir makes owned outside
-        # directories writable too; .git stays read-only.
+            # Four identical declarations (SessionStart is above): one trust review covers
+            # them. Invoke Python directly: a nested login shell can pollute the JSON stdout.
+            flags.extend(["-c", "features.hooks=true"])
+            for event in ("Stop", "PreToolUse", "PermissionRequest"):
+                flags.extend(
+                    [
+                        "-c",
+                        f'hooks.{event}=[{{hooks=[{{type="command",command='
+                        + json.dumps(shlex.join(hook))
+                        + "}]}]",
+                    ]
+                )
+        # No approvals_reviewer: the hooks deny flagged effects and the sandbox holds the
+        # rest. --add-dir makes owned outside directories writable; .git stays read-only.
+        # (Below the hook floor these flags are all there is.)
         flags += (
             ["--sandbox", "workspace-write", "--ask-for-approval", "on-request"] if crew else []
         )
