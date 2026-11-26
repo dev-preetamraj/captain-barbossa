@@ -371,6 +371,9 @@ class SupervisorSocketDoorTests(SessionCase):
         self.assertEqual(lifetime.read(self.current, ref)["state"], "exited")
 
     def test_crew_without_a_supervised_transport_is_refused(self):
+        # Every shipped provider now has an adapter; grok stands in for one that has none.
+        others = {key: value for key, value in supervisor.ADAPTERS.items() if key != "grok"}
+        self.enterContext(patch.dict(supervisor.ADAPTERS, others, clear=True))
         self.serve()
         for provider, execution, incarnation, pattern in (
             ("fake", None, "b" * 32, "not a supervised crew"),

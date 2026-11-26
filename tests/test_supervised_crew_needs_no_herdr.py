@@ -416,6 +416,9 @@ class SupervisedCrewTests(SessionCase):
         self.herdr.assert_not_called()
 
     def test_placement_flags_and_unsupported_providers_are_refused(self):
+        # Every shipped provider now has a transport; grok stands in for one that has none.
+        unsupported = {key: value for key, value in agents.TRANSPORTS.items() if key != "grok"}
+        self.enterContext(patch.dict(agents.TRANSPORTS, unsupported, clear=True))
         for argv, pattern in (
             (("--agent", "codex", "--placement", "tab"), r"\[supervised-flags\].*--placement"),
             (("--agent", "grok"), r"\[supervised-transport\] grok"),

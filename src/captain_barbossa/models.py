@@ -50,7 +50,12 @@ HOOKLESS = ("pi", "grok")
 # Providers a `captain supervise` session can run with no terminal, and the structured
 # transports each offers, preferred first; Codex's is also its subcommand, Claude's runs the
 # user's claude under claude_host through the optional Agent SDK.
-TRANSPORTS = {"codex": ("app-server",), "claude": ("sdk",), "pi": ("rpc",)}
+TRANSPORTS = {
+    "codex": ("app-server",),
+    "claude": ("sdk",),
+    "pi": ("rpc",),
+    "grok": ("acp",),
+}
 # Providers whose own hook can hand mail to their own model, so the body never crosses a
 # terminal. Codex's notify marks a turn boundary but cannot return context, so it stays out.
 HOOK_DELIVERED = ("claude",)
@@ -66,6 +71,14 @@ PI_FAMILIES = ("claude", "codex", "grok")
 # newest version, stable over preview. Variants (image, live, customtools) never match.
 GEMINI_TIERS = {"flash-lite": "cheap", "flash": "mid", "pro": "strong"}
 GEMINI_ID = re.compile(r"gemini-(\d+(?:\.\d+)*)-(flash-lite|flash|pro)(-preview)?")
+# Grok 1.0.62 is the ACP build verified against `grok agent stdio`.
+GROK_ACP_FLOOR = (1, 0, 62)
+
+
+def grok_acp_supported(version):
+    """Whether an ACP initialize version is at least the verified Grok floor."""
+    match = re.fullmatch(r"(?:grok(?:-cli)?\s+)?(\d+)\.(\d+)\.(\d+)", version or "")
+    return bool(match and tuple(map(int, match.groups())) >= GROK_ACP_FLOOR)
 
 
 @lru_cache(maxsize=1)
