@@ -353,8 +353,12 @@ the work in the working tree and report the diff.
 CLAUDE_NO_ATTRIBUTION = json.dumps({"attribution": {"commit": "", "pr": "", "sessionUrl": False}})
 
 
-def native_args(provider, instructions, model=None, events=None, add_dirs=(), transport="tui"):
+def native_args(
+    provider, instructions, model=None, events=None, add_dirs=(), transport="tui", allow=()
+):
     """add_dirs: directories of crew-owned paths outside the checkout, made writable.
+
+    allow: command prefixes a Claude captain runs unasked, as Bash allow rules.
 
     Codex "app-server" omits notify, the TUI flags and the model: the supervisor sends those.
     """
@@ -379,6 +383,8 @@ def native_args(provider, instructions, model=None, events=None, add_dirs=(), tr
         if add_dirs:
             # PreToolUse still gates every call; this only lifts the working-directory check.
             settings["permissions"] = {"additionalDirectories": list(add_dirs)}
+        if allow:
+            settings.setdefault("permissions", {})["allow"] = [f"Bash({rule} *)" for rule in allow]
         flags = [
             "--append-system-prompt",
             instructions,

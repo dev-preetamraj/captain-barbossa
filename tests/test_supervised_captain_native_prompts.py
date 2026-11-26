@@ -21,6 +21,7 @@ from captain_barbossa import (
     claude_agent,
     config,
     pi_rpc,
+    sessions,
     store,
     supervision,
     supervisor,
@@ -79,6 +80,41 @@ class ClaudeCaptainPromptTests(SessionCase):
         self.assertEqual(relayed[0]["tool_input"], {"command": "make test"})
         denied = self.permission(link(True, relay=approve("deny")), "Bash", {"command": "rm"})
         self.assertEqual(denied["behavior"], "deny")
+
+    def test_an_always_allow_answer_reaches_the_host_with_the_rules_it_offered(self):
+        relayed = []
+        rules = [{"type": "addRules", "behavior": "allow"}]
+
+        def relay(event):
+            relayed.append(event)
+            return 0, {"hookSpecificOutput": {"decision": {"behavior": "allow", "remember": True}}}
+
+        def ask(target, params):
+            message = {"id": "host-1", "method": "permission", "params": params}
+            claude_agent.permission(target, message)
+            return target.peer.answers[-1][1]
+
+        params = {"tool": "Bash", "input": {"command": "make"}, "rules": rules}
+        self.assertEqual(
+            ask(link(True, relay=relay), params), {"behavior": "allow", "remember": True}
+        )
+        self.assertEqual(relayed[0]["permission_rules"], rules)
+        self.assertEqual(
+            ask(link(True, relay=relay), {**params, "rules": []}), {"behavior": "allow"}
+        )
+
+    def test_the_supervised_claude_captain_preallows_only_its_own_session_commands(self):
+        from captain_barbossa import instructions, launch
+
+        current = sessions.session(self.project, None, create=True)
+        own = f"Bash({instructions.captain_command(current.meta['id'])} *)"
+        for transport, allowed in (("sdk", [own]), ("tui", None)):
+            with self.subTest(transport=transport):
+                command, _ = launch.prepare_launch(
+                    current, self.project, "claude", "/bin/claude", None, transport=transport
+                )
+                settings = json.loads(command[command.index("--settings") + 1])
+                self.assertEqual(settings.get("permissions", {}).get("allow"), allowed)
 
     def test_ask_user_question_answers_are_keyed_by_question_text(self):
         asked = []

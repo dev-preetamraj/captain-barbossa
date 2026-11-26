@@ -1,6 +1,7 @@
 """claude_host turns a pane crew's claude argv into Agent SDK options, with the SDK optional."""
 
 import asyncio
+import dataclasses
 import json
 import subprocess
 import sys
@@ -15,6 +16,13 @@ import home_isolation  # noqa: F401
 
 from captain_barbossa import claude_host, instructions
 from captain_barbossa.runtime import CaptainError
+
+
+@dataclasses.dataclass
+class Update:
+    type: str
+    behavior: str | None = None
+    mode: str | None = None
 
 
 class ClaudeHostOptionsTests(unittest.TestCase):
@@ -51,6 +59,55 @@ class ClaudeHostOptionsTests(unittest.TestCase):
         hooks = json.loads(built.extra_args["settings"])["hooks"]
         self.assertIn("PreToolUse", hooks)
         self.assertIn("PermissionRequest", hooks)
+
+    def test_a_captain_preallows_only_the_commands_it_is_given(self):
+        captain = self.root / "events" / "captain.jsonl"
+        own = instructions.captain_command("sid-1")
+
+        def settings(**kwargs):
+            flags = instructions.native_args("claude", "x", events=captain, **kwargs)
+            return json.loads(flags[flags.index("--settings") + 1])
+
+        self.assertNotIn("permissions", settings())
+        self.assertEqual(settings(allow=[own])["permissions"], {"allow": [f"Bash({own} *)"]})
+        self.assertEqual(
+            settings(allow=[own], add_dirs=["/extra"])["permissions"],
+            {"additionalDirectories": ["/extra"], "allow": [f"Bash({own} *)"]},
+        )
+
+    def ask(self, suggestions, reply):
+        sdk = SimpleNamespace(
+            PermissionResultAllow=lambda **given: SimpleNamespace(behavior="allow", **given),
+            PermissionResultDeny=lambda **given: SimpleNamespace(behavior="deny", **given),
+        )
+        host = claude_host.Host(["/opt/bin/claude"], 1)
+        host.sdk = sdk
+        sent = []
+
+        async def request(method, params, timeout):
+            sent.append((method, params))
+            return {"result": reply}
+
+        host.request = request
+        context = SimpleNamespace(suggestions=suggestions)
+        result = asyncio.run(host.ask("Bash", {"command": "make test"}, context))
+        return result, sent[0][1]
+
+    def test_an_always_allow_answer_keeps_only_claudes_allow_rule_suggestions(self):
+        rule, mode = Update("addRules", "allow"), Update("setMode", mode="acceptEdits")
+        result, params = self.ask([rule, mode], {"behavior": "allow", "remember": True})
+        self.assertEqual(result.updated_permissions, [rule])
+        self.assertEqual([item["type"] for item in params["rules"]], ["addRules"])
+
+    def test_a_plain_allow_or_a_missing_suggestion_persists_nothing(self):
+        rule = Update("addRules", "allow")
+        plain_allow, _ = self.ask([rule], {"behavior": "allow"})
+        self.assertIsNone(plain_allow.updated_permissions)
+        no_rule, params = self.ask([], {"behavior": "allow", "remember": True})
+        self.assertIsNone(no_rule.updated_permissions)
+        self.assertEqual(params["rules"], [])
+        denied, _ = self.ask([rule], {"behavior": "deny", "remember": True})
+        self.assertEqual(denied.behavior, "deny")
 
     def test_a_malformed_argv_is_refused(self):
         for argv in (["/c", "--a"], ["/c", "x", "y"], ["/c", "--a", "1", "--a", "2"]):

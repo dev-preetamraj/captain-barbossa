@@ -125,12 +125,15 @@ def permission(link, message):
         if link.captain and tool == ASK_USER:
             result = questions(link, inputs) or result
         elif link.captain:
+            rules = params.get("rules") if isinstance(params.get("rules"), list) else []
             request = {"hook_event_name": "PermissionRequest", "tool_name": tool, "cwd": link.root}
-            _, output = link.relay({**request, "tool_input": inputs})
+            _, output = link.relay({**request, "tool_input": inputs, "permission_rules": rules})
             native = (output or {}).get("hookSpecificOutput")
             verdict = native.get("decision") if isinstance(native, dict) else None
             if isinstance(verdict, dict) and verdict.get("behavior") == "allow":
                 result = {"behavior": "allow"}
+                if verdict.get("remember") is True and rules:
+                    result["remember"] = True
             else:
                 result = {"behavior": "deny", "message": "The user denied this in the app."}
     except (CaptainError, OSError):

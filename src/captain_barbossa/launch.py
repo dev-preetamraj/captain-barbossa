@@ -178,10 +178,11 @@ def prepare_launch(
     add_memory(current.graph, f"session:{meta['id']}", "captain", provider)
     events = current.events("captain")
     private_dir(events.parent)
+    own = [instructions.captain_command(meta["id"])] if transport == "sdk" else []
     command = [
         *instructions.native_command(binary, transport),
         *instructions.native_args(
-            provider, instruction_text, model, events=events, transport=transport
+            provider, instruction_text, model, events=events, transport=transport, allow=own
         ),
     ]
     if provider == "pi" and bridge:

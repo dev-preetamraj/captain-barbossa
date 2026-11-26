@@ -131,9 +131,20 @@ class Host:
             self.waiting.pop(identifier, None)
 
     async def ask(self, tool_name, tool_input, context):
-        """The captain's permission prompt, decided by the user in the app; unanswered denies."""
+        """The captain's permission prompt, decided by the user in the app; unanswered denies.
+
+        Claude's own allow-rule suggestions go to the app, and a `remember` answer has claude
+        keep exactly those rules, as the terminal's don't-ask-again choice does.
+        """
+        rules = [
+            update
+            for update in context.suggestions or ()
+            if update.type == "addRules" and update.behavior == "allow"
+        ]
         reply = await self.request(
-            "permission", {"tool": tool_name, "input": tool_input}, ASK_TIMEOUT
+            "permission",
+            {"tool": tool_name, "input": tool_input, "rules": plain(rules)},
+            ASK_TIMEOUT,
         )
         result = (reply or {}).get("result")
         result = result if isinstance(result, dict) else {}
@@ -141,7 +152,10 @@ class Host:
             updated = dict(tool_input)
             if isinstance(result.get("answers"), dict):
                 updated["answers"] = result["answers"]
-            return self.sdk.PermissionResultAllow(updated_input=updated)
+            remembered = rules if result.get("remember") is True and rules else None
+            return self.sdk.PermissionResultAllow(
+                updated_input=updated, updated_permissions=remembered
+            )
         message = result.get("message") or "Declined: nobody answered in the app."
         return self.sdk.PermissionResultDeny(message=message)
 
