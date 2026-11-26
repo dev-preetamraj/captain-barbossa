@@ -1,26 +1,32 @@
 .DEFAULT_GOAL := help
 
-.PHONY: help install test lint format gate build clean tool version bump uat release status guard-clean
+.PHONY: help install test test-base lint format gate build clean tool version bump uat release status guard-clean
+
+# Development keeps the [app] extra, which a bare `uv sync --locked` removes. Recipes stay
+# literal: the crew gate reads `make test` and escalates any variable it cannot resolve.
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*##' $(MAKEFILE_LIST) | awk -F':.*##' '{printf "%-10s %s\n", $$1, $$2}'
 
-install: ## Sync the locked dev environment
-	uv sync --locked
+install: ## Sync the locked dev environment with the [app] extra
+	uv sync --locked --extra app
 
 test: ## Run the unittest suite
-	uv run --locked python -m unittest discover -s tests -v
+	uv run --locked --extra app python -m unittest discover -s tests -v
+
+test-base: ## Run the suite in a throwaway env without the [app] extra
+	uv run --locked --isolated python -m unittest discover -s tests
 
 lint: ## Check lint and formatting without modifying files
-	uv run --locked ruff check .
-	uv run --locked ruff format --check .
+	uv run --locked --extra app ruff check .
+	uv run --locked --extra app ruff format --check .
 
 format: ## Apply formatting and fix supported lint issues
-	uv run --locked ruff check --fix .
-	uv run --locked ruff format .
+	uv run --locked --extra app ruff check --fix .
+	uv run --locked --extra app ruff format .
 
 gate: ## Run the full pre-push gate (lint, format, tests)
-	uv run --locked pre-commit run --all-files --hook-stage pre-push
+	uv run --locked --extra app pre-commit run --all-files --hook-stage pre-push
 
 build: ## Build sdist and wheel
 	uv build
