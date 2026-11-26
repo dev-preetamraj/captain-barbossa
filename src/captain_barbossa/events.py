@@ -632,7 +632,13 @@ def append_event(args=None):
         from .protocol import note_denial
 
         try:
-            note_denial(crew, event)
+            denial = event
+            if provider == "pi":
+                denial = {
+                    **event,
+                    "tool_name": PI_TOOLS.get(event.get("tool_name"), event.get("tool_name")),
+                }
+            note_denial(crew, denial)
         except (CaptainError, OSError, ValueError, KeyError):
             pass  # a lost denial only leaves the next ask without its grant request
     if incarnation:

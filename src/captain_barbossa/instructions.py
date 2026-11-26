@@ -57,12 +57,14 @@ def hook_command(events):
 
 
 def native_command(binary, transport="tui"):
-    """The argv before the native flags: "sdk" runs the user's claude under claude_host."""
+    """The argv before native flags for a terminal or structured transport."""
     match transport:
         case "tui":
             return [binary]
         case "sdk":
             return [python_command(), "-m", "captain_barbossa.claude_host", binary]
+        case "rpc":
+            return [binary, "--mode", "rpc"]
         case _:
             return [binary, transport]
 
@@ -314,7 +316,7 @@ def native_args(provider, instructions, model=None, events=None, add_dirs=(), tr
         ]
         flags += ["--permission-mode", "auto"] if crew else []
     elif provider == "pi":
-        # pi has no hook/notify mechanism, so crew state falls back to pane reading.
+        # TUI crew state falls back to pane reading; RPC streams it to the supervisor.
         flags = ["--append-system-prompt", instructions]
     elif provider == "grok":
         # Grok uses Claude-compatible hooks but no --settings flag and we avoid

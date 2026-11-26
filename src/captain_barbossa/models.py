@@ -50,7 +50,7 @@ HOOKLESS = ("pi", "grok")
 # Providers a `captain supervise` session can run with no terminal, and the structured
 # transports each offers, preferred first; Codex's is also its subcommand, Claude's runs the
 # user's claude under claude_host through the optional Agent SDK.
-TRANSPORTS = {"codex": ("app-server",), "claude": ("sdk",)}
+TRANSPORTS = {"codex": ("app-server",), "claude": ("sdk",), "pi": ("rpc",)}
 # Providers whose own hook can hand mail to their own model, so the body never crosses a
 # terminal. Codex's notify marks a turn boundary but cannot return context, so it stays out.
 HOOK_DELIVERED = ("claude",)
