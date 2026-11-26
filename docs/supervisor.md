@@ -65,6 +65,7 @@ Every refusal is a JSON-RPC error whose message starts with its protocol code an
 | `interrupt_all` | `request_timeout`, every agent in parallel (10) |
 | `message_captain` | any bridge round in flight, then at most two native requests per prompt it sends; budget 60 |
 | `ack_delivery`, `uncertain_deliveries`, `resolve_captain_delivery` | any bridge round in flight; budget 30 |
+| `snapshot` | one crew state read per agent (`request_timeout` each), the delivery projection and usage, up to 5 reads; budget 60 |
 | `start_captain` | launch preparation plus `startup_timeout`; budget 45 |
 | `stop_captain` | 2×`stop_timeout` + 1 (31) |
 | `providers` | with `recheck` or an unchecked provider, 2×`startup_timeout` (60); cached otherwise |
@@ -105,6 +106,7 @@ Every refusal is a JSON-RPC error whose message starts with its protocol code an
 | `captain_requests` | none | `{requests: [{id, kind, payload, state, at, answer?, resolved_at?}]}`; `payload` shapes under Supervised captain |
 | `answer_captain` | `request`, then for an approval `decision` (`approve`/`deny`) and `remember` (optional bool), or for a question `answers` ({question id: text}) | `{request, state: "answered"}` |
 | `ack_delivery` | `delivery_id` | `{delivery_id, state: "acknowledged"}` |
+| `snapshot` | none | the read model at `cursors` (see Snapshot) |
 | `subscribe` | `cursors` (optional object: stream name to `{offset, generation}` or a bare offset) | `{session_id, ends}`, then notifications on the same connection |
 | `transcript` | `agent`, `after` or `before` (optional cursors), `limit` (1 to 500, default 200), `incarnation` (optional) | `{agent, provider, files, entries, start, end, more}` |
 | `step` | `agent`, `id`, `incarnation` (optional) | one entry with its whole text |
@@ -307,6 +309,27 @@ Each supervised agent's own protocol reports its usage as a frame, the shape the
 The supervisor keeps the newest frame in `events/<stem>.live-usage.json` and publishes it as `output` with `method: "captain/usage"`.
 `usage` returns, for the captain and every current crew, the native reading (transcript or rollout) with the live frame filling only what it leaves null; the dashboard of a supervised session shows the same, so a pi crew gets a CTX column.
 A Herdr session never reads a live frame.
+
+## Snapshot
+
+`snapshot` is the app's read model: everything it shows, read at once, with the stream cursors to `subscribe` from.
+
+```json
+{"session_id": "...", "at": 1795675819.4, "cursors": {"actions": {"offset": 18342, "generation": "16777232-1789"}, "captain": {...}},
+ "captain": {"state": "idle", "provider": "codex", "transport": "app-server", "model": "gpt-5", "effort": null},
+ "agents": [{"id": "will", "crew": "Will", "provider": "codex", "model": "gpt-5", "effort": null, "incarnation": "<32 hex>", "execution": "supervised", "checkout": "shared", "worktree_id": null, "execution_root": "/path", "status": "started", "state": "working", "source": "supervisor", "detail": "native state"}],
+ "assignments": [{"id": "...", "crew": "Will", "incarnation_id": "...", "state": "working", "task": "...", "paths": [], "actions": [], "verify": null, "question": null, "report": null, "outcome": null, "execution_root": "/path", "worktree_id": null, "reviewed": null, "reviewed_results": null, "active": true}],
+ "mail": [], "deliveries": [], "uncertain_deliveries": [], "prompts": [], "questions": [], "grant_requests": [], "authorizations": [], "captain_requests": [], "results": [], "usage": {...}}
+```
+
+- `captain` is `captain_state` plus provider, transport, model and effort; with no captain running, `state` is null and `provider` is the last one recorded.
+- `agents` holds every crew of the session, dismissed ones included (`status: "dismissed"`, `state` null); `state`, `source` and `detail` are `status`'s evidence-based crew state.
+- `assignments` is every assignment, done ones too, with `active` for the crew's current one; `results` is each isolated result with its `reviewed` record.
+- `mail` is unread mail per crew, `deliveries` the pending `wait --all` projection, `prompts` the user's queued `message_captain` prompts, `questions` what `questions` returns.
+- `grant_requests`, `authorizations` and `captain_requests` hold only open ones (`authorizations` also approved, unspent ones); `usage` is the dashboard's snapshot (`captain dashboard --json`).
+- Cursor rule: `cursors` is taken before the read, at a line boundary, after spooled actions are flushed; the read is repeated while actions land during it, up to 5 times.
+  There is no gap: every action before the cursor is reflected in the snapshot, and `subscribe` from `cursors` delivers every later one.
+  An action after the cursor may repeat state the snapshot already shows, because a writer saves its change before logging it, so the app applies actions idempotently by `id`; each carries an absolute state.
 
 ## Model catalogue
 

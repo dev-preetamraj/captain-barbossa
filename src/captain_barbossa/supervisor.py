@@ -29,6 +29,7 @@ from . import (
     claude_agent,
     codex_app_server,
     config,
+    dashboard,
     do,
     eventlog,
     instructions,
@@ -128,6 +129,8 @@ USAGE_OUTPUT = "captain/usage"
 # How long a device-code sign-in may wait for the user, and the output lines it keeps.
 SIGN_IN_TIMEOUT = 900
 SIGN_IN_LINES = 20
+# Reads `snapshot` repeats while actions land during them before it settles for no gap.
+SNAPSHOT_TRIES = 5
 # What a crew reads when the user denies its grant request without saying why.
 DENIED_REASON = "The user denied this in the app without a reason; do not retry it."
 
@@ -631,6 +634,7 @@ class CaptainRun:
     mine: set = field(default_factory=set)
     reported: set = field(default_factory=set)
     asks: dict = field(default_factory=dict)
+    effort: str | None = None
 
 
 def live(link):
@@ -910,7 +914,9 @@ def start_captain(supervisor, params):
             captain=True,
             thread=native,
         )
-        run = supervisor.captain = CaptainRun(link, provider, transport)
+        run = supervisor.captain = CaptainRun(
+            link, provider, transport, effort=params.get("effort")
+        )
     link.relay = lambda event: captain_relay(supervisor, run, event)
     link.ended = lambda event: captain_turn_ended(supervisor, run, event)
     link.notice = lambda key, summary: attention(supervisor, CAPTAIN, summary)
@@ -1557,6 +1563,109 @@ def sessions(supervisor, params):
     return catalog(Path(supervisor.session.meta["project"]))
 
 
+def snapshot(supervisor, params):
+    """The app's read model at one cursor per stream; `subscribe` from `cursors` for the rest."""
+    for _ in range(SNAPSHOT_TRIES):
+        cursors = stream_ends(supervisor)
+        view = read_model(supervisor)
+        # An action landing during the read retries, so the cursor sits after what was read.
+        if stream_ends(supervisor).get("actions") == cursors.get("actions"):
+            break
+    reply = {"session_id": supervisor.session.meta["id"], "at": time.time(), "cursors": cursors}
+    return eventlog.redact({**reply, **view}, supervisor.literals)
+
+
+def read_model(supervisor):
+    current = current_session(supervisor)
+    directory = current.directory
+    path = directory / "protocol.json"
+    state = store.read_json(path) if path.exists() else {"active": {}, "assignments": {}}
+    members = [crew for crew in Crew.members(current) if not crew.is_dismissed]
+    run = supervisor.captain
+    with supervision.acting_as(supervisor.token):
+        mail = [
+            {"crew": crew.crew_id, **message}
+            for crew in members
+            for message in protocol.unread(crew)
+        ]
+        pending = protocol.wait_all(current, 0)["deliveries"]
+    assignments = list(state["assignments"].values())
+    active = set(state["active"].values())
+    return {
+        "captain": {
+            **captain_state(supervisor, {}),
+            "provider": run.provider if run else _captain_record(directory).get("provider"),
+            "transport": run.transport if run else None,
+            "model": run.link.model if run else None,
+            "effort": run.effort if run else None,
+        },
+        "agents": [agent_row(supervisor, crew) for crew in Crew.members(current)],
+        "assignments": [assignment_row(row, row["id"] in active) for row in assignments],
+        "mail": mail,
+        "deliveries": pending,
+        "uncertain_deliveries": uncertain_deliveries(supervisor, {})["deliveries"],
+        "prompts": [
+            row for row in state.get("captain_messages", ()) if row["delivered_at"] is None
+        ],
+        "questions": questions(supervisor)["questions"],
+        "grant_requests": [
+            request
+            for row in assignments
+            if row["id"] in active
+            for request in row.get("grant_requests", ())
+            if request["state"] == "open"
+        ],
+        "authorizations": [
+            row for row in state.get("authorizations", ()) if row["state"] in ("open", "approved")
+        ],
+        "captain_requests": [
+            row for row in state.get("captain_requests", ()) if row["state"] == "open"
+        ],
+        "results": [result_row(manifest, state) for manifest in results.inventory(current)],
+        "usage": dashboard.snapshot(current),
+    }
+
+
+def agent_row(supervisor, crew):
+    record, found = crew.record, None
+    if not crew.is_dismissed:
+        with supervision.acting_as(supervisor.token):
+            found = crew.current_state()
+    return {
+        "id": crew.crew_id,
+        "crew": crew.display_name,
+        "provider": record.get("provider"),
+        "model": record.get("model"),
+        "effort": record.get("effort"),
+        "incarnation": record.get("incarnation_id"),
+        "execution": record.get("execution", "foreground"),
+        "checkout": record.get("checkout"),
+        "worktree_id": record.get("worktree_id"),
+        "execution_root": record.get("execution_root"),
+        "status": record.get("status"),
+        "state": found.state if found else None,
+        "source": found.source if found else None,
+        "detail": found.detail if found else None,
+    }
+
+
+def assignment_row(row, active):
+    keys = ("id", "crew", "incarnation_id", "state", "paths", "actions", "verify", "question")
+    keys += ("report", "outcome", "execution_root", "worktree_id", "reviewed", "reviewed_results")
+    return {
+        **{key: row.get(key) for key in keys},
+        "task": row.get("original_task"),
+        "active": active,
+    }
+
+
+def result_row(manifest, state):
+    keys = ("id", "worktree_id", "crew_id", "incarnation_id", "assignment_id", "provisional")
+    assignment = state["assignments"].get(manifest["assignment_id"]) or {}
+    reviewed = (assignment.get("reviewed_results") or {}).get(manifest["id"])
+    return {**{key: manifest.get(key) for key in (*keys, "unresolved")}, "reviewed": reviewed}
+
+
 def model_list(supervisor, params):
     """The model catalogue of one provider or all, probed from the installed native tools."""
     from . import model_catalogue  # only the app asks; a crew start never pays for it
@@ -1797,6 +1906,7 @@ METHODS = {
     "usage": agent_usage,
     "models": model_list,
     "ack_delivery": ack_delivery,
+    "snapshot": snapshot,
     "resolve_captain_delivery": resolve_captain_delivery,
     "uncertain_deliveries": uncertain_deliveries,
 }
