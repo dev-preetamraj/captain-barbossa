@@ -17,18 +17,20 @@ from home_isolation import SessionCase
 
 from captain_barbossa import (
     config,
+    eventlog,
     jsonrpc,
     sessions,
     store,
     supervision,
     supervisor,
     transcripts,
-    usage,
 )
 from captain_barbossa.runtime import CaptainError
 
 INCARNATION = "b" * 32
 THREAD = "01a2176a-48b1-70c0-a026-b307ee836b13"
+SESSION = "0a1b2c3d-1111-4222-8333-444455556666"
+SECRET = "sk-live-0123456789"
 
 
 def lines(path, records):
@@ -46,6 +48,7 @@ class SupervisedTranscriptTests(SessionCase):
         os.environ.pop(supervision.TOKEN_ENV, None)
         self.current = supervisor.open_session(self.project, None)
         self.native = self.root / "native"
+        os.environ.update(CLAUDE_CONFIG_DIR=str(self.native), CODEX_HOME=str(self.native))
 
     def crew(self, provider, name="will"):
         record = {"id": name, "incarnation_id": INCARNATION, "provider": provider}
@@ -54,10 +57,15 @@ class SupervisedTranscriptTests(SessionCase):
         self.current = self.current._replace(meta=meta)
         return self.current.events(f"{name}-{INCARNATION}")
 
+    def start(self, events, transcript, **fields):
+        event = {"hook_event_name": "SessionStart", "transcript_path": str(transcript)}
+        event.update(session_id=SESSION, incarnation_id=INCARNATION, **fields)
+        lines(events, [event])
+
     def claude(self):
         events = self.crew("claude")
-        transcript = self.native / "projects" / "p" / "s.jsonl"
-        lines(events, [{"hook_event_name": "SessionStart", "transcript_path": str(transcript)}])
+        transcript = self.native / "projects" / "p" / f"{SESSION}.jsonl"
+        self.start(events, transcript)
         lines(
             transcript,
             [
@@ -142,10 +150,14 @@ class SupervisedTranscriptTests(SessionCase):
         first = transcripts.read(self.current, "will", after="0:0", limit=1)
         self.assertEqual(([e["text"] for e in first["entries"]], first["more"]), (["Go."], True))
 
-    def test_a_codex_rollout_is_found_by_its_thread(self):
+    def rollout(self, incarnation=INCARNATION):
         events = self.crew("codex")
-        lines(events, [{"type": "agent-turn-complete", "thread-id": THREAD}])
-        rollout = self.native / "sessions" / "2026" / "11" / "26" / f"rollout-x-{THREAD}.jsonl"
+        notice = {"type": "agent-turn-complete", "thread-id": THREAD}
+        lines(events, [{**notice, "incarnation_id": incarnation}])
+        return self.native / "sessions" / "2026" / "11" / "26" / f"rollout-x-{THREAD}.jsonl"
+
+    def test_a_codex_rollout_is_found_by_its_thread(self):
+        rollout = self.rollout()
         lines(
             rollout,
             [
@@ -211,9 +223,8 @@ class SupervisedTranscriptTests(SessionCase):
                 },
             ],
         )
-        with patch.object(usage, "CODEX_SESSIONS_ROOT", self.native / "sessions"):
-            page = transcripts.read(self.current, "will")
-        self.assertEqual(page["files"], [str(rollout)])
+        page = transcripts.read(self.current, "will")
+        self.assertEqual(page["files"], [str(rollout.resolve())])
         self.assertEqual(
             [(e["role"], e["kind"], e["tool"], e["text"]) for e in page["entries"]],
             [
@@ -310,6 +321,123 @@ class SupervisedTranscriptTests(SessionCase):
                 call()
         self.assertEqual(transcripts.read(self.current, "captain")["entries"], [])
 
+    def named(self, path, **fields):
+        """A Claude crew whose only SessionStart names `path`; the file holds one text record."""
+        events = self.crew("claude")
+        self.start(events, path, **fields)
+        record = {"type": "user", "message": {"role": "user", "content": "secret plans"}}
+        lines(path, [record])
+        return events
+
+    def test_a_transcript_outside_the_native_root_is_never_read(self):
+        stray = self.root / "elsewhere" / f"{SESSION}.jsonl"
+        self.named(stray)
+        page = transcripts.read(self.current, "will")
+        self.assertEqual((page["provider"], page["files"], page["entries"]), (None, [], []))
+
+    def test_a_transcript_not_named_for_its_session_is_never_read(self):
+        projects = self.native / "projects" / "p"
+        other = "0a1b2c3d-1111-4222-8333-999999999999"
+        for name in ("s.jsonl", f"{other}.jsonl"):
+            with self.subTest(name=name):
+                events = self.named(projects / name)
+                self.assertEqual(transcripts.read(self.current, "will")["files"], [])
+                events.unlink()
+
+    def test_events_of_another_incarnation_own_no_transcript(self):
+        path = self.native / "projects" / "p" / f"{SESSION}.jsonl"
+        for fields in ({"incarnation_id": "c" * 32}, {"session_id": "not-a-uuid"}):
+            with self.subTest(fields=fields):
+                events = self.crew("claude")
+                lines(events, [{"transcript_path": str(path), **{**self.event(), **fields}}])
+                lines(path, [{"type": "user", "message": {"role": "user", "content": "x"}}])
+                self.assertEqual(transcripts.read(self.current, "will")["files"], [])
+                events.unlink()
+
+    def event(self):
+        return {"session_id": SESSION, "incarnation_id": INCARNATION}
+
+    def test_a_session_named_by_two_different_paths_is_ambiguous(self):
+        projects = self.native / "projects"
+        events = self.named(projects / "p" / f"{SESSION}.jsonl")
+        self.start(events, projects / "q" / f"{SESSION}.jsonl")
+        self.assertEqual(transcripts.read(self.current, "will")["files"], [])
+
+    def test_a_symlinked_parent_or_file_is_refused_not_followed(self):
+        real = self.root / "real"
+        lines(real / f"{SESSION}.jsonl", [{"type": "user", "message": {"content": "x"}}])
+        projects = self.native / "projects"
+        projects.mkdir(parents=True)
+        (projects / "linked").symlink_to(real)
+        (projects / "file").mkdir()
+        (projects / "file" / f"{SESSION}.jsonl").symlink_to(real / f"{SESSION}.jsonl")
+        for parent in ("linked", "file"):
+            with self.subTest(parent=parent):
+                events = self.crew("claude")
+                self.start(events, projects / parent / f"{SESSION}.jsonl")
+                with self.assertRaisesRegex(CaptainError, r"\[transcript-file\]"):
+                    transcripts.read(self.current, "will")
+                events.unlink()
+
+    def test_a_transcript_reached_through_a_symlinked_config_dir_is_still_read(self):
+        link = self.root / "dotfiles-link"
+        link.symlink_to(self.native.parent)
+        os.environ["CLAUDE_CONFIG_DIR"] = str(link / "native")
+        self.named(link / "native" / "projects" / "p" / f"{SESSION}.jsonl")
+        page = transcripts.read(self.current, "will")
+        self.assertEqual([e["text"] for e in page["entries"]], ["secret plans"])
+
+    def test_a_codex_thread_stamped_by_another_incarnation_is_never_read(self):
+        rollout = self.rollout(incarnation="c" * 32)
+        lines(rollout, [{"type": "session_meta", "payload": {"id": THREAD}}])
+        self.assertEqual(transcripts.read(self.current, "will")["files"], [])
+
+    def test_a_codex_rollout_under_a_symlinked_date_dir_is_refused(self):
+        rollout = self.rollout()
+        real = self.root / "real-year"
+        lines(real / "11" / "26" / rollout.name, [{"type": "session_meta"}])
+        (self.native / "sessions").mkdir(parents=True)
+        (self.native / "sessions" / "2026").symlink_to(real)
+        with self.assertRaisesRegex(CaptainError, r"\[transcript-file\]"):
+            transcripts.read(self.current, "will")
+
+    def test_a_secret_straddling_the_page_cut_is_redacted_before_it_is_clipped(self):
+        os.environ[eventlog.TOKEN_ENV] = SECRET
+        text = "x" * (transcripts.TEXT_CHARS - 5) + SECRET
+        message = {"role": "user", "content": [{"type": "text", "text": text}]}
+        path = self.native / "projects" / "p" / f"{SESSION}.jsonl"
+        self.named(path)
+        lines(path, [{"type": "user", "message": message}])
+        page = transcripts.read(self.current, "will")
+        shown = page["entries"][-1]["text"]
+        self.assertNotIn("sk-", shown)
+        self.assertEqual(len(shown), transcripts.TEXT_CHARS)
+
+    def test_a_secret_straddling_the_step_cut_is_redacted_before_it_is_clipped(self):
+        os.environ[eventlog.TOKEN_ENV] = SECRET
+        text = "x" * (transcripts.STEP_CHARS - 5) + SECRET
+        message = {"role": "user", "content": [{"type": "text", "text": text}]}
+        path = self.native / "projects" / "p" / f"{SESSION}.jsonl"
+        self.named(path)
+        lines(path, [{"type": "user", "message": message}])
+        entry = transcripts.read(self.current, "will")["entries"][-1]
+        whole = transcripts.step(self.current, "will", entry["id"])
+        self.assertNotIn("sk-", whole["text"])
+        self.assertEqual((len(whole["text"]), whole["clipped"]), (transcripts.STEP_CHARS, True))
+
+    def test_structured_tool_arguments_are_redacted_before_they_are_serialized(self):
+        os.environ[eventlog.TOKEN_ENV] = SECRET
+        arguments = {"env": {"password": "hunter2"}, "argv": ["curl", SECRET]}
+        tool = {"type": "tool_use", "id": "t", "name": "Bash", "input": arguments}
+        path = self.native / "projects" / "p" / f"{SESSION}.jsonl"
+        self.named(path)
+        message = {"role": "assistant", "content": [tool]}
+        lines(path, [{"type": "assistant", "message": message}])
+        shown = transcripts.read(self.current, "will")["entries"][-1]["text"]
+        self.assertNotIn("hunter2", shown)
+        self.assertNotIn(SECRET, shown)
+        self.assertEqual(json.loads(shown)["env"], {"password": "[redacted]"})
+
 
 class SupervisorTranscriptMethodTests(SessionCase):
     def setUp(self):
@@ -331,6 +459,7 @@ class SupervisorTranscriptMethodTests(SessionCase):
         self.enterContext(patch.dict(os.environ))
         self.enterContext(contextlib.chdir(self.project))
         os.environ.pop(supervision.TOKEN_ENV, None)
+        os.environ["CLAUDE_CONFIG_DIR"] = str(self.root / "native")
         self.current = supervisor.open_session(self.project, None)
         read_fd, write_fd = os.pipe()
         stopped = threading.Event()
@@ -360,8 +489,9 @@ class SupervisorTranscriptMethodTests(SessionCase):
         with sessions.crew_meta(self.current.directory) as meta:
             meta["crew"]["will"] = record
         events = self.current.events(f"will-{INCARNATION}")
-        transcript = self.root / "native" / "projects" / "p" / "s.jsonl"
-        lines(events, [{"hook_event_name": "SessionStart", "transcript_path": str(transcript)}])
+        transcript = self.root / "native" / "projects" / "p" / f"{SESSION}.jsonl"
+        start = {"hook_event_name": "SessionStart", "transcript_path": str(transcript)}
+        lines(events, [{**start, "session_id": SESSION, "incarnation_id": INCARNATION}])
         tool = {"type": "tool_use", "id": "t", "name": "Login", "input": {"apiKey": "sk-live"}}
         message = {"role": "assistant", "content": [tool]}
         lines(transcript, [{"type": "assistant", "message": message}])

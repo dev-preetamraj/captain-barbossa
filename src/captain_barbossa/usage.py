@@ -26,6 +26,7 @@ JOURNAL_BYTES = 1 << 20  # cap on captain-written incarnation evidence
 # Codex rollout logs, one per thread, named rollout-<stamp>-<thread id>.jsonl.
 CODEX_SESSIONS_ROOT = Path.home() / ".codex" / "sessions"
 _THREAD_ID = re.compile(r"[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}")
+_INCARNATION = re.compile(r"[a-f0-9]{32}")
 
 # Bundled fallback for the Claude context windows, used only when the price cache is
 # cold; LiteLLM's max_input_tokens wins whenever it is warm. A window is a stable fact
@@ -111,7 +112,7 @@ def _owned(manifest):
 
 
 def native_files(events_path):
-    """(provider or None, session files) the native CLI behind an events file wrote, oldest first."""
+    """(provider or None, session files, strict root); with no manifest, only files its events prove owned."""
     manifest = _manifest(events_path)
     if os.path.lexists(manifest):
         owned = _owned(manifest)
@@ -121,11 +122,66 @@ def native_files(events_path):
                 events_path, sessions_root=Path(owned["native_root"]) / "sessions"
             )
             files = [str(rollout)] if rollout else []
-        return owned["provider"], files
-    if files := _transcript_paths(events_path):
-        return "claude", files
-    rollout = _rollout_path(events_path)
-    return ("codex", [str(rollout)]) if rollout else (None, [])
+        return owned["provider"], files, None
+    incarnation = _incarnation(Path(events_path))
+    files, root = _claude_sources(events_path, incarnation)
+    if files:
+        return "claude", files, root
+    alias = _native_home("CODEX_HOME", ".codex") / "sessions"
+    if not alias.is_absolute():
+        return None, [], None
+    root = alias.resolve()
+    rollout = _rollout_path(
+        events_path,
+        sessions_root=root,
+        accept=lambda record: record.get("incarnation_id") == incarnation,
+    )
+    return ("codex", [str(rollout)], root) if rollout else (None, [], None)
+
+
+def _incarnation(events_path):
+    """The incarnation an events file is named for, or None for the captain and bare crew ids."""
+    head, _, tail = events_path.stem.rpartition("-")
+    return tail if head and _INCARNATION.fullmatch(tail) else None
+
+
+def _native_home(variable, default):
+    return Path(os.environ.get(variable) or Path.home() / default).expanduser()
+
+
+def _claude_sources(events_path, incarnation):
+    """(transcripts, root) this incarnation's events name as <session id>.jsonl; an ambiguous session is dropped."""
+    alias = _native_home("CLAUDE_CONFIG_DIR", ".claude") / "projects"
+    if not alias.is_absolute():
+        return [], None
+    root, named = alias.resolve(), {}
+    for record in records(events_path):
+        session, path = record.get("session_id"), record.get("transcript_path")
+        if (
+            record.get("provider") in {None, "claude"}
+            and record.get("incarnation_id") == incarnation
+            and isinstance(session, str)
+            and _THREAD_ID.fullmatch(session)
+            and isinstance(path, str)
+        ):
+            named.setdefault(session, {})[path] = None
+    files = []
+    for session, paths in named.items():
+        owned = _under(root, alias, next(iter(paths))) if len(paths) == 1 else None
+        if owned is not None and owned.name == f"{session}.jsonl":
+            files.append(str(owned))
+    return files, root
+
+
+def _under(root, alias, value):
+    """`value` re-based onto the resolved `root` when it sits under it or its alias, else None."""
+    path = Path(value)
+    if not path.is_absolute() or "." in path.parts or ".." in path.parts:
+        return None
+    for base in (root, alias):
+        if path.is_relative_to(base):
+            return root / path.relative_to(base)
+    return None
 
 
 def freeze(events_path, incarnation, *, provider=None, transcripts=None, native_root=None):
@@ -402,7 +458,7 @@ def _epoch(value):
         return None
 
 
-def _rollout_path(events_path, *, sessions_root=None):
+def _rollout_path(events_path, *, sessions_root=None, accept=None):
     """The rollout log for the newest notification naming a thread that has one.
 
     Codex notifies for its own title-generation turns too, but those run on a throwaway
@@ -412,6 +468,8 @@ def _rollout_path(events_path, *, sessions_root=None):
     for record in reversed(list(records(events_path))):
         thread = record.get("thread-id")
         if not isinstance(thread, str) or not _THREAD_ID.fullmatch(thread):
+            continue
+        if accept is not None and not accept(record):
             continue
         try:
             root = CODEX_SESSIONS_ROOT if sessions_root is None else sessions_root

@@ -10,7 +10,7 @@ import stat
 from collections import deque
 from pathlib import Path
 
-from . import usage
+from . import eventlog, safe_read, usage
 from .runtime import CaptainError
 
 # Characters of an entry's text in a page; `step` returns its whole block up to STEP_CHARS.
@@ -48,7 +48,9 @@ def _text(value):
 
 
 def _arguments(value):
-    return value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+    if isinstance(value, str):
+        return value
+    return json.dumps(eventlog.redact(value, eventlog.known_secrets()), ensure_ascii=False)
 
 
 def _block(role, kind, text, tool=None, call=None):
@@ -119,20 +121,29 @@ def _pi(record):
 PARSERS = {"claude": _claude, "codex": _codex, "pi": _pi}
 
 
-def _open(path):
-    """A native session file opened for reading: regular, never through a symlink."""
-    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+def _open(path, root=None):
+    """A native session file opened for reading: regular, and with a root, no symlink below it."""
+    try:
+        if root is None:
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        else:
+            with safe_read._open(root, path) as walked:
+                fd = os.dup(walked)
+    except FileNotFoundError:
+        raise
+    except OSError as exc:
+        raise CaptainError(f"[transcript-file] Cannot open {path}: {exc.strerror}") from exc
     if not stat.S_ISREG(os.fstat(fd).st_mode):
         os.close(fd)
         raise CaptainError(f"[transcript-file] Not a regular file: {path}")
     return os.fdopen(fd, "rb")
 
 
-def _records(files, start=(0, 0)):
+def _records(files, root, start=(0, 0)):
     """(position, end, record) for each complete JSON object line at or after `start`."""
     for index in range(start[0], len(files)):
         try:
-            file = _open(files[index])
+            file = _open(files[index], root)
         except FileNotFoundError:
             continue  # cleaned up with the crew's native history
         with file:
@@ -150,17 +161,23 @@ def _records(files, start=(0, 0)):
                     yield position, (index, offset), record
 
 
+def _clip(text, limit):
+    """(text cut to `limit`, whether it was cut), redacted whole first so no secret is split."""
+    text = eventlog.redact_text(text, eventlog.known_secrets())
+    return text[:limit], len(text) > limit
+
+
 def _entries(parse, position, record):
     entries = []
     for number, block in enumerate(parse(record)):
-        text = block["text"]
+        text, clipped = _clip(block["text"], TEXT_CHARS)
         entries.append(
             {
                 "id": f"{position[0]}:{position[1]}:{number}",
                 "at": record.get("timestamp"),
                 **block,
-                "text": text[:TEXT_CHARS],
-                "clipped": len(text) > TEXT_CHARS,
+                "text": text,
+                "clipped": clipped,
             }
         )
     return entries
@@ -178,8 +195,8 @@ def _position(value, name):
 
 
 def _sources(session, agent, incarnation):
-    provider, files = usage.native_files(events_path(session, agent, incarnation))
-    return provider, [Path(file) for file in files], PARSERS.get(provider)
+    provider, files, root = usage.native_files(events_path(session, agent, incarnation))
+    return provider, [Path(file) for file in files], root, PARSERS.get(provider)
 
 
 def read(session, agent, *, after=None, before=None, limit=DEFAULT_LIMIT, incarnation=None):
@@ -190,11 +207,11 @@ def read(session, agent, *, after=None, before=None, limit=DEFAULT_LIMIT, incarn
         raise CaptainError("[transcript-range] Pass after or before, not both.")
     first = _position(after, "after") if after is not None else (0, 0)
     stop = _position(before, "before") if before is not None else None
-    provider, files, parse = _sources(session, agent, incarnation)
+    provider, files, root, parse = _sources(session, agent, incarnation)
     pages, end, more = deque(), first, False
     if parse is not None:
         count = 0
-        for position, finish, record in _records(files, first):
+        for position, finish, record in _records(files, root, first):
             if stop is not None and position >= stop:
                 break
             found = _entries(parse, position, record)
@@ -225,11 +242,11 @@ def step(session, agent, entry, *, incarnation=None):
     if match is None:
         raise CaptainError("[transcript-entry] An entry id is FILE:OFFSET:BLOCK.")
     index, offset, number = (int(group) for group in match.groups())
-    _, files, parse = _sources(session, agent, incarnation)
+    _, files, root, parse = _sources(session, agent, incarnation)
     if parse is None or index >= len(files):
         raise CaptainError(f"[transcript-entry] {agent} has no entry {entry}.")
     try:
-        file = _open(files[index])
+        file = _open(files[index], root)
     except FileNotFoundError as exc:
         raise CaptainError(f"[transcript-gone] {files[index]} no longer exists.") from exc
     with file:
@@ -246,11 +263,11 @@ def step(session, agent, entry, *, incarnation=None):
     blocks = parse(record) if isinstance(record, dict) else []
     if number >= len(blocks):
         raise CaptainError(f"[transcript-entry] {agent} has no entry {entry}.")
-    text = blocks[number]["text"]
+    text, clipped = _clip(blocks[number]["text"], STEP_CHARS)
     return {
         "id": entry,
         "at": record.get("timestamp"),
         **blocks[number],
-        "text": text[:STEP_CHARS],
-        "clipped": len(text) > STEP_CHARS,
+        "text": text,
+        "clipped": clipped,
     }
