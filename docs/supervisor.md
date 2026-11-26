@@ -64,8 +64,13 @@ Every refusal is a JSON-RPC error whose message starts with its protocol code an
 | `interrupt_all` | `reason` (optional) | `{crews: [{crew, outcome, detail?}, ...]}`; outcome `interrupted`, `idle`, `error` or `pending` |
 | `set_model` | `crew`, `model` | `{crew, model, applies}`; applies `now` or `next-turn` |
 | `resolve_grant` | `request`, `decision` (`grant` or `deny`), `reason` (required to deny) | `{request, crew, state, message_id}`; state `granted` or `denied` |
-| `hello` | none | `{protocol, version, session_id, project, capabilities, methods, notifications, commands}` |
-| `command` | `argv` (list of strings, verb first) | `{exit, stdout, stderr}`, plus `truncated: true` when either output passed 1 MiB |
+| `hello` | none | `{protocol, version, session_id, project, capabilities, methods, notifications, commands, authorized_commands}` |
+| `command` | `argv` (list of strings, verb first) | `{exit, stdout, stderr, result?, refusal?, truncated?}`; for `do` and `quiet`, `{authorization}` |
+| `resolve_authorization` | `request`, `decision` (`approve` or `deny`), `reason` (optional) | `{request, state, run?}` |
+| `authorizations` | none | `{authorizations: [request, ...]}` |
+| `questions` | none | `{questions: [{crew, assignment, question, text, grant_request, delivered_at, escalated, waiting_on}]}` |
+| `diff` | `assignment` | `{assignment, baseline, current, root, paths, files, diff, truncated}` |
+| `mark_reviewed` | `assignment`, `result` (optional), `note` (optional) | `{assignment, result, at, note}` |
 | `subscribe` | `cursors` (optional object: stream name to `{offset, generation}` or a bare offset) | `{session_id, cursors}`, then notifications on the same connection |
 | `transcript` | `agent`, `after` or `before` (optional cursors), `limit` (1 to 500, default 200), `incarnation` (optional) | `{agent, provider, files, entries, start, end, more}` |
 | `step` | `agent`, `id`, `incarnation` (optional) | one entry with its whole text |
@@ -73,7 +78,7 @@ Every refusal is a JSON-RPC error whose message starts with its protocol code an
 | `sessions` | none | the session list (see Session hub) |
 
 The CLI calls `start`, `ring`, `stop`, `state`, `interrupt` and `set_model` itself, from `crew`, `tell`, `wait`, `dismiss`, `status` and `model`.
-An app calls `hello`, `command`, `subscribe`, `transcript`, `step`, `rename`, `sessions`, `interrupt_all`, `resolve_grant` and `shutdown` directly.
+An app calls every other method directly.
 
 - `start` refuses a lifetime that is not the crew's own recorded launch, a crew not marked `"execution": "supervised"`, a provider with no supervised transport, and any start once `shutdown` began.
   It refuses with `[codex-hooks-missing]` when Codex does not load all four captain hooks (SessionStart, Stop, PreToolUse, PermissionRequest; Codex 0.164.0 or newer), and with `[codex-hooks-untrusted]` when any of them is untrusted, modified or disabled.
@@ -82,7 +87,7 @@ An app calls `hello`, `command`, `subscribe`, `transcript`, `step`, `rename`, `s
 - `ring` with a `message_id` Codex already accepted lands again without starting a second turn.
   A `turn/start` Codex never answered reports `"delivery unconfirmed"`: held, never bounced, and settled by the next turn notice.
 
-Refusal codes by method: `supervisor-params` (any), `supervisor-crew`, `supervisor-transport`, `supervisor-closing`, `supervisor-startup`, `codex-hooks-missing`, `codex-hooks-untrusted`, `claude-sdk-missing`, `claude-start` (start), `grant-request-unknown`, `grant-request-closed`, `grant-request-reason`, `grant-request-decision`, `grant-request-unsupported` (resolve_grant), `command-refused`, `command-timeout`, `command-failed` (command), `transcript-agent`, `transcript-range`, `transcript-entry`, `transcript-file`, `transcript-gone` (transcript, step), `session-name` (rename).
+Refusal codes by method: `supervisor-params` (any), `supervisor-crew`, `supervisor-transport`, `supervisor-closing`, `supervisor-startup`, `codex-hooks-missing`, `codex-hooks-untrusted`, `claude-sdk-missing`, `claude-start` (start), `grant-request-unknown`, `grant-request-closed`, `grant-request-reason`, `grant-request-decision`, `grant-request-unsupported` (resolve_grant), `command-refused`, `command-timeout`, `command-failed` (command), `transcript-agent`, `transcript-range`, `transcript-entry`, `transcript-file`, `transcript-gone` (transcript, step), `session-name` (rename), `authorization-argv` (command), `authorization-unknown`, `authorization-closed`, `authorization-decision` (resolve_authorization), `diff-assignment`, `diff-no-baseline`, `diff-git` (diff), `review-assignment`, `review-no-report`, `review-result` (mark_reviewed).
 
 ### hello
 
@@ -102,9 +107,10 @@ Refusal codes by method: `supervisor-params` (any), `supervisor-crew`, `supervis
 ### command
 
 `argv[0]` must be one of `crew`, `assign`, `tell`, `answer`, `grant`, `interrupt`, `model`, `wait`, `status`, `dismiss`, `recover`, `memory`, `result`, `worktree`, `dashboard` (only as `dashboard --once`) or `inspect`.
-`do` and `quiet` stay out until the app has an authorization flow.
+`do` and `quiet` never run from `command` alone: they open an authorization request (see Captain authorization).
 The verb runs as `python -m captain_barbossa --session <id> ARGV...` in the project, as the captain: crew identity variables are dropped, `CAPTAIN_SESSION` and the supervisor token are set, stdin is empty.
 The CLI stays the only writer of captain state, and the reply is the verb's own exit code and output; a non-zero exit is a result, not a refusal.
+The reply is also typed, so a client never parses CLI text: on exit 0, stdout that is JSON comes back parsed as `result`; on any other exit, `refusal` is `{code, message}`, with the protocol code found in the CLI's error (`captain-error` when it names none).
 Each verb has its own deadline (`supervisor.COMMANDS`: 30 to 180 seconds, `wait` 600); past it the process group is killed and the call is refused with `[command-timeout]`.
 Both pipes are drained as the verb runs and kept to 1 MiB plus a 4 KiB redaction margin each; the rest is read and dropped.
 A client sets its own read deadline above the verb's, and passes `wait --timeout` below 600.
@@ -147,12 +153,47 @@ A Herdr session writes no action log and reads nothing extra to decide that: cal
 | `recruit` | first assignment of a crew incarnation | `task, paths, actions, verify, handoff` |
 | `assign` | a handoff to the same incarnation | `task, paths, actions, verify, handoff` |
 | `mail` | `crew`, `assign`, `tell`, `answer`, resolve_grant, delivery hooks, `inbox` | `message, state` (`sent`, `read`, `bounced`), plus `mail_kind, question, text` when sent and `reason` when bounced |
-| `question` | `ask` | `question, state: "asked", text, request` (grant request id or null) |
+| `question` | `ask`, supervisor | `question, state: "asked", text, request` (grant request id or null); `state: "routed", waiting_on` when its waitingOn changes |
 | `grant` | `grant`, `ask` after a gate denial, resolve_grant | `state` (`requested`, `granted`, `denied`), `command, request`, plus `tool, cwd, code, category, question` when requested and `reason` when denied |
 | `report` | `done` | `report, verification` |
 | `lifecycle` | supervisor and `wait` | `state` (`started`, `failed`, `stopped`, `retained`, `pending`, `exited`, `lost`), `detail` |
+| `authorization` | `captain do`, `command`, resolve_authorization (crew is `captain`, assignment null) | `request, state` (`open`, `approved`, `denied`, `spent`), plus `origin, argv, command, category` when opened and `reason` when decided |
+| `review` | mark_reviewed | `result` (null for the report), `note` |
 
 Lines are capped at 64 KiB; an oversized action drops its largest payload fields and keeps its identity, with `payload_truncated: true`.
+
+## Captain authorization
+
+In a supervised session, `captain do` and `quiet` are gated by requests the user resolves in the app, recorded in `protocol.json` under `authorizations`.
+A Herdr session is unchanged and reads or writes nothing for this.
+
+```json
+{"id": "<32 hex>", "origin": "captain", "argv": null, "command": {"do_command": "push"}, "category": "outward", "state": "open", "at": 1795675819.4}
+```
+
+- `category` is `outward` (`push`, `fetch`, `pull`), `destructive` (`run`: a Makefile recipe can do anything) or `local` (`commit`, `branch`, `switch`, `quiet`).
+- The captain's own `captain do` of an outward or destructive verb with no approved request opens one (or finds the open one for the same command) and is refused with `[authorization-required]`; it runs once the user approves, on the captain's rerun of the same command.
+  A local verb runs as before.
+- Through `command`, every `do` and `quiet` argv, local ones too, only opens a request (origin `app`) and returns `{authorization: request}`.
+  Approving it with `resolve_authorization` runs it at once as the captain, with `CAPTAIN_AUTHORIZATION` naming the request, and the reply carries the run's typed `command` result as `run`.
+- An approval authorizes exactly one run of exactly that command (`command` holds the parsed fields), is spent by it, and expires unspent after 15 minutes; a denial is final.
+- Every request and decision is an `authorization` protocol action, so a subscribed app shows the card as soon as the request opens.
+
+## Questions: waitingOn
+
+A supervised crew's question waits on the captain first.
+It moves to the human, and stays there, once it is escalated (unanswered through its re-ask), or once the captain has received it (acknowledged the `asked` delivery) and then ended a turn without answering it.
+The supervisor decides this from the delivery acknowledgement (`delivered_at`, set when `wait` acks the question) and the captain's own turn-end hook events, on each subscription projection and drain tick and on `questions`.
+Each change is recorded as the question's `waiting_on` in `protocol.json` and as a `question` action with `state: "routed"`.
+Answering is unchanged: `answer`, through `command`.
+
+## Review: per-assignment diff and reviewed state
+
+- When a supervised assignment begins, `protocol.begin` records `baseline`: a Git tree id of the whole working tree (tracked, changed and untracked, ignores respected), built in a scratch index so the real index never changes.
+  A worktree crew's baseline is taken in its own worktree; a Herdr assignment takes none.
+- `diff` snapshots the tree again and returns `git diff baseline current` limited to the assignment's owned and claimed paths inside the checkout, so another crew's edits and earlier uncommitted work stay out.
+  `files` is the numstat (`added`/`deleted` null for binary); `diff` is cut at 1 MiB with `truncated: true`.
+- `mark_reviewed` records `reviewed: {at, note}` on the assignment for its report, or `reviewed_results[result]` for one isolated result of it, and logs a `review` action; the CLI reads both from `protocol.json`.
 
 ## Session hub
 
@@ -225,7 +266,7 @@ A supervised crew whose native CLI exits without a report is closed as lost with
 ## Redaction
 
 Every notification, every `command`, `transcript` and `step` reply and every action log line passes one redaction: a value under a key ending, case, dash and underscore aside, in `apikey`, `secret`, `password`, `authorization` or `token` becomes `"[redacted]"`, and the supervisor token is replaced wherever it appears.
-Inside strings, a serialized pair such as `"apiKey": "..."` is redacted too, including one cut off at the end of the text.
+Inside strings, a serialized secret-named key's value is redacted too, whatever its JSON type (string, number, boolean, null, array or object), including one cut off at the end of the text.
 Counts such as `input_tokens` are kept.
 `command` output is redacted before it is clipped, so a secret on the 1 MiB boundary never shows a prefix.
 The action log redacts the token from the writer's environment, and in the supervisor its own token.

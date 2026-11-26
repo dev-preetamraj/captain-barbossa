@@ -83,8 +83,8 @@ class SupervisorCommandWhitelistTests(SessionCase):
 
     def test_only_whitelisted_verbs_run(self):
         for argv, code in (
-            (["do", "push"], "command-refused"),
-            (["quiet", "status"], "command-refused"),
+            (["do", "force-push"], "authorization-argv"),
+            (["quiet", "status"], "authorization-argv"),
             (["supervise"], "command-refused"),
             (["focus", "will"], "command-refused"),
             (["dashboard"], "command-refused"),

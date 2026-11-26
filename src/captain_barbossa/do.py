@@ -8,14 +8,17 @@ Every run is recorded before it is reported, because work with no pane keeps the
 watch-your-crew rule only by being reviewable afterwards.
 """
 
+import argparse
 import json
 import os
 import re
 import sys
 import time
 from pathlib import Path
+from uuid import uuid4
 
 from . import config, inspection, protocol
+from .eventlog import record_action
 from .models import PROVIDERS, headless_argv, headless_report, resolve_model
 from .processes import TARGET, TIMEOUT, capture, makefile_targets
 from .runtime import CaptainError, check_text, executable, inside_project
@@ -31,6 +34,15 @@ BRANCH = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]*")
 # A provider without one would need its own list here, and the refusal below is for it.
 # The prompt below must not restate that gate: a codex turn reads through the shell alone,
 # so telling it not to run commands leaves it nothing to read with and it refuses the task.
+# In a supervised session these verbs leave the machine or run arbitrary recipes, so each run
+# needs the user's approved authorization request; the rest need one only through the app.
+CATEGORIES = {"push": "outward", "fetch": "outward", "pull": "outward", "run": "destructive"}
+# Set by the supervisor on the one run an approved request authorizes.
+AUTHORIZATION_ENV = "CAPTAIN_AUTHORIZATION"
+# An approval unspent this long expires, so a stale yes never authorizes a later run.
+APPROVAL_TTL = 900
+FIELDS = ("do_command", "message", "path", "name", "target", "task", "diff", "write")
+FIELDS += ("read", "model", "timeout")
 QUIET_PROMPT = (
     "You are a one-shot agent for Captain Barbossa: do the task and finish. Nobody is "
     "watching, so there is nobody to ask and no pane to open; read whatever the task needs "
@@ -305,9 +317,149 @@ def _commit(args, root, session_directory):
         return f"Committed {head} on {_branch(root)}.", output
 
 
+def parse(argv):
+    """A `do` or `quiet` argv parsed exactly as the CLI parses it."""
+
+    class Parser(argparse.ArgumentParser):
+        def error(self, message):
+            raise CaptainError(f"[authorization-argv] {message}")
+
+    parser = Parser(prog="captain", add_help=False)
+    add_arguments(parser.add_subparsers(dest="command", parser_class=Parser))
+    if not argv or argv[0] not in ("do", "quiet"):
+        raise CaptainError("[authorization-argv] Only do and quiet need an authorization.")
+    return parser.parse_args(argv)
+
+
+def command_of(args):
+    """The fields that make two runs the same command, in a fixed order."""
+    return {field: getattr(args, field) for field in FIELDS if hasattr(args, field)}
+
+
+def category(args):
+    return CATEGORIES.get(args.do_command, "local")
+
+
+def _expire(rows, now):
+    for row in rows:
+        if row["state"] == "approved" and now - row["resolved_at"] > APPROVAL_TTL:
+            row["state"] = "expired"
+
+
+def _log(session_directory, row, **fields):
+    record_action(
+        session_directory,
+        "authorization",
+        "captain",
+        None,
+        supervised=True,
+        request=row["id"],
+        state=row["state"],
+        **fields,
+    )
+
+
+def request_authorization(session_directory, args, origin, argv=None):
+    """The open or approved request for this exact command, else a new open one."""
+    wanted = command_of(args)
+    with protocol.checkpoint(session_directory) as state:
+        rows = state.setdefault("authorizations", [])
+        _expire(rows, time.time())
+        found = next(
+            (
+                row
+                for row in rows
+                if row["command"] == wanted and row["state"] in ("open", "approved")
+            ),
+            None,
+        )
+        if found is not None:
+            return dict(found)
+        row = {
+            "id": uuid4().hex,
+            "origin": origin,
+            "argv": argv,
+            "command": wanted,
+            "category": category(args),
+            "state": "open",
+            "at": time.time(),
+        }
+        rows.append(row)
+    _log(session_directory, row, origin=origin, argv=argv, command=wanted, category=row["category"])
+    return dict(row)
+
+
+def resolve_authorization(session_directory, request_id, decision, reason=None):
+    """Approve an open request for one run, or deny it."""
+    if decision not in ("approve", "deny"):
+        raise CaptainError("[authorization-decision] Decide approve or deny.")
+    if reason is not None:
+        check_text(reason, "reason")
+    with protocol.checkpoint(session_directory) as state:
+        rows = state.get("authorizations", [])
+        _expire(rows, time.time())
+        row = next((row for row in rows if row["id"] == request_id), None)
+        if row is None:
+            raise CaptainError(f"[authorization-unknown] No authorization request {request_id}.")
+        if row["state"] != "open":
+            raise CaptainError(f"[authorization-closed] Request {request_id} is {row['state']}.")
+        row.update(
+            state="approved" if decision == "approve" else "denied",
+            reason=reason,
+            resolved_at=time.time(),
+        )
+        row = dict(row)
+    _log(session_directory, row, reason=reason)
+    return row
+
+
+def _spend(session_directory, args, request_id):
+    """Spend the approved request for this exact command (the named one when given), or None."""
+    wanted = command_of(args)
+    with protocol.checkpoint(session_directory) as state:
+        rows = state.get("authorizations", [])
+        _expire(rows, time.time())
+        row = next(
+            (
+                row
+                for row in rows
+                if row["state"] == "approved"
+                and row["command"] == wanted
+                and request_id in (None, row["id"])
+            ),
+            None,
+        )
+        if row is None:
+            return None
+        row.update(state="spent", spent_at=time.time())
+        row = dict(row)
+    _log(session_directory, row)
+    return row
+
+
+def authorize(args, session_directory):
+    """Refuse a supervised run that needs the user's approval and has none to spend."""
+    named = os.environ.get(AUTHORIZATION_ENV)
+    if not named and category(args) == "local":
+        return
+    if _spend(session_directory, args, named):
+        return
+    if named:
+        raise CaptainError(
+            f"[authorization-required] Request {named} is not an approved request for this command."
+        )
+    row = request_authorization(session_directory, args, "captain")
+    raise CaptainError(
+        f"[authorization-required] `{args.do_command}` is {row['category']}: the user must "
+        f"approve request {row['id']} in the app. Run the same command again once it is approved."
+    )
+
+
 def run(args, session_directory, project, meta=None):
     """Dispatch one `do` action; record a refusal once unless the run already was."""
     try:
+        if (meta or {}).get("transport") == "supervisor":
+            authorize(args, session_directory)
         return _dispatch(args, session_directory, project, meta)
     except KeyboardInterrupt:
         command = ["captain", "do", args.do_command]

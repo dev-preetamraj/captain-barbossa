@@ -1,11 +1,14 @@
 """Explicit assignment state and acknowledged delivery, local to one session."""
 
+import contextlib
 import hashlib
 import json
 import os
 import re
 import shlex
+import shutil
 import subprocess
+import tempfile
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -87,6 +90,9 @@ PLACEHOLDER = re.compile(
 )
 PATH_PLACEHOLDER = re.compile(r"\b(?:TODO|TBD|FIXME)\b|<[^<>]+>|\{\{[^{}]+\}\}", re.I)
 GIT_TIMEOUT = 5
+# A whole-tree snapshot hashes every changed file, so it gets longer than a status read.
+SNAPSHOT_TIMEOUT = 60
+DIFF_CHARS = 1024 * 1024
 # Enough of a --verify run's output to see why it failed; the full log is on disk.
 VERIFY_LINES = 15
 VERIFY_MARK = "[verify]"
@@ -260,6 +266,8 @@ def begin(
     if set(actions) - set(ACTIONS):
         raise CaptainError("Unknown assignment action.")
     require_current(crew)
+    # Taken before the locks, so a slow snapshot never holds up another recruit.
+    baseline = snapshot(execution_root) if supervised(crew) else None
     # One lock for the project, whichever root a session lives in.
     with (
         lock(state_storage(project) / "allocation.lock"),
@@ -336,6 +344,7 @@ def begin(
         if supervised(crew):
             # Read back by receipt, which a delivery hook calls with no session metadata.
             assignment["supervised"] = True
+            assignment["baseline"] = baseline
         state["assignments"][assignment["id"]] = assignment
         state["active"][crew.crew_id] = assignment["id"]
     record_action(
@@ -356,6 +365,68 @@ def begin(
 def supervised(crew):
     """Whether the crew's session logs protocol actions, from metadata already loaded."""
     return crew.session.meta.get("transport") == "supervisor"
+
+
+def waiting_on(question, captain_idle_at):
+    """`captain` until the question is escalated, or the captain ended a turn after receiving it."""
+    if question.get("waiting_on") == "human" or question.get("escalated"):
+        return "human"
+    delivered = question.get("delivered_at")
+    if delivered is not None and captain_idle_at is not None and captain_idle_at > delivered:
+        return "human"
+    return "captain"
+
+
+def route_questions(directory, routes):
+    """Record each question's new waitingOn; `routes` maps (crew id, question id) to it."""
+    moved = []
+    with checkpoint(directory) as state:
+        for (crew_id, question_id), target in routes.items():
+            assignment = state["assignments"].get(state["active"].get(crew_id))
+            question = assignment and assignment["question"]
+            if question and question["id"] == question_id and question.get("waiting_on") != target:
+                question["waiting_on"] = target
+                moved.append((crew_id, assignment["id"], question_id, target))
+    for crew_id, assignment_id, question_id, target in moved:
+        record_action(
+            directory,
+            "question",
+            crew_id,
+            assignment_id,
+            supervised=True,
+            question=question_id,
+            state="routed",
+            waiting_on=target,
+        )
+    return moved
+
+
+def mark_reviewed(directory, assignment_id, result_id=None, note=None):
+    """Record that a report, or one isolated result of it, was reviewed."""
+    if note is not None:
+        check_text(note, "note")
+    with checkpoint(directory) as state:
+        assignment = state["assignments"].get(assignment_id)
+        if assignment is None:
+            raise CaptainError(f"[review-assignment] No assignment {assignment_id}.")
+        if result_id is None and not assignment.get("report"):
+            raise CaptainError(f"[review-no-report] Assignment {assignment_id} has no report yet.")
+        mark = {"at": time.time(), "note": note}
+        if result_id is None:
+            assignment["reviewed"] = mark
+        else:
+            assignment.setdefault("reviewed_results", {})[result_id] = mark
+        crew, logged = assignment.get("crew"), bool(assignment.get("supervised"))
+    record_action(
+        directory,
+        "review",
+        crew,
+        assignment_id,
+        supervised=logged,
+        result=result_id,
+        note=note,
+    )
+    return {"assignment": assignment_id, "result": result_id, **mark}
 
 
 def notice(assignment, status, summary):
@@ -400,22 +471,91 @@ def check_action(assignment, project, action, paths, held=lambda paths: False):
             raise CaptainError(f"[outside-grant] Path is not owned by this assignment: {path}")
 
 
-def _git(project, *args):
-    """Read-only git in the project, or None when there is no readable work tree."""
+def _git(project, *args, timeout=GIT_TIMEOUT, index=None):
+    """Git in the project, or None when there is no readable work tree; `index` swaps the index."""
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
     env["GIT_OPTIONAL_LOCKS"] = "0"
+    if index is not None:
+        env["GIT_INDEX_FILE"] = str(index)
     try:
         result = subprocess.run(
             ["git", "-C", str(project), *args],
             capture_output=True,
             text=True,
-            timeout=GIT_TIMEOUT,
+            timeout=timeout,
             stdin=subprocess.DEVNULL,
             env=env,
         )
     except (OSError, subprocess.TimeoutExpired):
         return None
     return result
+
+
+def snapshot(root):
+    """A tree id of the whole working tree as it stands, built in a scratch index; None off Git."""
+    found = _git(root, "rev-parse", "--path-format=absolute", "--git-path", "index")
+    if found is None or found.returncode:
+        return None
+    with tempfile.TemporaryDirectory(prefix="captain-snapshot-") as scratch:
+        index = Path(scratch) / "index"
+        with contextlib.suppress(FileNotFoundError):
+            shutil.copyfile(found.stdout.strip(), index)
+        added = _git(root, "add", "--all", "--", ".", timeout=SNAPSHOT_TIMEOUT, index=index)
+        if added is None or added.returncode:
+            return None
+        tree = _git(root, "write-tree", timeout=SNAPSHOT_TIMEOUT, index=index)
+    return tree.stdout.strip() if tree is not None and not tree.returncode else None
+
+
+def assignment_diff(directory, assignment_id):
+    """The changes to one assignment's paths since its baseline, from a fresh snapshot."""
+    state = read_json(directory / "protocol.json") if (directory / "protocol.json").exists() else {}
+    assignment = state.get("assignments", {}).get(assignment_id)
+    if assignment is None:
+        raise CaptainError(f"[diff-assignment] No assignment {assignment_id}.")
+    base = assignment.get("baseline")
+    if not base:
+        raise CaptainError(f"[diff-no-baseline] Assignment {assignment_id} has no baseline.")
+    root = assignment["execution_root"]
+    paths = sorted(
+        {
+            path
+            for path in (*assignment["paths"], *assignment.get("claimed", ()))
+            if not Path(path).is_absolute()
+        }
+    )
+    view = {"assignment": assignment_id, "baseline": base, "root": root, "paths": paths}
+    if not paths:
+        return {**view, "current": base, "files": [], "diff": "", "truncated": False}
+    current = snapshot(root)
+    if current is None:
+        raise CaptainError(f"[diff-git] Cannot snapshot {root}.")
+    options = ("diff", "--no-ext-diff", "--no-textconv", "--no-color", "--no-renames")
+    numstat = _git(
+        root, *options, "--numstat", base, current, "--", *paths, timeout=SNAPSHOT_TIMEOUT
+    )
+    options += (base, current, "--")
+    patch = _git(root, *options, *paths, timeout=SNAPSHOT_TIMEOUT)
+    if numstat is None or patch is None or numstat.returncode or patch.returncode:
+        raise CaptainError(f"[diff-git] git diff failed in {root}.")
+    files = []
+    for line in numstat.stdout.splitlines():
+        added, deleted, path = line.split("\t", 2)
+        files.append(
+            {
+                "path": path,
+                "added": None if added == "-" else int(added),
+                "deleted": None if deleted == "-" else int(deleted),
+            }
+        )
+    text = patch.stdout
+    return {
+        **view,
+        "current": current,
+        "files": files,
+        "diff": text[:DIFF_CHARS],
+        "truncated": len(text) > DIFF_CHARS,
+    }
 
 
 def unlanded(project, assignment, *, ignore_uncommitted=False):
@@ -1446,6 +1586,10 @@ def poll(crew, ack=None, modal=True):
         pending, acked = assignment["pending"], False
         if ack:
             if pending and ack == pending["result"]["delivery_id"]:
+                question = assignment["question"]
+                if assignment.get("supervised") and question:
+                    if pending["result"]["status"] == "asked":
+                        question["delivered_at"] = time.time()
                 assignment["ack_seq"] = pending["seq"]
                 assignment["offset"] = pending["offset"]
                 assignment["scan_offset"] = pending["offset"]

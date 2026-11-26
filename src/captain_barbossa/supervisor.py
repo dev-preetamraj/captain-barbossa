@@ -18,6 +18,7 @@ import threading
 import time
 from contextlib import ExitStack
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 
 from . import (
@@ -25,6 +26,7 @@ from . import (
     claude_agent,
     codex_app_server,
     config,
+    do,
     eventlog,
     instructions,
     jsonrpc,
@@ -32,11 +34,12 @@ from . import (
     pi_rpc,
     processes,
     protocol,
+    results,
     store,
     supervision,
     transcripts,
 )
-from .crew import Crew
+from .crew import Crew, event_status
 from .memory import add_memory
 from .runtime import CaptainError
 from .sessions import Session, catalog, crew_meta, rename_session, session
@@ -118,6 +121,8 @@ COMMANDS = {
     "dashboard": 30,
     "inspect": 60,
 }
+# Verbs `command` runs only after resolve_authorization approves them, with their deadlines.
+AUTHORIZED = {"do": processes.TIMEOUT + 60, "quiet": processes.TIMEOUT + 60}
 # Bytes of a command's stdout or stderr returned; a reply line is capped at jsonrpc.MAX_LINE.
 COMMAND_OUTPUT = 1024 * 1024
 # Bytes read past COMMAND_OUTPUT so a secret straddling the cut is whole when redacted.
@@ -138,6 +143,8 @@ DELIVERY_INTERVAL = 2.0
 STREAM_BYTES = 1024 * 1024
 # Ephemeral notifications a slow subscriber may fall behind by before newer ones are dropped.
 FEED_LIMIT = 1000
+# Bytes of the captain's newest hook events read to find when its last turn ended.
+CAPTAIN_TAIL = 65536
 STREAM_NAME = re.compile(r"[A-Za-z0-9_-]{1,128}")
 
 
@@ -600,6 +607,7 @@ def hello(supervisor, params):
         "methods": sorted(METHODS),
         "notifications": list(NOTIFICATIONS),
         "commands": sorted(COMMANDS),
+        "authorized_commands": sorted(AUTHORIZED),
     }
 
 
@@ -633,23 +641,44 @@ def _clip(data, literals):
 
 
 def command(supervisor, params):
-    """Run one whitelisted captain verb in this session as the captain: {exit, stdout, stderr}."""
+    """Run one whitelisted verb as the captain; `do` and `quiet` only open an authorization."""
     argv = params.get("argv")
     if not isinstance(argv, list) or not argv or not all(isinstance(word, str) for word in argv):
         raise CaptainError("[supervisor-params] argv must be a non-empty list of strings.")
     verb = argv[0]
+    if verb in AUTHORIZED:
+        args = do.parse(argv)
+        row = do.request_authorization(supervisor.session.directory, args, "app", argv)
+        return {"authorization": row}
     if verb not in COMMANDS:
         raise CaptainError(f"[command-refused] {verb!r} is not a whitelisted captain verb.")
     if verb == "dashboard" and argv[1:] != ["--once"]:
         raise CaptainError("[command-refused] dashboard runs only as `dashboard --once`.")
+    return run_command(supervisor, argv, COMMANDS[verb])
+
+
+def typed(reply):
+    """Add the outcome a client reads instead of parsing text: JSON `result` or a `refusal`."""
+    if reply["exit"] == 0:
+        with contextlib.suppress(ValueError):
+            reply["result"] = json.loads(reply["stdout"])
+        return reply
+    message = reply["stderr"].strip().removeprefix("captain:").strip() or reply["stdout"].strip()
+    match = PROTOCOL_CODE.search(message)
+    reply["refusal"] = {"code": match[1] if match else "captain-error", "message": message}
+    return reply
+
+
+def run_command(supervisor, argv, timeout, extra_env=None):
+    verb = argv[0]
     meta = supervisor.session.meta
     env = {key: value for key, value in os.environ.items() if key not in CREW_ENV}
     env.update(
         CAPTAIN_PROJECT=meta["project"],
         CAPTAIN_SESSION=meta["id"],
         **{supervision.TOKEN_ENV: supervisor.token},
+        **(extra_env or {}),
     )
-    timeout = COMMANDS[verb]
     try:
         process = subprocess.Popen(
             [instructions.python_command(), "-m", "captain_barbossa", "--session", meta["id"]]
@@ -673,7 +702,31 @@ def command(supervisor, params):
     reply = {"exit": process.returncode, "stdout": out, "stderr": err}
     if clipped or err_clipped:
         reply["truncated"] = True
+    return typed(reply)
+
+
+def resolve_authorization(supervisor, params):
+    """Approve or deny a request; an approved app request runs at once, a captain's on its rerun."""
+    reason = params.get("reason")
+    if reason is not None and not isinstance(reason, str):
+        raise CaptainError("[supervisor-params] reason must be a string.")
+    directory = supervisor.session.directory
+    row = do.resolve_authorization(
+        directory, _text(params, "request"), _text(params, "decision"), reason
+    )
+    reply = {"request": row["id"], "state": row["state"]}
+    if row["state"] == "approved" and row["origin"] == "app":
+        extra = {do.AUTHORIZATION_ENV: row["id"]}
+        reply["run"] = run_command(supervisor, row["argv"], AUTHORIZED[row["argv"][0]], extra)
+        rows = store.read_json(directory / "protocol.json").get("authorizations", [])
+        reply["state"] = next(r["state"] for r in rows if r["id"] == row["id"])
     return reply
+
+
+def authorizations(supervisor, params):
+    path = supervisor.session.directory / "protocol.json"
+    rows = store.read_json(path).get("authorizations", []) if path.exists() else []
+    return {"authorizations": rows}
 
 
 def current_session(supervisor):
@@ -712,6 +765,78 @@ def rename(supervisor, params):
     except CaptainError as exc:
         raise CaptainError(f"[session-name] {exc}") from exc
     return {"session_id": supervisor.session.meta["id"], "name": name.strip()}
+
+
+def captain_idle_at(supervisor):
+    """When the captain's newest turn ended, from the tail of its own hook events; None if never."""
+    path = supervisor.session.events("captain")
+    try:
+        size = path.stat().st_size
+    except FileNotFoundError:
+        return None
+    start = max(0, size - CAPTAIN_TAIL)
+    events, _ = eventlog.read_events(path, start, max_bytes=CAPTAIN_TAIL)
+    for event in reversed(events):
+        if event_status(event) in ("done", "idle") and isinstance(event.get("timestamp"), str):
+            with contextlib.suppress(ValueError):
+                return datetime.fromisoformat(event["timestamp"]).timestamp()
+    return None
+
+
+def questions(supervisor, params=None):
+    """Every open supervised question with who it waits on, recording any change of route."""
+    directory = supervisor.session.directory
+    path = directory / "protocol.json"
+    state = store.read_json(path) if path.exists() else {"active": {}, "assignments": {}}
+    idle, rows, routes = captain_idle_at(supervisor), [], {}
+    for crew_id, assignment_id in state["active"].items():
+        assignment = state["assignments"].get(assignment_id) or {}
+        question = assignment.get("question")
+        if not question or not assignment.get("supervised"):
+            continue
+        target = protocol.waiting_on(question, idle)
+        if question.get("waiting_on") != target:
+            routes[(crew_id, question["id"])] = target
+        rows.append(
+            {
+                "crew": crew_id,
+                "assignment": assignment_id,
+                "question": question["id"],
+                "text": question["text"],
+                "grant_request": question.get("grant_request"),
+                "delivered_at": question.get("delivered_at"),
+                "escalated": bool(question.get("escalated")),
+                "waiting_on": target,
+            }
+        )
+    if routes:
+        protocol.route_questions(directory, routes)
+    return {"questions": rows}
+
+
+def route(supervisor):
+    with contextlib.suppress(CaptainError, OSError, KeyError):
+        questions(supervisor)  # best effort: the next tick routes again
+
+
+def diff(supervisor, params):
+    return protocol.assignment_diff(supervisor.session.directory, _text(params, "assignment"))
+
+
+def mark_reviewed(supervisor, params):
+    """Mark a report reviewed, or with `result` one isolated result of that assignment."""
+    assignment_id, result_id = _text(params, "assignment"), params.get("result")
+    note = params.get("note")
+    if note is not None and not isinstance(note, str):
+        raise CaptainError("[supervisor-params] note must be a string.")
+    if result_id is not None:
+        try:
+            manifest = results.read(current_session(supervisor), _text(params, "result"))
+        except (CaptainError, OSError) as exc:
+            raise CaptainError(f"[review-result] Result {result_id} is unreadable: {exc}") from exc
+        if manifest["assignment_id"] != assignment_id:
+            raise CaptainError(f"[review-result] Result {result_id} is not {assignment_id}'s.")
+    return protocol.mark_reviewed(supervisor.session.directory, assignment_id, result_id, note)
 
 
 def sessions(supervisor, params):
@@ -845,6 +970,7 @@ def stream(supervisor, fd, cursors, feed):
                 send(method, params)
             if time.monotonic() - projected >= DELIVERY_INTERVAL:
                 projected = time.monotonic()
+                route(supervisor)
                 pending = deliveries(supervisor)
                 keys = {}
                 for delivery in pending or ():
@@ -890,6 +1016,11 @@ METHODS = {
     "step": step,
     "rename": rename,
     "sessions": sessions,
+    "resolve_authorization": resolve_authorization,
+    "authorizations": authorizations,
+    "questions": questions,
+    "diff": diff,
+    "mark_reviewed": mark_reviewed,
 }
 
 
@@ -1042,6 +1173,7 @@ def serve(current, out, stopped):
             )
             while not stopped.wait(protocol.DRAIN_INTERVAL):
                 drain_all(supervisor)
+                route(supervisor)
         finally:
             with supervisor.lock:
                 supervisor.closing.set()

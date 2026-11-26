@@ -52,16 +52,28 @@ ACTION_SPOOL = "actions.spool"
 ACTION_LOCK_WAIT = 1.0
 # The token a supervisor hands its app; the action log and every reply redact it.
 TOKEN_ENV = "CAPTAIN_SUPERVISOR_TOKEN"
-ACTION_KINDS = ("recruit", "assign", "mail", "question", "grant", "report", "lifecycle")
+ACTION_KINDS = (
+    "recruit",
+    "assign",
+    "mail",
+    "question",
+    "grant",
+    "report",
+    "lifecycle",
+    "authorization",
+    "review",
+)
 ACTION_IDENTITY = ("id", "kind", "at", "crew", "assignment", "message", "question", "request")
 # Key suffixes, compared without case, dashes or underscores, whose values never leave in clear.
 SECRET_KEYS = ("apikey", "secret", "password", "authorization", "token")
 REDACTED = "[redacted]"
-# A quoted secret-named key and its string value, possibly cut off at the end of the text.
-SECRET_PAIR = re.compile(
-    r'("[^"\\]*?(?:api[-_]?key|secret|password|authorization|token)"\s*:\s*)"(?:[^"\\]|\\.)*(?:"|$)',
-    re.IGNORECASE,
+# A quoted secret-named key and its colon; the value after it is one JSON value of any type.
+SECRET_KEY = re.compile(
+    r'"[^"\\]*?(?:api[-_]?key|secret|password|authorization|token)"\s*:\s*', re.IGNORECASE
 )
+QUOTED = re.compile(r'"(?:[^"\\]|\\.)*(?:"|$)')
+BARE = re.compile(r"[^,}\]\s]*")
+_decoder = json.JSONDecoder()
 # Literal secrets this process knows besides the token in its environment: a supervisor's own.
 _hidden = set()
 
@@ -75,11 +87,30 @@ def known_secrets():
 
 
 def redact_text(text, literals=()):
-    """Serialized text with literal secrets and quoted secret-named values redacted."""
+    """Serialized text with literal secrets and every secret-named key's value redacted."""
     for secret in literals:
         if secret:
             text = text.replace(secret, REDACTED)
-    return SECRET_PAIR.sub(rf'\1"{REDACTED}"', text)
+    parts, at = [], 0
+    for match in SECRET_KEY.finditer(text):
+        if match.start() < at:
+            continue  # inside a value already redacted
+        parts += [text[at : match.end()], f'"{REDACTED}"']
+        at = _value_end(text, match.end())
+    return "".join(parts) + text[at:]
+
+
+def _value_end(text, start):
+    """Where the JSON value at `start` ends; one cut off by the end of the text runs to it."""
+    try:
+        return _decoder.raw_decode(text, start)[1]
+    except ValueError:
+        pass
+    if text.startswith('"', start):
+        return QUOTED.match(text, start).end()
+    if text.startswith(("[", "{"), start):
+        return len(text)
+    return BARE.match(text, start).end()
 
 
 def redact(value, secrets=()):

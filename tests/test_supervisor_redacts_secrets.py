@@ -129,6 +129,26 @@ class SupervisorRedactsSecretsTests(SessionCase):
             seen.append(reader.read(deadline))
         return seen
 
+    def test_serialized_secrets_of_every_json_type_are_redacted(self):
+        text = (
+            '{"password": 123456, "token": ["sk-a", {"x": "sk-b"}], "apiKey": {"v": "sk-c"}, '
+            '"secret": true, "api_key": null, "input_tokens": 7, "Authorization": "Bearer \\"sk-d"}'
+        )
+        self.assertEqual(
+            eventlog.redact_text(text),
+            '{"password": "[redacted]", "token": "[redacted]", "apiKey": "[redacted]", '
+            '"secret": "[redacted]", "api_key": "[redacted]", "input_tokens": 7, '
+            '"Authorization": "[redacted]"}',
+        )
+        for cut, expected in (
+            ('{"token": ["sk-a", "sk-', '{"token": "[redacted]"'),
+            ('{"password": "sk-', '{"password": "[redacted]"'),
+            ("token = 1; 'password': 5", "token = 1; 'password': 5"),
+        ):
+            with self.subTest(cut=cut):
+                self.assertEqual(eventlog.redact_text(cut), expected)
+        self.assertNotIn("123456", json.dumps(eventlog.redact({"log": '{"password": 123456}'})))
+
     def test_secret_named_keys_and_literal_secrets_are_redacted(self):
         value = {
             "apiKey": "sk-1",
