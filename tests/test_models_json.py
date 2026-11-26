@@ -65,10 +65,20 @@ class ModelsJsonTests(unittest.TestCase):
         )
 
     def test_claude_alias_moves_but_exact_old_id_and_context_remain(self) -> None:
-        rows = {row["id"]: row for row in self.provider("claude")["models"]}
+        model_rows = self.provider("claude")["models"]
+        self.assertEqual(
+            [(row["id"], row["name"]) for row in model_rows],
+            [
+                ("claude-fable-5-2", "Fable 5.2"),
+                ("claude-opus-5-5", "Opus 5.5"),
+                ("claude-sonnet-5-5", "Sonnet 5.5"),
+                ("claude-haiku-5-5", "Haiku 5.5"),
+                ("claude-fable-5-1", "Fable 5.1"),
+            ],
+        )
+        rows = {row["id"]: row for row in model_rows}
         self.assertEqual(rows["claude-fable-5-2"]["aliases"], ["fable"])
         self.assertEqual(rows["claude-fable-5-1"]["aliases"], [])
-        self.assertEqual(rows["claude-fable-5-2"]["name"], "Claude Fable 5.2")
         self.assertNotIn("legacy", rows["claude-fable-5-2"])
         self.assertTrue(rows["claude-fable-5-1"]["legacy"])
         self.assertNotIn("legacy", rows["claude-haiku-5-5"])
@@ -105,9 +115,24 @@ class ModelsJsonTests(unittest.TestCase):
     def test_codex_pages_native_efforts_without_inventing_context_or_dropping_aliases(self) -> None:
         result = self.provider("codex")
         self.assertIsNone(result["error"])
+        self.assertEqual(
+            [(row["id"], row["name"]) for row in result["models"]],
+            [
+                ("gpt-6.2-astra", "GPT-6.2 Astra"),
+                ("gpt-6.2-sol", "GPT-6.2 Sol"),
+                ("gpt-6.1-terra", "GPT-6.1 Terra"),
+                ("gpt-6-luna", "GPT-6 Luna"),
+                ("gpt-6-astra", "GPT-6 Astra"),
+                ("gpt-6.1-sol", "GPT-6.1 Sol"),
+                ("gpt-6-sol", "GPT-6 Sol"),
+                ("gpt-5.6-sol", "GPT-5.6 Sol"),
+                ("gpt-5.6-terra", "GPT-5.6 Terra"),
+                ("gpt-5.6-luna", "GPT-5.6 Luna"),
+                ("native-new", "Native New"),
+            ],
+        )
         rows = {row["id"]: row for row in result["models"]}
         self.assertEqual(rows["gpt-6.2-astra"]["aliases"], ["astra"])
-        self.assertEqual(rows["gpt-6.2-astra"]["name"], "GPT-6.2-Astra")
         self.assertEqual(rows["gpt-6.2-astra"]["effort_levels"], ["low", "ultra"])
         self.assertIsNone(rows["gpt-6.2-astra"]["context_window"])
         self.assertNotIn("legacy", rows["gpt-6.2-astra"])
@@ -142,13 +167,27 @@ class ModelsJsonTests(unittest.TestCase):
     def test_pi_queries_each_models_supported_levels_and_qualifies_ambiguous_ids(self) -> None:
         result = self.provider("pi")
         self.assertIsNone(result["error"])
+        self.assertEqual(
+            [(row["id"], row["name"]) for row in result["models"]],
+            [
+                ("anthropic/claude-fable-5-2", "Claude Fable 5.2"),
+                ("anthropic/claude-opus-5", "Claude Opus 5"),
+                ("google/gemini-3.8-flash", "Gemini 3.8 Flash"),
+                ("openai/gpt-6.2-sol", "GPT-6.2 Sol"),
+                ("openai/gpt-6-luna", "GPT-6 Luna"),
+                ("local/tiny", "local/tiny"),
+                ("second/shared", "second/shared"),
+                ("first/shared", "Shared First"),
+                ("anthropic/claude-opus-4-8", "Claude Opus 4.8"),
+                ("google/gemini-3.7-flash", "Gemini 3.7 Flash"),
+            ],
+        )
         rows = {row["id"]: row for row in result["models"]}
         self.assertEqual(rows["first/shared"]["aliases"], [])
         self.assertEqual(rows["second/shared"]["aliases"], [])
         self.assertEqual(rows["local/tiny"]["aliases"], ["tiny"])
         self.assertEqual(rows["first/shared"]["name"], "Shared First")
         self.assertEqual(rows["second/shared"]["name"], "second/shared")
-        self.assertEqual(rows["anthropic/claude-opus-5"]["name"], "Claude Opus 5")
         self.assertTrue(rows["anthropic/claude-opus-4-8"]["legacy"])
         self.assertNotIn("legacy", rows["anthropic/claude-opus-5"])
         self.assertEqual(rows["first/shared"]["effort_levels"], ["off", "high", "max"])
@@ -164,7 +203,7 @@ class ModelsJsonTests(unittest.TestCase):
         (self.root / "settings.toml").write_text('[models.pi]\ncheap = "tiny"\n')
         result = self.provider("pi")
         self.assertEqual(result["tiers"], {"cheap": "local/tiny", "mid": None, "strong": None})
-        self.assertEqual(len(result["models"]), 5)
+        self.assertEqual(len(result["models"]), 10)
 
     def test_pi_failed_model_switch_does_not_reuse_previous_models_levels(self) -> None:
         os.environ["CATALOGUE_TEST_MODE"] = "switch-fails"
@@ -334,6 +373,31 @@ def fake_native(provider: str) -> None:
                             "name": "Claude Opus 5",
                             "provider": "anthropic",
                         },
+                        {
+                            "id": "claude-fable-5-2",
+                            "name": "Claude-Fable-5.2",
+                            "provider": "anthropic",
+                        },
+                        {
+                            "id": "gpt-6-luna",
+                            "name": "GPT-6-Luna",
+                            "provider": "openai",
+                        },
+                        {
+                            "id": "gpt-6.2-sol",
+                            "name": "GPT-6.2-Sol",
+                            "provider": "openai",
+                        },
+                        {
+                            "id": "gemini-3.7-flash",
+                            "name": "Gemini 3.7 Flash",
+                            "provider": "google",
+                        },
+                        {
+                            "id": "gemini-3.8-flash",
+                            "name": "Gemini 3.8 Flash",
+                            "provider": "google",
+                        },
                     ]
                 }
             case "set_model":
@@ -359,6 +423,8 @@ def fake_native(provider: str) -> None:
                     "second": ["off", "low"],
                     "local": ["off"],
                     "anthropic": ["off", "high"],
+                    "openai": ["off", "high"],
+                    "google": ["off", "high"],
                 }
                 data = {"levels": [False] if mode == "bad-metadata" else levels[selected]}
             case _:

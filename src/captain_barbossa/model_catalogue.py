@@ -21,6 +21,12 @@ PROBE_TIMEOUT = 15.0
 MODEL_VERSION = re.compile(r"(?<!\d)(\d+(?:\.\d+)*)(?!\d)")
 FAMILY_WORD = re.compile(r"[a-z]+|\d+")
 FAMILY_NOISE = frozenset(("latest", "preview"))
+CLAUDE_MODEL = re.compile(r"(?:claude[- ]+)?([a-z]+)[- ]+(\d+(?:[.-]\d+)*)", re.I)
+CODEX_MODEL = re.compile(r"gpt[- ](\d+(?:[.-]\d+)*)[- ]+([a-z][a-z0-9-]*)", re.I)
+CAPABILITY_RANKS = {
+    "claude": ("fable", "opus", "sonnet", "haiku"),
+    "codex": ("astra", "sol", "terra", "luna"),
+}
 
 
 class Peer(Protocol):
@@ -168,11 +174,82 @@ def _mark_legacy(rows: list[dict], provider: str) -> None:
             row.pop("legacy", None)
 
 
-def _claude_name(identifier: str) -> str:
-    match = re.fullmatch(r"claude-([a-z]+)-(\d+(?:-\d+)*)", identifier)
+def _claude_name(value: object, identifier: str, *, upstream: bool = False) -> str:
+    source = _name(value, identifier)
+    match = CLAUDE_MODEL.fullmatch(source) or CLAUDE_MODEL.fullmatch(identifier)
     if match is None:
-        return identifier
-    return f"Claude {match.group(1).title()} {match.group(2).replace('-', '.')}"
+        return source
+    prefix = "Claude " if upstream else ""
+    return f"{prefix}{match.group(1).title()} {match.group(2).replace('-', '.')}"
+
+
+def _codex_name(value: object, identifier: str) -> str:
+    source = _name(value, identifier)
+    match = CODEX_MODEL.fullmatch(source) or CODEX_MODEL.fullmatch(identifier)
+    if match is None:
+        return source
+    return f"GPT-{match.group(1).replace('-', '.')} {match.group(2).title()}"
+
+
+def _pi_name(value: object, identifier: str, fallback: str | None = None) -> str:
+    source = _name(value, fallback or identifier)
+    claude = _claude_name(source, identifier, upstream=True)
+    if claude != source or CLAUDE_MODEL.fullmatch(source):
+        return claude
+    return _codex_name(source, identifier)
+
+
+def _catalogue_name(provider: str, identifier: str) -> str:
+    if provider == "claude":
+        return _claude_name(None, identifier)
+    if provider == "codex":
+        return _codex_name(None, identifier)
+    model_id = identifier.partition("/")[2] or identifier
+    return _pi_name(None, model_id)
+
+
+def _version_key(row: dict) -> tuple[int | float, ...]:
+    match = MODEL_VERSION.search(row["name"]) or MODEL_VERSION.search(row["id"])
+    if match is None:
+        return (float("inf"),)
+    return (*(-int(part) for part in match.group(1).split(".")), float("inf"))
+
+
+def _pi_upstream(row: dict) -> str:
+    words = FAMILY_WORD.findall(row["name"].lower())
+    for family in ("claude", "gemini", "gpt"):
+        if family in words:
+            return family
+    return words[0] if words else row["id"].casefold()
+
+
+def _capability_rank(row: dict, provider: str) -> int:
+    ranking = CAPABILITY_RANKS[provider]
+    words = set(FAMILY_WORD.findall(f"{row['name']} {row['id']}".lower()))
+    return next((rank for rank, family in enumerate(ranking) if family in words), len(ranking))
+
+
+def _sort_models(rows: list[dict], provider: str) -> list[dict]:
+    def key(row: dict) -> tuple:
+        upstream = _pi_upstream(row) if provider == "pi" else ""
+        ranked_provider = (
+            "claude"
+            if provider == "claude" or upstream == "claude"
+            else "codex"
+            if provider == "codex" or upstream == "gpt"
+            else None
+        )
+        rank = _capability_rank(row, ranked_provider) if ranked_provider else 0
+        return (
+            row.get("legacy") is True,
+            upstream,
+            rank,
+            _version_key(row),
+            row["name"].casefold(),
+            row["id"].casefold(),
+        )
+
+    return sorted(rows, key=key)
 
 
 def _exclude_codex(native: dict) -> bool:
@@ -206,7 +283,10 @@ def codex_models(root: Path) -> list[dict]:
                 if _exclude_codex(native):
                     rows.append({"id": identifier, "_exclude": True})
                     continue
-                row = _model(identifier, name=native.get("displayName"))
+                row = _model(
+                    identifier,
+                    name=_codex_name(native.get("displayName"), identifier),
+                )
                 row["_legacy"] = isinstance(native.get("upgrade"), str) and bool(native["upgrade"])
                 row["_current"] = native.get("isDefault") is True
                 efforts = native.get("supportedReasoningEfforts")
@@ -252,10 +332,11 @@ def pi_models(root: Path) -> list[dict]:
         rows = []
         for native in native_rows:
             model_id, provider = _identifier(native.get("id")), _identifier(native.get("provider"))
+            identifier = f"{provider}/{model_id}"
             row = _model(
-                f"{provider}/{model_id}",
+                identifier,
                 (model_id,) if counts[model_id] == 1 else (),
-                native.get("name"),
+                _pi_name(native.get("name"), model_id, identifier),
             )
             row["context_window"] = _window(native.get("contextWindow"))
             rows.append(row)
@@ -278,7 +359,7 @@ def pi_models(root: Path) -> list[dict]:
 def claude_models(root: Path) -> list[dict]:
     return [
         {
-            **_model(identifier, aliases, _claude_name(identifier)),
+            **_model(identifier, aliases, _claude_name(None, identifier)),
             "context_window": usage.CONTEXT_WINDOWS.get(identifier),
             "effort_levels": list(CLAUDE_EFFORTS),
         }
@@ -296,7 +377,7 @@ def catalogue(root: Path, agent: str | None = None) -> dict:
     providers = []
     for provider in (agent,) if agent else PROVIDERS:
         rows = {
-            identifier: _model(identifier, aliases)
+            identifier: _model(identifier, aliases, _catalogue_name(provider, identifier))
             for identifier, aliases in models.MODELS.get(provider, ())
         }
         error = None
@@ -316,12 +397,14 @@ def catalogue(root: Path, agent: str | None = None) -> dict:
         entries = tuple((row["id"], tuple(row["aliases"])) for row in rows.values())
         tiers = models.tier_mapping(provider, entries)
         for identifier in tiers.values():
-            rows.setdefault(identifier, _model(identifier))
+            rows.setdefault(
+                identifier, _model(identifier, name=_catalogue_name(provider, identifier))
+            )
         providers.append(
             {
                 "provider": provider,
                 "tiers": {tier: tiers.get(tier) for tier in models.TIER_NAMES},
-                "models": list(rows.values()),
+                "models": _sort_models(list(rows.values()), provider),
                 "error": error,
             }
         )
