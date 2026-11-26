@@ -11,15 +11,16 @@ workspace. It launches a native agent CLI (Claude Code, Codex, pi, grok) as the 
 and the captain recruits further native agents as **crew** in new Herdr panes or
 tabs. Crew get one-word Pirates of the Caribbean names. All coordination happens
 through generated role instructions and a small graph memory stored outside the
-repo; there is no daemon or tmux layer, and the crew token-usage dashboard is a
-plain-text refresh loop in a Herdr pane, not a TUI.
+repo; there is no tmux layer and no daemon except the app's opt-in `captain supervise`,
+and the crew token-usage dashboard is a plain-text refresh loop in a Herdr pane, not a TUI.
 
 ## Layout
 
 ```text
 src/captain_barbossa/
   cli.py          argparse entry point and dispatch: captain, crew, wait, tell, model,
-                  focus, session, init, status, dashboard, dismiss, relayout, memory, recover
+                  focus, session, init, status, dashboard, dismiss, relayout, memory, recover,
+                  supervise
   launch.py       native captain launch, launch plan, dashboard pane, exit pane cleanup
   agents.py       crew recruitment and create/wait/tell/model/focus/status/dismiss
   instructions.py role instructions and per-provider native CLI arguments
@@ -60,10 +61,17 @@ src/captain_barbossa/
   background.py   paneless read-only crew: detached owner process, cancel, outcome
   background_state.py background run files, owner liveness and status
   processes.py    bounded subprocess runs (process-group reaping), declared Makefile targets
+  supervisor.py   `captain supervise`: per-session socket server owning supervised crew
+  supervision.py  the CLI's token-gated door to that socket
+  codex_app_server.py supervised Codex adapter over `codex app-server`
+  claude_host.py  the user's claude through the Agent SDK, JSON-RPC on stdio
+  claude_agent.py supervised Claude adapter over claude_host
+  jsonrpc.py      line-delimited JSON-RPC framing, deadlines, multiplexed Peer
   update_check.py startup PyPI update check and `captain update`
 tests/            unittest suite; Herdr and model sessions are mocked, a real PTY is used
 docs/             plan.md is current scope; settings, placement, dashboard, memory,
-                  crew-lifecycle and troubleshooting are the user guides
+                  crew-lifecycle and troubleshooting are the user guides; supervisor.md is
+                  the app's socket contract
 ```
 
 Key facts:
@@ -166,6 +174,15 @@ Key facts:
   Exactly one outcome is written; failures, timeouts, cancels and a lost owner
   close the assignment with an `error` notice and `outcome`, never a `done`. No pane
   reads, doorbell, `tell` or `answer` for it.
+- `captain supervise` is the one daemon: an app-launched, long-running process per
+  session holding `supervisor.lock`, on a token-gated socket under `~/.captain/run`
+  (never temp; token only on its readiness line). Only it sets session `transport:
+  "supervisor"` (Herdr sessions refused); its crew get `execution: "supervised"`,
+  run `codex app-server` or `claude_host` (Claude Agent SDK, optional `[app]` extra)
+  under the lifetime guard, refuse to start with untrusted Codex hooks, and gate
+  approvals through `captain hook`. Turns are untimed, every request bounded. Herdr
+  commands and hooks never import the supervisor modules (lazy imports, pinned by a
+  test). Methods, refusal codes and shapes: docs/supervisor.md.
 - The delegation axis is judgment, not file-touching: `make test` writes nothing and
   needs no crew, while research changes no file and does.
 - Settings layer bottom to top: `defaults.toml` (package data, the only place a default

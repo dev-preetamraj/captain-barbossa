@@ -619,6 +619,22 @@ def append_event(args=None):
             event["status"] = f"working: approval {permission.verdict.value} [{permission.code}]"
         file.write(event_line(event))
         file.flush()
+    if (
+        permission is not None
+        and incarnation
+        and crew.is_supervised
+        and (
+            permission.verdict == Verdict.DENY
+            or (kind == "PermissionRequest" and permission.verdict != Verdict.ALLOW_ONCE)
+        )
+    ):
+        # Supervised crew only, so a Herdr hook never takes the protocol lock here.
+        from .protocol import note_denial
+
+        try:
+            note_denial(crew, event)
+        except (CaptainError, OSError, ValueError, KeyError):
+            pass  # a lost denial only leaves the next ask without its grant request
     if incarnation:
         try:
             native_history.observe(crew, event)

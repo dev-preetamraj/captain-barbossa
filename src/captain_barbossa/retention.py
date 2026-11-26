@@ -44,11 +44,17 @@ def unresolved(directory):
     """Whether a session holds work or an outcome nobody has received yet, kept at any age.
 
     A dismissed crew can receive nothing more, so only live roster entries count. State
-    that cannot be read cannot prove there is nothing left, so it counts too.
+    that cannot be read cannot prove there is nothing left, so it counts too, and so does
+    a supervised session whose supervisor still holds its lock.
     """
     try:
         path = directory / "session.json"
         meta = read_json(path) if path.exists() else {}
+        if meta.get("transport") == "supervisor":
+            from . import supervision  # local: Herdr sessions never load the supervisor door
+
+            if supervision.alive(directory):
+                return True
         roster = meta.get("crew", {})
         current = Session(directory, meta)
         lifetimes = directory / "lifetimes"

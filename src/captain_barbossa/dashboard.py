@@ -213,6 +213,16 @@ def _background_status(crew):
         return "-"
 
 
+def _supervised_status(crew):
+    """The supervisor's live state for a crew with no pane, or None when it cannot answer."""
+    from . import supervision  # local: Herdr sessions never load the supervisor door
+
+    try:
+        return supervision.state(crew)
+    except CaptainError:
+        return None
+
+
 def _roster(current, agents):
     """(current rows, dismissed crew's (tokens, cost), current crew count)."""
     live = _crew_status(agents)
@@ -228,6 +238,8 @@ def _roster(current, agents):
             continue
         if crew.is_background:
             status = _background_status(crew)
+        elif crew.is_supervised:
+            status = _supervised_status(crew) or crew.record.get("status") or "-"
         else:
             status = live.get(crew.record.get("agent")) or crew.record.get("status") or "-"
         rows.append(_safe_row(crew, name, status))
@@ -351,7 +363,8 @@ def _notice(rows, retired):
 def render(current, size=None):
     """The frame as text: an optional header, the roster, TOTAL, and its annotation."""
     current = _fresh(current)
-    agents = _live_agents()
+    # A supervised session has no Herdr workspace to ask.
+    agents = [] if current.meta.get("transport") == "supervisor" else _live_agents()
     rows, retired, crew_count = _roster(current, agents)
     width, height = size or shutil.get_terminal_size((80, 24))
     # The last column stays empty so a full-width line cannot autowrap.

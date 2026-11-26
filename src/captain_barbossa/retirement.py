@@ -80,6 +80,14 @@ def retire(crew):
 
     if crew.is_background and background_state.alive(crew):
         background.cancel(crew, "Crew dismissed.")
+    if crew.record.get("execution") == "supervised":
+        from . import supervision  # local: Herdr sessions never load the supervisor door
+
+        if supervision.alive(crew.session.directory):
+            try:
+                supervision.stop(crew, "Crew dismissed.")
+            except CaptainError:
+                pass  # the revoke below stops it too; the lifetime check reports what happened
     ref = crew.record["lifetime_id"]
     verdict = stop(crew.session, ref, scope="group")
     state = {"lifetime": {"ok": verdict.ok, "reason": verdict.reason}}

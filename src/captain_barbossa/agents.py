@@ -26,7 +26,7 @@ from . import (
 from .crew import Crew, CrewState
 from .dashboard import dashboard_pane, renest_dashboard
 from .memory import add_memory, truncate_label
-from .models import HOOKLESS, claude_label, model_names, resolve_model
+from .models import HOOKLESS, TRANSPORTS, claude_label, model_names, resolve_model
 from .pane import MODEL_TIMEOUT, PROMPT_TIMEOUT, shell_ready_for_input
 from .placement import Placement, launch_choices
 from .runtime import HERDR_ERRORS, CaptainError, check_text, executable
@@ -149,6 +149,10 @@ def wait_crew(args, pane, project):
 def focus_crew(args, pane, project):
     _, crew = Crew.for_args(args, pane, project)
     refuse_background(crew, "focus")
+    if crew.is_supervised:
+        raise CaptainError(
+            f"[supervised-focus] {crew.display_name} has no pane; focus is app-owned."
+        )
     try:
         agent = runtime.herdr("agent", "get", crew.record["agent"]).get("agent", {})
         # The live agent wins over the recorded tab when its pane has moved.
@@ -177,6 +181,16 @@ def interrupt_crew(args, pane, project):
         if outcome == "cancelled":
             add_memory(current.graph, crew.record["agent"], "interrupted", args.reason or "captain")
         print(f"{crew.display_name}: {outcome}.")
+        return
+    if crew.is_supervised:
+        from . import supervision  # local: Herdr commands never load the supervisor door
+
+        if supervision.interrupt(crew, args.reason) != "interrupted":
+            print(f"{crew.display_name} was idle; nothing was interrupted.")
+            return
+        add_memory(current.graph, crew.record["agent"], "interrupted", args.reason or "captain")
+        # The supervisor rings held mail itself when the interrupted turn ends.
+        print(f"Interrupted {crew.display_name}.")
         return
     try:
         runtime.herdr("agent", "send-keys", crew.record["agent"], "escape")
@@ -235,7 +249,14 @@ def status_crew(args, pane, project):
                 crew.display_name,
                 crew.record.get("provider", "-"),
                 crew.record.get("model") or "-",
-                crew.record.get("pane") or ("background" if crew.is_background else "-"),
+                crew.record.get("pane")
+                or (
+                    "background"
+                    if crew.is_background
+                    else "supervised"
+                    if crew.is_supervised
+                    else "-"
+                ),
                 status,
                 truncate_label(task[0], 60) if task else "-",
             )
@@ -294,6 +315,16 @@ def switch_model(args, pane, project):
     refuse_background(crew, "a model switch")
     provider = crew.record["provider"]
     model = resolve_model(provider, args.model)
+    if crew.is_supervised:
+        from . import supervision  # local: Herdr commands never load the supervisor door
+
+        applies = supervision.set_model(crew, model)["applies"]
+        with crew_meta(current.directory) as meta:
+            meta["crew"][crew.crew_id]["model"] = model
+        add_memory(current.graph, crew.display_name, "model", model)
+        when = "from its next turn" if applies == "next-turn" else "now"
+        print(f"{crew.display_name} switched to {model}; it applies {when}.")
+        return
     crew_agent = crew.record["agent"]
     names = [name.casefold() for name in model_names(provider, model)]
     if (
@@ -394,7 +425,9 @@ def dismiss_gone(crew):
 
 def dismiss_crew(args, pane, project):
     current = session(project, pane, args.session, allow_dead_workspace=True)
-    dead_workspace = current.meta["workspace"] != pane["workspace_id"]
+    # A supervised session has no pane, tab or layout to settle.
+    supervised = current.meta.get("transport") == "supervisor"
+    dead_workspace = not supervised and current.meta["workspace"] != pane["workspace_id"]
     bounced, undelivered = [], False
     unreported = None
     with crew_meta(current.directory) as meta:
@@ -406,9 +439,11 @@ def dismiss_crew(args, pane, project):
         forced = getattr(args, "force", False)
         gone = False
         # Read while the crew still holds its slot; applied once Herdr has closed the pane.
-        placement = Placement(pane, current, dashboard_pane(current))
+        placement = None if supervised else Placement(pane, current, dashboard_pane(current))
         try:
-            evening = [] if dead_workspace else placement.even_after_close(crew.record)
+            evening = (
+                [] if dead_workspace or supervised else placement.even_after_close(crew.record)
+            )
         except HERDR_ERRORS as exc:  # geometry is cosmetic; never lose the dismissal over it
             print(f"captain: tab not re-evened: {exc}", file=sys.stderr)
             evening = []
@@ -507,7 +542,7 @@ def dismiss_crew(args, pane, project):
     # Rename after the roster write: a stale tab id must not cost the dismissal record.
     if label:
         runtime.herdr("tab", "rename", tab_id, label)
-    if not dead_workspace:
+    if not dead_workspace and not supervised:
         relayout_session(current)
     add_memory(current.graph, f"session:{meta['id']}", "dismissed", crew.record["agent"])
     for message in bounced:
@@ -708,6 +743,106 @@ def choose_checkout(args, project, directory, profile_source=None):
     return checkout, source
 
 
+def crew_launch(
+    crew, project, binary, model, plugin_context, managed, launcher=None, transport="tui"
+):
+    """Native argv and launch env for a crew; prepares its native history and empty events file."""
+    record = crew.record
+    provider = record["provider"]
+    env = {
+        "CAPTAIN_ROLE": "crew",
+        "CAPTAIN_CREW": crew.crew_id,
+        "CAPTAIN_INCARNATION": record["incarnation_id"],
+        "CAPTAIN_ASSIGNMENT": record["assignment_id"],
+        "CAPTAIN_SESSION": crew.session.meta["id"],
+        "CAPTAIN_PROJECT": str(project.resolve()),
+        "CAPTAIN_STATE_ROOT": str(state_root()),
+        "CAPTAIN_TEMP_ROOT": str(temp_root()),
+    }
+    if launcher is not None:
+        env["CAPTAIN_CREW_LAUNCHER"] = str(launcher)
+    env["CAPTAIN_WORKTREE_ID"] = record.get("worktree_id") or ""
+    history = (
+        native_history.prepare(crew, incarnation=record["incarnation_id"], project=project)
+        if managed
+        else {"argv": [], "env": {}}
+    )
+    env.update(history["env"])
+    instruction_text = instructions.agent_instructions(
+        crew.session.directory, f"crew member {crew.display_name}", provider
+    )
+    instruction_text += plugin_context
+    events = crew.events
+    private_dir(events.parent)
+    events.write_text("", encoding="utf-8")
+    events.chmod(0o600)
+    native_argv = [
+        *instructions.native_command(binary, transport),
+        *instructions.native_args(
+            provider,
+            instruction_text,
+            model,
+            events,
+            add_dirs=record["outside_dirs"],
+            transport=transport,
+        ),
+        *history["argv"],
+    ]
+    return native_argv, env
+
+
+def launch_supervised(crew, current, project, binary, model, args, context=""):
+    """Start a crew under the session's supervisor; the roster entry is written first, as for
+    a background crew, so a failure anywhere after leaves a record dismiss can retire."""
+    from . import supervision  # local: Herdr commands never load the supervisor door
+
+    record = {**crew.record, "execution": "supervised", "model": model, "task": args.task}
+    record["status"] = "starting"
+    crew.record = record
+    current.meta["crew"][crew.crew_id] = record
+    write_json(current.meta_path, current.meta)
+    try:
+        assignment = begin_recruitment(crew, project, args)
+        record.update(
+            assignment_id=assignment["id"],
+            outside_dirs=protocol.outside_dirs(assignment["execution_root"], assignment["paths"]),
+        )
+        write_json(current.meta_path, current.meta)
+        native_argv, env = crew_launch(
+            crew, project, binary, model, context, True, transport=TRANSPORTS[record["provider"]][0]
+        )
+        record["lifetime_id"] = lifetime.prepare(
+            current, record, native_argv, env, execution.root(current, record)
+        )
+        write_json(current.meta_path, current.meta)
+        message_id = protocol.deliver(
+            crew, args.task, assignment_id=assignment["id"], initial=True, queue_only=True
+        )
+        supervision.start(crew, record["lifetime_id"])
+    except (CaptainError, OSError) as exc:
+        try:
+            with protocol.checkpoint(current.directory) as state:
+                assignment = protocol.active(state, crew)
+                if assignment["state"] != "done":
+                    protocol.close_unreported(assignment, "failed", f"[supervised-start] {exc}")
+        except CaptainError:
+            pass  # nothing was reserved, so there is nothing to close
+        if record.get("lifetime_id"):
+            lifetime.revoke(current, record["lifetime_id"])
+        record.update(status="dismissed", startup_error=str(exc))
+        write_json(current.meta_path, current.meta)
+        raise
+    protocol.ring(crew, message_id)
+    record["status"] = "started"
+    write_json(current.meta_path, current.meta)
+    add_memory(current.graph, f"session:{current.meta['id']}", "crew", record["agent"])
+    add_memory(current.graph, record["agent"], "name", record["name"])
+    add_memory(current.graph, record["agent"], "assigned", args.task)
+    if model:
+        add_memory(current.graph, record["agent"], "model", model)
+    print(json.dumps({key: value for key, value in record.items() if key != "task"}))
+
+
 def create_crew(args, pane, project):
     given = args.name
     if given is not None:
@@ -730,6 +865,23 @@ def create_crew(args, pane, project):
             raise CaptainError("[background-flags] --background takes no --verify.")
     current = session(project, pane, args.session)
     managed = is_durable(current.directory, project)
+    # Only `captain supervise` marks a session, and it refuses one with a Herdr workspace.
+    supervised = current.meta.get("transport") == "supervisor"
+    if supervised:
+        flags = [
+            flag
+            for flag, given in (
+                ("--background", paneless),
+                ("--placement", args.placement),
+                ("--direction", args.direction),
+                ("--split-pane", args.split_pane),
+            )
+            if given
+        ]
+        if flags:
+            raise CaptainError(
+                f"[supervised-flags] A supervised session has no panes; drop {', '.join(flags)}."
+            )
     if paneless and not managed:
         raise CaptainError(
             "[legacy-session] This session lives in temporary storage from an older captain, "
@@ -753,6 +905,14 @@ def create_crew(args, pane, project):
             provider, model, sources = launch_choices(args, current.directory)
             background.check_provider(provider)
             sources["execution"] = "--background"
+        elif supervised:
+            provider, model, sources = launch_choices(args, current.directory)
+            if provider not in TRANSPORTS:
+                raise CaptainError(
+                    f"[supervised-transport] {provider} cannot run supervised yet; "
+                    f"supported: {', '.join(TRANSPORTS)}."
+                )
+            sources["execution"] = "supervised session"
         else:
             board = dashboard_pane(current)
             rec = Placement(pane, current, board).resolve(args, current.directory)
@@ -769,10 +929,14 @@ def create_crew(args, pane, project):
             effective = {
                 "agent": provider,
                 "model": model,
-                "execution": "background" if paneless else "foreground",
+                "execution": "background"
+                if paneless
+                else "supervised"
+                if supervised
+                else "foreground",
                 "checkout": checkout,
             }
-            if not paneless:
+            if not paneless and not supervised:
                 effective.update(placement=placement, direction=direction, split_pane=split_pane)
                 sources["direction"] = "--direction" if args.direction else "automatic placement"
                 sources["split_pane"] = "--split-pane" if args.split_pane else "automatic placement"
@@ -818,6 +982,9 @@ def create_crew(args, pane, project):
         if paneless:
             launch_background(crew, current, project, provider, binary, model, args, plugin_context)
             return
+        if supervised:
+            launch_supervised(crew, current, project, binary, model, args, plugin_context)
+            return
         assignment = begin_recruitment(crew, project, args)
         # Reserve ownership before launch; failures before native startup release it below.
         crew.record.update(
@@ -831,61 +998,16 @@ def create_crew(args, pane, project):
         write_json(current.meta_path, meta)
         try:
             launcher = current.directory / f"crew-{name}.sh"
-            environment = [
-                "--env",
-                "CAPTAIN_ROLE=crew",
-                "--env",
-                f"CAPTAIN_CREW={name}",
-                "--env",
-                f"CAPTAIN_INCARNATION={incarnation}",
-                "--env",
-                f"CAPTAIN_ASSIGNMENT={assignment['id']}",
-                "--env",
-                f"CAPTAIN_SESSION={meta['id']}",
-                "--env",
-                f"CAPTAIN_PROJECT={project.resolve()}",
-                "--env",
-                f"CAPTAIN_STATE_ROOT={state_root()}",
-                "--env",
-                f"CAPTAIN_TEMP_ROOT={temp_root()}",
-                "--env",
-                f"CAPTAIN_CREW_LAUNCHER={launcher}",
-            ]
             execution_root = execution.root(current, crew.record)
-            if crew.record.get("worktree_id"):
-                environment.extend(["--env", f"CAPTAIN_WORKTREE_ID={crew.record['worktree_id']}"])
-            else:
-                environment.extend(["--env", "CAPTAIN_WORKTREE_ID="])
-            history = (
-                native_history.prepare(crew, incarnation=incarnation, project=project)
-                if managed
-                else {"argv": [], "env": {}}
+            native_argv, env = crew_launch(
+                crew, project, binary, model, plugin_context, managed, launcher
             )
-            for key, value in history["env"].items():
-                environment.extend(["--env", f"{key}={value}"])
-            instruction_text = instructions.agent_instructions(
-                current.directory, f"crew member {display_name}", provider
-            )
-            instruction_text += plugin_context
-            events = crew.events
-            private_dir(events.parent)
-            events.write_text("", encoding="utf-8")
-            events.chmod(0o600)
-            native_argv = [
-                binary,
-                *instructions.native_args(
-                    provider,
-                    instruction_text,
-                    model,
-                    events,
-                    add_dirs=crew.record["outside_dirs"],
-                ),
-                *history["argv"],
-            ]
+            environment = [arg for key, value in env.items() for arg in ("--env", f"{key}={value}")]
             command = shlex.join(native_argv)
             if managed:
-                overrides = dict(value.split("=", 1) for value in environment[1::2])
-                overrides.pop("CAPTAIN_CREW_LAUNCHER", None)
+                overrides = {
+                    key: value for key, value in env.items() if key != "CAPTAIN_CREW_LAUNCHER"
+                }
                 ref = lifetime.prepare(current, crew.record, native_argv, overrides, execution_root)
                 crew.record["lifetime_id"] = ref
                 write_json(current.meta_path, meta)

@@ -36,6 +36,8 @@ from .sessions import find_session, project_sessions, read_session, rename_sessi
 from .store import project_root
 from .update_check import upgrade
 
+# supervision.TOKEN_ENV, named here so a Herdr command never imports the supervisor door.
+SUPERVISOR_TOKEN_ENV = "CAPTAIN_SUPERVISOR_TOKEN"
 VERIFY_HELP = "Makefile target captain runs at done; its receipt rides the report"
 
 
@@ -237,6 +239,9 @@ def parser(*, plan=False):
     stop.add_argument("--reason", help="why, recorded in session memory")
     commands.add_parser("session", help="print the current session id")
     commands.add_parser("recover", help="JSON digest of memory, assignments and pending deliveries")
+    commands.add_parser(
+        "supervise", help="own this session's crew behind a socket for an app, with no Herdr"
+    )
     commands.add_parser("update", help="upgrade the installed captain-barbossa tool")
     start = commands.add_parser(
         "init", help="create .captain/settings.toml without changing an existing file"
@@ -469,8 +474,15 @@ def paneless_target(args):
     Those need the session alone, so no Herdr pane is resolved, even from a stale Herdr
     environment. Anything involving a visual crew still needs Herdr: its wait rings
     doorbells, and ringing without Herdr would bounce its mail. Anything unresolvable
-    falls through to the usual pane lookup and its error.
+    falls through to the usual pane lookup and its error. Only a caller holding the
+    supervisor token reads the session to find a supervised one, where nothing has a pane.
     """
+    if os.environ.get(SUPERVISOR_TOKEN_ENV) and args.session:
+        try:
+            if read_session(active_project(), args.session).meta.get("transport") == "supervisor":
+                return True
+        except CaptainError:
+            pass  # not a readable supervised session: the checks below decide as before
     if args.command not in ("wait", "interrupt") or not args.session:
         return False
     try:
@@ -567,6 +579,11 @@ def main(argv=None):
         if args.command == "inspect":
             inspection.run(args, active_project())
             return 0
+        if args.command == "supervise":
+            # Local so a Herdr command never loads the supervisor and its adapters.
+            from .supervisor import run
+
+            return run(args, active_project())
         if args.command == "status":
             status_crew(args, None, active_project())
             return 0

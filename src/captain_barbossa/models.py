@@ -47,6 +47,10 @@ PI_SETTLED = ("stop", "end_turn")
 # No hook or notify mechanism, so crew state comes from Herdr's own agent status and the
 # pane, and a switch or a mail doorbell has to read the composer to know it is safe.
 HOOKLESS = ("pi", "grok")
+# Providers a `captain supervise` session can run with no terminal, and the structured
+# transports each offers, preferred first; Codex's is also its subcommand, Claude's runs the
+# user's claude under claude_host through the optional Agent SDK.
+TRANSPORTS = {"codex": ("app-server",), "claude": ("sdk",)}
 # Providers whose own hook can hand mail to their own model, so the body never crosses a
 # terminal. Codex's notify marks a turn boundary but cannot return context, so it stays out.
 HOOK_DELIVERED = ("claude",)

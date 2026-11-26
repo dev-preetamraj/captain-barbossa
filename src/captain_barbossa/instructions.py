@@ -56,6 +56,17 @@ def hook_command(events):
     return [python_command(), "-m", "captain_barbossa", "hook", str(events)]
 
 
+def native_command(binary, transport="tui"):
+    """The argv before the native flags: "sdk" runs the user's claude under claude_host."""
+    match transport:
+        case "tui":
+            return [binary]
+        case "sdk":
+            return [python_command(), "-m", "captain_barbossa.claude_host", binary]
+        case _:
+            return [binary, transport]
+
+
 def captain_command(session_id):
     return shlex.join([python_command(), "-m", "captain_barbossa", "--session", session_id])
 
@@ -269,8 +280,11 @@ the work in the working tree and report the diff.
 CLAUDE_NO_ATTRIBUTION = json.dumps({"attribution": {"commit": "", "pr": "", "sessionUrl": False}})
 
 
-def native_args(provider, instructions, model=None, events=None, add_dirs=()):
-    """add_dirs: directories of crew-owned paths outside the checkout, made writable."""
+def native_args(provider, instructions, model=None, events=None, add_dirs=(), transport="tui"):
+    """add_dirs: directories of crew-owned paths outside the checkout, made writable.
+
+    Codex "app-server" omits notify, the TUI flags and the model: the supervisor sends those.
+    """
     hook = hook_command(events) if events is not None else None
     # pi has no permission prompts; its extension (pi_history) pipes PreToolUse to the hook.
     crew = events is not None and Path(events).stem != "captain"
@@ -313,7 +327,8 @@ def native_args(provider, instructions, model=None, events=None, add_dirs=()):
         if hook:
             # Codex hashes the literal command for trust; bind identity from launch env.
             hook = [*hook[:-1], "--environment"]
-            flags.extend(["-c", "notify=" + json.dumps(hook)])
+            if transport == "tui":
+                flags.extend(["-c", "notify=" + json.dumps(hook)])
             flags.extend(
                 [
                     "-c",
@@ -341,6 +356,8 @@ def native_args(provider, instructions, model=None, events=None, add_dirs=()):
         # No approvals_reviewer: the hooks deny flagged effects and the sandbox holds the
         # rest. --add-dir makes owned outside directories writable; .git stays read-only.
         # (Below the hook floor these flags are all there is.)
+        if transport != "tui":
+            return flags
         flags += (
             ["--sandbox", "workspace-write", "--ask-for-approval", "on-request"] if crew else []
         )

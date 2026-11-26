@@ -12,6 +12,8 @@ from .runtime import HERDR_ERRORS, CaptainError
 from .store import project_root
 
 SETTINGS_PATH = Path(".captain") / "settings.toml"
+# Tables only `captain supervise` reads; the `captain init` template leaves them out.
+TEMPLATE_OMITS = ("[supervisor]",)
 
 
 def defaults_text():
@@ -169,8 +171,13 @@ def template():
         "# shipped defaults, one key at a time: whatever stays commented falls back.",
         "",
     ]
+    omitted = False
     for line in defaults_text().splitlines():
         stripped = line.strip()
+        if stripped.startswith("["):
+            omitted = stripped in TEMPLATE_OMITS
+        if omitted:
+            continue
         lines.append(f"# {line}" if stripped and not stripped.startswith(("#", "[")) else line)
     return "\n".join(lines).rstrip("\n") + "\n"
 
