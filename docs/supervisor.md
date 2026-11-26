@@ -22,7 +22,9 @@ Design and phasing are in [terminal-free-plan.md](terminal-free-plan.md).
 - The token exists only in memory and on that line; it is never written to disk.
   The supervisor strips `CAPTAIN_SUPERVISOR_TOKEN` from every process it spawns, except the supervised captain, which gets a second, scoped token there (see Supervised captain).
 - SIGINT, SIGTERM, SIGHUP or the `shutdown` method stop the captain, then every crew, then any sign-in, remove the socket and exit.
-  A client disconnecting (a closed app window) changes nothing; crew keep running.
+- When stdin is a pipe or socket (an app launcher), its end of file does the same, so a crashed app never leaves an orphan holding the lock; the app keeps stdin open for the supervisor's life, and anything written to it is ignored.
+  A terminal or `/dev/null` stdin is never watched.
+  A client disconnecting from the socket (a closed app window) changes nothing; crew keep running.
 - If the supervisor dies, the lifetime guard kills its crew; the next CLI poll closes their assignments as lost (`[supervisor-lost]`).
 
 ## Wire format
@@ -73,12 +75,12 @@ Every refusal is a JSON-RPC error whose message starts with its protocol code an
 | `mark_reviewed` | `assignment`, `result` (optional), `note` (optional) | `{assignment, result, at, note}` |
 | `start_captain` | `provider`, `model` (optional, default `[captain]` settings), `effort` (pi only) | `{provider, transport, model, state: "started"}` |
 | `captain_state` | none | `{state, provider?}`; state `idle`, `working`, `blocked` or `null` |
-| `message_captain` | `text` | `{landed, gate}`, like `ring` |
+| `message_captain` | `text`, `message_id` (optional, 1 to 128 of `A-Za-z0-9_-`; minted when absent) | `{message_id, delivery_id, state, landed}`; state `delivered`, `queued` or `uncertain` |
 | `interrupt_captain` | `reason` (optional) | `{outcome}` |
 | `stop_captain` | none | `{outcome}`; `stopped`, `pending` or `not-running` |
 | `captain_requests` | none | `{requests: [{id, kind, payload, state, at, answer?, resolved_at?}]}` |
 | `answer_captain` | `request`, `decision` (`approve`/`deny`, for an approval) or `answers` ({question id: text}) | `{request, state: "answered"}` |
-| `subscribe` | `cursors` (optional object: stream name to `{offset, generation}` or a bare offset) | `{session_id, cursors}`, then notifications on the same connection |
+| `subscribe` | `cursors` (optional object: stream name to `{offset, generation}` or a bare offset) | `{session_id, ends}`, then notifications on the same connection |
 | `transcript` | `agent`, `after` or `before` (optional cursors), `limit` (1 to 500, default 200), `incarnation` (optional) | `{agent, provider, files, entries, start, end, more}` |
 | `step` | `agent`, `id`, `incarnation` (optional) | one entry with its whole text |
 | `rename` | `name` | `{session_id, name}` |
@@ -88,6 +90,7 @@ Every refusal is a JSON-RPC error whose message starts with its protocol code an
 | `cancel_sign_in` | `provider` | the attempt, or `{provider, state: "not-running"}` |
 | `usage` | none | `{agents: [{agent, usage}]}`; `usage` is a frame or null |
 | `resolve_captain_delivery` | `delivery_id`, `decision` (`resend` or `ack`) | `{delivery_id, decision}` |
+| `uncertain_deliveries` | none | `{deliveries: [{delivery_id, at, delivery}]}`, oldest first |
 
 The CLI calls `start`, `ring`, `stop`, `state`, `interrupt` and `set_model` itself, from `crew`, `tell`, `wait`, `dismiss`, `status` and `model`.
 An app calls every other method directly.
@@ -99,7 +102,7 @@ An app calls every other method directly.
 - `ring` with a `message_id` Codex already accepted lands again without starting a second turn.
   A `turn/start` Codex never answered reports `"delivery unconfirmed"`: held, never bounced, and settled by the next turn notice.
 
-Refusal codes by method: `supervisor-params` (any), `supervisor-crew`, `supervisor-transport`, `supervisor-closing`, `supervisor-startup`, `codex-hooks-missing`, `codex-hooks-untrusted`, `claude-sdk-missing`, `claude-start` (start), `grant-request-unknown`, `grant-request-closed`, `grant-request-reason`, `grant-request-decision`, `grant-request-unsupported` (resolve_grant), `command-refused`, `command-timeout`, `command-failed` (command), `transcript-agent`, `transcript-range`, `transcript-entry`, `transcript-file`, `transcript-gone` (transcript, step), `session-name` (rename), `supervisor-captain-token` (any method but the captain CLI's, with the captain's token), `captain-delivery-decision`, `captain-delivery-unknown` (resolve_captain_delivery), `sign-in-method`, `sign-in-running`, `sign-in-missing` (sign_in), `authorization-argv` (command), `authorization-unknown`, `authorization-closed`, `authorization-decision` (resolve_authorization), `diff-assignment`, `diff-no-baseline`, `diff-git` (diff), `review-assignment`, `review-no-report`, `review-result` (mark_reviewed), `captain-transport`, `captain-running`, `captain-start` (start_captain), `captain-not-running` (message, interrupt and answer), `captain-request-closed`, `captain-request-answer`, `captain-request-unknown` (answer_captain).
+Refusal codes by method: `supervisor-params` (any), `supervisor-crew`, `supervisor-transport`, `supervisor-closing`, `supervisor-startup`, `codex-hooks-missing`, `codex-hooks-untrusted`, `claude-sdk-missing`, `claude-start` (start), `grant-request-unknown`, `grant-request-closed`, `grant-request-reason`, `grant-request-decision`, `grant-request-unsupported` (resolve_grant), `command-refused`, `command-timeout`, `command-failed` (command), `transcript-agent`, `transcript-range`, `transcript-entry`, `transcript-file`, `transcript-gone` (transcript, step), `session-name` (rename), `supervisor-captain-token` (any method but the captain CLI's, with the captain's token), `captain-delivery-decision`, `captain-delivery-unknown` (resolve_captain_delivery), `sign-in-method`, `sign-in-running`, `sign-in-missing` (sign_in), `authorization-argv` (command), `authorization-unknown`, `authorization-closed`, `authorization-decision` (resolve_authorization), `diff-assignment`, `diff-no-baseline`, `diff-git` (diff), `review-assignment`, `review-no-report`, `review-result` (mark_reviewed), `captain-transport`, `captain-running`, `captain-start` (start_captain), `captain-not-running` (message, interrupt and answer), `captain-message-id` (message_captain), `captain-request-closed`, `captain-request-answer`, `captain-request-unknown` (answer_captain).
 
 ### hello
 
@@ -134,6 +137,7 @@ Streams are `actions` (the protocol action log) and one per native event file, n
 A stream missing from `cursors` replays from 0, so `{}` replays the whole session.
 A stream's `generation` names the file itself (device and inode); a cursor whose generation differs, or whose offset is past the file's end, replays that stream from 0 and its first notification carries `reset: true`, so the client drops what it held for the stream.
 A bare-offset cursor has no generation and resets only past the end.
+The result's `ends` holds each stream's cursor `{offset, generation}` at subscribe time, past its last complete line: a client whose held cursor for every stream has reached its end is caught up, so a read made right after `subscribe` (`questions`, `authorizations`, `captain_requests`) lines up with the stream.
 Notifications, all redacted (see below):
 
 | Notification | Params | Replayed |
@@ -141,11 +145,13 @@ Notifications, all redacted (see below):
 | `event` | `{stream, crew, cursor, generation, reset, events}`: lines past the previous cursor, at most 1 MiB per notification; `crew` is null for `actions` and `captain` | yes, from `{offset: cursor, generation}` |
 | `delivery` | one `wait --all` delivery: `{status, delivery_id, crew, assignment_id, summary}` | while unacknowledged |
 | `output` | `{crew, method, params}`: a native notification as the provider sent it, or with `method: "captain/usage"` a live usage frame (see Live usage) | no |
-| `attention` | `{crew, code, message}`: a start refused (hooks missing or untrusted, SDK missing), a native auth failure, or with `code: "sign-in"` and `sign_in` a sign-in's progress | no |
+| `attention` | `{crew, code, message}`: a start refused (hooks missing or untrusted, SDK missing), a native auth failure, with `code: "captain-delivery-uncertain"` and `delivery_id` an unconfirmed captain delivery, or with `code: "sign-in"` and `sign_in` a sign-in's progress | no |
+| `heartbeat` | `{at}` (epoch seconds), sent when nothing else was sent for 10 seconds | no |
 
 - A client keeps the latest `cursor` per stream and passes them to its next `subscribe`, so a reconnect misses no line and repeats none.
 - `delivery` is the projection `wait --all` returns, sent once per subscription while its `delivery_id` stays pending; it never acknowledges, so the captain's own `wait` still receives and acks it.
 - `output` and `attention` are live only, and a subscriber more than 1000 notifications behind loses the oldest ones rather than stalling a crew.
+- The supervisor closes a subscription with no final message when it stops or when one notification write takes longer than `request_timeout`; a client that sees the close, or no line for 30 seconds, reconnects with its cursors.
 
 ## Protocol actions
 
@@ -172,6 +178,7 @@ A Herdr session writes no action log and reads nothing extra to decide that: cal
 | `lifecycle` | supervisor and `wait` | `state` (`started`, `failed`, `stopped`, `retained`, `pending`, `exited`, `lost`), `detail` |
 | `authorization` | `captain do`, `command`, resolve_authorization (crew is `captain`, assignment null) | `request, state` (`open`, `approved`, `denied`, `spent`), plus `origin, argv, command, category` when opened and `reason` when decided |
 | `review` | mark_reviewed | `result` (null for the report), `note` |
+| `prompt` | message_captain, the delivery bridge (crew is `captain`, assignment null) | `message, state` (`queued`, `delivered`), plus `text` when queued |
 
 Lines are capped at 64 KiB; an oversized action drops its largest payload fields and keeps its identity, with `payload_truncated: true`.
 
@@ -216,14 +223,20 @@ The captain can route a question to the user itself, for good, with `captain esc
 `start_captain` runs the session's captain itself: the provider's first `TRANSPORTS` entry (`codex app-server`, Claude through `claude_host`, `pi --mode rpc`; grok is refused), with `prepare_launch`'s instructions and launch state, the supervised-session instruction text and no pi delivery extension.
 
 - The captain is not a crew: no lifetime record. It runs in its own process group with a scoped token as `CAPTAIN_SUPERVISOR_TOKEN`, so its `captain` commands reach this supervisor. `stop_captain`, `shutdown` and the supervisor's own exit close its input, wait `stop_timeout`, then kill the whole group.
+- `captain.json` records `{provider, pane: null, transport: "supervisor", native_session_id}`: the session id the adapter opened (a Codex thread) is merged in as soon as it opens, and the next `start_captain` with the same provider starts from it, so a stop or crash before the first finished turn still resumes; another provider drops it.
 - The scoped token reaches only the methods the captain CLI calls (`hello`, `start`, `stop`, `state`, `ring`, `interrupt`, `set_model`); every other method, such as `answer_captain`, `resolve_authorization`, `resolve_grant`, `resolve_captain_delivery` or `command`, is refused with `[supervisor-captain-token]`, so nothing the captain runs can answer the user's own decisions.
 - Its adapter link has `captain` set: Codex skips the crew-only four-hook check and starts its thread with the user's own sandbox and approval settings, as a terminal captain does, and Claude's ring carries the text instead of the crew wake line.
 - A captain's turn record (pi's turn-complete, Claude's idle notification) goes to its own hook; only a native permission request becomes a captain request.
-- The delivery bridge replaces `captain wait` and pi's extension. Each round it reads `wait --all`'s projection, acknowledges `idle` and `working` at once, and rings every other delivery into the captain as one message (the summary cut at 2000 characters).
-  A delivery is claimed in `sessions/<id>/captain-deliveries/` before it is first sent, acknowledged with `wait --ack` only after the adapter reports it landed, and retried while the captain is busy.
-  A claim left unconfirmed by an earlier supervisor is never resent or acknowledged; it is reported once as `[captain-delivery-uncertain]`.
+- The delivery bridge replaces `captain wait` and pi's extension. Each round it first sends the user's queued prompts in order, then reads `wait --all`'s projection, acknowledges `idle` and `working` at once, and rings every other delivery into the captain as one message (the summary cut at 2000 characters).
+  A delivery is claimed in `sessions/<id>/captain-deliveries/` before it is first sent, acknowledged with `wait --ack` only after the adapter reports it landed, and retried while the captain is busy or stopped.
+  A send the adapter reports `"delivery unconfirmed"` (in this supervisor) or that an earlier supervisor never confirmed stays claimed: it is never resent or acknowledged, and is reported once per supervisor as an `attention` with `code: "captain-delivery-uncertain"` and its `delivery_id`.
+  `uncertain_deliveries` lists every such claim, so a client that missed the attention still finds it; `delivery` is the crew delivery projection, or `{delivery_id, message_id}` for a user prompt.
   The user settles it with `resolve_captain_delivery{delivery_id, decision}`: `resend` drops the claim so the next round sends it again, `ack` marks it delivered so the next round acknowledges it (`[captain-delivery-decision]`, `[captain-delivery-unknown]`); it runs between bridge rounds, never during one.
-- Operator notes: the user's `tell`, `answer`, `interrupt`, `model` and `dismiss` through `command`, `interrupt_all` and `resolve_grant` are recorded under `operator_notes` in `protocol.json` and put in front of whatever next starts a captain turn (a delivery, an authorization outcome or `message_captain`), then marked delivered.
+- `message_captain` queues the user's prompt under `captain_messages` in `protocol.json`, records a `prompt` action, and sends what the captain will take at once; a busy captain gets it from the bridge when its turn ends, and a stopped one from the next `start_captain`.
+  Its claim id is `user-<message_id>`, and the ring carries that id, so Codex never starts a second turn for it.
+  `message_id` makes a retry safe: a known id returns that prompt's state and sends nothing again, and a known id with other text is refused with `[captain-message-id]`; ids stay known for the newest 200 delivered prompts.
+  `state` is `delivered`, `queued` (waiting for the captain), or `uncertain` (settle it with `resolve_captain_delivery`).
+- Operator notes: the user's `tell`, `answer`, `interrupt`, `model` and `dismiss` through `command`, `interrupt_all` and `resolve_grant` are recorded under `operator_notes` in `protocol.json` and put, one line each, in front of whatever next starts a captain turn (a prompt, a delivery or an authorization outcome), then marked delivered.
 - `interrupt_all` interrupts the captain too, as `{crew: "captain", outcome}`.
 - The captain's native prompts go to the user: a Codex approval request or ask-user (`requestUserInput`), a Claude permission request or `AskUserQuestion` (the captain's host alone registers the SDK's `can_use_tool`), and a pi extension dialog (`confirm` as an approval; `select`, `input` and `editor` as a question with the one id `value`) each open a `captain_requests` entry and a `question` action (crew `captain`, `waiting_on: "human"`), an `attention` notification with `[captain-request]`, and wait up to 30 minutes for `answer_captain`; unanswered, it expires and is declined (pi: cancelled).
   Claude's `AskUserQuestion` questions use their own text as the id, and a pi `select` answer must be one of its options.
@@ -272,10 +285,12 @@ The app keeps no session list of its own; it reads captain state, and needs no s
 Files removed by native-history cleanup after a dismissal are skipped, so that crew's transcript reads as empty.
 
 ```json
-{"id": "0:18342:2", "at": "2026-11-26T10:32:51.264Z", "role": "assistant", "kind": "tool_call", "text": "{\"command\": \"ls\"}", "tool": "Bash", "call": "toolu_01", "clipped": false}
+{"id": "0:18342:2", "at": "2026-11-26T10:32:51.264Z", "role": "assistant", "kind": "tool_call", "text": "{\"command\": \"ls\"}", "tool": "Bash", "call": "toolu_01", "origin": null, "clipped": false}
 ```
 
 - An entry is one block of one native record: `role` `user`, `assistant`, `tool` or `system`, `kind` `text`, `thinking`, `tool_call` or `tool_result`; `call` links a result to its call.
+- In the captain's transcript, a `user` text block is split into one entry per part, each with `origin`: `operator-note` (the notes in front), then `user` (a `message_captain` prompt), `delivery` (a crew delivery), `authorization` (an authorization outcome) or `native` (the provider's own context).
+  A prompt is known by a digest kept in `sessions/<id>/captain-prompts`; every other entry has `origin: null`.
 - `id` is `FILE:OFFSET:BLOCK`: the index into `files`, the record's byte offset and the block; native files only grow, so it stays valid.
 - A page's `text` is cut at 4096 characters with `clipped: true`; `step` returns that entry's whole block (up to 1 MiB), for full step output on demand.
 - Without `after`, a page is the newest entries before `before` (default: the end); pass `start` back as `before` for older entries and `end` as `after` for newer ones.

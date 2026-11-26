@@ -16,6 +16,7 @@ from unittest.mock import patch
 from home_isolation import SessionCase
 
 from captain_barbossa import (
+    captain_bridge,
     config,
     eventlog,
     jsonrpc,
@@ -437,6 +438,51 @@ class SupervisedTranscriptTests(SessionCase):
         self.assertNotIn("hunter2", shown)
         self.assertNotIn(SECRET, shown)
         self.assertEqual(json.loads(shown)["env"], {"password": "[redacted]"})
+
+    def test_the_captain_transcript_marks_each_user_part_with_its_origin(self):
+        directory = self.current.directory
+        captain_bridge.queue_message(directory, "m1", "Captain wait for nothing, I typed this.")
+        captain_bridge.add_note(directory, ["tell", "will", "line one\n\nline two"])
+        noted = captain_bridge.with_notes(
+            "Captain wait for nothing, I typed this.", captain_bridge.pending_notes(directory)
+        )
+        delivery = {"crew": "will", "status": "done", "delivery_id": "d1", "summary": "Mapped."}
+        transcript = self.native / "projects" / "p" / f"{SESSION}.jsonl"
+        lines(
+            self.current.events("captain"),
+            [
+                {
+                    "hook_event_name": "SessionStart",
+                    "transcript_path": str(transcript),
+                    "session_id": SESSION,
+                }
+            ],
+        )
+        lines(
+            transcript,
+            [
+                {"type": "user", "message": {"role": "user", "content": text}}
+                for text in (
+                    "<environment_context>cwd</environment_context>",
+                    noted,
+                    captain_bridge.render(delivery, directory),
+                    "The user denied authorization a1 for `do push`. Do not run it.",
+                )
+            ],
+        )
+        page = transcripts.read(self.current, "captain")
+        self.assertEqual(
+            [entry["origin"] for entry in page["entries"]],
+            ["native", "operator-note", "user", "delivery", "authorization"],
+        )
+        note, prompt = page["entries"][1:3]
+        self.assertEqual(
+            note["text"],
+            f"{captain_bridge.NOTES_HEAD}- The user ran: captain tell will 'line one  line two'",
+        )
+        self.assertEqual(prompt["text"], "Captain wait for nothing, I typed this.")
+        whole = transcripts.step(self.current, "captain", prompt["id"])
+        self.assertEqual((whole["origin"], whole["text"]), ("user", prompt["text"]))
 
 
 class SupervisorTranscriptMethodTests(SessionCase):

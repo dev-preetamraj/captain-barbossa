@@ -62,6 +62,7 @@ ACTION_KINDS = (
     "lifecycle",
     "authorization",
     "review",
+    "prompt",
 )
 ACTION_IDENTITY = ("id", "kind", "at", "crew", "assignment", "message", "question", "request")
 # Key suffixes, compared without case, dashes or underscores, whose values never leave in clear.

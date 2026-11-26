@@ -59,7 +59,7 @@ class BridgeStepTests(SessionCase):
             ring,
             lambda item: self.acks.append(item["delivery_id"]),
             self.mine,
-            lambda code, message: self.reports.append(code),
+            lambda code, message, *delivery_id: self.reports.append(code),
         )
 
     def test_a_held_delivery_is_retried_and_acknowledged_only_once_it_lands(self):
@@ -105,6 +105,29 @@ class BridgeStepTests(SessionCase):
                 self.step([item])
                 self.assertEqual(self.rings, [])
                 self.assertEqual(self.acks, [])
+
+    def test_an_unconfirmed_send_is_listed_with_its_id_until_resolved(self):
+        seen = []
+
+        def ring(message_id, text):
+            self.rings.append(message_id)
+            return {"landed": False, "gate": "delivery unconfirmed"}
+
+        def report(*args):
+            seen.append(args)
+
+        for _ in range(2):
+            captain_bridge.step(
+                self.directory, [delivery("d1")], ring, self.acks.append, self.mine, report
+            )
+        self.assertEqual(self.rings, ["d1"])
+        self.assertEqual(seen[0][0::2], ("captain-delivery-uncertain", "d1"))
+        (listed,) = captain_bridge.uncertain_claims(self.directory, self.mine)
+        self.assertEqual((listed["delivery_id"], listed["delivery"]), ("d1", delivery("d1")))
+        captain_bridge.resolve_claim(self.directory, "d1", "ack")
+        self.assertEqual(captain_bridge.uncertain_claims(self.directory, self.mine), [])
+        self.step([delivery("d1")])
+        self.assertEqual(self.acks, ["d1"])
 
     def test_malformed_claim_can_be_explicitly_resent_or_acknowledged(self):
         for decision in ("resend", "ack"):

@@ -8,9 +8,10 @@ import os
 import re
 import stat
 from collections import deque
+from functools import partial
 from pathlib import Path
 
-from . import eventlog, safe_read, usage
+from . import captain_bridge, eventlog, safe_read, usage
 from .runtime import CaptainError
 
 # Characters of an entry's text in a page; `step` returns its whole block up to STEP_CHARS.
@@ -53,8 +54,8 @@ def _arguments(value):
     return json.dumps(eventlog.redact(value, eventlog.known_secrets()), ensure_ascii=False)
 
 
-def _block(role, kind, text, tool=None, call=None):
-    return {"role": role, "kind": kind, "text": text, "tool": tool, "call": call}
+def _block(role, kind, text, tool=None, call=None, origin=None):
+    return {"role": role, "kind": kind, "text": text, "tool": tool, "call": call, "origin": origin}
 
 
 def _content(role, content):
@@ -119,6 +120,18 @@ def _pi(record):
 
 
 PARSERS = {"claude": _claude, "codex": _codex, "pi": _pi}
+
+
+def _captain(parse, prompts, record):
+    """The captain's user text split into parts, each with the origin the bridge wrote it for."""
+    blocks = []
+    for block in parse(record):
+        if block["role"] != "user" or block["kind"] != "text":
+            blocks.append(block)
+            continue
+        for origin, text in captain_bridge.parts(block["text"], prompts):
+            blocks.append({**block, "text": text, "origin": origin})
+    return blocks
 
 
 def _open(path, root=None):
@@ -196,7 +209,10 @@ def _position(value, name):
 
 def _sources(session, agent, incarnation):
     provider, files, root = usage.native_files(events_path(session, agent, incarnation))
-    return provider, [Path(file) for file in files], root, PARSERS.get(provider)
+    parse = PARSERS.get(provider)
+    if agent == "captain" and parse is not None:
+        parse = partial(_captain, parse, captain_bridge.prompt_digests(session.directory))
+    return provider, [Path(file) for file in files], root, parse
 
 
 def read(session, agent, *, after=None, before=None, limit=DEFAULT_LIMIT, incarnation=None):

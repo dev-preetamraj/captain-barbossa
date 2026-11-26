@@ -184,11 +184,15 @@ class SupervisorStreamReplayTests(SessionCase):
         )
         ready = self.serve()
         client, reader, reply = self.subscribe(ready, {})
-        self.assertEqual(reply["result"], {"session_id": self.current.meta["id"], "cursors": {}})
+        self.assertEqual(reply["result"]["session_id"], self.current.meta["id"])
+        ends = reply["result"]["ends"]
         seen = self.until(
             reader, lambda seen: self.batches(seen, "actions") and self.batches(seen, stem)
         )
         (actions,), (native,) = self.batches(seen, "actions"), self.batches(seen, stem)
+        for name, batch in (("actions", actions), (stem, native)):
+            held = {"offset": batch["cursor"], "generation": batch["generation"]}
+            self.assertEqual(ends[name], held)
         self.assertEqual([action["id"] for action in actions["events"]], [first])
         self.assertIsNone(actions["crew"])
         self.assertEqual(native["crew"], "will")
@@ -215,6 +219,26 @@ class SupervisorStreamReplayTests(SessionCase):
         seen = self.until(reader, lambda seen: self.batches(seen, "actions"))
         replayed = self.batches(seen, "actions")[0]["events"]
         self.assertEqual([action["id"] for action in replayed], [first, second])
+
+    def test_subscribe_returns_each_streams_end_short_of_a_partial_line(self):
+        self.crew()
+        stem = f"will-{INCARNATION}"
+        events = self.current.events(stem)
+        self.append(events, {"seq": 1})
+        whole = events.stat().st_size
+        with events.open("a", encoding="utf-8") as file:
+            file.write('{"seq": 2')
+        ready = self.serve()
+        _, _, reply = self.subscribe(ready, {stem: {"offset": whole, "generation": None}})
+        self.assertEqual(reply["result"]["ends"][stem]["offset"], whole)
+
+    def test_a_quiet_subscription_gets_heartbeats(self):
+        self.enterContext(patch.object(supervisor, "HEARTBEAT_INTERVAL", 0.2))
+        ready = self.serve()
+        _, reader, _ = self.subscribe(ready, {})
+        beats = [n for n in self.quiet(reader, 1.0) if n["method"] == "heartbeat"]
+        self.assertGreaterEqual(len(beats), 2)
+        self.assertIsInstance(beats[0]["params"]["at"], float)
 
     def test_cursors_must_name_streams_and_offsets(self):
         ready = self.serve()

@@ -41,6 +41,17 @@ ECHO_PEER = (
     "    message = json.loads(line)\n"
     "    print(json.dumps({'id': message['id'], 'result': {'thread': 't-1'}}), flush=True)\n"
 )
+# `captain supervise` with its socket in argv[1], as an app or a terminal launches it.
+LAUNCHED = (
+    "import sys\n"
+    "from pathlib import Path\n"
+    "from unittest.mock import patch\n"
+    "from captain_barbossa import cli, supervision\n"
+    "def path(directory):\n"
+    "    return Path(sys.argv[1]) / f's-{directory.name[:12]}.sock'\n"
+    "with patch.object(supervision, 'socket_path', path):\n"
+    "    sys.exit(cli.main(['supervise']))\n"
+)
 
 
 def open_fake(link):
@@ -150,6 +161,37 @@ class SupervisorSocketDoorTests(SessionCase):
             for item in root.rglob("*"):
                 if item.is_file() and not item.is_socket():
                     self.assertNotIn(ready["token"].encode(), item.read_bytes(), item)
+
+    def launch(self, stdin):
+        process = subprocess.Popen(
+            [sys.executable, "-c", LAUNCHED, str(self.sockets)],
+            cwd=self.project,
+            stdin=stdin,
+            stdout=subprocess.PIPE,
+            text=True,
+        )
+        self.addCleanup(process.wait, 30)
+        self.addCleanup(process.stdout.close)
+        self.addCleanup(lambda: process.poll() is None and process.terminate())
+        ready = json.loads(process.stdout.readline())
+        return process, ready, self.current.directory.parent / ready["session_id"]
+
+    def test_closing_the_app_launchers_pipe_stops_the_supervisor(self):
+        process, ready, directory = self.launch(subprocess.PIPE)
+        self.assertTrue(supervision.alive(directory))
+        process.stdin.close()
+        self.assertEqual(process.wait(30), 0)
+        self.assertFalse(supervision.alive(directory))
+        self.assertFalse(Path(ready["socket"]).exists())
+
+    def test_a_supervisor_without_a_launcher_pipe_keeps_serving(self):
+        process, ready, directory = self.launch(subprocess.DEVNULL)
+        time.sleep(1)
+        self.assertIsNone(process.poll())
+        os.environ[supervision.TOKEN_ENV] = ready["token"]
+        self.assertEqual(supervision.request(directory, "hello")["session_id"], ready["session_id"])
+        process.terminate()
+        self.assertEqual(process.wait(30), 0)
 
     def test_wrong_or_missing_token_is_refused(self):
         self.serve()

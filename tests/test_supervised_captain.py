@@ -43,10 +43,17 @@ def fake_captain(rung, state, holder):
         if state["value"] == "busy":
             return {"landed": False, "gate": "agent not idle"}
         rung.append((message_id, text))
+        if state["value"] == "unconfirmed":
+            return {"landed": False, "gate": "delivery unconfirmed"}
         return {"landed": True, "gate": None}
 
+    def open_link(link):
+        holder.update(link=link, seed=link.thread)
+        link.thread = link.thread or f"thread-{len(holder.setdefault('opened', []))}"
+        holder["opened"].append(link.thread)
+
     return types.SimpleNamespace(
-        open=lambda link: holder.update(link=link),
+        open=open_link,
         state=lambda link: "working" if state["value"] == "busy" else state["value"],
         ring=ring,
         interrupt=lambda link, reason: "interrupted",
@@ -140,6 +147,24 @@ class SupervisedCaptainTests(SessionCase):
         with self.assertRaisesRegex(CaptainError, r"\[captain-not-running\]"):
             self.call("message_captain", {"text": "hi"})
 
+    def test_a_restarted_captain_resumes_its_native_session_only_for_the_same_provider(self):
+        self.enterContext(
+            patch.dict(
+                supervisor.ADAPTERS, {"other": fake_captain([], {"value": "idle"}, self.holder)}
+            )
+        )
+        record = self.current.directory / "captain.json"
+        self.call("start_captain", {"provider": "fake"})
+        self.assertIsNone(self.holder["seed"])
+        self.assertEqual(store.read_json(record)["native_session_id"], "thread-0")
+        self.call("stop_captain")
+        self.call("start_captain", {"provider": "fake"})
+        self.assertEqual(self.holder["seed"], "thread-0")
+        self.call("stop_captain")
+        self.call("start_captain", {"provider": "other"})
+        self.assertIsNone(self.holder["seed"])
+        self.assertEqual(store.read_json(record)["provider"], "other")
+
     def test_operator_notes_reach_the_captain_before_its_next_turn(self):
         self.call("start_captain", {"provider": "fake"})
         self.state["value"] = "busy"
@@ -153,6 +178,67 @@ class SupervisedCaptainTests(SessionCase):
         self.assertTrue(text.endswith("Carry on."))
         self.call("message_captain", {"text": "Next."})
         self.assertEqual(self.rung[-1][1], "Next.")
+
+    def test_a_prompt_to_a_busy_captain_is_queued_and_sent_once_it_is_idle(self):
+        self.call("start_captain", {"provider": "fake"})
+        self.state["value"] = "busy"
+        reply = self.call("message_captain", {"text": "Plan it.", "message_id": "m1"})
+        self.assertEqual(
+            reply,
+            {"message_id": "m1", "delivery_id": "user-m1", "state": "queued", "landed": False},
+        )
+        self.assertEqual(self.rung, [])
+        self.state["value"] = "idle"
+        self.until(lambda: self.rung, "the queued prompt")
+        self.assertEqual(self.rung, [("user-m1", "Plan it.")])
+        prompts = [(a["message"], a["state"]) for a in self.actions() if a["kind"] == "prompt"]
+        self.assertEqual(prompts, [("m1", "queued"), ("m1", "delivered")])
+        self.assertEqual(self.actions()[-2]["text"], "Plan it.")
+
+    def test_a_retried_message_id_is_sent_once(self):
+        self.call("start_captain", {"provider": "fake"})
+        for _ in range(2):
+            reply = self.call("message_captain", {"text": "Go.", "message_id": "m1"})
+            self.assertEqual((reply["state"], reply["landed"]), ("delivered", True))
+        self.assertEqual(self.rung, [("user-m1", "Go.")])
+        with self.assertRaisesRegex(CaptainError, r"\[captain-message-id\]"):
+            self.call("message_captain", {"text": "Stop.", "message_id": "m1"})
+        with self.assertRaisesRegex(CaptainError, r"\[captain-message-id\]"):
+            self.call("message_captain", {"text": "Go.", "message_id": "../m"})
+
+    def test_an_unconfirmed_prompt_is_listed_until_the_user_resolves_it(self):
+        alerts, publish = [], supervisor.publish
+
+        def spy(owner, method, params):
+            if method == "attention":
+                alerts.append(params)
+            publish(owner, method, params)
+
+        self.enterContext(patch.object(supervisor, "publish", side_effect=spy))
+        self.call("start_captain", {"provider": "fake"})
+        self.state["value"] = "unconfirmed"
+        reply = self.call("message_captain", {"text": "Go.", "message_id": "m1"})
+        self.assertEqual(reply["state"], "uncertain")
+        self.state["value"] = "idle"
+        self.assertEqual(
+            self.call("message_captain", {"text": "Go.", "message_id": "m1"})["state"], "uncertain"
+        )
+        alert = self.until(
+            lambda: next((a for a in alerts if a.get("delivery_id")), None), "the alert"
+        )
+        self.assertEqual(
+            (alert["code"], alert["delivery_id"]), ("captain-delivery-uncertain", "user-m1")
+        )
+        (listed,) = self.call("uncertain_deliveries")["deliveries"]
+        self.assertEqual(listed["delivery_id"], "user-m1")
+        self.assertEqual(len(self.rung), 1)
+        self.call("resolve_captain_delivery", {"delivery_id": "user-m1", "decision": "resend"})
+        self.until(lambda: len(self.rung) == 2, "the resent prompt")
+        self.assertEqual(self.rung, [("user-m1", "Go.")] * 2)
+        self.assertEqual(self.call("uncertain_deliveries"), {"deliveries": []})
+        self.assertEqual(
+            self.call("message_captain", {"text": "Go.", "message_id": "m1"})["state"], "delivered"
+        )
 
     def test_native_prompts_of_the_captain_are_put_to_the_user(self):
         self.call("start_captain", {"provider": "fake"})

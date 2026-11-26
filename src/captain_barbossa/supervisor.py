@@ -19,6 +19,7 @@ import time
 from contextlib import ExitStack
 from dataclasses import dataclass, field
 from datetime import datetime
+from functools import partial
 from pathlib import Path
 from uuid import uuid4
 
@@ -98,10 +99,12 @@ CREW_ENV = (
     "CAPTAIN_WORKTREE_ID",
     "CAPTAIN_CREW_LAUNCHER",
 )
-NOTIFICATIONS = ("event", "delivery", "output", "attention")
-# Subscription pacing: event re-reads, delivery projections and bytes of one file per notification.
+NOTIFICATIONS = ("event", "delivery", "output", "attention", "heartbeat")
+# Subscription pacing: event re-reads, delivery projections, the longest silence, and bytes of
+# one file per notification.
 STREAM_INTERVAL = 0.5
 DELIVERY_INTERVAL = 2.0
+HEARTBEAT_INTERVAL = 10.0
 STREAM_BYTES = 1024 * 1024
 # Ephemeral notifications a slow subscriber may fall behind by before newer ones are dropped.
 FEED_LIMIT = 1000
@@ -314,10 +317,11 @@ def tee_output(supervisor, link):
     link.peer.handler = tee
 
 
-def attention(supervisor, crew_id, message):
+def attention(supervisor, crew_id, message, **fields):
     match = PROTOCOL_CODE.match(message)
     code = match[1] if match else "supervisor-error"
-    publish(supervisor, "attention", {"crew": crew_id, "code": code, "message": message})
+    params = {"crew": crew_id, "code": code, "message": message, **fields}
+    publish(supervisor, "attention", params)
 
 
 def lifecycle(supervisor, crew_id, state, detail):
@@ -645,11 +649,36 @@ def captain_command(supervisor, provider, model, effort):
     env.update(overlay)
     # The captain drives the CLI, which reaches this supervisor only with the token.
     env[supervision.TOKEN_ENV] = supervisor.captain_token
-    store.write_json(
-        current.directory / "captain.json",
-        {"provider": provider, "pane": None, "transport": "supervisor"},
-    )
     return argv, env, model, transport
+
+
+def _captain_record(directory):
+    path = directory / "captain.json"
+    try:
+        value = store.read_json(path) if path.exists() else {}
+    except (CaptainError, ValueError, OSError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def record_captain(directory, provider):
+    """Mark the captain in captain.json, keeping (and returning) a same-provider native session id."""
+    previous = _captain_record(directory)
+    native = previous.get("native_session_id")
+    if previous.get("provider") != provider or not isinstance(native, str):
+        native = None
+    record = {"provider": provider, "pane": None, "transport": "supervisor"}
+    if native:
+        record["native_session_id"] = native
+    store.write_json(directory / "captain.json", record)
+    return native
+
+
+def remember_native(directory, provider, native):
+    """Merge the session id the captain's adapter opened into captain.json, for a restart."""
+    record = _captain_record(directory)
+    if isinstance(native, str) and native and record.get("provider") == provider:
+        store.write_json(directory / "captain.json", {**record, "native_session_id": native})
 
 
 def own_captain(supervisor, run, argv, env):
@@ -675,6 +704,8 @@ def own_captain(supervisor, run, argv, env):
                 os.close(fd)
             keep_stderr(supervisor, link, errors)
         link.adapter.open(link)
+        with contextlib.suppress(CaptainError, OSError):
+            remember_native(supervisor.session.directory, run.provider, link.thread)
         if link.peer is not None:
             tee_output(supervisor, link)
         link.ready.set()
@@ -768,15 +799,24 @@ def captain_question(supervisor, run, params):
     return {key: {"answers": [value]} for key, value in (answers or {}).items()} or None
 
 
+def ring_captain(run, message_id, text):
+    if not live(run.link):
+        return {"landed": False, "gate": "captain stopped"}
+    return run.link.adapter.ring(run.link, message_id, text)
+
+
+def report_captain(supervisor, run, code, message, delivery_id=None):
+    """An `attention` for a bridge condition, once per supervisor run."""
+    if (code, message) not in run.reported:
+        run.reported.add((code, message))
+        fields = {"delivery_id": delivery_id} if delivery_id else {}
+        attention(supervisor, CAPTAIN, f"[{code}] {message}", **fields)
+
+
 def bridge_captain(supervisor, run):
-    """Deliver crew results, notes and authorization outcomes until the captain stops."""
+    """Deliver prompts, crew results, notes and authorization outcomes until the captain stops."""
     directory = supervisor.session.directory
     link = run.link
-
-    def ring_captain(message_id, text):
-        if not live(link):
-            return {"landed": False, "gate": "captain stopped"}
-        return link.adapter.ring(link, message_id, text)
 
     def ack(delivery):
         current = current_session(supervisor)
@@ -785,18 +825,14 @@ def bridge_captain(supervisor, run):
             with supervision.acting_as(supervisor.token):
                 protocol.poll(crew, ack=delivery["delivery_id"])
 
-    def report(code, message):
-        if (code, message) not in run.reported:
-            run.reported.add((code, message))
-            attention(supervisor, CAPTAIN, f"[{code}] {message}")
-
+    ring, report = partial(ring_captain, run), partial(report_captain, supervisor, run)
     link.ready.wait()
     while live(link) and not supervisor.stopped.is_set():
         try:
             with supervision.acting_as(supervisor.token):
                 pending = protocol.wait_all(supervisor.session, 0)["deliveries"]
             with supervisor.bridge_lock:
-                captain_bridge.step(directory, pending, ring_captain, ack, run.mine, report)
+                captain_bridge.step(directory, pending, ring, ack, run.mine, report)
         except (CaptainError, OSError, KeyError) as exc:
             report("captain-bridge", str(exc))
         run.wake.wait(BRIDGE_POLL)
@@ -812,6 +848,7 @@ def start_captain(supervisor, params):
     if supervisor.captain is not None and not supervisor.captain.link.done.is_set():
         raise CaptainError("[captain-running] The captain is already running.")
     argv, env, model, transport = captain_command(supervisor, provider, model, params.get("effort"))
+    native = record_captain(supervisor.session.directory, provider)
     project = supervisor.session.meta["project"]
     expire_captain_requests(supervisor)
     with supervisor.lock:
@@ -828,6 +865,7 @@ def start_captain(supervisor, params):
             root=project,
             model=model,
             captain=True,
+            thread=native,
         )
         run = supervisor.captain = CaptainRun(link, provider, transport)
     link.relay = lambda event: captain_relay(supervisor, run, event)
@@ -870,15 +908,29 @@ def captain_state(supervisor, params):
 
 
 def message_captain(supervisor, params):
-    """The user's own prompt to the captain, with any operator notes in front."""
+    """Queue the user's prompt once per message_id and send what the captain will take now."""
     run = _captain(supervisor)
     directory = supervisor.session.directory
-    notes = captain_bridge.pending_notes(directory)
-    text = captain_bridge.with_notes(_text(params, "text"), notes)
-    rung = run.link.adapter.ring(run.link, f"user-{uuid4().hex}", text)
-    if rung["landed"]:
-        captain_bridge.notes_delivered(directory, notes)
-    return rung
+    message_id = params.get("message_id")
+    message_id = uuid4().hex if message_id is None else message_id
+    if not isinstance(message_id, str):
+        raise CaptainError("[supervisor-params] message_id must be a string.")
+    captain_bridge.queue_message(directory, message_id, _text(params, "text"))
+    with supervisor.bridge_lock:
+        captain_bridge.send_messages(
+            directory,
+            partial(ring_captain, run),
+            run.mine,
+            partial(report_captain, supervisor, run),
+        )
+        state_name = captain_bridge.message_state(directory, message_id)
+    run.wake.set()
+    return {
+        "message_id": message_id,
+        "delivery_id": captain_bridge.USER + message_id,
+        "state": state_name,
+        "landed": state_name == "delivered",
+    }
 
 
 def interrupt_captain(supervisor, params):
@@ -923,8 +975,17 @@ def expire_captain_requests(supervisor, run=None):
             ]
 
 
+def uncertain_deliveries(supervisor, params):
+    run = supervisor.captain
+    with supervisor.bridge_lock:
+        rows = captain_bridge.uncertain_claims(
+            supervisor.session.directory, run.mine if run is not None else set()
+        )
+    return eventlog.redact({"deliveries": rows}, supervisor.literals)
+
+
 def resolve_captain_delivery(supervisor, params):
-    """The user's decision on a delivery an earlier supervisor sent without confirmation."""
+    """The user's decision on a delivery sent to the captain and never confirmed."""
     with supervisor.bridge_lock:
         reply = captain_bridge.resolve_claim(
             supervisor.session.directory, _text(params, "delivery_id"), params.get("decision")
@@ -1455,7 +1516,12 @@ def sessions(supervisor, params):
 
 
 def subscribe(supervisor, params):
-    """Validate the cursors; Handler then streams notifications on this connection."""
+    """Validate the cursors and return each stream's end; Handler then streams from the cursors."""
+    subscription_cursors(params)
+    return {"session_id": supervisor.session.meta["id"], "ends": stream_ends(supervisor)}
+
+
+def subscription_cursors(params):
     cursors = params.get("cursors", {})
     if not isinstance(cursors, dict):
         cursors = None
@@ -1478,7 +1544,37 @@ def subscribe(supervisor, params):
             "[supervisor-params] cursors must map stream names to {offset, generation} or an "
             "offset."
         )
-    return {"session_id": supervisor.session.meta["id"], "cursors": normal}
+    return normal
+
+
+def complete_end(path, size):
+    """The offset just past the last complete line of the first `size` bytes."""
+    with path.open("rb") as file:
+        end = size
+        while end > 0:
+            start = max(0, end - 65536)
+            file.seek(start)
+            chunk = file.read(end - start)
+            newline = chunk.rfind(b"\n")
+            if newline >= 0:
+                return start + newline + 1
+            end = start
+    return 0
+
+
+def stream_ends(supervisor):
+    """Each stream's cursor now, which a subscriber's held cursor reaches once caught up."""
+    with contextlib.suppress(CaptainError, OSError):
+        eventlog.flush_actions(supervisor.session.directory)
+    ends = {}
+    for name, path in streams(supervisor).items():
+        try:
+            info = path.stat()
+            offset = complete_end(path, info.st_size)
+        except FileNotFoundError:
+            continue
+        ends[name] = {"offset": offset, "generation": f"{info.st_dev}-{info.st_ino}"}
+    return ends
 
 
 def streams(supervisor):
@@ -1563,7 +1659,7 @@ def leave(supervisor, feed):
 def stream(supervisor, fd, cursors, feed):
     """Send redacted notifications until the client leaves or the supervisor stops."""
     timeout = config.number("supervisor", "request_timeout")
-    sent, projected = set(), 0.0
+    sent, projected, written = set(), 0.0, [time.monotonic()]
 
     def send(method, params):
         message = {"jsonrpc": "2.0", "method": method}
@@ -1573,10 +1669,13 @@ def stream(supervisor, fd, cursors, feed):
         except CaptainError as exc:
             if "[jsonrpc-line]" not in str(exc):
                 raise  # an oversized notification is dropped; anything else ends the stream
+        written[0] = time.monotonic()
 
     os.set_blocking(fd, False)
     try:
         while not supervisor.stopped.is_set() and not hung_up(fd):
+            if time.monotonic() - written[0] >= HEARTBEAT_INTERVAL:
+                send("heartbeat", {"at": time.time()})
             for method, params in replay(supervisor, cursors):
                 send(method, params)
             if time.monotonic() - projected >= DELIVERY_INTERVAL:
@@ -1644,6 +1743,7 @@ METHODS = {
     "cancel_sign_in": cancel_sign_in,
     "usage": agent_usage,
     "resolve_captain_delivery": resolve_captain_delivery,
+    "uncertain_deliveries": uncertain_deliveries,
 }
 
 
@@ -1717,7 +1817,7 @@ class Handler(socketserver.BaseRequestHandler):
         if ends:
             supervisor.stopped.set()
         if feed is not None:
-            stream(supervisor, fd, dict(reply["result"]["cursors"]), feed)
+            stream(supervisor, fd, subscription_cursors(params), feed)
 
     @staticmethod
     def answer(supervisor, method, params):
@@ -1768,8 +1868,27 @@ def _remove_stale(path):
     path.unlink()
 
 
-def serve(current, out, stopped):
-    """Serve until `stopped` (a signal or `shutdown`), then stop every crew."""
+def watch_launcher(fd, stopped):
+    """Stop when `fd`, a pipe or socket from an app launcher, closes; a terminal is never watched."""
+    try:
+        mode = os.fstat(fd).st_mode
+    except OSError:
+        return False
+    if not (stat.S_ISFIFO(mode) or stat.S_ISSOCK(mode)):
+        return False
+
+    def drain():
+        with contextlib.suppress(OSError):
+            while os.read(fd, 65536):
+                pass
+        stopped.set()
+
+    threading.Thread(target=drain, name="launcher", daemon=True).start()
+    return True
+
+
+def serve(current, out, stopped, launcher=None):
+    """Serve until `stopped` (a signal, `shutdown` or the launcher closing), then stop every crew."""
     path = supervision.socket_path(current.directory)
     with ExitStack() as stack:
         try:
@@ -1803,6 +1922,8 @@ def serve(current, out, stopped):
                 file=out,
                 flush=True,
             )
+            if launcher is not None:
+                watch_launcher(launcher, stopped)
             while not stopped.wait(protocol.DRAIN_INTERVAL):
                 drain_all(supervisor)
                 route(supervisor)
@@ -1824,7 +1945,7 @@ def run(args, project):
     try:
         for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
             previous[signum] = signal.signal(signum, lambda *_: stopped.set())
-        serve(current, sys.stdout, stopped)
+        serve(current, sys.stdout, stopped, 0)
     finally:
         for signum, handler in previous.items():
             signal.signal(signum, handler)
