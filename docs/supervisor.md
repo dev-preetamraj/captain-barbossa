@@ -20,8 +20,8 @@ Design and phasing are in [terminal-free-plan.md](terminal-free-plan.md).
 ```
 
 - The token exists only in memory and on that line; it is never written to disk.
-  The app passes it to the captain as `CAPTAIN_SUPERVISOR_TOKEN`, and the supervisor strips that variable from every process it spawns.
-- SIGINT, SIGTERM, SIGHUP or the `shutdown` method stop every crew, remove the socket and exit.
+  The supervisor strips `CAPTAIN_SUPERVISOR_TOKEN` from every process it spawns, except the supervised captain, which gets a second, scoped token there (see Supervised captain).
+- SIGINT, SIGTERM, SIGHUP or the `shutdown` method stop the captain, then every crew, then any sign-in, remove the socket and exit.
   A client disconnecting (a closed app window) changes nothing; crew keep running.
 - If the supervisor dies, the lifetime guard kills its crew; the next CLI poll closes their assignments as lost (`[supervisor-lost]`).
 
@@ -83,6 +83,11 @@ Every refusal is a JSON-RPC error whose message starts with its protocol code an
 | `step` | `agent`, `id`, `incarnation` (optional) | one entry with its whole text |
 | `rename` | `name` | `{session_id, name}` |
 | `sessions` | none | the session list (see Session hub) |
+| `providers` | `recheck` (optional bool), `provider` (optional) | `{providers: [{provider, installed, version, signed_in, account, detail, checked_at, sign_in, attempt}]}` |
+| `sign_in` | `provider`, `method` (optional), `api_key` (with `apiKey`) | the attempt, or `{provider, state: "guidance", guidance}` |
+| `cancel_sign_in` | `provider` | the attempt, or `{provider, state: "not-running"}` |
+| `usage` | none | `{agents: [{agent, usage}]}`; `usage` is a frame or null |
+| `resolve_captain_delivery` | `delivery_id`, `decision` (`resend` or `ack`) | `{delivery_id, decision}` |
 
 The CLI calls `start`, `ring`, `stop`, `state`, `interrupt` and `set_model` itself, from `crew`, `tell`, `wait`, `dismiss`, `status` and `model`.
 An app calls every other method directly.
@@ -94,7 +99,7 @@ An app calls every other method directly.
 - `ring` with a `message_id` Codex already accepted lands again without starting a second turn.
   A `turn/start` Codex never answered reports `"delivery unconfirmed"`: held, never bounced, and settled by the next turn notice.
 
-Refusal codes by method: `supervisor-params` (any), `supervisor-crew`, `supervisor-transport`, `supervisor-closing`, `supervisor-startup`, `codex-hooks-missing`, `codex-hooks-untrusted`, `claude-sdk-missing`, `claude-start` (start), `grant-request-unknown`, `grant-request-closed`, `grant-request-reason`, `grant-request-decision`, `grant-request-unsupported` (resolve_grant), `command-refused`, `command-timeout`, `command-failed` (command), `transcript-agent`, `transcript-range`, `transcript-entry`, `transcript-file`, `transcript-gone` (transcript, step), `session-name` (rename), `authorization-argv` (command), `authorization-unknown`, `authorization-closed`, `authorization-decision` (resolve_authorization), `diff-assignment`, `diff-no-baseline`, `diff-git` (diff), `review-assignment`, `review-no-report`, `review-result` (mark_reviewed), `captain-transport`, `captain-running`, `captain-start` (start_captain), `captain-not-running` (message, interrupt and answer), `captain-request-closed`, `captain-request-answer`, `captain-request-unknown` (answer_captain).
+Refusal codes by method: `supervisor-params` (any), `supervisor-crew`, `supervisor-transport`, `supervisor-closing`, `supervisor-startup`, `codex-hooks-missing`, `codex-hooks-untrusted`, `claude-sdk-missing`, `claude-start` (start), `grant-request-unknown`, `grant-request-closed`, `grant-request-reason`, `grant-request-decision`, `grant-request-unsupported` (resolve_grant), `command-refused`, `command-timeout`, `command-failed` (command), `transcript-agent`, `transcript-range`, `transcript-entry`, `transcript-file`, `transcript-gone` (transcript, step), `session-name` (rename), `supervisor-captain-token` (any method but the captain CLI's, with the captain's token), `captain-delivery-decision`, `captain-delivery-unknown` (resolve_captain_delivery), `sign-in-method`, `sign-in-running`, `sign-in-missing` (sign_in), `authorization-argv` (command), `authorization-unknown`, `authorization-closed`, `authorization-decision` (resolve_authorization), `diff-assignment`, `diff-no-baseline`, `diff-git` (diff), `review-assignment`, `review-no-report`, `review-result` (mark_reviewed), `captain-transport`, `captain-running`, `captain-start` (start_captain), `captain-not-running` (message, interrupt and answer), `captain-request-closed`, `captain-request-answer`, `captain-request-unknown` (answer_captain).
 
 ### hello
 
@@ -108,8 +113,9 @@ Refusal codes by method: `supervisor-params` (any), `supervisor-crew`, `supervis
 - `supervised` is whether this supervisor can start that provider's crew; `transport` is null when it cannot.
 - `delivery` is `body` (the ring carries the rendered mail) or `hook` (the ring is a wake line and the crew's own hook hands the body over).
 - `gate` is `hooks`, `extension` (pi) or `relay` (grok over ACP: every permission request goes through `captain hook`; supervised grok crew run without `--permission-mode auto`, which a Herdr grok crew keeps as its whole gate).
-- `output` is `items` (Codex app-server item and turn notifications), `events` (pi RPC session events), `turns` (Claude: turn state only) or null.
+- `output` is `items` (Codex app-server item and turn notifications), `events` (pi RPC session events), `messages` (Claude: every Agent SDK message, partial deltas included) or null.
 - `limits` states each provider's known gaps in plain words.
+- `sign_in` is `{methods, guidance}`: the sign-in methods `sign_in` accepts (none for Claude and pi) and what the user does otherwise.
 
 ### command
 
@@ -134,8 +140,8 @@ Notifications, all redacted (see below):
 | --- | --- | --- |
 | `event` | `{stream, crew, cursor, generation, reset, events}`: lines past the previous cursor, at most 1 MiB per notification; `crew` is null for `actions` and `captain` | yes, from `{offset: cursor, generation}` |
 | `delivery` | one `wait --all` delivery: `{status, delivery_id, crew, assignment_id, summary}` | while unacknowledged |
-| `output` | `{crew, method, params}`: a native notification as the provider sent it | no |
-| `attention` | `{crew, code, message}`: a start refused (hooks missing or untrusted, SDK missing) or a native auth failure | no |
+| `output` | `{crew, method, params}`: a native notification as the provider sent it, or with `method: "captain/usage"` a live usage frame (see Live usage) | no |
+| `attention` | `{crew, code, message}`: a start refused (hooks missing or untrusted, SDK missing), a native auth failure, or with `code: "sign-in"` and `sign_in` a sign-in's progress | no |
 
 - A client keeps the latest `cursor` per stream and passes them to its next `subscribe`, so a reconnect misses no line and repeats none.
 - `delivery` is the projection `wait --all` returns, sent once per subscription while its `delivery_id` stays pending; it never acknowledges, so the captain's own `wait` still receives and acks it.
@@ -209,15 +215,48 @@ The captain can route a question to the user itself, for good, with `captain esc
 
 `start_captain` runs the session's captain itself: the provider's first `TRANSPORTS` entry (`codex app-server`, Claude through `claude_host`, `pi --mode rpc`; grok is refused until it has a captain transport), with `prepare_launch`'s instructions and launch state, the supervised-session instruction text and no pi delivery extension.
 
-- The captain is not a crew: no lifetime record. It runs in its own process group with `CAPTAIN_SUPERVISOR_TOKEN` in its environment, so its `captain` commands reach this supervisor. `stop_captain`, `shutdown` and the supervisor's own exit close its input, wait `stop_timeout`, then kill the whole group.
-- Its adapter link has `captain` set: Codex skips the crew-only four-hook check (a captain keeps native prompts), and Claude's ring carries the text instead of the crew wake line.
+- The captain is not a crew: no lifetime record. It runs in its own process group with a scoped token as `CAPTAIN_SUPERVISOR_TOKEN`, so its `captain` commands reach this supervisor. `stop_captain`, `shutdown` and the supervisor's own exit close its input, wait `stop_timeout`, then kill the whole group.
+- The scoped token reaches only the methods the captain CLI calls (`hello`, `start`, `stop`, `state`, `ring`, `interrupt`, `set_model`); every other method, such as `answer_captain`, `resolve_authorization`, `resolve_grant`, `resolve_captain_delivery` or `command`, is refused with `[supervisor-captain-token]`, so nothing the captain runs can answer the user's own decisions.
+- Its adapter link has `captain` set: Codex skips the crew-only four-hook check and starts its thread with the user's own sandbox and approval settings, as a terminal captain does, and Claude's ring carries the text instead of the crew wake line.
+- A captain's turn record (pi's turn-complete, Claude's idle notification) goes to its own hook; only a native permission request becomes a captain request.
 - The delivery bridge replaces `captain wait` and pi's extension. Each round it reads `wait --all`'s projection, acknowledges `idle` and `working` at once, and rings every other delivery into the captain as one message (the summary cut at 2000 characters).
   A delivery is claimed in `sessions/<id>/captain-deliveries/` before it is first sent, acknowledged with `wait --ack` only after the adapter reports it landed, and retried while the captain is busy.
   A claim left unconfirmed by an earlier supervisor is never resent or acknowledged; it is reported once as `[captain-delivery-uncertain]`.
+  The user settles it with `resolve_captain_delivery{delivery_id, decision}`: `resend` drops the claim so the next round sends it again, `ack` marks it delivered so the next round acknowledges it (`[captain-delivery-decision]`, `[captain-delivery-unknown]`); it runs between bridge rounds, never during one.
 - Operator notes: the user's `tell`, `answer`, `interrupt`, `model` and `dismiss` through `command`, `interrupt_all` and `resolve_grant` are recorded under `operator_notes` in `protocol.json` and put in front of whatever next starts a captain turn (a delivery, an authorization outcome or `message_captain`), then marked delivered.
 - `interrupt_all` interrupts the captain too, as `{crew: "captain", outcome}`.
-- The captain's native prompts go to the user: a Codex approval request or ask-user (`requestUserInput`) opens a `captain_requests` entry and a `question` action (crew `captain`, `waiting_on: "human"`), an `attention` notification with `[captain-request]`, and waits up to 30 minutes for `answer_captain`; unanswered, it expires and is declined.
+- The captain's native prompts go to the user: a Codex approval request or ask-user (`requestUserInput`), a Claude permission request or `AskUserQuestion` (the captain's host alone registers the SDK's `can_use_tool`), and a pi extension dialog (`confirm` as an approval; `select`, `input` and `editor` as a question with the one id `value`) each open a `captain_requests` entry and a `question` action (crew `captain`, `waiting_on: "human"`), an `attention` notification with `[captain-request]`, and wait up to 30 minutes for `answer_captain`; unanswered, it expires and is declined (pi: cancelled).
+  Claude's `AskUserQuestion` questions use their own text as the id, and a pi `select` answer must be one of its options.
+  `start_captain` expires any request still open from an earlier captain, `stop_captain` expires and declines the ones its captain waits on, and only the newest 200 closed requests are kept.
 - Supervised-session instructions swap the Herdr-only lines (panes, tabs, focus, placement, background crew, wait) for app ones and never grow the text; crew recruited in the session get the same swap. Herdr text is unchanged.
+
+## Provider status and sign-in
+
+- `providers` probes each provider once and caches the result until `recheck: true`; probes run in parallel and one that outlasts twice `startup_timeout` reads as unknown with `[provider-check]`.
+  `installed` is whether the CLI is on PATH, `version` the first line of its `--version`, and `signed_in` true, false or null (unknown).
+  Codex reads `account/read` from a short-lived bare `codex app-server`; Claude runs `claude auth status --json` (Captain never reads, stores or proxies Claude credentials, and keeps only the auth method and email); pi is signed in when `pi --list-models` lists a model; Grok has no verified status command, so only `XAI_API_KEY` reads as signed in and anything else is null.
+- `sign_in` for Codex runs `account/login/start` on a bare `codex app-server`: `chatgptDeviceCode` (the default) or `apiKey` with `api_key`.
+  The key goes straight to Codex, which stores it itself; the supervisor never writes or logs it and redacts it from every reply and notification.
+- `sign_in` for Grok runs `grok login --device-auth` in its own process group and reports each output line (the last 20 in `output`) and the first URL and code it prints.
+- Claude and pi return their `guidance` and start nothing.
+- An attempt is `{provider, method, state, user_code, verification_url, detail, output}`; `state` is `starting`, `waiting` (a device code is shown), `signed-in`, `failed` or `cancelled`.
+  `sign_in` answers once the attempt leaves `starting` (or after `startup_timeout`), a device code expires after 15 minutes, and a second attempt for the same provider is refused while one runs.
+  Every state change is an `attention` with `code: "sign-in"`; a successful one rechecks that provider before it is announced.
+- `cancel_sign_in`, `shutdown` and the supervisor's own exit cancel attempts and reap their processes.
+
+## Live usage
+
+Each supervised agent's own protocol reports its usage as a frame, the shape the dashboard reads: `input, output, cache_read, cache_write, tokens, context, limit, model, cost, rate`, with null for anything unknown, never zero.
+
+- Codex: `thread/tokenUsage/updated` (totals, the last call's context and `modelContextWindow`; no cost).
+- Claude: each SDK `ResultMessage` (that query's usage, summed; `total_cost_usd` as claude reports it for the session; the context window from `modelUsage` when present; no context).
+- pi: `get_session_stats` after each settled turn (totals, cost and `contextUsage`).
+- Grok: its usage ledger. A prompt result's `usage` is that turn's and is added whole; a `usage_update` carrying a `usage` block is a cumulative session reading whose drop marks a resumed session; whichever kind arrives first owns the token totals, so the two never count twice.
+  A `usage_update`'s `used` and `size` are the context and window, and its USD `cost.amount` is the session's cumulative cost, read the same way.
+
+The supervisor keeps the newest frame in `events/<stem>.live-usage.json` and publishes it as `output` with `method: "captain/usage"`.
+`usage` returns, for the captain and every current crew, the native reading (transcript or rollout) with the live frame filling only what it leaves null; the dashboard of a supervised session shows the same, so a pi crew gets a CTX column.
+A Herdr session never reads a live frame.
 
 ## Session hub
 
@@ -251,6 +290,15 @@ Files removed by native-history cleanup after a dismissal are skipped, so that c
 - The crew runs `pi --mode rpc` behind `pi_rpc`, with the same extension and session directory as a pane crew; its gate is that extension, which fails closed.
 - A model switch needs a `provider/model` id.
 
+## Grok crew
+
+- The crew runs `grok agent stdio`; `open` needs Grok 1.0.62 or newer, read from ACP `agentInfo.version` or, when Grok names none, from `grok --version`.
+  A session that does not start in an asking mode is switched to `default` when Grok offers it (unverified against a real Grok).
+- A prompt lands once `session/prompt` is sent; its reply ends the turn whenever it comes, so a turn has no deadline and a closed connection ends it.
+  A prompt that cannot be sent is not delivered.
+- Every `session/request_permission` goes through `captain hook` in the gate's own terms: a delete as `rm -- PATH` and a move as `mv SRC DST`, so a loss of unowned work is flagged; an edit names its one path (from `rawInput` or `locations`) as `Write`, or `Edit` when it carries an old string; an effect with no single path reaches the gate with none and is refused.
+- An `execute`, `edit`, `delete`, `move` or `fetch` call that runs without having asked cancels the turn and posts `[grok-ungated]`.
+
 ## Codex crew
 
 - The crew runs `codex app-server` with the same `-c` instructions, hook declarations and `history.persistence="none"` as a pane crew, minus `notify`, `--sandbox`, `--ask-for-approval`, `--add-dir` and `-m`.
@@ -266,8 +314,10 @@ Files removed by native-history cleanup after a dismissal are skipped, so that c
   Without it, `start` is refused with `[claude-sdk-missing]`; a claude that fails to start is refused with `[claude-start]`.
 - `--settings` (hooks, no attribution, additional directories) and `--session-id` reach claude through `extra_args`, never the SDK's own `settings` or `sandbox`.
   The system prompt is the `claude_code` preset with the crew instructions appended, the permission mode is `auto`, and setting sources are `user`, `project` and `local`, as for a pane crew.
-- No `can_use_tool` callback is registered: the SDK races it against the PermissionRequest hook and the callback always wins.
+- A crew's host registers no `can_use_tool` callback: the SDK races it against the PermissionRequest hook and the callback always wins.
   claude's own command hooks gate every call, and a call no hook answers is denied by claude itself.
+  Only a supervised captain's host registers one, which asks the supervisor (`permission`) and so the user.
+- The host streams partial messages and forwards every SDK message as a `message` notification (`kind` names its class, `data` its fields) and each result's usage as `result`, so they reach the app as `output`; one too large for a line is dropped, and `transcript` keeps it whole.
 - Claude stays hook-delivered: `ring` sends only the wake line as a query, and the UserPromptSubmit, Stop and SessionStart hooks hand over the body and stamp its receipt.
 - `interrupt` and `set_model` use the SDK's own calls; a retier never writes the user's Claude settings.
   An interrupted or failed turn runs no Stop hook, so the supervisor records Claude's own idle notification shape (`Notification`, `idle_prompt`).

@@ -1,8 +1,9 @@
 """The Claude adapter: one supervised crew's claude_host over stdio JSON-RPC."""
 
+import json
 import threading
 
-from . import config, jsonrpc
+from . import config, jsonrpc, processes, usage
 from .pane import WAKE_LINE
 from .runtime import CaptainError
 
@@ -13,6 +14,7 @@ AUTH = (
 WORKING = "working"
 FINISHING = "finishing"
 UNCONFIRMED = "delivery unconfirmed"
+ASK_USER = "AskUserQuestion"
 
 
 def _timeout(name):
@@ -26,8 +28,10 @@ def open(link):
     )
     link.stdin = link.stdout = None
     link.peer.start()
+    # Only the captain's host asks the user; a crew's own hooks are its whole gate.
+    params = {"ask": True} if link.captain else {}
     try:
-        started = link.peer.request("connect", {}, _timeout("startup_timeout"))
+        started = link.peer.request("connect", params, _timeout("startup_timeout"))
     except CaptainError as exc:
         # The host's own refusal, [claude-sdk-missing] say, keeps its code.
         raise CaptainError(str(exc).removeprefix("[jsonrpc-error] connect: ")) from exc
@@ -111,12 +115,88 @@ def finish(link, event):
     link.ended(None)
 
 
+def permission(link, message):
+    """Answer the captain host's permission request with the user's decision; a crew is denied."""
+    params = message.get("params") if isinstance(message.get("params"), dict) else {}
+    tool = params.get("tool")
+    inputs = params.get("input") if isinstance(params.get("input"), dict) else {}
+    result = {"behavior": "deny", "message": "Declined: nobody answered in the app."}
+    try:
+        if link.captain and tool == ASK_USER:
+            result = questions(link, inputs) or result
+        elif link.captain:
+            request = {"hook_event_name": "PermissionRequest", "tool_name": tool, "cwd": link.root}
+            _, output = link.relay({**request, "tool_input": inputs})
+            native = (output or {}).get("hookSpecificOutput")
+            verdict = native.get("decision") if isinstance(native, dict) else None
+            if isinstance(verdict, dict) and verdict.get("behavior") == "allow":
+                result = {"behavior": "allow"}
+            else:
+                result = {"behavior": "deny", "message": "The user denied this in the app."}
+    except (CaptainError, OSError):
+        pass  # an unanswerable request is denied
+    try:
+        link.peer.respond(message["id"], result, _timeout("request_timeout"))
+    except CaptainError:
+        pass  # the host is closing; claude sees the request unanswered either way
+
+
+def questions(link, inputs):
+    """AskUserQuestion put to the user; claude reads the answers keyed by question text."""
+    asked = [
+        question
+        for question in inputs.get("questions") or ()
+        if isinstance(question, dict) and isinstance(question.get("question"), str)
+    ]
+    payload = {
+        "questions": [
+            {
+                "id": question["question"],
+                "header": question.get("header"),
+                "question": question["question"],
+                "options": question.get("options") or [],
+                "multiSelect": bool(question.get("multiSelect")),
+            }
+            for question in asked
+        ]
+    }
+    answered = link.ask("question", payload) if asked else None
+    answers = {
+        key: value["answers"][0]
+        for key, value in (answered or {}).items()
+        if isinstance(value, dict) and value.get("answers")
+    }
+    return {"behavior": "allow", "answers": answers} if answers else None
+
+
+def account(binary, root, timeout):
+    """Status from the user's own `claude auth status`; Captain never reads Claude credentials."""
+    result = processes.capture(root, [binary, "auth", "status", "--json"], timeout)
+    try:
+        status = json.loads(result.stdout)
+    except ValueError:
+        status = None
+    if not isinstance(status, dict) or type(status.get("loggedIn")) is not bool:
+        detail = (result.stderr or result.stdout).strip()[:500]
+        return {"signed_in": None, "account": None, "detail": detail or "No status."}
+    found = None
+    if status["loggedIn"]:
+        found = {"type": status.get("authMethod"), "email": status.get("email")}
+    return {"signed_in": status["loggedIn"], "account": found, "detail": None}
+
+
 def handle(link, message):
-    """Runs on the reader thread; the host sends only turn and attention notifications."""
+    """Runs on the reader thread; the one request a host sends is a captain's `permission`."""
     if "id" in message:
+        if message.get("method") == "permission":
+            threading.Thread(target=permission, args=(link, message), daemon=True).start()
         return
     params = message.get("params") if isinstance(message.get("params"), dict) else {}
-    if message["method"] == "turn" and params.get("state") == "working":
+    if message["method"] == "result" and getattr(link, "usage", None) is not None:
+        totals = link.native.setdefault("usage_totals", {})
+        model = params.get("model") if isinstance(params.get("model"), str) else link.model
+        link.usage(usage.claude_live(totals, params, model))
+    elif message["method"] == "turn" and params.get("state") == "working":
         with link.guard:
             settled(link)
             link.turn = WORKING

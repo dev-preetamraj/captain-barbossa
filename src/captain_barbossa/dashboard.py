@@ -13,7 +13,7 @@ from .models import MODELS
 from .runtime import HERDR_ERRORS, CaptainError
 from .sessions import Session, read_session
 from .store import read_json, state_root, temp_root
-from .usage import RATE_WINDOW, model_for_events, usage_for_events
+from .usage import RATE_WINDOW, model_for_events, usage_for_events, with_live
 
 # Label, base width, right-aligned. A column grows to fit its content; the base keeps
 # the frame steady when a number briefly shortens. See docs/dashboard-layout.md.
@@ -120,7 +120,9 @@ def _captain_status(agents, record):
 def _row(crew, name, status):
     """A roster row: numbers stay None when unknown so no cell fabricates a zero."""
     provider = crew.record.get("provider", "-")
-    usage = usage_for_events(crew.events)
+    # The supervisor's live readings fill what the native files leave unknown, such as pi's CTX.
+    supervised = crew.session.meta.get("transport") == "supervisor"
+    usage = (with_live if supervised else usage_for_events)(crew.events)
     if usage is None:
         model = crew.record.get("model") or model_for_events(crew.events)
         return (name, (provider, model), status, None, None, None, None, ("", "", ""))

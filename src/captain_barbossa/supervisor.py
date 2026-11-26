@@ -43,10 +43,11 @@ from . import (
     store,
     supervision,
     transcripts,
+    usage,
 )
 from .crew import Crew, event_status
 from .memory import add_memory
-from .models import TRANSPORTS, resolve_model
+from .models import CAPABILITIES, PROVIDERS, TRANSPORTS, resolve_model
 from .runtime import CaptainError
 from .sessions import Session, catalog, crew_meta, rename_session, session
 
@@ -69,51 +70,6 @@ REFUSED = -32000
 TOKEN_ERROR = -32001
 PROTOCOL_CODE = re.compile(r"\[([a-z0-9-]+)\] ")
 PROTOCOL_VERSION = "captain.supervisor/1"
-# Per provider, limits stated plainly; hello adds `supervised` from ADAPTERS (docs/supervisor.md).
-CAPABILITIES = {
-    "codex": {
-        "transport": "app-server",
-        "delivery": "body",
-        "gate": "hooks",
-        "output": "items",
-        "limits": [
-            "Needs Codex 0.164.0 or newer, with captain's four hooks trusted once in a Herdr "
-            "Codex crew; Captain never writes Codex trust.",
-            "Native ask-user requests are declined; the crew uses captain ask.",
-        ],
-    },
-    "claude": {
-        "transport": "sdk",
-        "delivery": "hook",
-        "gate": "hooks",
-        "output": "turns",
-        "limits": [
-            "Needs the optional claude-agent-sdk: pip install captain-barbossa[app].",
-            "Streams turn state only, not assistant or tool deltas.",
-        ],
-    },
-    "pi": {
-        "transport": "rpc",
-        "delivery": "body",
-        "gate": "extension",
-        "output": "events",
-        "limits": [
-            "pi extension tools outside the tool map pass the gate.",
-            "A model switch needs a provider/model id.",
-        ],
-    },
-    "grok": {
-        "transport": "acp",
-        "delivery": "body",
-        "gate": "relay",
-        "output": "events",
-        "limits": [
-            "Supervised grok asks the gate over ACP for every permission; a grok crew in a "
-            "Herdr session has no hook, so its own auto mode is the whole gate there.",
-            "grok cannot be a supervised captain yet.",
-        ],
-    },
-}
 # Captain verbs `command` runs, with deadlines in seconds; `do` waits for an authorization flow.
 COMMANDS = {
     "crew": 180,
@@ -162,7 +118,18 @@ CAPTAIN = "captain"
 BRIDGE_POLL = 2.0
 # How long a native prompt of the captain's waits for the user before it is declined.
 CAPTAIN_ASK_TIMEOUT = 1800
+# Closed captain requests kept in protocol.json; open ones are always kept.
+REQUESTS_KEPT = 200
+# Hook events adapters relay to record a turn, never to ask anyone.
+TURN_HOOKS = ("Notification", "Stop")
+# Methods the captain's scoped token may call: exactly those the captain CLI uses.
+CAPTAIN_METHODS = ("hello", "start", "stop", "state", "ring", "interrupt", "set_model")
 STREAM_NAME = re.compile(r"[A-Za-z0-9_-]{1,128}")
+# The `output` method that carries a live usage frame, apart from any provider's own methods.
+USAGE_OUTPUT = "captain/usage"
+# How long a device-code sign-in may wait for the user, and the output lines it keeps.
+SIGN_IN_TIMEOUT = 900
+SIGN_IN_LINES = 20
 
 
 @dataclass
@@ -194,6 +161,7 @@ class Link:
     notice: object = None
     captain: bool = False
     ask: object = None
+    usage: object = None
 
 
 @dataclass
@@ -208,6 +176,15 @@ class Supervisor:
     closing: threading.Event = field(default_factory=threading.Event)
     feeds: list = field(default_factory=list)
     captain: object = None
+    statuses: dict = field(default_factory=dict)
+    sign_ins: dict = field(default_factory=dict)
+    # The captain's own token: its process tree may only act as the CLI does (CAPTAIN_METHODS).
+    captain_token: str = field(default_factory=lambda: secrets.token_urlsafe(32))
+    bridge_lock: threading.Lock = field(default_factory=threading.Lock)
+
+    @property
+    def literals(self):
+        return (self.token, self.captain_token)
 
 
 def refusal(message, code=REFUSED):
@@ -442,6 +419,7 @@ def start(supervisor, params):
     link.relay = lambda payload: relay_hook(link, payload)
     link.ended = lambda event: turn_finished(supervisor, link, event)
     link.notice = lambda key, summary: post_notice(supervisor, link, key, summary)
+    link.usage = lambda frame: live_usage(supervisor, link, frame)
     # One lock admits a crew and closes admission, so stop-all never misses one.
     with supervisor.lock:
         if supervisor.closing.is_set():
@@ -516,8 +494,10 @@ def shutdown(supervisor, params):
         raise CaptainError("[supervisor-params] end must be true or false.")
     with supervisor.lock:
         supervisor.closing.set()
-    crews = stop_all(supervisor)
+    # The captain first, so the bridge never rings it with the crew's own stop notices.
     stop_captain(supervisor)
+    crews = stop_all(supervisor)
+    cancel_sign_ins(supervisor)
     if end:
         with crew_meta(supervisor.session.directory) as meta:
             meta["ended_at"] = time.time()
@@ -670,7 +650,7 @@ def captain_command(supervisor, provider, model, effort):
     }
     env.update(overlay)
     # The captain drives the CLI, which reaches this supervisor only with the token.
-    env[supervision.TOKEN_ENV] = supervisor.token
+    env[supervision.TOKEN_ENV] = supervisor.captain_token
     store.write_json(
         current.directory / "captain.json",
         {"provider": provider, "pane": None, "transport": "supervisor"},
@@ -768,6 +748,12 @@ def captain_ask(supervisor, run, kind, payload):
     return slot[1]
 
 
+def captain_relay(supervisor, run, event):
+    """A captain's turn record goes to its own hook; a native approval request to the user."""
+    turn = event.get("type") == "agent-turn-complete" or event.get("hook_event_name") in TURN_HOOKS
+    return relay_hook(run.link, event) if turn else captain_approval(supervisor, run, event)
+
+
 def captain_approval(supervisor, run, event):
     """A native approval request answered by the user, in the hook output shape adapters read."""
     inputs = event.get("tool_input") or {}
@@ -775,6 +761,7 @@ def captain_approval(supervisor, run, event):
         "tool": event.get("tool_name"),
         "command": inputs.get("command"),
         "cwd": event.get("cwd"),
+        "input": inputs,
     }
     decision = captain_ask(supervisor, run, "approval", payload)
     behavior = "allow" if decision == "approve" else "deny"
@@ -814,7 +801,8 @@ def bridge_captain(supervisor, run):
         try:
             with supervision.acting_as(supervisor.token):
                 pending = protocol.wait_all(supervisor.session, 0)["deliveries"]
-            captain_bridge.step(directory, pending, ring_captain, ack, run.mine, report)
+            with supervisor.bridge_lock:
+                captain_bridge.step(directory, pending, ring_captain, ack, run.mine, report)
         except (CaptainError, OSError, KeyError) as exc:
             report("captain-bridge", str(exc))
         run.wake.wait(BRIDGE_POLL)
@@ -831,6 +819,7 @@ def start_captain(supervisor, params):
         raise CaptainError("[captain-running] The captain is already running.")
     argv, env, model, transport = captain_command(supervisor, provider, model, params.get("effort"))
     project = supervisor.session.meta["project"]
+    expire_captain_requests(supervisor)
     with supervisor.lock:
         if supervisor.closing.is_set():
             raise CaptainError("[supervisor-closing] The supervisor is stopping.")
@@ -847,10 +836,15 @@ def start_captain(supervisor, params):
             captain=True,
         )
         run = supervisor.captain = CaptainRun(link, provider, transport)
-    link.relay = lambda event: captain_approval(supervisor, run, event)
+    link.relay = lambda event: captain_relay(supervisor, run, event)
     link.ended = lambda event: captain_turn_ended(supervisor, run, event)
     link.notice = lambda key, summary: attention(supervisor, CAPTAIN, summary)
-    link.ask = lambda kind, params: captain_question(supervisor, run, params)
+    link.ask = lambda kind, params: (
+        captain_question(supervisor, run, params)
+        if kind == "question"
+        else captain_ask(supervisor, run, kind, params)
+    )
+    link.usage = lambda frame: live_usage(supervisor, link, frame)
     threading.Thread(
         target=own_captain, args=(supervisor, run, argv, env), name="captain", daemon=True
     ).start()
@@ -908,8 +902,42 @@ def stop_captain(supervisor, params=None):
     deadline = 2 * config.number("supervisor", "stop_timeout") + processes.GROUP_TERMINATE_TIMEOUT
     if not run.link.done.wait(deadline):
         return {"outcome": "pending"}
+    expire_captain_requests(supervisor, run)
     lifecycle_captain(supervisor, "stopped", "stopped by the supervisor")
     return {"outcome": "stopped"}
+
+
+def expire_captain_requests(supervisor, run=None):
+    """Expire requests no running captain waits on and keep the newest closed ones."""
+    directory = supervisor.session.directory
+    if run is not None:
+        for slot in list(run.asks.values()):
+            slot[0].set()  # an unanswered prompt is declined
+    path = directory / "protocol.json"
+    rows = store.read_json(path).get("captain_requests", []) if path.exists() else []
+    for row in rows:
+        if row["state"] == "open":
+            with contextlib.suppress(CaptainError):
+                captain_bridge.close_request(directory, row["id"], "expired")
+    if len(rows) > REQUESTS_KEPT:
+        with protocol.checkpoint(directory) as state:
+            rows = state.get("captain_requests", [])
+            closed = [row for row in rows if row["state"] != "open"][-REQUESTS_KEPT:]
+            keep = {row["id"] for row in closed}
+            state["captain_requests"] = [
+                row for row in rows if row["state"] == "open" or row["id"] in keep
+            ]
+
+
+def resolve_captain_delivery(supervisor, params):
+    """The user's decision on a delivery an earlier supervisor sent without confirmation."""
+    with supervisor.bridge_lock:
+        reply = captain_bridge.resolve_claim(
+            supervisor.session.directory, _text(params, "delivery_id"), params.get("decision")
+        )
+    if (run := supervisor.captain) is not None:
+        run.wake.set()
+    return reply
 
 
 def captain_requests(supervisor, params):
@@ -950,6 +978,249 @@ def hello(supervisor, params):
         "commands": sorted(COMMANDS),
         "authorized_commands": sorted(AUTHORIZED),
     }
+
+
+def live_usage(supervisor, link, frame):
+    """Keep a live reading beside the agent's events and publish it; None re-reads the native's."""
+    try:
+        if frame is not None:
+            usage.record_live(link.events, frame)
+        else:
+            frame = usage.with_live(link.events)
+    except (CaptainError, OSError):
+        return  # best effort: the next reading replaces it
+    publish(supervisor, "output", {"crew": link.crew_id, "method": USAGE_OUTPUT, "params": frame})
+
+
+def agent_usage(supervisor, params):
+    """Each current agent's usage: the native reading, with live readings filling its gaps."""
+    current = current_session(supervisor)
+    agents = (
+        [(CAPTAIN, current.events(CAPTAIN))]
+        if (current.directory / "captain.json").exists()
+        else []
+    )
+    agents += [
+        (crew.crew_id, crew.events) for crew in Crew.members(current) if not crew.is_dismissed
+    ]
+    rows = []
+    for agent, events in agents:
+        try:
+            frame = usage.with_live(events)
+        except (CaptainError, OSError, ValueError, KeyError, TypeError):
+            frame = None  # unreadable reads as unknown, never zero
+        rows.append({"agent": agent, "usage": frame})
+    return {"agents": rows}
+
+
+def probe(provider, root):
+    """One provider's install, version and sign-in status, each None when it cannot be read."""
+    timeout = config.number("supervisor", "startup_timeout")
+    row = {
+        "provider": provider,
+        "installed": False,
+        "version": None,
+        "signed_in": None,
+        "account": None,
+        "detail": None,
+        "checked_at": time.time(),
+    }
+    try:
+        binary = runtime.executable(provider)
+    except CaptainError as exc:
+        row["detail"] = str(exc)
+        return row
+    row["installed"] = True
+    with contextlib.suppress(CaptainError, OSError):
+        result = processes.capture(root, [binary, "--version"], timeout)
+        lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+        row["version"] = lines[0] if result.returncode == 0 and lines else None
+    try:
+        row.update(ADAPTERS[provider].account(binary, root, timeout))
+    except (CaptainError, OSError) as exc:
+        row["detail"] = str(exc)
+    return row
+
+
+def check_providers(supervisor, names):
+    """Probe providers in parallel and cache the result; one past its deadline reads as unknown."""
+    root, found = supervisor.session.meta["project"], {}
+    threads = [
+        threading.Thread(
+            target=lambda name: found.update({name: probe(name, root)}), args=(name,), daemon=True
+        )
+        for name in names
+    ]
+    for thread in threads:
+        thread.start()
+    deadline = time.monotonic() + 2 * config.number("supervisor", "startup_timeout")
+    for thread in threads:
+        thread.join(max(0, deadline - time.monotonic()))
+    late = "[provider-check] The check did not finish before its deadline."
+    with supervisor.lock:
+        for name in names:
+            supervisor.statuses[name] = dict(found.get(name) or {"provider": name, "detail": late})
+
+
+def providers(supervisor, params):
+    """Each provider's status, cached until `recheck`, with its sign-in routes and attempt."""
+    recheck, wanted = params.get("recheck", False), params.get("provider")
+    if type(recheck) is not bool:
+        raise CaptainError("[supervisor-params] recheck must be true or false.")
+    if wanted is not None and wanted not in PROVIDERS:
+        raise CaptainError(f"[supervisor-params] provider must be one of {', '.join(PROVIDERS)}.")
+    names = [wanted] if wanted else list(PROVIDERS)
+    with supervisor.lock:
+        stale = [name for name in names if recheck or name not in supervisor.statuses]
+    if stale:
+        check_providers(supervisor, stale)
+    with supervisor.lock:
+        attempts = {name: supervisor.sign_ins.get(name) for name in names}
+        statuses = {name: supervisor.statuses[name] for name in names}
+    rows = []
+    for name in names:
+        unknown = dict.fromkeys(("installed", "version", "signed_in", "account", "checked_at"))
+        rows.append(
+            {
+                **unknown,
+                **statuses[name],
+                "sign_in": CAPABILITIES[name]["sign_in"],
+                "attempt": attempts[name].view() if attempts[name] else None,
+            }
+        )
+    return {"providers": rows}
+
+
+@dataclass
+class SignIn:
+    """A sign-in the user started; its `literals` (an API key) are redacted from all it reports."""
+
+    provider: str
+    method: str
+    announce: object
+    literals: tuple = ()
+    state: str = "starting"
+    user_code: str | None = None
+    verification_url: str | None = None
+    detail: str | None = None
+    output: list = field(default_factory=list)
+    cancel: threading.Event = field(default_factory=threading.Event)
+    changed: threading.Event = field(default_factory=threading.Event)
+    done: threading.Event = field(default_factory=threading.Event)
+
+    def report(self, line=None, **fields):
+        """Record progress; a change of any field is announced, a bare output line is kept."""
+        if line is not None:
+            line = eventlog.redact_text(line, self.literals)
+            self.output = [*self.output, line][-SIGN_IN_LINES:]
+        for key, value in fields.items():
+            if isinstance(value, str):
+                value = eventlog.redact_text(value, self.literals)
+            setattr(self, key, value)
+        if fields:
+            self.changed.set()
+            self.announce(self)
+
+    def view(self):
+        return {
+            "provider": self.provider,
+            "method": self.method,
+            "state": self.state,
+            "user_code": self.user_code,
+            "verification_url": self.verification_url,
+            "detail": self.detail,
+            "output": list(self.output),
+        }
+
+
+def announce(supervisor, attempt):
+    """Publish a sign-in's progress as an `attention` the app shows, carrying the attempt."""
+    view, name = attempt.view(), attempt.provider
+    if attempt.state == "waiting":
+        code = f" and enter {view['user_code']}" if view["user_code"] else ""
+        message = f"Sign {name} in: open {view['verification_url']}{code}."
+    elif attempt.state == "signed-in":
+        message = f"{name} is signed in."
+    elif attempt.state == "failed":
+        message = f"{name} sign-in failed: {view['detail']}"
+    else:
+        message = f"{name} sign-in is {attempt.state}."
+    params = {"crew": None, "code": "sign-in", "message": f"[sign-in] {message}", "sign_in": view}
+    publish(supervisor, "attention", params)
+
+
+def sign_in(supervisor, params):
+    """Start a provider's sign-in; a provider Captain cannot sign in returns its guidance."""
+    provider = _text(params, "provider")
+    if provider not in CAPABILITIES:
+        raise CaptainError(f"[supervisor-params] provider must be one of {', '.join(PROVIDERS)}.")
+    routes = CAPABILITIES[provider]["sign_in"]
+    if not routes["methods"]:
+        return {"provider": provider, "state": "guidance", "guidance": routes["guidance"]}
+    method = params.get("method") or routes["methods"][0]
+    if method not in routes["methods"]:
+        raise CaptainError(
+            f"[sign-in-method] {provider} signs in with {' or '.join(routes['methods'])}."
+        )
+    secret = params.get("api_key") if method == "apiKey" else None
+    if method == "apiKey" and (not isinstance(secret, str) or not secret.strip()):
+        raise CaptainError("[supervisor-params] api_key must be a non-empty string.")
+    try:
+        binary = runtime.executable(provider)
+    except CaptainError as exc:
+        raise CaptainError(f"[sign-in-missing] {exc}") from exc
+    attempt = SignIn(
+        provider, method, lambda found: announce(supervisor, found), (secret,) if secret else ()
+    )
+    with supervisor.lock:
+        if supervisor.closing.is_set():
+            raise CaptainError("[supervisor-closing] The supervisor is stopping.")
+        running = supervisor.sign_ins.get(provider)
+        if running is not None and not running.done.is_set():
+            raise CaptainError(f"[sign-in-running] A {provider} sign-in is already under way.")
+        supervisor.sign_ins[provider] = attempt
+    work = {"method": method, "api_key": secret}
+    threading.Thread(
+        target=run_sign_in, args=(supervisor, attempt, binary, work), daemon=True
+    ).start()
+    attempt.changed.wait(config.number("supervisor", "startup_timeout"))
+    return attempt.view()
+
+
+def run_sign_in(supervisor, attempt, binary, work):
+    """Run the adapter's sign-in to its end; a success refreshes the cached status first."""
+    deadline = time.monotonic() + SIGN_IN_TIMEOUT
+    root = supervisor.session.meta["project"]
+    try:
+        state, detail = ADAPTERS[attempt.provider].sign_in(attempt, binary, root, work, deadline)
+    except (CaptainError, OSError) as exc:
+        state, detail = "failed", str(exc)
+    if state == "signed-in":
+        check_providers(supervisor, [attempt.provider])
+    attempt.report(state=state, detail=detail)
+    attempt.done.set()
+
+
+def cancel_sign_in(supervisor, params):
+    provider = _text(params, "provider")
+    with supervisor.lock:
+        attempt = supervisor.sign_ins.get(provider)
+    if attempt is None or attempt.done.is_set():
+        return {"provider": provider, "state": "not-running"}
+    attempt.cancel.set()
+    attempt.done.wait(config.number("supervisor", "stop_timeout"))
+    return attempt.view()
+
+
+def cancel_sign_ins(supervisor):
+    """Cancel every sign-in under way against one stop deadline."""
+    with supervisor.lock:
+        attempts = list(supervisor.sign_ins.values())
+    for attempt in attempts:
+        attempt.cancel.set()
+    deadline = time.monotonic() + config.number("supervisor", "stop_timeout")
+    for attempt in attempts:
+        attempt.done.wait(max(0, deadline - time.monotonic()))
 
 
 def _capture(process, timeout):
@@ -1041,7 +1312,7 @@ def run_command(supervisor, argv, timeout, extra_env=None):
     except subprocess.TimeoutExpired as exc:
         processes.terminate_process_group(process)
         raise CaptainError(f"[command-timeout] {verb} exceeded {timeout}s.") from exc
-    literals = (supervisor.token,)
+    literals = supervisor.literals
     (out, clipped), (err, err_clipped) = _clip(stdout, literals), _clip(stderr, literals)
     reply = {"exit": process.returncode, "stdout": out, "stderr": err}
     if clipped or err_clipped:
@@ -1089,7 +1360,7 @@ def transcript(supervisor, params):
         limit=limit,
         incarnation=params.get("incarnation"),
     )
-    return eventlog.redact(page, (supervisor.token,))
+    return eventlog.redact(page, supervisor.literals)
 
 
 def step(supervisor, params):
@@ -1099,7 +1370,7 @@ def step(supervisor, params):
         _text(params, "id"),
         incarnation=params.get("incarnation"),
     )
-    return eventlog.redact(entry, (supervisor.token,))
+    return eventlog.redact(entry, supervisor.literals)
 
 
 def rename(supervisor, params):
@@ -1300,7 +1571,7 @@ def stream(supervisor, fd, cursors, feed):
 
     def send(method, params):
         message = {"jsonrpc": "2.0", "method": method}
-        message["params"] = eventlog.redact(params, (supervisor.token,))
+        message["params"] = eventlog.redact(params, supervisor.literals)
         try:
             jsonrpc.write(fd, message, time.monotonic() + timeout)
         except CaptainError as exc:
@@ -1372,6 +1643,11 @@ METHODS = {
     "stop_captain": stop_captain,
     "answer_captain": answer_captain,
     "captain_requests": captain_requests,
+    "providers": providers,
+    "sign_in": sign_in,
+    "cancel_sign_in": cancel_sign_in,
+    "usage": agent_usage,
+    "resolve_captain_delivery": resolve_captain_delivery,
 }
 
 
@@ -1450,10 +1726,18 @@ class Handler(socketserver.BaseRequestHandler):
     @staticmethod
     def answer(supervisor, method, params):
         token = params.pop("token", None)
-        if not isinstance(token, str) or not hmac.compare_digest(token, supervisor.token):
+        given = token.encode() if isinstance(token, str) else b""
+        full = hmac.compare_digest(given, supervisor.token.encode())
+        scoped = hmac.compare_digest(given, supervisor.captain_token.encode())
+        if not (full or scoped):
             return {"error": refusal("[supervisor-token] Wrong or missing token.", TOKEN_ERROR)}
         if method not in METHODS:
             return {"error": refusal(f"[unknown-method] {method}", UNKNOWN_METHOD)}
+        if scoped and method not in CAPTAIN_METHODS:
+            message = (
+                f"[supervisor-captain-token] {method} is the user's to call, not the captain's."
+            )
+            return {"error": refusal(message, TOKEN_ERROR)}
         try:
             return {"result": METHODS[method](supervisor, params)}
         except (CaptainError, OSError) as exc:
@@ -1505,7 +1789,8 @@ def serve(current, out, stopped):
         stack.callback(server.server_close)
         os.chmod(path, 0o600)
         supervisor = Supervisor(current, secrets.token_urlsafe(32), stopped)
-        eventlog.hide(supervisor.token)
+        for secret in supervisor.literals:
+            eventlog.hide(secret)
         server.supervisor = supervisor
         threading.Thread(target=server.serve_forever, name="supervisor", daemon=True).start()
         try:
@@ -1529,8 +1814,9 @@ def serve(current, out, stopped):
             with supervisor.lock:
                 supervisor.closing.set()
             server.shutdown()
-            stop_all(supervisor)
             stop_captain(supervisor)
+            stop_all(supervisor)
+            cancel_sign_ins(supervisor)
 
 
 def run(args, project):

@@ -49,6 +49,14 @@ _FIELDS = {
     "cache_read": "cache_read_input_tokens",
     "cache_write": "cache_creation_input_tokens",
 }
+_PI_FIELDS = {
+    "input": "input",
+    "output": "output",
+    "cache_read": "cacheRead",
+    "cache_write": "cacheWrite",
+}
+# A supervised agent's newest reading from its own protocol, beside its events file.
+LIVE_SUFFIX = ".live-usage.json"
 _PRICE_KEYS = (
     "input_cost_per_token",
     "output_cost_per_token",
@@ -245,15 +253,101 @@ def _grok_usage(events_path):
     model = model if isinstance(model, str) and model else None
     context = ledger.get("context")
     context = context if type(context) is int and context >= 0 else None
+    limit = ledger.get("limit")
     return {
         **counts,
         "tokens": sum(counts.values()),
         "context": context,
-        "limit": None,
+        "limit": limit if type(limit) is int and limit > 0 else None,
         "model": model,
         "cost": cost,
         "rate": None,
     }
+
+
+def record_live(events_path, frame):
+    store.write_json(Path(events_path).with_suffix(LIVE_SUFFIX), {"version": 1, "usage": frame})
+
+
+def live_usage(events_path):
+    """The supervisor's live frame for an events file; a malformed value reads as unknown."""
+    ledger = _read_json(Path(events_path).with_suffix(LIVE_SUFFIX))
+    frame = ledger.get("usage") if ledger.get("version") == 1 else None
+    if not isinstance(frame, dict):
+        return None
+    counts = (*_FIELDS, "tokens", "context", "limit")
+    clean = {key: frame.get(key) if _known(frame.get(key), int) else None for key in counts}
+    for key in ("cost", "rate"):
+        clean[key] = frame.get(key) if _known(frame.get(key), (int, float)) else None
+    model = frame.get("model")
+    clean["model"] = model if isinstance(model, str) and model else None
+    return clean
+
+
+def _known(value, kinds):
+    return type(value) in (kinds if isinstance(kinds, tuple) else (kinds,)) and value >= 0
+
+
+def with_live(events_path, *, cached_only=True):
+    """Native usage, with a supervised agent's live frame filling only what it leaves unknown."""
+    native = usage_for_events(events_path, cached_only=cached_only)
+    live = live_usage(events_path)
+    if native is None or live is None:
+        return native or live
+    return {
+        key: live.get(key) if native.get(key) is None else native[key] for key in {*native, *live}
+    }
+
+
+def codex_live(token_usage, model):
+    """A frame from app-server's thread/tokenUsage/updated; Codex reports no cost there."""
+    if not isinstance(token_usage, dict) or not isinstance(token_usage.get("total"), dict):
+        return None
+
+    def counts(breakdown):
+        breakdown = breakdown if isinstance(breakdown, dict) else {}
+        return _codex_counts(
+            {
+                "input_tokens": breakdown.get("inputTokens"),
+                "cached_input_tokens": breakdown.get("cachedInputTokens"),
+                "output_tokens": breakdown.get("outputTokens"),
+                "cache_write_input_tokens": breakdown.get("cacheWriteInputTokens"),
+            }
+        )
+
+    last = token_usage.get("last")
+    context = _context(counts(last)) if isinstance(last, dict) else None
+    limit = _configured_limit() or _count(token_usage.get("modelContextWindow")) or None
+    return _frame(counts(token_usage["total"]), context, limit, model, None, [])
+
+
+def pi_live(stats, model):
+    """A frame from pi's get_session_stats; contextUsage is absent when pi knows no window."""
+    tokens = stats.get("tokens") if isinstance(stats, dict) else None
+    if not isinstance(tokens, dict):
+        return None
+    totals = {key: tokens.get(field) for key, field in _PI_FIELDS.items()}
+    if not all(_known(value, int) for value in totals.values()):
+        return None
+    cost = stats.get("cost") if _known(stats.get("cost"), (int, float)) else None
+    window = stats.get("contextUsage") if isinstance(stats.get("contextUsage"), dict) else {}
+    context = window.get("tokens") if _known(window.get("tokens"), int) else None
+    limit = window.get("contextWindow") if _known(window.get("contextWindow"), int) else None
+    return _frame(totals, context, _configured_limit() or limit, model, cost, [])
+
+
+def claude_live(totals, result, model):
+    """Fold one SDK ResultMessage into `totals`: usage is that query's, cost the session's."""
+    counts = result.get("usage") if isinstance(result.get("usage"), dict) else {}
+    for name, field in _FIELDS.items():
+        totals[name] = totals.get(name, 0) + _count(counts.get(field))
+    cost = result.get("total_cost_usd")
+    cost = cost if _known(cost, (int, float)) else None
+    by_model = result.get("model_usage") if isinstance(result.get("model_usage"), dict) else {}
+    entry = by_model.get(model) or (next(iter(by_model.values())) if len(by_model) == 1 else {})
+    window = entry.get("contextWindow") if isinstance(entry, dict) else None
+    limit = _configured_limit() or (window if _known(window, int) and window else None)
+    return _frame(dict(totals), None, limit, model, cost, [])
 
 
 def _combine(frames):
@@ -284,12 +378,7 @@ def _pi_usage(transcripts):
                 continue
             found = True
             model = data.get("model", model)
-            for key, field in (
-                ("input", "input"),
-                ("output", "output"),
-                ("cache_read", "cacheRead"),
-                ("cache_write", "cacheWrite"),
-            ):
+            for key, field in _PI_FIELDS.items():
                 totals[key] += _count(counts.get(field))
             prices = counts.get("cost")
             turn_cost = prices.get("total") if isinstance(prices, dict) else None

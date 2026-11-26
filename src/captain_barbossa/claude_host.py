@@ -1,11 +1,13 @@
 """One supervised Claude crew: the user's claude under the Agent SDK, driven by JSON-RPC on stdio.
 
-Requests are connect, query, interrupt, set_model and close; notifications are turn and attention.
-Supervised mail, gating and usage stay with claude's own command hooks; only isolated
-one-shot turns register a deny-all callback, which wins the SDK's PermissionRequest race.
+Requests are connect, query, interrupt, set_model and close; notifications are turn, result,
+message and attention. Supervised mail, gating and usage stay with claude's own command hooks;
+only a captain's host (connect `ask`) registers a callback, asking the supervisor `permission`,
+and isolated one-shot turns a deny-all one, which wins the SDK's PermissionRequest race.
 """
 
 import asyncio
+import dataclasses
 import json
 import os
 import signal
@@ -23,9 +25,11 @@ SETTING_SOURCES = ("user", "project", "local")
 # claude's exit after a close we started: clean, or the SIGTERM the SDK or the guard sent.
 NO_PERSISTENCE = "--no-session-persistence"
 CLOSED = (0, 143, -signal.SIGTERM)
+# Outlasts the supervisor's own wait for the user's answer, which declines when it expires.
+ASK_TIMEOUT = 1860
 
 
-def options(sdk, argv, cwd, *, isolated=False):
+def options(sdk, argv, cwd, *, isolated=False, partial=False, can_use_tool=None):
     """Build native options, stripping executable user configuration for isolated turns."""
     cli, flags = argv[0], argv[1:]
     ephemeral = isolated and NO_PERSISTENCE in flags
@@ -62,6 +66,10 @@ def options(sdk, argv, cwd, *, isolated=False):
             can_use_tool=deny_tool,
             mcp_servers={},
         )
+    if partial:
+        typed["include_partial_messages"] = True
+    if can_use_tool is not None:
+        typed["can_use_tool"] = can_use_tool
     built = sdk.ClaudeAgentOptions(
         cli_path=cli,
         system_prompt=prompt,
@@ -78,11 +86,12 @@ class Host:
 
     def __init__(self, argv, out):
         self.argv, self.out = argv, out
-        self.sdk = self.client = self.process = None
+        self.sdk = self.client = self.process = self.model = None
         self.working = self.warned = False
         self.exited = None
         self.stop = asyncio.Event()
         self.tasks = set()
+        self.waiting, self.next_id = {}, 0
 
     def send(self, message):
         jsonrpc.write(self.out, {"jsonrpc": "2.0", **message})
@@ -105,6 +114,36 @@ class Host:
             task = asyncio.create_task(self.answer(message))
             self.tasks.add(task)
             task.add_done_callback(self.tasks.discard)
+        elif (future := self.waiting.get(message.get("id"))) is not None and not future.done():
+            future.set_result(message)
+
+    async def request(self, method, params, timeout):
+        """The supervisor's reply to a request of ours, or None past `timeout`."""
+        self.next_id += 1
+        identifier = f"host-{self.next_id}"
+        future = self.waiting[identifier] = asyncio.get_running_loop().create_future()
+        try:
+            self.send({"id": identifier, "method": method, "params": params})
+            return await asyncio.wait_for(future, timeout)
+        except (CaptainError, OSError, TimeoutError):
+            return None
+        finally:
+            self.waiting.pop(identifier, None)
+
+    async def ask(self, tool_name, tool_input, context):
+        """The captain's permission prompt, decided by the user in the app; unanswered denies."""
+        reply = await self.request(
+            "permission", {"tool": tool_name, "input": tool_input}, ASK_TIMEOUT
+        )
+        result = (reply or {}).get("result")
+        result = result if isinstance(result, dict) else {}
+        if result.get("behavior") == "allow":
+            updated = dict(tool_input)
+            if isinstance(result.get("answers"), dict):
+                updated["answers"] = result["answers"]
+            return self.sdk.PermissionResultAllow(updated_input=updated)
+        message = result.get("message") or "Declined: nobody answered in the app."
+        return self.sdk.PermissionResultDeny(message=message)
 
     async def answer(self, message):
         params = message.get("params") if isinstance(message.get("params"), dict) else {}
@@ -118,7 +157,7 @@ class Host:
 
     async def call(self, method, params):
         if method == "connect":
-            return await self.connect()
+            return await self.connect(ask=params.get("ask") is True)
         if self.client is None:
             raise CaptainError(f"[claude-host] {method} before connect.")
         match method:
@@ -141,7 +180,7 @@ class Host:
                 return {}
         raise CaptainError(f"[claude-host] Unknown method {method}.")
 
-    async def connect(self):
+    async def connect(self, ask=False):
         if self.client is not None:
             raise CaptainError("[claude-host] Already connected.")
         try:
@@ -149,7 +188,9 @@ class Host:
         except ImportError as exc:
             raise CaptainError(SDK_MISSING) from exc
         self.sdk = sdk
-        built, session_id = options(sdk, self.argv, os.getcwd())
+        built, session_id = options(
+            sdk, self.argv, os.getcwd(), partial=True, can_use_tool=self.ask if ask else None
+        )
         client = sdk.ClaudeSDKClient(built)
         try:
             await client.connect()
@@ -181,15 +222,33 @@ class Host:
             self.working = False
             if getattr(message, "api_error_status", None) == 401:
                 self.attention()
+            self.notify(
+                "result",
+                usage=plain(getattr(message, "usage", None)),
+                total_cost_usd=plain(getattr(message, "total_cost_usd", None)),
+                model_usage=plain(getattr(message, "model_usage", None)),
+                model=self.model,
+            )
             # Claude runs no Stop hook for an interrupted or failed turn.
             clean = message.subtype == "success" and not message.is_error
             self.notify("turn", state="idle", clean=clean)
-        elif isinstance(message, self.sdk.AssistantMessage):
+            return
+        if isinstance(message, self.sdk.AssistantMessage):
             if getattr(message, "error", None) == "authentication_failed":
                 self.attention()
+            if isinstance(getattr(message, "model", None), str):
+                self.model = message.model
             if not self.working:
                 self.working = True
                 self.notify("turn", state="working")
+        self.output(message)
+
+    def output(self, message):
+        """Every other SDK message, partial deltas included, for the app's live output."""
+        try:
+            self.notify("message", kind=type(message).__name__, data=plain(message))
+        except CaptainError:
+            pass  # an oversized message is dropped; the transcript keeps it whole
 
     def attention(self):
         if not self.warned:
@@ -216,6 +275,20 @@ class Host:
         if code in CLOSED:
             return 0
         return code if isinstance(code, int) and code > 0 else 1
+
+
+def plain(value):
+    """An SDK message as JSON values, each dataclass tagged with its class name."""
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        fields = {item.name: plain(getattr(value, item.name)) for item in dataclasses.fields(value)}
+        return {"type": type(value).__name__, **fields}
+    if isinstance(value, dict):
+        return {str(key): plain(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [plain(item) for item in value]
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    return str(value)
 
 
 async def one_shot(argv, out):

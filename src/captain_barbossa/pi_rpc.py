@@ -5,7 +5,7 @@ import os
 import threading
 import time
 
-from . import config, jsonrpc
+from . import config, jsonrpc, models, usage
 from .runtime import CaptainError
 
 STARTING = "starting"
@@ -276,16 +276,69 @@ def _finish(link, event):
             if link.turn == FINISHING:
                 link.turn = None
     link.ended(None)
+    record_stats(link)
 
 
-def _cancel_dialog(link, identifier):
+def record_stats(link):
+    """Hand pi's get_session_stats to the supervisor as a live usage frame, best effort."""
+    if getattr(link, "usage", None) is None:
+        return
+    try:
+        stats = link.peer.request("get_session_stats", {}, _timeout("request_timeout"))
+    except (CaptainError, OSError):
+        return  # unknown stays unknown until the next turn's reading
+    if (frame := usage.pi_live(stats, link.model)) is not None:
+        link.usage(frame)
+
+
+def _respond_dialog(link, identifier, reply):
     try:
         link.peer.send(
-            {"type": "extension_ui_response", "id": identifier, "cancelled": True},
+            {"type": "extension_ui_response", "id": identifier, **reply},
             _timeout("request_timeout"),
         )
     except (CaptainError, OSError):
         pass
+
+
+def _ask_dialog(link, event):
+    """Put a captain's extension dialog to the user; unanswered, it is cancelled."""
+    method, title = event["method"], event.get("title")
+    message = event.get("message")
+    reply = {"cancelled": True}
+    try:
+        if method == "confirm":
+            text = " - ".join(part for part in (title, message) if isinstance(part, str) and part)
+            payload = {"tool": "confirm", "command": text, "cwd": link.root}
+            decision = link.ask("approval", payload)
+            if decision is not None:
+                reply = {"confirmed": decision == "approve"}
+        else:
+            options = [option for option in event.get("options") or () if isinstance(option, str)]
+            question = {
+                "id": "value",
+                "header": title,
+                "question": message or title,
+                "options": [{"label": option} for option in options],
+                "prefill": event.get("prefill") or event.get("placeholder"),
+            }
+            answered = link.ask("question", {"method": method, "questions": [question]}) or {}
+            value = next(iter((answered.get("value") or {}).get("answers") or ()), None)
+            if isinstance(value, str) and (method != "select" or value in options):
+                reply = {"value": value}
+    except (CaptainError, OSError):
+        pass  # an unanswerable dialog is cancelled, as for a crew
+    _respond_dialog(link, event["id"], reply)
+
+
+def account(binary, root, timeout):
+    """pi is signed in when it lists at least one authenticated model."""
+    models.pi_models.cache_clear()
+    try:
+        served = models.pi_models()
+    except CaptainError as exc:
+        return {"signed_in": False, "account": None, "detail": str(exc)}
+    return {"signed_in": True, "account": {"models": len(served)}, "detail": None}
 
 
 def handle(link, message):
@@ -294,7 +347,11 @@ def handle(link, message):
     if kind == "extension_ui_request":
         identifier = event.get("id")
         if event.get("method") in DIALOG_METHODS and isinstance(identifier, str):
-            threading.Thread(target=_cancel_dialog, args=(link, identifier), daemon=True).start()
+            if getattr(link, "captain", False):
+                target, args = _ask_dialog, (link, event)
+            else:
+                target, args = _respond_dialog, (link, identifier, {"cancelled": True})
+            threading.Thread(target=target, args=args, daemon=True).start()
     elif kind == "agent_start":
         with link.guard:
             _settled(link)

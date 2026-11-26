@@ -56,6 +56,72 @@ TRANSPORTS = {
     "pi": ("rpc",),
     "grok": ("acp",),
 }
+# Per provider, limits stated plainly and the sign-in routes the supervisor offers; `hello`
+# adds `supervised`, and docs/supervisor.md names every field.
+CAPABILITIES = {
+    "codex": {
+        "transport": "app-server",
+        "delivery": "body",
+        "gate": "hooks",
+        "output": "items",
+        "limits": [
+            "Needs Codex 0.164.0 or newer, with captain's four hooks trusted once in a Herdr "
+            "Codex crew; Captain never writes Codex trust.",
+            "Native ask-user requests are declined; the crew uses captain ask.",
+        ],
+        "sign_in": {
+            "methods": ["chatgptDeviceCode", "apiKey"],
+            "guidance": "Sign in here with a ChatGPT device code or an OpenAI API key, which "
+            "Codex keeps in its own store; or run `codex login` in a terminal.",
+        },
+    },
+    "claude": {
+        "transport": "sdk",
+        "delivery": "hook",
+        "gate": "hooks",
+        "output": "messages",
+        "limits": [
+            "Needs the optional claude-agent-sdk: pip install captain-barbossa[app].",
+        ],
+        "sign_in": {
+            "methods": [],
+            "guidance": "Run `claude auth login` in a terminal, or set ANTHROPIC_API_KEY for "
+            "the supervisor; Captain never reads, stores or proxies Claude credentials.",
+        },
+    },
+    "pi": {
+        "transport": "rpc",
+        "delivery": "body",
+        "gate": "extension",
+        "output": "events",
+        "limits": [
+            "pi extension tools outside the tool map pass the gate.",
+            "A model switch needs a provider/model id.",
+        ],
+        "sign_in": {
+            "methods": [],
+            "guidance": "Run `pi auth login <provider>` (or `/login` in pi) in a terminal, or "
+            "set the provider's API key for the supervisor.",
+        },
+    },
+    "grok": {
+        "transport": "acp",
+        "delivery": "body",
+        "gate": "relay",
+        "output": "events",
+        "limits": [
+            "Supervised grok asks the gate over ACP for every permission; a grok crew in a "
+            "Herdr session has no hook, so its own auto mode is the whole gate there.",
+            "grok cannot be a supervised captain yet.",
+            "Grok reports no sign-in status; only XAI_API_KEY shows as signed in.",
+        ],
+        "sign_in": {
+            "methods": ["deviceAuth"],
+            "guidance": "Sign in here with a device code (grok login --device-auth), or set "
+            "XAI_API_KEY for the supervisor.",
+        },
+    },
+}
 # Providers whose own hook can hand mail to their own model, so the body never crosses a
 # terminal. Codex's notify marks a turn boundary but cannot return context, so it stays out.
 HOOK_DELIVERED = ("claude",)

@@ -1,9 +1,13 @@
 """The Codex app-server adapter: one Codex thread per supervised crew over stdio JSON-RPC."""
 
+import contextlib
+import os
 import shlex
+import subprocess
 import threading
+import time
 
-from . import __version__, config, instructions, jsonrpc
+from . import __version__, config, instructions, jsonrpc, processes, usage
 from .runtime import CaptainError
 
 # Set while turn/start is in flight, so a second ring cannot start a turn beside it.
@@ -36,7 +40,10 @@ def open(link):
     if not link.captain:
         # The captain keeps its native prompts, which the supervisor puts to the user instead.
         require_live_hooks(link, link.peer.request("hooks/list", {"cwds": [link.root]}, timeout))
-    params = {"cwd": link.root, "sandbox": "workspace-write", "approvalPolicy": "on-request"}
+    params = {"cwd": link.root}
+    if not link.captain:
+        # A captain keeps the user's own sandbox and approval settings, as in a terminal.
+        params.update(sandbox="workspace-write", approvalPolicy="on-request")
     if link.model:
         params["model"] = link.model
     started = link.peer.request("thread/start", params, timeout)
@@ -162,6 +169,10 @@ def handle(link, message):
         link.native.setdefault("items", {})[item.get("id")] = item
     elif method == "item/completed" and item.get("type") == "agentMessage":
         link.native["reply"] = str(item.get("text") or "")
+    elif method == "thread/tokenUsage/updated" and getattr(link, "usage", None) is not None:
+        # On the reader thread, so readings are kept in the order Codex sent them.
+        if (frame := usage.codex_live(params.get("tokenUsage"), link.model)) is not None:
+            link.usage(frame)
     elif method == "turn/completed":
         turn = _turn_id(params)
         with link.guard:
@@ -260,3 +271,106 @@ def answer(link, message):
         link.peer.respond(identifier, result, timeout)
     except CaptainError:
         pass  # the thread is closing; Codex sees the request unanswered either way
+
+
+def account_server(binary, root, handler, timeout):
+    """(process, peer) of a bare `codex app-server` for account calls, in its own group."""
+    native_in, write_fd = os.pipe()
+    read_fd, native_out = os.pipe()
+    env = {key: value for key, value in os.environ.items() if key not in processes.CHILD_SECRETS}
+    try:
+        process = subprocess.Popen(
+            [binary, "app-server"],
+            cwd=root,
+            stdin=native_in,
+            stdout=native_out,
+            stderr=subprocess.DEVNULL,
+            env=env,
+            start_new_session=True,
+        )
+    except OSError as exc:
+        for fd in (write_fd, read_fd):
+            os.close(fd)
+        raise CaptainError(f"[codex-app-server] codex app-server did not start: {exc}") from exc
+    finally:
+        for fd in (native_in, native_out):
+            os.close(fd)
+    peer = jsonrpc.Peer(read_fd, write_fd, handler, "codex-account")
+    peer.start()
+    try:
+        client = {"name": "captain-barbossa", "version": __version__}
+        peer.request("initialize", {"clientInfo": client}, timeout)
+        peer.notify("initialized", timeout)
+    except CaptainError:
+        close_account_server(process, peer)
+        raise
+    return process, peer
+
+
+def close_account_server(process, peer):
+    """End of input asks app-server to exit; its group is reaped either way."""
+    peer.close()
+    with contextlib.suppress(subprocess.TimeoutExpired):
+        process.wait(processes.GROUP_TERMINATE_TIMEOUT)
+    processes.terminate_process_group(process)
+
+
+def account(binary, root, timeout):
+    """Sign-in status from Codex's own account/read; Codex keeps every credential."""
+    process, peer = account_server(binary, root, lambda message: None, timeout)
+    try:
+        read = peer.request("account/read", {"refreshToken": False}, timeout)
+    finally:
+        close_account_server(process, peer)
+    read = read if isinstance(read, dict) else {}
+    found = read.get("account")
+    if isinstance(found, dict):
+        keep = {
+            "type": found.get("type"),
+            "email": found.get("email"),
+            "plan": found.get("planType"),
+        }
+        return {"signed_in": True, "account": keep, "detail": None}
+    if read.get("requiresOpenaiAuth") is False:
+        detail = "Codex's configured provider needs no OpenAI sign-in."
+        return {"signed_in": True, "account": None, "detail": detail}
+    return {"signed_in": False, "account": None, "detail": None}
+
+
+def sign_in(attempt, binary, root, params, deadline):
+    """(state, detail) of account/login/start; an API key goes to Codex's own store only."""
+    timeout = _timeout("startup_timeout")
+    completed, outcome = threading.Event(), {}
+
+    def handler(message):
+        if message.get("method") == "account/login/completed" and "id" not in message:
+            body = message.get("params")
+            outcome.update(body if isinstance(body, dict) else {})
+            completed.set()
+
+    process, peer = account_server(binary, root, handler, timeout)
+    try:
+        if params["method"] == "apiKey":
+            request = {"type": "apiKey", "apiKey": params["api_key"]}
+            peer.request("account/login/start", request, timeout)
+            read = peer.request("account/read", {"refreshToken": False}, timeout)
+            found = read.get("account") if isinstance(read, dict) else None
+            return ("signed-in", None) if isinstance(found, dict) else ("failed", "No account.")
+        started = peer.request("account/login/start", {"type": "chatgptDeviceCode"}, timeout)
+        started = started if isinstance(started, dict) else {}
+        login, code, url = (started.get(key) for key in ("loginId", "userCode", "verificationUrl"))
+        if not all(isinstance(value, str) and value for value in (login, code, url)):
+            return "failed", f"account/login/start returned no device code: {started}"
+        attempt.report(state="waiting", user_code=code, verification_url=url)
+        while not completed.wait(0.2):
+            if attempt.cancel.is_set() or time.monotonic() > deadline:
+                with contextlib.suppress(CaptainError):
+                    peer.request("account/login/cancel", {"loginId": login}, timeout)
+                return ("cancelled", None) if attempt.cancel.is_set() else ("failed", "Expired.")
+        if outcome.get("loginId") not in (None, login):
+            return "failed", "Codex completed a different login."
+        if outcome.get("success") is True:
+            return "signed-in", None
+        return "failed", str(outcome.get("error") or "Codex reported the sign-in failed.")
+    finally:
+        close_account_server(process, peer)
