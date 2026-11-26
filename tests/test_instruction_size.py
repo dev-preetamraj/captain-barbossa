@@ -13,14 +13,6 @@ class InstructionSizeTests(unittest.TestCase):
     def setUp(self):
         self.directory = Path(self.enterContext(tempfile.TemporaryDirectory()))
 
-    def test_supervised_grok_guidance_leaves_herdr_guidance_intact(self):
-        herdr = instruction_prompts.agent_instructions(self.directory, "Captain Barbossa")
-        supervised = instruction_prompts.supervised_text(herdr, "")
-        self.assertIn("codex|claude|pi|grok --task 'assignment'", supervised)
-        self.assertIn("supervised Grok uses the supervisor gate", supervised)
-        self.assertNotIn("grok has no hook", supervised)
-        self.assertIn("grok has no hook", herdr)
-
     def test_crew_instructions_are_much_shorter_than_the_captains(self):
         crew_text = instruction_prompts.agent_instructions(self.directory, "crew member Jack")
         captain_text = instruction_prompts.agent_instructions(self.directory, "Captain Barbossa")

@@ -50,12 +50,7 @@ HOOKLESS = ("pi", "grok")
 # Providers a `captain supervise` session can run with no terminal, and the structured
 # transports each offers, preferred first; Codex's is also its subcommand, Claude's runs the
 # user's claude under claude_host through the optional Agent SDK.
-TRANSPORTS = {
-    "codex": ("app-server",),
-    "claude": ("sdk",),
-    "pi": ("rpc",),
-    "grok": ("acp",),
-}
+TRANSPORTS = {"codex": ("app-server",), "claude": ("sdk",), "pi": ("rpc",)}
 # Per provider, limits stated plainly and the sign-in routes the supervisor offers; `hello`
 # adds `supervised`, and docs/supervisor.md names every field.
 CAPABILITIES = {
@@ -105,20 +100,17 @@ CAPABILITIES = {
         },
     },
     "grok": {
-        "transport": "acp",
+        "transport": None,
         "delivery": "body",
-        "gate": "relay",
-        "output": "events",
+        "gate": "none",
+        "output": None,
         "limits": [
-            "Supervised grok asks the gate over ACP for every permission; a grok crew in a "
-            "Herdr session has no hook, so its own auto mode is the whole gate there.",
-            "grok cannot be a supervised captain yet.",
-            "Grok reports no sign-in status; only XAI_API_KEY shows as signed in.",
+            "No supervised transport yet; recruit grok crew in a Herdr session.",
+            "No hook: grok's own auto mode is the whole gate, so the gate fails open.",
         ],
         "sign_in": {
-            "methods": ["deviceAuth"],
-            "guidance": "Sign in here with a device code (grok login --device-auth), or set "
-            "XAI_API_KEY for the supervisor.",
+            "methods": [],
+            "guidance": "Grok runs only in a Herdr session; sign in with grok in a terminal.",
         },
     },
 }
@@ -137,14 +129,6 @@ PI_FAMILIES = ("claude", "codex", "grok")
 # newest version, stable over preview. Variants (image, live, customtools) never match.
 GEMINI_TIERS = {"flash-lite": "cheap", "flash": "mid", "pro": "strong"}
 GEMINI_ID = re.compile(r"gemini-(\d+(?:\.\d+)*)-(flash-lite|flash|pro)(-preview)?")
-# Grok 1.0.62 is the ACP build verified against `grok agent stdio`.
-GROK_ACP_FLOOR = (1, 0, 62)
-
-
-def grok_acp_supported(version):
-    """Whether an ACP initialize version is at least the verified Grok floor."""
-    match = re.fullmatch(r"(?:grok(?:-cli)?\s+)?(\d+)\.(\d+)\.(\d+)", version or "")
-    return bool(match and tuple(map(int, match.groups())) >= GROK_ACP_FLOOR)
 
 
 @lru_cache(maxsize=1)

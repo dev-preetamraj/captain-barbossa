@@ -67,7 +67,6 @@ src/captain_barbossa/
   claude_host.py  the user's claude through the Agent SDK, JSON-RPC on stdio
   claude_agent.py supervised Claude adapter over claude_host
   pi_rpc.py       supervised pi adapter over `pi --mode rpc`
-  grok_acp.py     supervised Grok adapter over `grok agent stdio` (ACP), permission relay
   captain_bridge.py supervised captain: delivery bridge, claims, operator notes, requests
   transcripts.py  paged transcripts and full steps from a provider's own session files
   jsonrpc.py      line-delimited JSON-RPC framing, deadlines, multiplexed Peer
@@ -182,12 +181,11 @@ Key facts:
   session holding `supervisor.lock`, on a token-gated socket under `~/.captain/run`
   (never temp; token only on its readiness line). Only it sets session `transport:
   "supervisor"` (Herdr sessions refused); its crew get `execution: "supervised"`,
-  run `codex app-server`, `claude_host` (Agent SDK, optional `[app]` extra), `pi --mode
-  rpc` or `grok agent stdio` under the lifetime guard, refuse to start with untrusted
-  Codex hooks, and gate every approval through `captain hook` (Grok never runs in
-  auto mode). Turns are untimed, every request bounded.
-  `start_captain` runs the captain there too (not a crew, no lifetime record; Grok
-  refused) with a scoped token reaching only the methods the captain CLI calls, so it
+  run `codex app-server`, `claude_host` (Agent SDK, optional `[app]` extra) or `pi --mode
+  rpc` under the lifetime guard, refuse to start with untrusted Codex hooks, and gate
+  every approval through `captain hook`. Turns are untimed, every request bounded.
+  `start_captain` runs the captain there too (not a crew, no lifetime record) with a
+  scoped token reaching only the methods the captain CLI calls, so it
   cannot answer the user's own decisions. In a supervised session `captain do` and
   `quiet` outward/destructive verbs need an approved authorization request, spent by
   one run of that exact command; the app resolves it. Herdr commands and hooks never

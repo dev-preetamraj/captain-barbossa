@@ -17,7 +17,6 @@ from captain_barbossa import (
     claude_host,
     codex_app_server,
     dashboard,
-    grok_acp,
     pi_rpc,
     sessions,
     store,
@@ -118,47 +117,6 @@ class LiveFrameTests(SessionCase):
         self.assertEqual((frame["tokens"], frame["cost"], frame["context"]), (None, None, None))
         store.write_json(self.events.with_suffix(usage.LIVE_SUFFIX), {"version": 2})
         self.assertIsNone(usage.live_usage(self.events))
-
-
-class GrokLedgerTests(SessionCase):
-    def setUp(self):
-        super().setUp()
-        events = self.root / "events" / "jack-a.jsonl"
-        events.parent.mkdir()
-        self.link = SimpleNamespace(events=events, model="grok-4.7", usage=None)
-        self.ledger = events.with_suffix(".grok-usage.json")
-
-    def turn(self, **usage_fields):
-        grok_acp.record_usage(self.link, {"stopReason": "end_turn", "usage": usage_fields}, True)
-
-    def update(self, **fields):
-        params = {"sessionId": "s", "update": {"sessionUpdate": "usage_update", **fields}}
-        grok_acp.record_usage(self.link, params)
-
-    def test_each_turns_usage_is_added_whole(self):
-        self.turn(inputTokens=12, outputTokens=3, cachedReadTokens=5)
-        self.turn(inputTokens=15, outputTokens=4)
-        totals = store.read_json(self.ledger)["totals"]
-        self.assertEqual((totals["input"], totals["output"], totals["cache_read"]), (27, 7, 5))
-        self.assertNotIn("cost", totals)
-
-    def test_session_cost_and_window_come_from_usage_updates(self):
-        self.turn(inputTokens=10, outputTokens=1)
-        self.update(used=900, size=200000, cost={"amount": 0.5, "currency": "USD"})
-        self.update(used=950, size=200000, cost={"amount": 0.7, "currency": "USD"})
-        self.update(used=10, size=200000, cost={"amount": 0.1, "currency": "USD"})  # resumed
-        frame = usage._grok_usage(self.link.events)
-        self.assertEqual((frame["context"], frame["limit"]), (10, 200000))
-        self.assertAlmostEqual(frame["cost"], 0.8)
-        self.update(cost={"amount": 9.0, "currency": "EUR"})
-        self.assertAlmostEqual(usage._grok_usage(self.link.events)["cost"], 0.8)
-
-    def test_the_first_kind_of_reading_owns_the_token_totals(self):
-        self.update(usage={"inputTokens": 10, "outputTokens": 2, "costUsd": 0.1})
-        self.turn(inputTokens=10, outputTokens=2)
-        self.update(usage={"inputTokens": 30, "outputTokens": 4, "costUsd": 0.3})
-        totals = store.read_json(self.ledger)["totals"]
-        self.assertEqual((totals["input"], totals["output"]), (30, 4))
 
 
 class AdapterReadingTests(SessionCase):

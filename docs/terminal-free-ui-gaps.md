@@ -20,7 +20,7 @@ Every gap below must be closed in captain state, not in the client.
    The plan's `output` notifications are ephemeral, so crew activity and the captain conversation vanish on reconnect.
    The app needs `getTranscript(session, agent, range)` for scrollback and resumed sessions.
    Partial, `225dcbe` (confined to the crew's own session files in `31e0401`): `transcript` pages the Claude, Codex and pi session files for a crew or the captain, and `output` stays ephemeral.
-   Grok has no transcript reader yet.
+   Grok has no transcript reader; supervised Grok is deferred.
 3. **Structured grant requests** (Phase 1a and 1b).
    The supervisor must link the gate's denial to the crew's ask and resolve both with one call.
    A request carries an id, crew, assignment, the exact command, working directory, gate reason and category, and the crew's own words.
@@ -49,8 +49,8 @@ Every gap below must be closed in captain state, not in the client.
    Closed in `6e05ed5` (`interrupt_all` for crew) and extended in `ff4c32c` to include the captain.
 10. **Provider status and sign-in routes** (Phase 6).
     The app lists providers, rechecks them and starts sign-in, including device codes for Codex and Grok.
-    Partial, `d5c0048`: `providers`, `sign_in` and `cancel_sign_in` are built, Claude and pi return guidance only, and Grok's signed-in status reads only `XAI_API_KEY` (otherwise unknown).
-    Grok device auth and a real Grok are unchecked live.
+    Partial, `d5c0048`: `providers`, `sign_in` and `cancel_sign_in` are built, and Claude, pi and Grok return guidance only.
+    Grok device sign-in is deferred with supervised Grok.
 
 ## Requirements from the UI decisions
 

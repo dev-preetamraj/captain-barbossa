@@ -7,19 +7,18 @@ Status (2026-11-26): Phases 1-6 built and reviewed.
 Phase 1 (supervised Codex and Claude crew) was live-tested against the real CLIs; Phases 2-6 were tested against fake peers and reviewed.
 Still needs live checks:
 
-- A real Grok: the adapter, the 1.0.62 version floor and the switch to an asking mode were built against a fake ACP peer, and Grok is not installed on this machine.
-- Grok device auth: `grok login --device-auth` output parsing and Grok's signed-in status, which has no verified status command.
 - Claude cost fields: `total_cost_usd` and `modelUsage` from a real `ResultMessage`.
 - Live captain turns: the supervised captain on each provider, its delivery bridge and its approval and ask-user prompts.
 
 Not built: the model catalog with effort levels and the settings methods (see `terminal-free-ui-gaps.md`).
+Deferred: supervised Grok (the Grok ACP crew, its gate relay, usage ledger and device sign-in) was removed until it can be checked against a real Grok; a supervised session refuses grok, and Herdr Grok is unchanged.
 Branch: `feat/terminal-free-app`.
 Baseline: `main` at `df36799` (0.51.0).
 
 ## Decisions
 
 1. **Supervisor.** A pane-free supervisor owns the provider processes and exposes JSON-RPC plus an event stream to a thin client.
-2. **Adapters.** Codex app-server, Claude Agent SDK (Python), pi RPC, Grok ACP.
+2. **Adapters.** Codex app-server, Claude Agent SDK (Python), pi RPC, Grok ACP (deferred).
 3. **Authority.** The captain protocol stays the source of truth for assignments, grants, mail, receipts, done, memory, and worktree results.
 4. **Claude auth follows T3 Code.** Drive the user's installed, unmodified Claude Code through the Agent SDK with their own `claude auth login`.
    Never read, store, or proxy Claude tokens.

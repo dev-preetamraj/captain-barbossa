@@ -112,10 +112,10 @@ Refusal codes by method: `supervisor-params` (any), `supervisor-crew`, `supervis
 
 - `supervised` is whether this supervisor can start that provider's crew; `transport` is null when it cannot.
 - `delivery` is `body` (the ring carries the rendered mail) or `hook` (the ring is a wake line and the crew's own hook hands the body over).
-- `gate` is `hooks`, `extension` (pi) or `relay` (grok over ACP: every permission request goes through `captain hook`; supervised grok crew run without `--permission-mode auto`, which a Herdr grok crew keeps as its whole gate).
+- `gate` is `hooks`, `extension` (pi) or `none` (grok: its own auto mode is the whole gate, so it fails open).
 - `output` is `items` (Codex app-server item and turn notifications), `events` (pi RPC session events), `messages` (Claude: every Agent SDK message, partial deltas included) or null.
 - `limits` states each provider's known gaps in plain words.
-- `sign_in` is `{methods, guidance}`: the sign-in methods `sign_in` accepts (none for Claude and pi) and what the user does otherwise.
+- `sign_in` is `{methods, guidance}`: the sign-in methods `sign_in` accepts (none for Claude, pi and Grok) and what the user does otherwise.
 
 ### command
 
@@ -213,7 +213,7 @@ The captain can route a question to the user itself, for good, with `captain esc
 
 ## Supervised captain
 
-`start_captain` runs the session's captain itself: the provider's first `TRANSPORTS` entry (`codex app-server`, Claude through `claude_host`, `pi --mode rpc`; grok is refused until it has a captain transport), with `prepare_launch`'s instructions and launch state, the supervised-session instruction text and no pi delivery extension.
+`start_captain` runs the session's captain itself: the provider's first `TRANSPORTS` entry (`codex app-server`, Claude through `claude_host`, `pi --mode rpc`; grok is refused), with `prepare_launch`'s instructions and launch state, the supervised-session instruction text and no pi delivery extension.
 
 - The captain is not a crew: no lifetime record. It runs in its own process group with a scoped token as `CAPTAIN_SUPERVISOR_TOKEN`, so its `captain` commands reach this supervisor. `stop_captain`, `shutdown` and the supervisor's own exit close its input, wait `stop_timeout`, then kill the whole group.
 - The scoped token reaches only the methods the captain CLI calls (`hello`, `start`, `stop`, `state`, `ring`, `interrupt`, `set_model`); every other method, such as `answer_captain`, `resolve_authorization`, `resolve_grant`, `resolve_captain_delivery` or `command`, is refused with `[supervisor-captain-token]`, so nothing the captain runs can answer the user's own decisions.
@@ -234,11 +234,10 @@ The captain can route a question to the user itself, for good, with `captain esc
 
 - `providers` probes each provider once and caches the result until `recheck: true`; probes run in parallel and one that outlasts twice `startup_timeout` reads as unknown with `[provider-check]`.
   `installed` is whether the CLI is on PATH, `version` the first line of its `--version`, and `signed_in` true, false or null (unknown).
-  Codex reads `account/read` from a short-lived bare `codex app-server`; Claude runs `claude auth status --json` (Captain never reads, stores or proxies Claude credentials, and keeps only the auth method and email); pi is signed in when `pi --list-models` lists a model; Grok has no verified status command, so only `XAI_API_KEY` reads as signed in and anything else is null.
+  Codex reads `account/read` from a short-lived bare `codex app-server`; Claude runs `claude auth status --json` (Captain never reads, stores or proxies Claude credentials, and keeps only the auth method and email); pi is signed in when `pi --list-models` lists a model; Grok, with no supervised transport, reports only `installed` and `version`.
 - `sign_in` for Codex runs `account/login/start` on a bare `codex app-server`: `chatgptDeviceCode` (the default) or `apiKey` with `api_key`.
   The key goes straight to Codex, which stores it itself; the supervisor never writes or logs it and redacts it from every reply and notification.
-- `sign_in` for Grok runs `grok login --device-auth` in its own process group and reports each output line (the last 20 in `output`) and the first URL and code it prints.
-- Claude and pi return their `guidance` and start nothing.
+- Claude, pi and Grok return their `guidance` and start nothing.
 - An attempt is `{provider, method, state, user_code, verification_url, detail, output}`; `state` is `starting`, `waiting` (a device code is shown), `signed-in`, `failed` or `cancelled`.
   `sign_in` answers once the attempt leaves `starting` (or after `startup_timeout`), a device code expires after 15 minutes, and a second attempt for the same provider is refused while one runs.
   Every state change is an `attention` with `code: "sign-in"`; a successful one rechecks that provider before it is announced.
@@ -251,8 +250,6 @@ Each supervised agent's own protocol reports its usage as a frame, the shape the
 - Codex: `thread/tokenUsage/updated` (totals, the last call's context and `modelContextWindow`; no cost).
 - Claude: each SDK `ResultMessage` (that query's usage, summed; `total_cost_usd` as claude reports it for the session; the context window from `modelUsage` when present; no context).
 - pi: `get_session_stats` after each settled turn (totals, cost and `contextUsage`).
-- Grok: its usage ledger. A prompt result's `usage` is that turn's and is added whole; a `usage_update` carrying a `usage` block is a cumulative session reading whose drop marks a resumed session; whichever kind arrives first owns the token totals, so the two never count twice.
-  A `usage_update`'s `used` and `size` are the context and window, and its USD `cost.amount` is the session's cumulative cost, read the same way.
 
 The supervisor keeps the newest frame in `events/<stem>.live-usage.json` and publishes it as `output` with `method: "captain/usage"`.
 `usage` returns, for the captain and every current crew, the native reading (transcript or rollout) with the live frame filling only what it leaves null; the dashboard of a supervised session shows the same, so a pi crew gets a CTX column.
@@ -289,15 +286,6 @@ Files removed by native-history cleanup after a dismissal are skipped, so that c
 
 - The crew runs `pi --mode rpc` behind `pi_rpc`, with the same extension and session directory as a pane crew; its gate is that extension, which fails closed.
 - A model switch needs a `provider/model` id.
-
-## Grok crew
-
-- The crew runs `grok agent stdio`; `open` needs Grok 1.0.62 or newer, read from ACP `agentInfo.version` or, when Grok names none, from `grok --version`.
-  A session that does not start in an asking mode is switched to `default` when Grok offers it (unverified against a real Grok).
-- A prompt lands once `session/prompt` is sent; its reply ends the turn whenever it comes, so a turn has no deadline and a closed connection ends it.
-  A prompt that cannot be sent is not delivered.
-- Every `session/request_permission` goes through `captain hook` in the gate's own terms: a delete as `rm -- PATH` and a move as `mv SRC DST`, so a loss of unowned work is flagged; an edit names its one path (from `rawInput` or `locations`) as `Write`, or `Edit` when it carries an old string; an effect with no single path reaches the gate with none and is refused.
-- An `execute`, `edit`, `delete`, `move` or `fetch` call that runs without having asked cancels the turn and posts `[grok-ungated]`.
 
 ## Codex crew
 

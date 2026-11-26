@@ -236,7 +236,7 @@ It demonstrates assign, tell, interrupt, retier, grant and report end to end.
   - Body-on-ring delivery uses `prompt` when the crew is idle.
     `abort` interrupts; `set_model` retiers; `get_state` reports liveness.
   - `follow_up` and `steer` stay unused unless you choose mid-turn steering (Q8).
-- **`grok_acp.py` (4b)**
+- **`grok_acp.py` (4b)**, deferred: it was built against a fake ACP peer and removed until it can be checked against a real Grok, so a supervised session refuses grok; the design below stands.
   - Launches `grok agent stdio` and drives it with `session/new`, `session/prompt`, `session/cancel` and `session/set_model`.
   - `session/request_permission` is answered through the hook relay, so a gate that fails closed on our side covers every call Grok asks about.
   - Pin and verify a Grok version floor in `models.py`.
@@ -261,7 +261,7 @@ It demonstrates assign, tell, interrupt, retier, grant and report end to end.
 
 - Codex: pass `account/read` and `account/login/start` (chatgptDeviceCode or apiKey) straight through to app-server.
   The key goes to Codex's own store and is never stored or logged by the supervisor.
-- Grok: run `grok login --device-auth` as a supervised subprocess, with the device code shown in the app.
+- Grok (deferred with 4b): run `grok login --device-auth` as a supervised subprocess, with the device code shown in the app.
 - pi: guidance for an API key or `/login`.
 - Live CTX for the dashboard from `thread/tokenUsage/updated`, SDK `ResultMessage` and pi `get_session_stats`.
   Unknown values stay unknown.
@@ -338,6 +338,7 @@ The existing suite passes unmodified.
    `untrusted` is rejected because the gate returns DEFER for unclassified commands, and DEFER denies.
 6. Grok permission mode is decided in the Phase 4b spike.
    Relaying Grok permission requests needs grok in `events.GATED_PROVIDERS`.
+   Deferred with 4b: grok stays out of `GATED_PROVIDERS` until supervised Grok returns.
 7. A supervisor crash kills its crew, and the next CLI call closes their assignments as `lost`.
    Resume is out of scope.
 8. Mail lands at the turn boundary; steering comes later.

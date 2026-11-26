@@ -65,8 +65,6 @@ def native_command(binary, transport="tui"):
             return [python_command(), "-m", "captain_barbossa.claude_host", binary]
         case "rpc":
             return [binary, "--mode", "rpc"]
-        case "acp":
-            return [binary, "agent", "stdio"]
         case _:
             return [binary, transport]
 
@@ -105,11 +103,7 @@ crew, reported through wait; no tell, answer, focus or model; interrupt NAME can
   CAPTAIN crew --agent codex|claude|pi|grok --task 'assignment' --placement pane|tab
     [--direction vertical|horizontal|auto --split-pane <pane-id>|auto]
 """,
-        "Run, for every crew:\n  CAPTAIN crew --agent codex|claude|pi|grok --task 'assignment'\n",
-    ),
-    (
-        "grok has no hook, so only its own\nauto mode applies.",
-        "supervised Grok uses the supervisor gate.",
+        "Run, for every crew:\n  CAPTAIN crew --agent codex|claude|pi --task 'assignment'\n",
     ),
     ("use it for CAPTAIN and Herdr commands:", "use it for CAPTAIN commands:"),
     ("; never type into a crew pane to approve.", "."),
@@ -399,9 +393,8 @@ def native_args(provider, instructions, model=None, events=None, add_dirs=(), tr
         # Grok uses Claude-compatible hooks but no --settings flag and we avoid
         # writing user config; pane-fallback wait like pi.
         flags = ["--append-system-prompt", instructions, "--no-subagents"]
-        # In a terminal no hook flags effects, so auto mode is the whole gate; over ACP every
-        # permission request reaches the gate instead.
-        flags += ["--permission-mode", "auto"] if crew and transport == "tui" else []
+        # No hooks to flag effects: its auto mode is the whole gate, a documented gap.
+        flags += ["--permission-mode", "auto"] if crew else []
     else:
         flags = ["-c", "developer_instructions=" + json.dumps(instructions, ensure_ascii=False)]
         if hook:

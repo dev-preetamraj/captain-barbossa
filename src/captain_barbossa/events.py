@@ -39,7 +39,7 @@ from .store import lock, read_json, state_storage
 # The gate hooks every gated provider sends in Claude's wire shape. Codex's SessionStart
 # and Stop keep their own handling: Codex mail rides the ring, never a hook.
 GATE_HOOKS = ("PreToolUse", "PermissionRequest")
-GATED_PROVIDERS = ("claude", "codex", "pi", "grok")
+GATED_PROVIDERS = ("claude", "codex", "pi")
 # Providers whose hooks report each call's outcome; the rest settle a creation lazily.
 POST_TOOL_PROVIDERS = ("claude",)
 POST_TOOL_HOOKS = ("PostToolUse", "PostToolUseFailure")
@@ -582,15 +582,11 @@ def append_event(args=None):
             event["incarnation_id"] = incarnation
             event["seq"] = event.get("seq", seq + 1)
         kind = event.get("hook_event_name")
-        # Grok's Herdr hook remains fail-open; only the supervised ACP relay is a complete gate.
-        gate_provider = provider in GATED_PROVIDERS and (
-            provider != "grok" or bool(incarnation) and crew.is_supervised
-        )
         # Only a managed crew incarnation is gated; the captain keeps its native prompts.
-        gated = bool(incarnation) and gate_provider and kind in GATE_HOOKS
+        gated = bool(incarnation) and provider in GATED_PROVIDERS and kind in GATE_HOOKS
         if (provider != "claude" or kind in GATE_HOOKS) and not gated:
             kind = None
-        if incarnation and gate_provider:
+        if incarnation and provider in GATED_PROVIDERS:
             try:
                 settle_created(Path(events_path), event, provider)
             except (CaptainError, OSError, ValueError, KeyError, TypeError):

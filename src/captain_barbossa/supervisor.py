@@ -30,7 +30,6 @@ from . import (
     config,
     do,
     eventlog,
-    grok_acp,
     instructions,
     jsonrpc,
     launch,
@@ -53,12 +52,7 @@ from .sessions import Session, catalog, crew_meta, rename_session, session
 
 # Provider -> adapter module (open, ring, interrupt, set_model, state over a Link).
 # A provider without a row is refused at start.
-ADAPTERS = {
-    "codex": codex_app_server,
-    "claude": claude_agent,
-    "pi": pi_rpc,
-    "grok": grok_acp,
-}
+ADAPTERS = {"codex": codex_app_server, "claude": claude_agent, "pi": pi_rpc}
 # Bytes of a native CLI's stderr kept per crew; the rest is read and dropped.
 STDERR_LIMIT = 1024 * 1024
 # How long a second supervisor waits for a lock probe to let go before refusing.
@@ -1035,6 +1029,8 @@ def probe(provider, root):
         result = processes.capture(root, [binary, "--version"], timeout)
         lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
         row["version"] = lines[0] if result.returncode == 0 and lines else None
+    if provider not in ADAPTERS:
+        return row
     try:
         row.update(ADAPTERS[provider].account(binary, root, timeout))
     except (CaptainError, OSError) as exc:

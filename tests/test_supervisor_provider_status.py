@@ -1,5 +1,5 @@
 """The app lists providers, rechecks them and starts sign-in: Codex through its own app-server
-account calls, Grok through its device login, Claude and pi as guidance only."""
+account calls, Claude, pi and Grok as guidance only."""
 
 import contextlib
 import json
@@ -39,12 +39,6 @@ elif name == "claude":
 elif name == "pi":
     print("provider   model              context  max-out  thinking  images")
     print("anthropic  claude-sonnet-5-5  200K     64K      yes       yes")
-elif name == "grok":
-    print("Visit https://accounts.example/device", flush=True)
-    print("Enter the code: QRST-5678", flush=True)
-    while not (root / "grok-done").exists():
-        time.sleep(0.05)
-    sys.exit(int((root / "grok-done").read_text()))
 else:
     login, buffer = None, b""
 
@@ -124,7 +118,7 @@ class ProviderStatusTests(SessionCase):
         self.enterContext(
             patch.object(runtime, "executable", side_effect=self.executable),
         )
-        env = {"FAKE_PROVIDER_DIR": str(self.fake), "XAI_API_KEY": ""}
+        env = {"FAKE_PROVIDER_DIR": str(self.fake)}
         self.enterContext(patch.dict(os.environ, env))
         self.claude_status({"loggedIn": True, "authMethod": "claude.ai", "email": "me@x"})
         current = supervisor.open_session(self.project, None)
@@ -201,8 +195,12 @@ class ProviderStatusTests(SessionCase):
         unknown = self.rows(recheck=True, provider="claude")["claude"]
         self.assertIsNone(unknown["signed_in"])
 
-    def test_claude_and_pi_sign_in_is_guidance_only(self):
-        for provider, hint in (("claude", "ANTHROPIC_API_KEY"), ("pi", "pi auth login")):
+    def test_claude_pi_and_grok_sign_in_is_guidance_only(self):
+        for provider, hint in (
+            ("claude", "ANTHROPIC_API_KEY"),
+            ("pi", "pi auth login"),
+            ("grok", "Herdr session"),
+        ):
             with self.subTest(provider=provider):
                 reply = supervisor.sign_in(self.supervisor, {"provider": provider})
                 self.assertEqual(reply["state"], "guidance")
@@ -266,42 +264,15 @@ class ProviderStatusTests(SessionCase):
         ):
             with self.subTest(params=params), self.assertRaisesRegex(CaptainError, code):
                 supervisor.sign_in(self.supervisor, params)
-        self.installed.discard("grok")
+        self.installed.discard("codex")
         with self.assertRaisesRegex(CaptainError, r"\[sign-in-missing\]"):
-            supervisor.sign_in(self.supervisor, {"provider": "grok"})
-
-    def test_grok_device_auth_surfaces_its_code_and_exit(self):
-        reply = supervisor.sign_in(self.supervisor, {"provider": "grok"})
-        self.assertEqual(reply["state"], "waiting")
-        self.assertEqual(reply["verification_url"], "https://accounts.example/device")
-        reply = self.until(
-            lambda: (view := self.supervisor.sign_ins["grok"].view())["user_code"] and view,
-            "the device code",
-        )
-        self.assertEqual(reply["user_code"], "QRST-5678")
-        self.assertEqual(self.log("grok")[0], {"argv": ["login", "--device-auth"]})
-        (self.fake / "grok-done").write_text("3")
-        attempt = self.supervisor.sign_ins["grok"]
-        self.until(attempt.done.is_set, "grok login to exit")
-        self.assertEqual((attempt.state, attempt.detail), ("failed", "grok login exited 3."))
-        self.assertIn("Enter the code: QRST-5678", attempt.output)
-
-    def test_grok_signs_in_on_a_clean_exit_and_can_be_cancelled(self):
-        supervisor.sign_in(self.supervisor, {"provider": "grok"})
-        self.assertEqual(
-            supervisor.cancel_sign_in(self.supervisor, {"provider": "grok"})["state"], "cancelled"
-        )
-        (self.fake / "grok-done").write_text("0")
-        supervisor.sign_in(self.supervisor, {"provider": "grok"})
-        attempt = self.supervisor.sign_ins["grok"]
-        self.until(attempt.done.is_set, "grok login to exit")
-        self.assertEqual(attempt.state, "signed-in")
+            supervisor.sign_in(self.supervisor, {"provider": "codex"})
 
     def test_hello_lists_the_routes_and_their_sign_in_methods(self):
         hello = supervisor.hello(self.supervisor, {})
         for method in ("providers", "sign_in", "cancel_sign_in", "usage"):
             self.assertIn(method, hello["methods"])
-        self.assertEqual(hello["capabilities"]["grok"]["sign_in"]["methods"], ["deviceAuth"])
+        self.assertEqual(hello["capabilities"]["grok"]["sign_in"]["methods"], [])
         self.assertEqual(hello["capabilities"]["claude"]["sign_in"]["methods"], [])
 
     def state_files(self):

@@ -225,7 +225,7 @@ def _live_usage(
     if provider == "pi":
         return _pi_usage(transcripts or [])
     if provider == "grok":
-        return _grok_usage(events_path)
+        return None
     if provider == "codex":
         frames = [
             _codex_usage(events_path, cached_only=cached_only, rollout=path)
@@ -236,33 +236,6 @@ def _live_usage(
         root = Path(native_root) / "sessions" if native_root else None
         return _codex_usage(events_path, cached_only=cached_only, sessions_root=root)
     return _claude_usage(events_path, cached_only=cached_only, transcripts=transcripts)
-
-
-def _grok_usage(events_path):
-    ledger = _read_json(Path(events_path).with_suffix(".grok-usage.json"))
-    totals = ledger.get("totals") if ledger.get("version") == 1 else None
-    if not isinstance(totals, dict):
-        return None
-    counts = {name: totals.get(name) for name in _FIELDS}
-    if not all(type(value) is int and value >= 0 for value in counts.values()):
-        return None
-    cost = totals.get("cost")
-    if cost is not None and (type(cost) not in (int, float) or cost < 0):
-        return None
-    model = ledger.get("model")
-    model = model if isinstance(model, str) and model else None
-    context = ledger.get("context")
-    context = context if type(context) is int and context >= 0 else None
-    limit = ledger.get("limit")
-    return {
-        **counts,
-        "tokens": sum(counts.values()),
-        "context": context,
-        "limit": limit if type(limit) is int and limit > 0 else None,
-        "model": model,
-        "cost": cost,
-        "rate": None,
-    }
 
 
 def record_live(events_path, frame):
