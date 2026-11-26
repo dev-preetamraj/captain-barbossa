@@ -121,6 +121,7 @@ Every refusal is a JSON-RPC error whose message starts with its protocol code an
 | `cancel_sign_in` | `provider` | the attempt, or `{provider, state: "not-running"}` |
 | `usage` | none | `{agents: [{agent, usage}]}`; `usage` is a frame or null |
 | `models` | `agent` (optional: `codex`, `claude` or `pi`; all when absent) | `{version: 1, providers: [{provider, tiers: {cheap, mid, strong}, models: [{id, aliases, context_window, effort_levels}], error}]}` |
+| `settings` | none | `{version: 1, settings, sources, paths}` (see Settings read) |
 | `resolve_captain_delivery` | `delivery_id`, `decision` (`resend` or `ack`) | `{delivery_id, decision}` |
 | `uncertain_deliveries` | none | `{deliveries: [{delivery_id, at, delivery}]}`, oldest first |
 
@@ -342,6 +343,19 @@ A Herdr session never reads a live frame.
 - Cursor rule: `cursors` is taken before the read, at a line boundary, after spooled actions are flushed; the read is repeated while actions land during it, up to 5 times.
   There is no gap: every action before the cursor is reflected in the snapshot, and `subscribe` from `cursors` delivers every later one.
   An action after the cursor may repeat state the snapshot already shows, because a writer saves its change before logging it, so the app applies actions idempotently by `id`; each carries an absolute state.
+
+## Settings read
+
+`captain settings --json`, run in the project with no session, Herdr or supervisor, and the `settings` method return the same read-only view:
+
+```json
+{"version": 1, "settings": {"crew": {"model": "strong", ...}, ...}, "sources": {"crew.model": "project", "dashboard.interval": "home", "captain.model": "defaults"}, "paths": {"home": "/Users/me/.captain/settings.toml", "project": "/path/to/project/.captain/settings.toml"}}
+```
+
+- `settings` is the merged table: `defaults.toml` under the home file under the project's, read fresh on every call.
+- `sources` names, for every non-table value by its dotted key, the layer that set it: `defaults`, `home` or `project`.
+- `paths` are the two user files, whether or not they exist; `project` is null when no project resolves.
+- Plain `captain settings` prints one `key = value  (layer)` line per value; nothing is written, and `captain init` is unchanged.
 
 ## Model catalogue
 

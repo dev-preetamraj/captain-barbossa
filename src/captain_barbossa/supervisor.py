@@ -1821,6 +1821,10 @@ def result_row(manifest, state):
     return {**{key: manifest.get(key) for key in (*keys, "unresolved")}, "reviewed": reviewed}
 
 
+def settings_view(supervisor, params):
+    return config.described()
+
+
 def model_list(supervisor, params):
     """The model catalogue of one provider or all, probed from the installed native tools."""
     from . import model_catalogue  # only the app asks; a crew start never pays for it
@@ -2061,6 +2065,7 @@ METHODS = {
     "cancel_sign_in": cancel_sign_in,
     "usage": agent_usage,
     "models": model_list,
+    "settings": settings_view,
     "ack_delivery": ack_delivery,
     "snapshot": snapshot,
     "set_captain_model": set_captain_model,

@@ -93,6 +93,28 @@ def source(*names):
     return None
 
 
+def leaves(table, names=()):
+    """(names, value) for every non-table value in table, depth first."""
+    for key, value in table.items():
+        if isinstance(value, dict):
+            yield from leaves(value, (*names, key))
+        else:
+            yield (*names, key), value
+
+
+def described():
+    """The merged settings read fresh, the layer that set each leaf, and the two user files."""
+    home, project = Path.home() / SETTINGS_PATH, project_settings()
+    merged = merge(merge(defaults(), read(home)), read(project) if project else {})
+    sources = {}
+    for names, _ in leaves(merged):
+        found = source(*names)
+        layer = "defaults" if found is None else "home" if found == home else "project"
+        sources[".".join(names)] = layer
+    paths = {"home": str(home), "project": str(project) if project else None}
+    return {"version": 1, "settings": merged, "sources": sources, "paths": paths}
+
+
 def _typed(table, names, kind):
     """Walk names into table and return the value only if it is already a kind."""
     found = table

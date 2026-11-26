@@ -246,6 +246,10 @@ def parser(*, plan=False):
     model.add_argument("name", help="crew name or ID (case-insensitive)")
     model.add_argument("model", help=f"tier ({'|'.join(TIER_NAMES)}), model name, or alias")
     model.add_argument("--json", action="store_true", help=JSON_HELP)
+    shown = commands.add_parser(
+        "settings", help="the merged settings and the file that set each, with no session"
+    )
+    shown.add_argument("--json", action="store_true", help="the settings as one JSON line")
     models_cmd = commands.add_parser(
         "models", help="list valid model IDs, aliases, and tier resolutions per agent CLI"
     )
@@ -499,6 +503,16 @@ def print_models(args):
         print(f"  tiers: {' '.join(f'{name}={tiers[name]}' for name in TIER_NAMES)}")
 
 
+def print_settings(args):
+    described = config.described()
+    if args.json:
+        print(json.dumps(described))
+        return
+    for names, value in config.leaves(described["settings"]):
+        dotted = ".".join(names)
+        print(f"{dotted} = {json.dumps(value)}  ({described['sources'][dotted]})")
+
+
 def print_providers(args):
     """Install and sign-in status per agent CLI; needs no session, Herdr or supervisor."""
     # Local: the probes load the supervised adapters, which no other command needs.
@@ -678,6 +692,10 @@ def main(argv=None):
             return 0
         if args.command == "providers":
             print_providers(args)
+            return 0
+        if args.command == "settings":
+            active_project()
+            print_settings(args)
             return 0
         if args.command == "models":
             if args.json:
