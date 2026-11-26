@@ -17,9 +17,10 @@ from pathlib import Path
 ROOT = Path(os.environ["FAKE_CODEX_DIR"])
 LOG = ROOT / "log.jsonl"
 CONTROL = ROOT / "control"
-THREAD = "thread-1"
+THREAD = os.environ.get("FAKE_CODEX_THREAD_ID", "thread-1")
 # FAKE_CODEX_TRUST sets the trust status hooks/list reports for every declared hook.
 TRUST = os.environ.get("FAKE_CODEX_TRUST", "trusted")
+RESUME = os.environ.get("FAKE_CODEX_RESUME", "accept")
 # With FAKE_CODEX_SESSION_ID set, the first turn runs the declared SessionStart hook, as Codex
 # does as its first turn begins, reporting this session id.
 SESSION_ID = os.environ.get("FAKE_CODEX_SESSION_ID")
@@ -51,15 +52,16 @@ class Server:
     def __init__(self, argv):
         self.turn, self.turns, self.requests = None, 0, 0
         self.hooks = declared_hooks(argv)
+        self.thread = THREAD
 
     def finish(self, status, reply=""):
         if self.turn is None:
             return
         if reply:
             item = {"type": "agentMessage", "id": f"msg-{self.turns}", "text": reply}
-            send({"method": "item/completed", "params": {"threadId": THREAD, "item": item}})
+            send({"method": "item/completed", "params": {"threadId": self.thread, "item": item}})
         turn = {"id": self.turn, "status": status, "items": []}
-        send({"method": "turn/completed", "params": {"threadId": THREAD, "turn": turn}})
+        send({"method": "turn/completed", "params": {"threadId": self.thread, "turn": turn}})
         self.turn = None
 
     def session_start(self):
@@ -89,7 +91,18 @@ class Server:
             row = {"cwd": cwd, "hooks": self.hooks, "warnings": [], "errors": []}
             send({"id": identifier, "result": {"data": [row]}})
         elif method == "thread/start":
-            send({"id": identifier, "result": {"thread": {"id": THREAD}}})
+            send({"id": identifier, "result": {"thread": {"id": self.thread}}})
+        elif method == "thread/resume":
+            if RESUME == "refuse":
+                send(
+                    {
+                        "id": identifier,
+                        "error": {"code": -32602, "message": "recorded thread unavailable"},
+                    }
+                )
+            else:
+                self.thread = message["params"]["threadId"]
+                send({"id": identifier, "result": {"thread": {"id": self.thread}}})
         elif method == "turn/start":
             if SESSION_ID and not self.turns:
                 self.session_start()
@@ -97,7 +110,7 @@ class Server:
             self.turn = f"turn-{self.turns}"
             turn = {"id": self.turn, "status": "inProgress", "items": []}
             send({"id": identifier, "result": {"turn": turn}})
-            send({"method": "turn/started", "params": {"threadId": THREAD, "turn": turn}})
+            send({"method": "turn/started", "params": {"threadId": self.thread, "turn": turn}})
         elif method == "turn/interrupt":
             send({"id": identifier, "result": {}})
             self.finish("interrupted")
@@ -109,7 +122,11 @@ class Server:
             self.finish("completed", command.get("reply", "Done."))
             return
         self.requests += 1
-        params = {"threadId": THREAD, "turnId": self.turn, "itemId": f"item-{self.requests}"}
+        params = {
+            "threadId": self.thread,
+            "turnId": self.turn,
+            "itemId": f"item-{self.requests}",
+        }
         if command["do"] == "approve":
             params.update(command=command["command"], cwd=command["cwd"], startedAtMs=0)
             method = "item/commandExecution/requestApproval"

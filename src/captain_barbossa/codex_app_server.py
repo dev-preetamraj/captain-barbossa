@@ -1,4 +1,4 @@
-"""The Codex app-server adapter: one Codex thread per supervised crew over stdio JSON-RPC."""
+"""The Codex app-server adapter: one thread per supervised agent over stdio JSON-RPC."""
 
 import contextlib
 import os
@@ -20,14 +20,31 @@ CHANGE_HEADERS = {"add": "Add", "delete": "Delete", "update": "Update"}
 GATE_HOOKS = ("sessionStart", "stop", "preToolUse", "permissionRequest")
 # Codex runs a hook whose trust status is one of these; untrusted and modified ones never run.
 RUNNING = ("trusted", "managed")
+RESUME_REFUSED = "[jsonrpc-error] thread/resume:"
 
 
 def _timeout(name):
     return config.number("supervisor", name)
 
 
+def _recorded_thread(link):
+    if not link.captain:
+        return None
+    if isinstance(getattr(link, "thread", None), str) and link.thread:
+        return link.thread
+    events = getattr(link, "events", None)
+    if events is None:
+        return None
+    recorded = None
+    for event in usage.records(events):
+        thread = event.get("thread-id")
+        if isinstance(thread, str) and thread:
+            recorded = thread
+    return recorded
+
+
 def open(link):
-    """Hand the pipes to a Peer, then initialize and start this crew's one thread."""
+    """Hand the pipes to a Peer, then initialize and open this agent's one thread."""
     link.peer = jsonrpc.Peer(
         link.stdout, link.stdin, lambda message: handle(link, message), link.crew_id
     )
@@ -46,10 +63,32 @@ def open(link):
         params.update(sandbox="workspace-write", approvalPolicy="on-request")
     if link.model:
         params["model"] = link.model
-    started = link.peer.request("thread/start", params, timeout)
+    method = "thread/start"
+    recorded = _recorded_thread(link)
+    if recorded is not None:
+        method = "thread/resume"
+        try:
+            resume = {**params, "threadId": recorded, "excludeTurns": True}
+            started = link.peer.request(method, resume, timeout)
+        except CaptainError as exc:
+            if not str(exc).startswith(RESUME_REFUSED):
+                raise
+            link.notice(
+                "codex_thread_resume",
+                f"[codex-thread-resume] Codex refused recorded thread {recorded}; "
+                f"starting a new thread: {exc}",
+            )
+            method = "thread/start"
+            started = link.peer.request(method, params, timeout)
+    else:
+        started = link.peer.request(method, params, timeout)
     thread = started.get("thread") if isinstance(started, dict) else None
     if not isinstance(thread, dict) or not isinstance(thread.get("id"), str):
-        raise CaptainError(f"[codex-app-server] thread/start returned no thread id: {started}")
+        raise CaptainError(f"[codex-app-server] {method} returned no thread id: {started}")
+    if method == "thread/resume" and thread["id"] != recorded:
+        raise CaptainError(
+            f"[codex-app-server] thread/resume returned {thread['id']} for recorded thread {recorded}"
+        )
     link.thread = thread["id"]
 
 
