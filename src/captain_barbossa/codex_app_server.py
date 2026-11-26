@@ -331,10 +331,37 @@ def _patch(item):
     return "\n".join(lines)
 
 
+def _own_command(command: str, session_id: str | None) -> bool:
+    """Match one literal session CLI invocation, optionally inside a standard shell's -lc."""
+    if not session_id or any(char in command for char in ";&|<>$`(){}*?[]~#\n\r\x00"):
+        return False
+    try:
+        words = shlex.split(command)
+        shells = {
+            f"{directory}/{shell}"
+            for directory in ("/bin", "/usr/bin")
+            for shell in ("sh", "bash", "zsh", "dash", "ksh")
+        }
+        if len(words) == 3 and words[0] in shells and words[1] == "-lc":
+            words = shlex.split(words[2])
+        prefix = shlex.split(instructions.captain_command(session_id))
+    except ValueError:
+        return False
+    if words[: len(prefix)] != prefix:
+        return False
+    return not any(
+        option.startswith("--") and option != "--" and "--session".startswith(option)
+        for word in words[len(prefix) :]
+        for option in (word.split("=", 1)[0],)
+    )
+
+
 def decision(link, params, tool, command):
-    """accept only when the gate allows; never acceptForSession, so grants stay one-shot."""
+    """Captain approvals may persist; crew grants always remain one-shot."""
     if command is None:
         return "decline"
+    if link.captain and tool == "Bash" and _own_command(command, link.env.get("CAPTAIN_SESSION")):
+        return "accept"
     event = {
         "hook_event_name": "PermissionRequest",
         "tool_name": tool,
@@ -355,8 +382,9 @@ def decision(link, params, tool, command):
             link.native["approvals"] -= 1
     native = (output or {}).get("hookSpecificOutput")
     verdict = native.get("decision") if isinstance(native, dict) else None
-    allowed = isinstance(verdict, dict) and verdict.get("behavior") == "allow"
-    return "accept" if allowed else "decline"
+    if not isinstance(verdict, dict) or verdict.get("behavior") != "allow":
+        return "decline"
+    return "acceptForSession" if link.captain and verdict.get("remember") is True else "accept"
 
 
 def answer(link, message):
