@@ -24,6 +24,7 @@ from captain_barbossa import (
     instructions,
     jsonrpc,
     lifetime,
+    model_catalogue,
     protocol,
     sessions,
     store,
@@ -310,6 +311,24 @@ class SupervisorSocketDoorTests(SessionCase):
         stopped.set()
         thread.join(30)
         self.assertFalse(supervision.alive(self.current.directory))
+
+    def test_models_returns_the_catalogue_of_one_provider_or_all(self):
+        self.serve()
+        calls = []
+        listed = {"version": 1, "providers": [{"provider": "pi", "models": []}]}
+
+        def catalogue(root, agent=None):
+            calls.append((root, agent))
+            return listed
+
+        with patch.object(model_catalogue, "catalogue", side_effect=catalogue):
+            self.assertEqual(
+                supervision.request(self.current.directory, "models", {"agent": "pi"}), listed
+            )
+            supervision.request(self.current.directory, "models")
+            with self.assertRaisesRegex(CaptainError, r"\[supervisor-params\]"):
+                supervision.request(self.current.directory, "models", {"agent": "grok"})
+        self.assertEqual(calls, [(self.project, "pi"), (self.project, None)])
 
     def test_herdr_session_is_refused(self):
         herdr = sessions.session(self.project, self.pane, create=True)

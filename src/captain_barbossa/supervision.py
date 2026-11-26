@@ -87,7 +87,7 @@ def request(directory, method, params=None, timeout=None):
         except OSError as exc:
             raise CaptainError(
                 f"[supervisor-gone] No supervisor answers for session {directory.name} at {path} "
-                f"({exc}). Start one with `captain supervise --session {directory.name}`."
+                f"({exc}). Start one with `captain --session {directory.name} supervise`."
             ) from exc
         try:
             return jsonrpc.call(

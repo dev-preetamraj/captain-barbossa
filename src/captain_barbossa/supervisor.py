@@ -916,21 +916,28 @@ def message_captain(supervisor, params):
     if not isinstance(message_id, str):
         raise CaptainError("[supervisor-params] message_id must be a string.")
     captain_bridge.queue_message(directory, message_id, _text(params, "text"))
+    error = None
     with supervisor.bridge_lock:
-        captain_bridge.send_messages(
-            directory,
-            partial(ring_captain, run),
-            run.mine,
-            partial(report_captain, supervisor, run),
-        )
+        try:
+            captain_bridge.send_messages(
+                directory,
+                partial(ring_captain, run),
+                run.mine,
+                partial(report_captain, supervisor, run),
+            )
+        except (CaptainError, OSError) as exc:
+            error = refusal(str(exc))
         state_name = captain_bridge.message_state(directory, message_id)
     run.wake.set()
-    return {
+    reply = {
         "message_id": message_id,
         "delivery_id": captain_bridge.USER + message_id,
         "state": state_name,
         "landed": state_name == "delivered",
     }
+    if error:
+        reply["error"] = {"code": error["data"]["code"], "message": error["message"]}
+    return reply
 
 
 def interrupt_captain(supervisor, params):
@@ -1005,13 +1012,15 @@ def answer_captain(supervisor, params):
     """Answer one of the captain's native prompts that the supervisor put to the user."""
     run = _captain(supervisor)
     request_id = _text(params, "request")
+    directory = supervisor.session.directory
+    rows = captain_requests(supervisor, params)["requests"]
+    row = next((row for row in rows if row["id"] == request_id), None)
+    if row is None:
+        raise CaptainError(f"[captain-request-unknown] No captain request {request_id}.")
     slot = run.asks.get(request_id)
     if slot is None:
-        raise CaptainError(f"[captain-request-closed] Request {request_id} is not waiting.")
-    directory = supervisor.session.directory
-    rows = store.read_json(directory / "protocol.json").get("captain_requests", [])
-    kind = next((row["kind"] for row in rows if row["id"] == request_id), None)
-    answer = captain_bridge.answer_for(kind, params)
+        raise CaptainError(f"[captain-request-closed] Request {request_id} is {row['state']}.")
+    answer = captain_bridge.answer_for(row["kind"], params)
     captain_bridge.close_request(directory, request_id, "answered", answer)
     slot[1] = answer
     slot[0].set()
@@ -1515,6 +1524,17 @@ def sessions(supervisor, params):
     return catalog(Path(supervisor.session.meta["project"]))
 
 
+def model_list(supervisor, params):
+    """The model catalogue of one provider or all, probed from the installed native tools."""
+    from . import model_catalogue  # only the app asks; a crew start never pays for it
+
+    agent = params.get("agent")
+    if agent is not None and agent not in model_catalogue.PROVIDERS:
+        choices = ", ".join(model_catalogue.PROVIDERS)
+        raise CaptainError(f"[supervisor-params] agent must be one of {choices}.")
+    return model_catalogue.catalogue(Path(supervisor.session.meta["project"]), agent)
+
+
 def subscribe(supervisor, params):
     """Validate the cursors and return each stream's end; Handler then streams from the cursors."""
     subscription_cursors(params)
@@ -1742,6 +1762,7 @@ METHODS = {
     "sign_in": sign_in,
     "cancel_sign_in": cancel_sign_in,
     "usage": agent_usage,
+    "models": model_list,
     "resolve_captain_delivery": resolve_captain_delivery,
     "uncertain_deliveries": uncertain_deliveries,
 }
@@ -1833,7 +1854,7 @@ class Handler(socketserver.BaseRequestHandler):
             message = (
                 f"[supervisor-captain-token] {method} is the user's to call, not the captain's."
             )
-            return {"error": refusal(message, TOKEN_ERROR)}
+            return {"error": refusal(message)}
         try:
             return {"result": METHODS[method](supervisor, params)}
         except (CaptainError, OSError) as exc:

@@ -1,6 +1,6 @@
 # Supervisor socket contract
 
-`captain supervise [--session ID]` runs one long-running process per session for a desktop app.
+`captain [--session ID] supervise` runs one long-running process per session for a desktop app (`--session` is the root option, before the subcommand).
 It is the one daemon Captain Barbossa has, and nothing in a Herdr session starts or loads it.
 This page is the wire contract for the app and for the CLI's own door, `supervision.py`.
 Design and phasing are in [terminal-free-plan.md](terminal-free-plan.md).
@@ -20,7 +20,10 @@ Design and phasing are in [terminal-free-plan.md](terminal-free-plan.md).
 ```
 
 - The token exists only in memory and on that line; it is never written to disk.
-  The supervisor strips `CAPTAIN_SUPERVISOR_TOKEN` from every process it spawns, except the supervised captain, which gets a second, scoped token there (see Supervised captain).
+  The supervisor removes `CAPTAIN_SUPERVISOR_TOKEN` from its own environment, so crew, their lifetime guards, relayed hooks, provider checks and sign-ins inherit no token.
+  The supervised captain's process group gets a second, scoped token there (see Supervised captain).
+  The CLI process that `command` (or an approved `resolve_authorization`) runs gets the full token there, because its verbs reach this supervisor with it; that CLI drops it (`processes.CHILD_SECRETS`) from the project and model commands `do` and `quiet` run, and its own Git reads keep it.
+  An environment is readable by any process of the same user (`ps -E`, `/proc/<pid>/environ`), so a crew running while a `command` verb runs can read the full token, and the captain's scoped token at any time.
 - SIGINT, SIGTERM, SIGHUP or the `shutdown` method stop the captain, then every crew, then any sign-in, remove the socket and exit.
 - When stdin is a pipe or socket (an app launcher), its end of file does the same, so a crashed app never leaves an orphan holding the lock; the app keeps stdin open for the supervisor's life, and anything written to it is ignored.
   A terminal or `/dev/null` stdin is never watched.
@@ -32,8 +35,8 @@ Design and phasing are in [terminal-free-plan.md](terminal-free-plan.md).
 - One newline-terminated JSON-RPC 2.0 request per connection, then one response; lines are capped at 4 MiB.
   `subscribe` is the one exception: after its response the connection stays open and carries notifications until the client closes it or the supervisor stops.
 - `params` is always an object and carries `"token"`; the supervisor removes it before dispatch.
-- Every request is bounded: the request read and the reply write each get `[supervisor] request_timeout`.
-  Only a supervised crew's turn has no total deadline.
+- The request read and the reply write each get `[supervisor] request_timeout`; a supervised crew's turn has no total deadline.
+  The method's own work has the ceilings below (seconds at the default `request_timeout` 10, `startup_timeout` 30, `stop_timeout` 15); a client sets each read deadline above its method's.
 
 ```json
 {"jsonrpc": "2.0", "id": 1, "method": "state", "params": {"token": "<secret>", "crew": "jack"}}
@@ -51,7 +54,27 @@ Every refusal is a JSON-RPC error whose message starts with its protocol code an
 | -32600 | malformed line or envelope (`jsonrpc-malformed`) |
 | -32601 | unknown method (`unknown-method`) |
 | -32001 | wrong or missing token (`supervisor-token`) |
-| -32000 | every other refusal; a CaptainError without its own code becomes `supervisor-error` |
+| -32000 | every other refusal, `supervisor-captain-token` (the captain's scoped token on a user-only method) included; a CaptainError without its own code becomes `supervisor-error` |
+
+| Method | Longest run |
+| --- | --- |
+| `start` | `startup_timeout` (30) |
+| `stop` | `stop_timeout` (15) |
+| `shutdown` | the captain's stop, then every crew's, then every sign-in's: 2×`stop_timeout` + 1, + `stop_timeout`, + `stop_timeout` (61) |
+| `ring`, `interrupt`, `set_model`, `state`, `interrupt_captain`, `captain_state` | `request_timeout` per native request; a pi ring makes two (20) |
+| `interrupt_all` | `request_timeout`, every agent in parallel (10) |
+| `message_captain` | any bridge round in flight, then at most two native requests per prompt it sends; budget 60 |
+| `start_captain` | launch preparation plus `startup_timeout`; budget 45 |
+| `stop_captain` | 2×`stop_timeout` + 1 (31) |
+| `providers` | with `recheck` or an unchecked provider, 2×`startup_timeout` (60); cached otherwise |
+| `sign_in` | `startup_timeout` (30) |
+| `cancel_sign_in` | `stop_timeout` (15) |
+| `command` | the verb's deadline (`supervisor.COMMANDS`: 30 to 180, `wait` 600) |
+| `resolve_authorization` | an approved app request runs its verb: `do` and `quiet` 960 |
+| `diff` | 5 per Git call |
+| `models` | 15 per native probe (Codex `model/list`, pi), run in turn (30 for all) |
+| `subscribe` | its reply at once; the stream until the client leaves |
+| every other method | captain-state and file reads with no native call; a backward `transcript` page rescans the session files |
 
 ## Methods
 
@@ -75,7 +98,7 @@ Every refusal is a JSON-RPC error whose message starts with its protocol code an
 | `mark_reviewed` | `assignment`, `result` (optional), `note` (optional) | `{assignment, result, at, note}` |
 | `start_captain` | `provider`, `model` (optional, default `[captain]` settings), `effort` (pi only) | `{provider, transport, model, state: "started"}` |
 | `captain_state` | none | `{state, provider?}`; state `idle`, `working`, `blocked` or `null` |
-| `message_captain` | `text`, `message_id` (optional, 1 to 128 of `A-Za-z0-9_-`; minted when absent) | `{message_id, delivery_id, state, landed}`; state `delivered`, `queued` or `uncertain` |
+| `message_captain` | `text`, `message_id` (optional, 1 to 128 of `A-Za-z0-9_-`; minted when absent) | `{message_id, delivery_id, state, landed, error?}`; state `delivered`, `queued` or `uncertain`; `error` `{code, message}` when the send failed |
 | `interrupt_captain` | `reason` (optional) | `{outcome}` |
 | `stop_captain` | none | `{outcome}`; `stopped`, `pending` or `not-running` |
 | `captain_requests` | none | `{requests: [{id, kind, payload, state, at, answer?, resolved_at?}]}` |
@@ -89,6 +112,7 @@ Every refusal is a JSON-RPC error whose message starts with its protocol code an
 | `sign_in` | `provider`, `method` (optional), `api_key` (with `apiKey`) | the attempt, or `{provider, state: "guidance", guidance}` |
 | `cancel_sign_in` | `provider` | the attempt, or `{provider, state: "not-running"}` |
 | `usage` | none | `{agents: [{agent, usage}]}`; `usage` is a frame or null |
+| `models` | `agent` (optional: `codex`, `claude` or `pi`; all when absent) | `{version: 1, providers: [{provider, tiers: {cheap, mid, strong}, models: [{id, aliases, context_window, effort_levels}], error}]}` |
 | `resolve_captain_delivery` | `delivery_id`, `decision` (`resend` or `ack`) | `{delivery_id, decision}` |
 | `uncertain_deliveries` | none | `{deliveries: [{delivery_id, at, delivery}]}`, oldest first |
 
@@ -102,7 +126,7 @@ An app calls every other method directly.
 - `ring` with a `message_id` Codex already accepted lands again without starting a second turn.
   A `turn/start` Codex never answered reports `"delivery unconfirmed"`: held, never bounced, and settled by the next turn notice.
 
-Refusal codes by method: `supervisor-params` (any), `supervisor-crew`, `supervisor-transport`, `supervisor-closing`, `supervisor-startup`, `codex-hooks-missing`, `codex-hooks-untrusted`, `claude-sdk-missing`, `claude-start` (start), `grant-request-unknown`, `grant-request-closed`, `grant-request-reason`, `grant-request-decision`, `grant-request-unsupported` (resolve_grant), `command-refused`, `command-timeout`, `command-failed` (command), `transcript-agent`, `transcript-range`, `transcript-entry`, `transcript-file`, `transcript-gone` (transcript, step), `session-name` (rename), `supervisor-captain-token` (any method but the captain CLI's, with the captain's token), `captain-delivery-decision`, `captain-delivery-unknown` (resolve_captain_delivery), `sign-in-method`, `sign-in-running`, `sign-in-missing` (sign_in), `authorization-argv` (command), `authorization-unknown`, `authorization-closed`, `authorization-decision` (resolve_authorization), `diff-assignment`, `diff-no-baseline`, `diff-git` (diff), `review-assignment`, `review-no-report`, `review-result` (mark_reviewed), `captain-transport`, `captain-running`, `captain-start` (start_captain), `captain-not-running` (message, interrupt and answer), `captain-message-id` (message_captain), `captain-request-closed`, `captain-request-answer`, `captain-request-unknown` (answer_captain).
+Refusal codes by method: `supervisor-params` (any), `supervisor-crew`, `supervisor-transport`, `supervisor-closing`, `supervisor-startup`, `codex-hooks-missing`, `codex-hooks-untrusted`, `claude-sdk-missing`, `claude-start` (start), `grant-request-unknown`, `grant-request-closed`, `grant-request-reason`, `grant-request-decision`, `grant-request-unsupported` (resolve_grant), `command-refused`, `command-timeout`, `command-failed` (command), `transcript-agent`, `transcript-range`, `transcript-entry`, `transcript-file`, `transcript-gone` (transcript, step), `session-name` (rename), `supervisor-captain-token` (any method but the captain CLI's, with the captain's token), `captain-delivery-decision`, `captain-delivery-unknown` (resolve_captain_delivery), `sign-in-method`, `sign-in-running`, `sign-in-missing` (sign_in), `supervisor-params` for an unknown `agent` (models), `authorization-argv` (command), `authorization-unknown`, `authorization-closed`, `authorization-decision` (resolve_authorization), `diff-assignment`, `diff-no-baseline`, `diff-git` (diff), `review-assignment`, `review-no-report`, `review-result` (mark_reviewed), `captain-transport`, `captain-running`, `captain-start` (start_captain), `captain-not-running` (message, interrupt and answer), `captain-message-id` (message_captain), `captain-request-closed`, `captain-request-answer`, `captain-request-unknown` (answer_captain).
 
 ### hello
 
@@ -235,7 +259,7 @@ The captain can route a question to the user itself, for good, with `captain esc
 - `message_captain` queues the user's prompt under `captain_messages` in `protocol.json`, records a `prompt` action, and sends what the captain will take at once; a busy captain gets it from the bridge when its turn ends, and a stopped one from the next `start_captain`.
   Its claim id is `user-<message_id>`, and the ring carries that id, so Codex never starts a second turn for it.
   `message_id` makes a retry safe: a known id returns that prompt's state and sends nothing again, and a known id with other text is refused with `[captain-message-id]`; ids stay known for the newest 200 delivered prompts.
-  `state` is `delivered`, `queued` (waiting for the captain), or `uncertain` (settle it with `resolve_captain_delivery`).
+  `state` is `delivered`, `queued` (waiting for the captain), or `uncertain` (settle it with `resolve_captain_delivery`); a send that raised instead of reporting a gate leaves the prompt `uncertain` and names the failure in `error`, never refusing the call.
 - Operator notes: the user's `tell`, `answer`, `interrupt`, `model` and `dismiss` through `command`, `interrupt_all` and `resolve_grant` are recorded under `operator_notes` in `protocol.json` and put, one line each, in front of whatever next starts a captain turn (a prompt, a delivery or an authorization outcome), then marked delivered.
 - `interrupt_all` interrupts the captain too, as `{crew: "captain", outcome}`.
 - The captain's native prompts go to the user: a Codex approval request or ask-user (`requestUserInput`), a Claude permission request or `AskUserQuestion` (the captain's host alone registers the SDK's `can_use_tool`), and a pi extension dialog (`confirm` as an approval; `select`, `input` and `editor` as a question with the one id `value`) each open a `captain_requests` entry and a `question` action (crew `captain`, `waiting_on: "human"`), an `attention` notification with `[captain-request]`, and wait up to 30 minutes for `answer_captain`; unanswered, it expires and is declined (pi: cancelled).
@@ -268,13 +292,18 @@ The supervisor keeps the newest frame in `events/<stem>.live-usage.json` and pub
 `usage` returns, for the captain and every current crew, the native reading (transcript or rollout) with the live frame filling only what it leaves null; the dashboard of a supervised session shows the same, so a pi crew gets a CTX column.
 A Herdr session never reads a live frame.
 
+## Model catalogue
+
+- `models` returns `model_catalogue.catalogue` for the session's project, probing the installed native tools on every call with no cache; the supervisor imports it only when the method is called.
+- Captain's known models are listed even when a probe fails: unknown fields are null and the provider's `error` names the failure.
+
 ## Session hub
 
 The app keeps no session list of its own; it reads captain state, and needs no second long-running process.
 
 - List: `captain sessions`, run in any project with no Herdr and no supervisor, prints the list as one JSON line; a running supervisor's `sessions` method returns the same: `{projects: [{project, exists, sessions: [{id, name, transport, state, last_activity, ended_at, crew}]}]}`, the current project first, then by project, newest first.
   `transport` is `supervisor` or `herdr`; `state` is `running` (a supervisor holds the lock), `ended`, `stopped` or `herdr` (a Herdr session, which the app cannot resume).
-- Start: run `captain supervise` in the project; resume: `captain supervise --session ID` there, which clears `ended_at`.
+- Start: run `captain supervise` in the project; resume: `captain --session ID supervise` there, which clears `ended_at`.
 - Rename: `rename`, or `captain --session ID --rename NAME` with no supervisor running.
 - End: `shutdown` with `end: true` stops every crew, records `ended_at` in `session.json` and exits; plain `shutdown` (quitting the app) stops without ending.
 

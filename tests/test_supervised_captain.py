@@ -42,6 +42,8 @@ def fake_captain(rung, state, holder):
     def ring(link, message_id, text):
         if state["value"] == "busy":
             return {"landed": False, "gate": "agent not idle"}
+        if state["value"] == "broken":
+            raise CaptainError("[jsonrpc-error] turn/start: the native refused.")
         rung.append((message_id, text))
         if state["value"] == "unconfirmed":
             return {"landed": False, "gate": "delivery unconfirmed"}
@@ -194,6 +196,28 @@ class SupervisedCaptainTests(SessionCase):
         prompts = [(a["message"], a["state"]) for a in self.actions() if a["kind"] == "prompt"]
         self.assertEqual(prompts, [("m1", "queued"), ("m1", "delivered")])
         self.assertEqual(self.actions()[-2]["text"], "Plan it.")
+
+    def test_a_ring_that_fails_returns_a_typed_state_not_an_error(self):
+        self.call("start_captain", {"provider": "fake"})
+        self.state["value"] = "broken"
+        reply = self.call("message_captain", {"text": "Go.", "message_id": "m1"})
+        self.assertEqual((reply["state"], reply["landed"]), ("uncertain", False))
+        self.assertEqual(reply["error"]["code"], "jsonrpc-error")
+        listed = self.call("uncertain_deliveries")["deliveries"]
+        self.assertEqual([row["delivery_id"] for row in listed], ["user-m1"])
+
+    def test_answering_an_unknown_request_is_unknown_and_a_captain_token_refusal_is_not_a_token_error(
+        self,
+    ):
+        self.call("start_captain", {"provider": "fake"})
+        with self.assertRaisesRegex(CaptainError, r"\[captain-request-unknown\]"):
+            self.call("answer_captain", {"request": "nope", "decision": "approve"})
+        owner = supervisor.Supervisor(self.current, "token", threading.Event())
+        error = supervisor.Handler.answer(owner, "command", {"token": owner.captain_token})
+        self.assertEqual(
+            (error["error"]["code"], error["error"]["data"]["code"]),
+            (supervisor.REFUSED, "supervisor-captain-token"),
+        )
 
     def test_a_retried_message_id_is_sent_once(self):
         self.call("start_captain", {"provider": "fake"})
