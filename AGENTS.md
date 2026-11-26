@@ -19,8 +19,8 @@ and the crew token-usage dashboard is a plain-text refresh loop in a Herdr pane,
 ```text
 src/captain_barbossa/
   cli.py          argparse entry point and dispatch: captain, crew, wait, tell, model,
-                  focus, session, init, status, dashboard, dismiss, relayout, memory, recover,
-                  supervise
+                  focus, session, sessions, init, status, dashboard, dismiss, relayout, memory,
+                  recover, escalate, supervise
   launch.py       native captain launch, launch plan, dashboard pane, exit pane cleanup
   agents.py       crew recruitment and create/wait/tell/model/focus/status/dismiss
   instructions.py role instructions and per-provider native CLI arguments
@@ -66,6 +66,10 @@ src/captain_barbossa/
   codex_app_server.py supervised Codex adapter over `codex app-server`
   claude_host.py  the user's claude through the Agent SDK, JSON-RPC on stdio
   claude_agent.py supervised Claude adapter over claude_host
+  pi_rpc.py       supervised pi adapter over `pi --mode rpc`
+  grok_acp.py     supervised Grok adapter over `grok agent stdio` (ACP), permission relay
+  captain_bridge.py supervised captain: delivery bridge, claims, operator notes, requests
+  transcripts.py  paged transcripts and full steps from a provider's own session files
   jsonrpc.py      line-delimited JSON-RPC framing, deadlines, multiplexed Peer
   update_check.py startup PyPI update check and `captain update`
 tests/            unittest suite; Herdr and model sessions are mocked, a real PTY is used
@@ -178,11 +182,17 @@ Key facts:
   session holding `supervisor.lock`, on a token-gated socket under `~/.captain/run`
   (never temp; token only on its readiness line). Only it sets session `transport:
   "supervisor"` (Herdr sessions refused); its crew get `execution: "supervised"`,
-  run `codex app-server` or `claude_host` (Claude Agent SDK, optional `[app]` extra)
-  under the lifetime guard, refuse to start with untrusted Codex hooks, and gate
-  approvals through `captain hook`. Turns are untimed, every request bounded. Herdr
-  commands and hooks never import the supervisor modules (lazy imports, pinned by a
-  test). Methods, refusal codes and shapes: docs/supervisor.md.
+  run `codex app-server`, `claude_host` (Agent SDK, optional `[app]` extra), `pi --mode
+  rpc` or `grok agent stdio` under the lifetime guard, refuse to start with untrusted
+  Codex hooks, and gate every approval through `captain hook` (Grok never runs in
+  auto mode). Turns are untimed, every request bounded.
+  `start_captain` runs the captain there too (not a crew, no lifetime record; Grok
+  refused) with a scoped token reaching only the methods the captain CLI calls, so it
+  cannot answer the user's own decisions. In a supervised session `captain do` and
+  `quiet` outward/destructive verbs need an approved authorization request, spent by
+  one run of that exact command; the app resolves it. Herdr commands and hooks never
+  import the supervisor modules (lazy imports, pinned by a test). Methods, refusal
+  codes and shapes: docs/supervisor.md.
 - The delegation axis is judgment, not file-touching: `make test` writes nothing and
   needs no crew, while research changes no file and does.
 - Settings layer bottom to top: `defaults.toml` (package data, the only place a default

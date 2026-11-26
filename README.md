@@ -595,6 +595,15 @@ conversation, not a provider transcript resume. See
 [memory.md](https://github.com/dev-preetamraj/captain-barbossa/blob/main/docs/memory.md)
 for session and project identity.
 
+## Desktop app plumbing
+
+`captain supervise`, `captain sessions` and `captain escalate` exist for a
+desktop app that runs captain and crew without a terminal or Herdr. They are
+app plumbing, documented in
+[supervisor.md](https://github.com/dev-preetamraj/captain-barbossa/blob/main/docs/supervisor.md),
+and you do not need them. Normal Herdr use is unchanged, and Herdr sessions
+never load that code.
+
 ## Troubleshooting
 
 For install, TTY, crew startup, approval, model confirmation, session,

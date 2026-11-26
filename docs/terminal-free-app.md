@@ -3,8 +3,16 @@
 Goal: let a desktop app run captain and crew without a terminal or Herdr.
 The existing CLI + Herdr flow keeps working unchanged; the new path is additive.
 
-Status (2026-11-26): Phase 1 done: supervised Codex (1a) and Claude (1b) crew, live-tested against the real CLIs.
-Next: Phase 2, the app's client surface (hello, command, subscribe) and the UI gaps it absorbs.
+Status (2026-11-26): Phases 1-6 built and reviewed.
+Phase 1 (supervised Codex and Claude crew) was live-tested against the real CLIs; Phases 2-6 were tested against fake peers and reviewed.
+Still needs live checks:
+
+- A real Grok: the adapter, the 1.0.62 version floor and the switch to an asking mode were built against a fake ACP peer, and Grok is not installed on this machine.
+- Grok device auth: `grok login --device-auth` output parsing and Grok's signed-in status, which has no verified status command.
+- Claude cost fields: `total_cost_usd` and `modelUsage` from a real `ResultMessage`.
+- Live captain turns: the supervised captain on each provider, its delivery bridge and its approval and ask-user prompts.
+
+Not built: the model catalog with effort levels and the settings methods (see `terminal-free-ui-gaps.md`).
 Branch: `feat/terminal-free-app`.
 Baseline: `main` at `df36799` (0.51.0).
 
