@@ -23,7 +23,7 @@ from .approval import (
     recipe_flag,
 )
 from .crew import Crew, event_status
-from .eventlog import MAX_EVENT_BYTES, read_events
+from .eventlog import MAX_EVENT_BYTES, read_events, record_action
 from .execution import root
 from .models import HOOK_DELIVERED, HOOKLESS
 from .pane import DRAFT_GATE, HOLD_EXPIRY, UNREADABLE_EXPIRY, UNREADABLE_GATE, inbox_line
@@ -333,9 +333,29 @@ def begin(
             "native_status": None,
             "verify": verify,
         }
+        if supervised(crew):
+            # Read back by receipt, which a delivery hook calls with no session metadata.
+            assignment["supervised"] = True
         state["assignments"][assignment["id"]] = assignment
         state["active"][crew.crew_id] = assignment["id"]
+    record_action(
+        crew.session.directory,
+        "assign" if previous else "recruit",
+        crew.crew_id,
+        assignment["id"],
+        supervised=supervised(crew),
+        task=task,
+        paths=paths,
+        actions=actions,
+        verify=verify,
+        handoff=handoff,
+    )
     return assignment
+
+
+def supervised(crew):
+    """Whether the crew's session logs protocol actions, from metadata already loaded."""
+    return crew.session.meta.get("transport") == "supervisor"
 
 
 def notice(assignment, status, summary):
@@ -441,7 +461,7 @@ def unlanded(project, assignment, *, ignore_uncommitted=False):
     return reasons
 
 
-def grant(crew, assignment_id, command):
+def grant(crew, assignment_id, command, request=None):
     """Captain-only: let this assignment run one exact command text once. The gate spends it
     on the first exact match; a handoff starts a new assignment, so it is never inherited."""
     if os.environ.get("CAPTAIN_ROLE") == "crew":
@@ -454,9 +474,22 @@ def grant(crew, assignment_id, command):
         if assignment["state"] == "done":
             raise CaptainError("Assignment is done; grant on its live successor instead.")
         grants = assignment.setdefault("grants", [])
-        if not any(entry["command"] == command for entry in grants):
+        added = not any(entry["command"] == command for entry in grants)
+        if added:
             grants.append({"command": command, "at": time.time()})
-        return {"assignment_id": assignment["id"], "grants": len(grants)}
+        response = {"assignment_id": assignment["id"], "grants": len(grants)}
+    if added or request:
+        record_action(
+            crew.session.directory,
+            "grant",
+            crew.crew_id,
+            response["assignment_id"],
+            supervised=supervised(crew),
+            state="granted",
+            command=command,
+            request=request,
+        )
+    return response
 
 
 def change(crew, args, project):
@@ -519,6 +552,18 @@ def change(crew, args, project):
                 )
                 response["grant_request"] = request["id"]
             notice(assignment, "asked", summary)
+            record_action(
+                crew.session.directory,
+                "question",
+                crew.crew_id,
+                assignment["id"],
+                supervised=supervised(crew),
+                defer=True,
+                question=question["id"],
+                state="asked",
+                text=args.question,
+                request=request["id"] if request else None,
+            )
             return response
         if assignment["question"]:
             raise CaptainError("Answer the pending question before done.")
@@ -535,6 +580,16 @@ def change(crew, args, project):
         response = {"assignment_id": assignment["id"], "status": "done"}
         if receipt:
             response["verification"] = receipt
+        record_action(
+            crew.session.directory,
+            "report",
+            crew.crew_id,
+            assignment["id"],
+            supervised=supervised(crew),
+            defer=True,
+            report=args.report,
+            verification=receipt,
+        )
         return response
 
 
@@ -585,6 +640,18 @@ def grant_request(crew, assignment, question):
     }
     assignment.setdefault("grant_requests", []).append(request)
     question["grant_request"] = request["id"]
+    record_action(
+        crew.session.directory,
+        "grant",
+        crew.crew_id,
+        assignment["id"],
+        supervised=supervised(crew),
+        defer=True,
+        state="requested",
+        **{key: request[key] for key in ("command", "tool", "cwd", "code", "category")},
+        request=request["id"],
+        question=question["id"],
+    )
     return request
 
 
@@ -620,9 +687,20 @@ def resolve_request(crew, request_id, decision, reason=None):
         )
         assignment_id = assignment["id"]
     if decision == "grant":
-        grant(crew, assignment_id, request["command"])
+        grant(crew, assignment_id, request["command"], request_id)
         text = f"Granted once: run exactly this command again, unchanged:\n{request['command']}"
     else:
+        record_action(
+            crew.session.directory,
+            "grant",
+            crew.crew_id,
+            assignment_id,
+            supervised=supervised(crew),
+            state="denied",
+            command=request["command"],
+            request=request_id,
+            reason=reason.strip(),
+        )
         text = (
             f"Denied: {reason.strip()}\nDo not run it or try another route; "
             "carry on without it, or report why you cannot."
@@ -823,13 +901,27 @@ def receipt(session_directory, crew_id, ids):
                 receipts.setdefault(message.get("assignment_id"), []).append(message_id)
     # checkpoint takes protocol.lock too, so mirror the receipt after the mail writes, like bounce.
     if receipts:
+        logged = set()
         with checkpoint(session_directory) as state:
             for assignment_id, read_ids in receipts.items():
                 assignment = state["assignments"].get(assignment_id)
+                if assignment and assignment.get("supervised"):
+                    logged.add(assignment_id)
                 for message in assignment["messages"] if assignment else ():
                     # A second read finds the mail already off "queued", so nothing to mirror.
                     if message["id"] in read_ids and message["delivery"] == "sent":
                         message["delivery"] = "read"
+        for assignment_id in logged:
+            for message_id in receipts[assignment_id]:
+                record_action(
+                    session_directory,
+                    "mail",
+                    crew_id,
+                    assignment_id,
+                    supervised=True,
+                    message=message_id,
+                    state="read",
+                )
 
 
 def render(session_directory, messages):
@@ -863,6 +955,16 @@ def bounce(crew, message_id, reason):
         message["state"] = "bounced"
         message["reason"] = reason
         write_json(path, message)
+    record_action(
+        directory,
+        "mail",
+        crew.crew_id,
+        message.get("assignment_id"),
+        supervised=supervised(crew),
+        message=message_id,
+        state="bounced",
+        reason=reason,
+    )
     with checkpoint(directory) as state:
         assignment = state["assignments"].get(state["active"].get(crew.crew_id))
         if assignment:
@@ -1243,6 +1345,18 @@ def deliver(
         enqueue(crew, text, kind, assignment_id, message_id)
         message["delivery"] = "sent"
         mark_sent(assignment, message)
+    record_action(
+        crew.session.directory,
+        "mail",
+        crew.crew_id,
+        assignment_id,
+        supervised=supervised(crew),
+        message=message_id,
+        state="sent",
+        mail_kind=message["kind"],
+        question=message["question_id"],
+        text=text,
+    )
     if not queue_only:
         ring(crew, message_id)
     return message_id
@@ -1606,14 +1720,23 @@ def reconcile_supervised(crew, assignment):
     # While the supervisor lives, a launch it has not claimed yet is starting, not gone.
     if not stopped.ok or (alive and stopped.reason == "never-launched"):
         return
-    close_unreported(
-        assignment,
-        "lost",
+    summary = (
         "[supervised-crew-exited] The crew's native CLI exited without a report; "
         "nothing was restarted."
         if alive
         else "[supervisor-lost] The supervisor ended and its crew stopped with it; "
-        "nothing was restarted.",
+        "nothing was restarted."
+    )
+    close_unreported(assignment, "lost", summary)
+    record_action(
+        crew.session.directory,
+        "lifecycle",
+        crew.crew_id,
+        assignment.get("id"),
+        supervised=supervised(crew),
+        defer=True,
+        state="lost",
+        detail=summary,
     )
 
 

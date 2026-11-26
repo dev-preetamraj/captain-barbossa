@@ -67,15 +67,31 @@ def usage_for_events(events_path, *, cached_only=True):
         except CaptainError:
             return None
         return value.get("usage") if isinstance(value.get("usage"), dict) else None
-    directory = Path(events_path).parent.parent.resolve() / "native-history"
-    manifest = directory / f"{Path(events_path).stem}.json"
+    manifest = _manifest(events_path)
     if not os.path.lexists(manifest):
         return _live_usage(events_path, cached_only=cached_only)
     try:
-        owned = history_manifest.read_manifest(manifest)
-        identities = journal(manifest.with_suffix(".pi.jsonl")) if owned["provider"] == "pi" else []
+        owned = _owned(manifest)
     except CaptainError:
         return None
+    return _live_usage(
+        events_path,
+        cached_only=cached_only,
+        provider=owned.get("provider"),
+        transcripts=owned.get("transcripts"),
+        native_root=owned.get("native_root"),
+    )
+
+
+def _manifest(events_path):
+    directory = Path(events_path).parent.parent.resolve() / "native-history"
+    return directory / f"{Path(events_path).stem}.json"
+
+
+def _owned(manifest):
+    """The native-history manifest with every transcript its incarnation is known to own."""
+    owned = history_manifest.read_manifest(manifest)
+    identities = journal(manifest.with_suffix(".pi.jsonl")) if owned["provider"] == "pi" else []
     if owned["provider"] == "claude":
         owned["transcripts"] = owned["transcripts"] + owned.get("usage_transcripts", [])
     if owned["provider"] == "pi":
@@ -91,13 +107,25 @@ def usage_for_events(events_path, *, cached_only=True):
             if path.parent == root and path.suffix == ".jsonl" and not path.is_symlink():
                 transcripts[str(path)] = None
         owned["transcripts"] = list(transcripts)
-    return _live_usage(
-        events_path,
-        cached_only=cached_only,
-        provider=owned.get("provider"),
-        transcripts=owned.get("transcripts"),
-        native_root=owned.get("native_root"),
-    )
+    return owned
+
+
+def native_files(events_path):
+    """(provider or None, session files) the native CLI behind an events file wrote, oldest first."""
+    manifest = _manifest(events_path)
+    if os.path.lexists(manifest):
+        owned = _owned(manifest)
+        files = owned["transcripts"]
+        if owned["provider"] == "codex" and not files:
+            rollout = _rollout_path(
+                events_path, sessions_root=Path(owned["native_root"]) / "sessions"
+            )
+            files = [str(rollout)] if rollout else []
+        return owned["provider"], files
+    if files := _transcript_paths(events_path):
+        return "claude", files
+    rollout = _rollout_path(events_path)
+    return ("codex", [str(rollout)]) if rollout else (None, [])
 
 
 def freeze(events_path, incarnation, *, provider=None, transcripts=None, native_root=None):

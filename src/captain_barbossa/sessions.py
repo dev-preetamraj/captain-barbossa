@@ -6,6 +6,7 @@ import time
 import uuid
 from collections import namedtuple
 from contextlib import contextmanager
+from pathlib import Path
 
 from .runtime import HERDR_ERRORS, CaptainError, herdr
 from .store import (
@@ -107,6 +108,41 @@ def all_sessions(current):
                 )
     rows.sort(key=lambda row: (row[0] != str(current), row[0], -row[3]))
     return rows
+
+
+def catalog(current):
+    """Every project's sessions as JSON for an app's session list, in all_sessions order."""
+    projects = {}
+    for project, name, session_id, active, directory in all_sessions(current):
+        try:
+            meta = read_json(directory / "session.json")
+        except CaptainError:
+            meta = {}
+        meta = meta if isinstance(meta, dict) else {}
+        transport = "supervisor" if meta.get("transport") == "supervisor" else "herdr"
+        if transport == "herdr":
+            state = "herdr"
+        else:
+            from .supervision import alive  # local: Herdr commands never load the door
+
+            state = (
+                "running" if alive(directory) else "ended" if meta.get("ended_at") else "stopped"
+            )
+        row = projects.setdefault(
+            project, {"project": project, "exists": Path(project).is_dir(), "sessions": []}
+        )
+        row["sessions"].append(
+            {
+                "id": session_id,
+                "name": name,
+                "transport": transport,
+                "state": state,
+                "last_activity": active,
+                "ended_at": meta.get("ended_at"),
+                "crew": session_crew(directory),
+            }
+        )
+    return {"projects": list(projects.values())}
 
 
 def project_sessions(project):

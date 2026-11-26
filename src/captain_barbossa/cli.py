@@ -32,7 +32,14 @@ from .prompts import PLACEMENTS, pick_session
 from .retention import PRUNE_DAYS
 from .retirement import artifact_command
 from .runtime import HERDR_ERRORS, CaptainError, current_pane
-from .sessions import find_session, project_sessions, read_session, rename_session, session_card
+from .sessions import (
+    catalog,
+    find_session,
+    project_sessions,
+    read_session,
+    rename_session,
+    session_card,
+)
 from .store import project_root
 from .update_check import upgrade
 
@@ -238,6 +245,7 @@ def parser(*, plan=False):
     stop.add_argument("name", help="crew name or ID (case-insensitive)")
     stop.add_argument("--reason", help="why, recorded in session memory")
     commands.add_parser("session", help="print the current session id")
+    commands.add_parser("sessions", help="JSON list of every project's sessions and their state")
     commands.add_parser("recover", help="JSON digest of memory, assignments and pending deliveries")
     commands.add_parser(
         "supervise", help="own this session's crew behind a socket for an app, with no Herdr"
@@ -556,6 +564,9 @@ def main(argv=None):
             return 0
         if args.command == "session":
             print_session(args)
+            return 0
+        if args.command == "sessions":
+            print(json.dumps(catalog(active_project())))
             return 0
         if args.command in ("result", "worktree"):
             print(json.dumps(artifact_command(args, read_session(active_project(), args.session))))

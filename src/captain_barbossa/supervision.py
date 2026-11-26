@@ -9,11 +9,11 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
-from . import config, jsonrpc
+from . import config, eventlog, jsonrpc
 from .runtime import CaptainError
 
 # The supervisor hands the token only to its launcher, which passes it to the captain.
-TOKEN_ENV = "CAPTAIN_SUPERVISOR_TOKEN"
+TOKEN_ENV = eventlog.TOKEN_ENV
 LOCK = "supervisor.lock"
 # macOS sun_path holds 104 bytes including the terminating NUL.
 SOCKET_PATH_LIMIT = 104
