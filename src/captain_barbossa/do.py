@@ -9,6 +9,7 @@ watch-your-crew rule only by being reviewable afterwards.
 """
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -17,7 +18,7 @@ import time
 from pathlib import Path
 from uuid import uuid4
 
-from . import config, inspection, protocol
+from . import config, inspection, protocol, sessions
 from .eventlog import record_action
 from .models import PROVIDERS, headless_argv, headless_report, resolve_model
 from .processes import TARGET, TIMEOUT, capture, makefile_targets
@@ -41,6 +42,7 @@ CATEGORIES = {"push": "outward", "fetch": "outward", "pull": "outward", "run": "
 AUTHORIZATION_ENV = "CAPTAIN_AUTHORIZATION"
 # An approval unspent this long expires, so a stale yes never authorizes a later run.
 APPROVAL_TTL = 900
+AUTHORIZATION_LIMIT = 256
 FIELDS = ("do_command", "message", "path", "name", "target", "task", "diff", "write")
 FIELDS += ("read", "model", "timeout")
 QUIET_PROMPT = (
@@ -321,6 +323,9 @@ def parse(argv):
     """A `do` or `quiet` argv parsed exactly as the CLI parses it."""
 
     class Parser(argparse.ArgumentParser):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **{**kwargs, "add_help": False})
+
         def error(self, message):
             raise CaptainError(f"[authorization-argv] {message}")
 
@@ -337,13 +342,39 @@ def command_of(args):
 
 
 def category(args):
+    if args.do_command == "quiet" and args.write:
+        return "destructive"
     return CATEGORIES.get(args.do_command, "local")
 
 
 def _expire(rows, now):
     for row in rows:
-        if row["state"] == "approved" and now - row["resolved_at"] > APPROVAL_TTL:
-            row["state"] = "expired"
+        if row["state"] in ("open", "approved"):
+            since = row["at"] if row["state"] == "open" else row["resolved_at"]
+            if now - since > APPROVAL_TTL:
+                row["state"] = "expired"
+
+
+def _context(session_directory, args):
+    """Bind approval to HEAD, remote configuration and the root recipe without storing secrets."""
+    root = Path(read_json(session_directory / "session.json")["project"])
+    values = [
+        _git(root, "symbolic-ref", "--quiet", "HEAD", check=False),
+        _git(root, "rev-parse", "--verify", "HEAD", check=False),
+        _git(root, "config", "--null", "--list", check=False),
+    ]
+    if args.do_command == "push" and values[1][0] == 0:
+        current = _branch(root)
+        command = _push_command(root, current)
+        values.extend(
+            (command, _git(root, "remote", "get-url", "--push", "--all", command[-2], check=False))
+        )
+    if args.do_command == "run":
+        makefile = root / "Makefile"
+        values.append(
+            hashlib.sha256(makefile.read_bytes()).hexdigest() if makefile.exists() else None
+        )
+    return hashlib.sha256(json.dumps(values).encode()).hexdigest()
 
 
 def _log(session_directory, row, **fields):
@@ -362,6 +393,7 @@ def _log(session_directory, row, **fields):
 def request_authorization(session_directory, args, origin, argv=None):
     """The open or approved request for this exact command, else a new open one."""
     wanted = command_of(args)
+    context = _context(session_directory, args)
     with protocol.checkpoint(session_directory) as state:
         rows = state.setdefault("authorizations", [])
         _expire(rows, time.time())
@@ -369,14 +401,33 @@ def request_authorization(session_directory, args, origin, argv=None):
             (
                 row
                 for row in rows
-                if row["command"] == wanted and row["state"] in ("open", "approved")
+                if row["command"] == wanted
+                and row.get("context") == context
+                and row["origin"] == origin
+                and (
+                    row["state"] in ("open", "approved")
+                    or (
+                        row["state"] == "denied"
+                        and time.time() - row["resolved_at"] <= APPROVAL_TTL
+                    )
+                )
             ),
             None,
         )
         if found is not None:
             return dict(found)
+        if len(rows) >= AUTHORIZATION_LIMIT:
+            rows[:] = [
+                row
+                for row in rows
+                if row["state"] in ("open", "approved")
+                or (row["state"] == "denied" and time.time() - row["resolved_at"] <= APPROVAL_TTL)
+            ]
+        if len(rows) >= AUTHORIZATION_LIMIT:
+            raise CaptainError("[authorization-limit] Too many pending authorization requests.")
         row = {
             "id": uuid4().hex,
+            "context": context,
             "origin": origin,
             "argv": argv,
             "command": wanted,
@@ -416,6 +467,10 @@ def resolve_authorization(session_directory, request_id, decision, reason=None):
 def _spend(session_directory, args, request_id):
     """Spend the approved request for this exact command (the named one when given), or None."""
     wanted = command_of(args)
+    context = _context(session_directory, args)
+    captain = os.environ.get("CAPTAIN_ROLE", "captain") == "captain" and not os.environ.get(
+        "CAPTAIN_CREW"
+    )
     with protocol.checkpoint(session_directory) as state:
         rows = state.get("authorizations", [])
         _expire(rows, time.time())
@@ -425,7 +480,11 @@ def _spend(session_directory, args, request_id):
                 for row in rows
                 if row["state"] == "approved"
                 and row["command"] == wanted
-                and request_id in (None, row["id"])
+                and row.get("context") == context
+                and (
+                    (row["origin"] == "app" and request_id == row["id"])
+                    or (row["origin"] == "captain" and captain and request_id is None)
+                )
             ),
             None,
         )
@@ -458,6 +517,12 @@ def authorize(args, session_directory):
 def run(args, session_directory, project, meta=None):
     """Dispatch one `do` action; record a refusal once unless the run already was."""
     try:
+        inherited = os.environ.get("CAPTAIN_SESSION")
+        selected = getattr(args, "session", None)
+        if inherited and selected and selected != inherited:
+            source = sessions.read_session(Path(project), inherited)
+            if source.meta.get("transport") == "supervisor":
+                raise CaptainError("[authorization-session] Cannot change a supervised session.")
         if (meta or {}).get("transport") == "supervisor":
             authorize(args, session_directory)
         return _dispatch(args, session_directory, project, meta)
@@ -470,6 +535,23 @@ def run(args, session_directory, project, meta=None):
             command = ["captain", "do", args.do_command]
             record(session_directory, args.do_command, command, 1, str(exc))
         raise
+
+
+def _push_command(root, current):
+    if current == "HEAD":
+        raise CaptainError("Detached HEAD; nothing to push.")
+    tracked, _ = _git(root, "rev-parse", "--abbrev-ref", f"{current}@{{upstream}}", check=False)
+    command = ["git", "push"]
+    if tracked != 0:
+        _, remotes = _git(root, "remote")
+        names = remotes.splitlines()
+        command += ["--set-upstream", names[0] if len(names) == 1 else "origin", current]
+    else:
+        _, remote = _git(
+            root, "for-each-ref", "--format=%(push:remotename)", f"refs/heads/{current}"
+        )
+        command += [remote, current]
+    return command
 
 
 def _dispatch(args, session_directory, project, meta=None):
@@ -504,19 +586,7 @@ def _dispatch(args, session_directory, project, meta=None):
         summary = f"Fast-forwarded {_branch(root)}."
     elif action == "push":
         current = _branch(root)
-        if current == "HEAD":
-            raise CaptainError("Detached HEAD; nothing to push.")
-        tracked, _ = _git(root, "rev-parse", "--abbrev-ref", f"{current}@{{upstream}}", check=False)
-        command = ["git", "push"]
-        if tracked != 0:
-            _, remotes = _git(root, "remote")
-            names = remotes.splitlines()
-            command += ["--set-upstream", names[0] if len(names) == 1 else "origin", current]
-        else:
-            _, remote = _git(
-                root, "for-each-ref", "--format=%(push:remotename)", f"refs/heads/{current}"
-            )
-            command += [remote, current]
+        command = _push_command(root, current)
         output = _act(root, command, session_directory, action)
         summary = f"Pushed {current}."
     else:

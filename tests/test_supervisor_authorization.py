@@ -3,10 +3,12 @@ authorization request the user resolves, and a supervised captain's outward or d
 `do` runs only on an approved, one-shot request recorded in captain state."""
 
 import contextlib
+import io
 import json
 import os
 import shutil
 import socket
+import sys
 import tempfile
 import threading
 import time
@@ -16,7 +18,17 @@ from unittest.mock import patch
 
 from home_isolation import SessionCase
 
-from captain_barbossa import config, do, eventlog, jsonrpc, sessions, store, supervision, supervisor
+from captain_barbossa import (
+    config,
+    do,
+    eventlog,
+    jsonrpc,
+    processes,
+    sessions,
+    store,
+    supervision,
+    supervisor,
+)
 from captain_barbossa.runtime import CaptainError
 
 
@@ -83,10 +95,104 @@ class CaptainAuthorizationTests(SessionCase):
 
     def test_a_herdr_session_never_asks_and_writes_nothing(self):
         herdr = sessions.session(self.project, self.pane, create=True)
-        with patch.object(do, "_dispatch") as dispatch:
+        with patch.object(do, "_dispatch") as dispatch, patch.object(do, "read_json") as read:
             do.run(do.parse(["do", "push"]), herdr.directory, self.project, herdr.meta)
+        read.assert_not_called()
         dispatch.assert_called_once()
         self.assertFalse((herdr.directory / "protocol.json").exists())
+
+    def test_children_never_inherit_authorization_secrets(self):
+        os.environ.update({key: "secret" for key in processes.CHILD_SECRETS})
+        command = [sys.executable, "-c", "import os; print(dict(os.environ))"]
+        _, output = do._spawn(self.project, command)
+        for key in processes.CHILD_SECRETS:
+            self.assertNotIn(key, output)
+        store.write_json(self.directory / "captain.json", {"provider": "codex"})
+        output = io.StringIO()
+        with (
+            patch.object(do, "headless_argv", return_value=command),
+            patch.object(do, "executable", return_value=sys.executable),
+            patch.object(do, "resolve_model", return_value=None),
+            patch.object(
+                do, "headless_report", side_effect=lambda provider, text, model: (text, None)
+            ),
+            contextlib.redirect_stdout(output),
+        ):
+            do._quiet(do.parse(["quiet", "--task", "read"]), self.project, self.directory)
+        for key in processes.CHILD_SECRETS:
+            self.assertNotIn(key, output.getvalue())
+
+    def test_changed_recipe_cannot_spend_an_approval(self):
+        recipe = self.project / "Makefile"
+        recipe.write_text("deploy:\n\t@echo before\n")
+        args = do.parse(["do", "run", "deploy"])
+        row = do.request_authorization(self.directory, args, "captain")
+        do.resolve_authorization(self.directory, row["id"], "approve")
+        recipe.write_text("deploy:\n\t@echo after\n")
+        self.assertIsNone(do._spend(self.directory, args, None))
+
+    def test_changed_head_or_remote_cannot_spend_an_approval(self):
+        do._git(self.project, "init")
+        args = do.parse(["do", "push"])
+        for command in (
+            ("symbolic-ref", "HEAD", "refs/heads/other"),
+            ("config", "remote.origin.url", "https://example.invalid/new"),
+        ):
+            with self.subTest(command=command):
+                row = do.request_authorization(self.directory, args, "captain")
+                do.resolve_authorization(self.directory, row["id"], "approve")
+                do._git(self.project, *command)
+                self.assertIsNone(do._spend(self.directory, args, None))
+
+    def test_explicit_session_cannot_escape_supervision(self):
+        herdr = sessions.session(self.project, self.pane, create=True)
+        os.environ["CAPTAIN_SESSION"] = self.directory.name
+        args = do.parse(["do", "push"])
+        args.session = herdr.directory.name
+        with patch.object(do, "_dispatch") as dispatch:
+            with self.assertRaisesRegex(CaptainError, "authorization-session"):
+                do.run(args, herdr.directory, self.project, herdr.meta)
+        dispatch.assert_not_called()
+
+    def test_write_quiet_requires_approval_but_read_only_does_not(self):
+        self.assertEqual(do.category(do.parse(["quiet", "--task", "read"])), "local")
+        with self.assertRaisesRegex(CaptainError, "destructive"):
+            do.authorize(do.parse(["quiet", "--task", "edit", "--write", "x"]), self.directory)
+
+    def test_app_and_captain_approvals_cannot_be_stolen_by_other_origins(self):
+        args = do.parse(["do", "push"])
+        app = do.request_authorization(self.directory, args, "app")
+        captain = do.request_authorization(self.directory, args, "captain")
+        self.assertNotEqual(app["id"], captain["id"])
+        do.resolve_authorization(self.directory, app["id"], "approve")
+        self.assertIsNone(do._spend(self.directory, args, None))
+        self.assertIsNotNone(do._spend(self.directory, args, app["id"]))
+        do.resolve_authorization(self.directory, captain["id"], "approve")
+        os.environ["CAPTAIN_ROLE"] = "crew"
+        self.assertIsNone(do._spend(self.directory, args, None))
+
+    def test_open_requests_expire_and_denials_have_a_cooldown(self):
+        args = do.parse(["do", "fetch"])
+        row = do.request_authorization(self.directory, args, "captain")
+        with patch.object(do.time, "time", return_value=time.time() + do.APPROVAL_TTL + 1):
+            with self.assertRaisesRegex(CaptainError, "authorization-closed"):
+                do.resolve_authorization(self.directory, row["id"], "approve")
+        row = do.request_authorization(self.directory, args, "captain")
+        do.resolve_authorization(self.directory, row["id"], "deny")
+        self.assertEqual(do.request_authorization(self.directory, args, "captain")["id"], row["id"])
+
+    def test_authorization_queue_is_bounded(self):
+        with patch.object(do, "AUTHORIZATION_LIMIT", 1):
+            do.request_authorization(self.directory, do.parse(["do", "fetch"]), "app")
+            with self.assertRaisesRegex(CaptainError, "authorization-limit"):
+                do.request_authorization(self.directory, do.parse(["do", "pull"]), "app")
+
+    def test_help_is_a_typed_refusal_without_stdout_or_system_exit(self):
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            with self.assertRaisesRegex(CaptainError, "authorization-argv"):
+                do.parse(["do", "push", "-h"])
+        self.assertEqual(output.getvalue(), "")
 
     def test_requests_and_decisions_are_protocol_actions(self):
         row = do.request_authorization(
