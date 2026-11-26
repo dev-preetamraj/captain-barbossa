@@ -30,7 +30,7 @@ from .memory import REPO_RELATIONS, RULEBOOK_FILES, memory
 from .models import PROVIDERS, TIER_NAMES, models_for, tiers_for
 from .onboarding import bootstrap
 from .prompts import PLACEMENTS, pick_session
-from .retention import PRUNE_DAYS
+from .retention import PRUNE_DAYS, archive_session, delete_session
 from .retirement import artifact_command
 from .runtime import HERDR_ERRORS, CaptainError, current_pane
 from .sessions import (
@@ -40,6 +40,7 @@ from .sessions import (
     read_session,
     rename_session,
     session_card,
+    set_archived,
 )
 from .store import project_root
 from .update_check import upgrade
@@ -51,6 +52,11 @@ JSON_HELP = "print the outcome as one JSON line instead of text"
 # Verbs whose --json failure is a JSON envelope on stdout, {"error": {code, message}}.
 JSON_VERBS = ("crew", "tell", "answer", "interrupt", "model", "dismiss", "status", "dashboard")
 JSON_VERBS += ("providers",)
+ARCHIVE_VERBS = {
+    "archive": archive_session,
+    "unarchive": lambda directory: set_archived(directory, False),
+    "delete": delete_session,
+}
 REFUSAL_CODE = re.compile(r"\[([a-z0-9-]+)\] ")
 
 
@@ -283,10 +289,19 @@ def parser(*, plan=False):
     listing.add_argument(
         "--json", action="store_true", help="add each app session's needs-you and unreviewed counts"
     )
+    listing.add_argument("--all", action="store_true", help="include archived sessions")
     end = commands.add_parser(
         "end", help="end a stopped app session with no supervisor running; prints JSON"
     )
     end.add_argument("--session", default=argparse.SUPPRESS, help="end this session")
+    for verb, summary in (
+        ("archive", "archive a stopped session, hiding it from `sessions`; prints JSON"),
+        ("unarchive", "clear a session's archive mark; prints JSON"),
+        ("delete", "delete a stopped session's state with no unlanded work; prints JSON"),
+    ):
+        commands.add_parser(verb, help=summary).add_argument(
+            "--session", default=argparse.SUPPRESS, help=f"{verb} this session"
+        )
     commands.add_parser("recover", help="JSON digest of memory, assignments and pending deliveries")
     supervise = commands.add_parser(
         "supervise", help="own this session's crew behind a socket for an app, with no Herdr"
@@ -646,10 +661,15 @@ def main(argv=None):
         if args.command == "sessions" and args.json:
             from .supervisor import counted_catalog  # local, as for supervise
 
-            print(json.dumps(counted_catalog(active_project())))
+            counted = {"include_archived": True} if args.all else {}
+            print(json.dumps(counted_catalog(active_project(), **counted)))
             return 0
         if args.command == "sessions":
-            print(json.dumps(catalog(active_project())))
+            print(json.dumps(catalog(active_project(), include_archived=args.all)))
+            return 0
+        if args.command in ARCHIVE_VERBS:
+            directory = read_session(active_project(), args.session).directory
+            print(json.dumps(ARCHIVE_VERBS[args.command](directory)))
             return 0
         if args.command == "end":
             from .supervisor import end_session  # local, as for supervise

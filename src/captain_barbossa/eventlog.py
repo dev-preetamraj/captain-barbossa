@@ -65,6 +65,9 @@ ACTION_KINDS = (
     "review",
     "prompt",
     "session-renamed",
+    "session-archived",
+    "session-unarchived",
+    "session-deleted",
 )
 ACTION_IDENTITY = ("id", "kind", "at", "crew", "assignment", "message", "question", "request")
 # Key suffixes, compared without case, dashes or underscores, whose values never leave in clear.
