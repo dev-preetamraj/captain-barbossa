@@ -93,6 +93,8 @@ def prepare(crew, *, incarnation, project, background=False):
         if provider in {"claude", "grok"}:
             argv = ["--session-id", session_id]
             if provider == "claude":
+                if background:
+                    argv.append("--no-session-persistence")
                 # Bookkeeping uses the resolved root; the native CLI sees only the caller's string.
                 if "CLAUDE_CONFIG_DIR" in os.environ:
                     env["CLAUDE_CONFIG_DIR"] = os.environ["CLAUDE_CONFIG_DIR"]
@@ -142,7 +144,7 @@ def prepare(crew, *, incarnation, project, background=False):
                 "ephemeral"
                 if background and provider == "codex"
                 else "no-session"
-                if background and provider == "pi"
+                if background and provider in {"pi", "claude"}
                 else "persisted"
             ),
             "native_root": str(root),
@@ -367,14 +369,22 @@ def cleanup(crew):
                 launch = lifetime.read(crew.session, record["incarnation_id"])
                 argv = launch["argv"]
                 no_history = (
-                    record["provider"] == "codex"
-                    and policy == "ephemeral"
-                    and argv[1:2] == ["exec"]
-                    and "--ephemeral" in argv[2:-1]
-                ) or (
-                    record["provider"] == "pi"
-                    and policy == "no-session"
-                    and "--no-session" in argv[1:-1]
+                    (
+                        record["provider"] == "codex"
+                        and policy == "ephemeral"
+                        and argv[1:2] == ["exec"]
+                        and "--ephemeral" in argv[2:-1]
+                    )
+                    or (
+                        record["provider"] == "pi"
+                        and policy == "no-session"
+                        and "--no-session" in argv[1:-1]
+                    )
+                    or (
+                        record["provider"] == "claude"
+                        and policy == "no-session"
+                        and "--no-session-persistence" in argv[1:-1]
+                    )
                 )
                 if not no_history:
                     record.update(state="pending", reason="no-history-launch-policy-unverified")

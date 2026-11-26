@@ -1,11 +1,12 @@
 """One supervised Claude crew: the user's claude under the Agent SDK, driven by JSON-RPC on stdio.
 
 Requests are connect, query, interrupt, set_model and close; notifications are turn and attention.
-Mail, gating and usage stay with claude's own command hooks, and no permission callback is
-registered because the SDK races one against the PermissionRequest hook and it always wins.
+Supervised mail, gating and usage stay with claude's own command hooks; only isolated
+one-shot turns register a deny-all callback, which wins the SDK's PermissionRequest race.
 """
 
 import asyncio
+import json
 import os
 import signal
 import sys
@@ -20,13 +21,16 @@ SDK_MISSING = (
 )
 SETTING_SOURCES = ("user", "project", "local")
 # claude's exit after a close we started: clean, or the SIGTERM the SDK or the guard sent.
+NO_PERSISTENCE = "--no-session-persistence"
 CLOSED = (0, 143, -signal.SIGTERM)
 
 
-def options(sdk, argv, cwd):
-    """(ClaudeAgentOptions, session id) for a pane crew's claude argv; every flag but the system
-    prompt and permission mode passes through extra_args, so options.settings stays unset."""
+def options(sdk, argv, cwd, *, isolated=False):
+    """Build native options, stripping executable user configuration for isolated turns."""
     cli, flags = argv[0], argv[1:]
+    ephemeral = isolated and NO_PERSISTENCE in flags
+    if isolated:
+        flags = [flag for flag in flags if flag != NO_PERSISTENCE]
     extra = {flag[2:]: value for flag, value in zip(flags[::2], flags[1::2])}
     if (
         len(flags) % 2
@@ -38,11 +42,31 @@ def options(sdk, argv, cwd):
     if "append-system-prompt" in extra:
         prompt["append"] = extra.pop("append-system-prompt")
     typed = {"permission_mode": extra.pop("permission-mode")} if "permission-mode" in extra else {}
+    if isolated:
+
+        async def deny_tool(tool_name, tool_input, context):
+            return sdk.PermissionResultDeny(message="Background crew are read-only.")
+
+        settings = json.loads(extra.get("settings", "{}"))
+        hook = settings.get("hooks", {}).get("PreToolUse", [])
+        extra["settings"] = json.dumps({"hooks": {"PreToolUse": hook}})
+        extra["strict-mcp-config"] = None
+        if ephemeral:
+            extra[NO_PERSISTENCE[2:]] = None
+        extra["mcp-config"] = json.dumps({"mcpServers": {}})
+        typed.update(
+            permission_mode="dontAsk",
+            env={"CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1"},
+            allowed_tools=["Read", "Grep", "Glob"],
+            tools=["Read", "Grep", "Glob"],
+            can_use_tool=deny_tool,
+            mcp_servers={},
+        )
     built = sdk.ClaudeAgentOptions(
         cli_path=cli,
         system_prompt=prompt,
         extra_args=extra,
-        setting_sources=list(SETTING_SOURCES),
+        setting_sources=[] if isolated else list(SETTING_SOURCES),
         cwd=cwd,
         **typed,
     )
@@ -194,6 +218,32 @@ class Host:
         return code if isinstance(code, int) and code > 0 else 1
 
 
+async def one_shot(argv, out):
+    """Emit the native result shape after one isolated turn and disconnect before exiting."""
+    import claude_agent_sdk as sdk
+
+    built, _ = options(sdk, argv[:-1], os.getcwd(), isolated=True)
+    client = sdk.ClaudeSDKClient(built)
+    try:
+        await client.connect()
+        await client.query(argv[-1])
+        async for message in client.receive_response():
+            if isinstance(message, sdk.ResultMessage):
+                payload = {
+                    "type": "result",
+                    "subtype": message.subtype,
+                    "is_error": message.is_error,
+                    "result": message.result,
+                    "num_turns": message.num_turns,
+                    "total_cost_usd": message.total_cost_usd,
+                }
+                jsonrpc.write(out, payload)
+                return 0 if message.subtype == "success" and not message.is_error else 1
+        return 1
+    finally:
+        await client.disconnect()
+
+
 def main(argv):
     if not argv:
         raise SystemExit("usage: python -m captain_barbossa.claude_host CLAUDE [--flag value ...]")
@@ -202,6 +252,8 @@ def main(argv):
     os.dup2(2, 1)
 
     async def serve():
+        if argv[0] == "--one-shot":
+            return await one_shot(argv[1:], out)
         return await Host(argv, out).run()
 
     return asyncio.run(serve())
