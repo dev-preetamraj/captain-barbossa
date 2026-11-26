@@ -3,7 +3,7 @@
 import json
 import threading
 
-from . import config, jsonrpc, processes, usage
+from . import config, jsonrpc, model_catalogue, processes, usage
 from .pane import WAKE_LINE
 from .runtime import CaptainError
 
@@ -15,6 +15,8 @@ WORKING = "working"
 FINISHING = "finishing"
 UNCONFIRMED = "delivery unconfirmed"
 ASK_USER = "AskUserQuestion"
+# claude's settings layer drops max, so a running session takes it only from --effort at start.
+RUNNING_EFFORTS = tuple(level for level in model_catalogue.CLAUDE_EFFORTS if level != "max")
 
 
 def _timeout(name):
@@ -30,12 +32,25 @@ def open(link):
     link.peer.start()
     # Only the captain's host asks the user; a crew's own hooks are its whole gate.
     params = {"ask": True} if link.captain else {}
+    if (effort := getattr(link, "effort", None)) is not None:
+        params["effort"] = _effort(effort, model_catalogue.CLAUDE_EFFORTS)
     try:
         started = link.peer.request("connect", params, _timeout("startup_timeout"))
     except CaptainError as exc:
         # The host's own refusal, [claude-sdk-missing] say, keeps its code.
         raise CaptainError(str(exc).removeprefix("[jsonrpc-error] connect: ")) from exc
-    link.thread = started.get("session_id") if isinstance(started, dict) else None
+    started = started if isinstance(started, dict) else {}
+    link.thread = started.get("session_id")
+    link.native["effort"] = effort
+    link.native["commands"] = started.get("commands") or []
+
+
+def _effort(effort, levels):
+    if effort not in levels:
+        raise CaptainError(
+            f"[effort-unsupported] Claude takes effort {', '.join(levels)} here, not {effort!r}."
+        )
+    return effort
 
 
 def state(link):
@@ -79,10 +94,41 @@ def interrupt(link, reason):
     return outcome
 
 
-def set_model(link, model):
-    link.peer.request("set_model", {"model": model}, _timeout("request_timeout"))
-    link.model = model
-    return {"model": model, "applies": "next-turn" if link.turn is not None else "now"}
+def set_model(link, model, effort=None):
+    """Claude's own set_model, then its flag-settings effort; a None keeps that setting."""
+    params = {} if model is None else {"model": model}
+    if effort is not None:
+        params["effort"] = _effort(effort, RUNNING_EFFORTS)
+    if params:
+        link.peer.request("set_model", params, _timeout("request_timeout"))
+    if model is not None:
+        link.model = model
+        link.native.pop("model", None)
+    if effort is not None:
+        link.native["effort"] = effort
+    applies = "next-turn" if link.turn is not None else "now"
+    return {**current(link), "applies": applies}
+
+
+def current(link):
+    """The model claude last reported, else the one asked for; effort is None at claude's default."""
+    return {"model": link.native.get("model") or link.model, "effort": link.native.get("effort")}
+
+
+def commands(link):
+    """Slash commands from claude's initialize reply; skills from its newest init message."""
+    listed = [row for row in link.native.get("commands", ()) if isinstance(row, dict)]
+    described = {row.get("name"): row.get("description") for row in listed}
+    init = link.native.get("init") or {}
+    skills = [name for name in init.get("skills") or () if isinstance(name, str)]
+    return {
+        "commands": [
+            {"name": row["name"], "description": row.get("description")}
+            for row in listed
+            if isinstance(row.get("name"), str) and row["name"] not in skills
+        ],
+        "skills": [{"name": name, "description": described.get(name)} for name in skills],
+    }
 
 
 def idle_event(link):
@@ -210,5 +256,12 @@ def handle(link, message):
             link.turn = None if clean else FINISHING
         target, args = (link.ended, (None,)) if clean else (finish, (link, idle_event(link)))
         threading.Thread(target=target, args=args, daemon=True).start()
+    elif message["method"] == "message" and params.get("kind") == "SystemMessage":
+        data = params.get("data") if isinstance(params.get("data"), dict) else {}
+        init = data.get("data") if isinstance(data.get("data"), dict) else {}
+        if data.get("subtype") == "init":
+            link.native["init"] = init
+            if isinstance(init.get("model"), str):
+                link.native["model"] = init["model"]
     elif message["method"] == "attention" and params.get("code") == "claude-auth":
         threading.Thread(target=link.notice, args=("claude_auth", AUTH), daemon=True).start()

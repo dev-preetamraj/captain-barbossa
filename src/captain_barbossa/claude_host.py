@@ -18,8 +18,8 @@ from . import jsonrpc
 from .runtime import CaptainError
 
 SDK_MISSING = (
-    "[claude-sdk-missing] Supervised Claude crew need the Agent SDK: "
-    "install captain-barbossa[app], then recruit again."
+    "[claude-sdk-missing] A supervised Claude captain or crew needs the Agent SDK: "
+    "install captain-barbossa[app], then start it again."
 )
 SETTING_SOURCES = ("user", "project", "local")
 # claude's exit after a close we started: clean, or the SIGTERM the SDK or the guard sent.
@@ -29,7 +29,7 @@ CLOSED = (0, 143, -signal.SIGTERM)
 ASK_TIMEOUT = 1860
 
 
-def options(sdk, argv, cwd, *, isolated=False, partial=False, can_use_tool=None):
+def options(sdk, argv, cwd, *, isolated=False, partial=False, can_use_tool=None, effort=None):
     """Build native options, stripping executable user configuration for isolated turns."""
     cli, flags = argv[0], argv[1:]
     ephemeral = isolated and NO_PERSISTENCE in flags
@@ -70,6 +70,8 @@ def options(sdk, argv, cwd, *, isolated=False, partial=False, can_use_tool=None)
         typed["include_partial_messages"] = True
     if can_use_tool is not None:
         typed["can_use_tool"] = can_use_tool
+    if effort is not None:
+        typed["effort"] = effort
     built = sdk.ClaudeAgentOptions(
         cli_path=cli,
         system_prompt=prompt,
@@ -171,7 +173,7 @@ class Host:
 
     async def call(self, method, params):
         if method == "connect":
-            return await self.connect(ask=params.get("ask") is True)
+            return await self.connect(ask=params.get("ask") is True, effort=params.get("effort"))
         if self.client is None:
             raise CaptainError(f"[claude-host] {method} before connect.")
         match method:
@@ -187,14 +189,31 @@ class Host:
                 await self.client.interrupt()
                 return {"outcome": "interrupted"}
             case "set_model":
-                await self.client.set_model(params.get("model"))
+                try:
+                    if "model" in params or "effort" not in params:
+                        await self.client.set_model(params.get("model"))
+                    if "effort" in params:
+                        await self.set_effort(params["effort"])
+                except CaptainError:
+                    raise
+                except Exception as exc:  # the SDK raises bare Exception for a refused control
+                    raise CaptainError(f"[claude-model] claude refused the change: {exc}") from exc
                 return {}
             case "close":
                 self.stop.set()
                 return {}
         raise CaptainError(f"[claude-host] Unknown method {method}.")
 
-    async def connect(self, ask=False):
+    async def set_effort(self, effort):
+        """Claude's own /effort path for a running session: its flag-settings layer."""
+        send = getattr(getattr(self.client, "_query", None), "_send_control_request", None)
+        if send is None:
+            raise CaptainError(
+                "[effort-unsupported] This Agent SDK cannot change a running Claude's effort."
+            )
+        await send({"subtype": "apply_flag_settings", "settings": {"effortLevel": effort}})
+
+    async def connect(self, ask=False, effort=None):
         if self.client is not None:
             raise CaptainError("[claude-host] Already connected.")
         try:
@@ -203,7 +222,12 @@ class Host:
             raise CaptainError(SDK_MISSING) from exc
         self.sdk = sdk
         built, session_id = options(
-            sdk, self.argv, os.getcwd(), partial=True, can_use_tool=self.ask if ask else None
+            sdk,
+            self.argv,
+            os.getcwd(),
+            partial=True,
+            can_use_tool=self.ask if ask else None,
+            effort=effort,
         )
         client = sdk.ClaudeSDKClient(built)
         try:
@@ -214,7 +238,10 @@ class Host:
         # The SDK drops its handle on disconnect, and claude's code decides history cleanup.
         self.process = getattr(getattr(client, "_transport", None), "_process", None)
         self.tasks.add(asyncio.create_task(self.pump()))
-        return {"session_id": session_id}
+        info = getattr(client, "get_server_info", None)
+        info = await info() if info is not None else None
+        commands = info.get("commands") if isinstance(info, dict) else None
+        return {"session_id": session_id, "commands": plain(commands or [])}
 
     async def pump(self):
         code = 1

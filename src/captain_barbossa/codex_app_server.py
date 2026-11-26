@@ -21,6 +21,12 @@ GATE_HOOKS = ("sessionStart", "stop", "preToolUse", "permissionRequest")
 # Codex runs a hook whose trust status is one of these; untrusted and modified ones never run.
 RUNNING = ("trusted", "managed")
 RESUME_REFUSED = "[jsonrpc-error] thread/resume:"
+# Codex's TUI built-ins the app-server serves as methods; typed as message text they reach the model.
+BUILTINS = (
+    {"name": "compact", "description": "Summarize the thread to free context."},
+    {"name": "review", "description": "Review the working tree's changes."},
+    {"name": "model", "description": "Choose the model and reasoning effort."},
+)
 
 
 def _timeout(name):
@@ -90,6 +96,11 @@ def open(link):
             f"[codex-app-server] thread/resume returned {thread['id']} for recorded thread {recorded}"
         )
     link.thread = thread["id"]
+    for key, native in (("thread_model", "model"), ("thread_effort", "reasoningEffort")):
+        if isinstance(started.get(native), str):
+            link.native[key] = started[native]
+    if (effort := getattr(link, "effort", None)) is not None:
+        link.native["effort"] = _effort(link, current(link)["model"], effort)
 
 
 def require_live_hooks(link, listed):
@@ -142,6 +153,8 @@ def ring(link, message_id, text):
     params = {"threadId": link.thread, "input": [{"type": "text", "text": text}]}
     if link.model:
         params["model"] = link.model
+    if link.native.get("effort"):
+        params["effort"] = link.native["effort"]
     if link.writable:
         params["sandboxPolicy"] = {"type": "workspaceWrite", "writableRoots": list(link.writable)}
     try:
@@ -172,9 +185,75 @@ def interrupt(link, reason):
     return "interrupted"
 
 
-def set_model(link, model):
-    link.model = model
-    return {"model": model, "applies": "next-turn" if link.turn is not None else "now"}
+def set_model(link, model, effort=None):
+    """Codex's per-turn model and effort; a kept effort the new model lacks falls to its default."""
+    target = model or current(link)["model"]
+    if effort is not None:
+        effort = _effort(link, target, effort)
+    elif model is not None and link.native.get("effort"):
+        levels = _efforts(link, target)
+        effort = link.native["effort"] if levels and link.native["effort"] in levels else None
+        link.native.pop("effort", None)
+    if model is not None:
+        link.model = model
+        link.native.pop("thread_effort", None)
+    if effort is not None:
+        link.native["effort"] = effort
+    return {**current(link), "applies": "next-turn" if link.turn is not None else "now"}
+
+
+def current(link):
+    return {
+        "model": link.model or link.native.get("thread_model"),
+        "effort": link.native.get("effort") or link.native.get("thread_effort"),
+    }
+
+
+def _efforts(link, model):
+    """The reasoning efforts model/list advertises for model, the source the catalogue reads."""
+    cursor, seen = None, set()
+    while True:
+        listed = link.peer.request(
+            "model/list", {"includeHidden": True, "cursor": cursor}, _timeout("request_timeout")
+        )
+        rows = listed.get("data") if isinstance(listed, dict) else None
+        for row in rows if isinstance(rows, list) else ():
+            if isinstance(row, dict) and model in (row.get("model"), row.get("id")):
+                efforts = row.get("supportedReasoningEfforts")
+                return [
+                    effort["reasoningEffort"]
+                    for effort in (efforts if isinstance(efforts, list) else ())
+                    if isinstance(effort, dict) and isinstance(effort.get("reasoningEffort"), str)
+                ]
+        cursor = listed.get("nextCursor") if isinstance(listed, dict) else None
+        if not isinstance(cursor, str) or not cursor or cursor in seen:
+            return None
+        seen.add(cursor)
+
+
+def _effort(link, model, effort):
+    levels = _efforts(link, model) if model else None
+    if not levels or effort not in levels:
+        offered = ", ".join(levels) if levels else "no listed effort"
+        raise CaptainError(
+            f"[effort-unsupported] Codex model {model or '(default)'} takes {offered}, "
+            f"not {effort!r}."
+        )
+    return effort
+
+
+def commands(link):
+    """Enabled skills from skills/list for the thread's cwd, with the app-served built-ins."""
+    listed = link.peer.request("skills/list", {"cwds": [link.root]}, _timeout("request_timeout"))
+    rows = listed.get("data") if isinstance(listed, dict) else None
+    skills = [
+        {"name": skill["name"], "description": skill.get("description")}
+        for row in (rows if isinstance(rows, list) else ())
+        if isinstance(row, dict) and isinstance(row.get("skills"), list)
+        for skill in row["skills"]
+        if isinstance(skill, dict) and isinstance(skill.get("name"), str) and skill.get("enabled")
+    ]
+    return {"commands": [dict(builtin) for builtin in BUILTINS], "skills": skills}
 
 
 def _turn_id(params):

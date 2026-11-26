@@ -152,6 +152,8 @@ def open(link):
     if not isinstance(session_id, str) or not session_id:
         raise CaptainError(f"[pi-rpc] get_state returned no session id: {current!r}")
     link.thread = session_id
+    if (effort := getattr(link, "effort", None)) is not None:
+        _set_thinking(link, effort)
 
 
 def state(link):
@@ -223,16 +225,67 @@ def close(link):
         pass
 
 
-def set_model(link, model):
+def _model_params(model):
     provider, separator, model_id = model.partition("/")
     if not separator or not provider or not model_id:
         raise CaptainError(f"[pi-rpc-model] pi model must be a provider/model ID: {model!r}")
-    working = state(link) != "idle"
-    link.peer.request(
-        "set_model", {"provider": provider, "modelId": model_id}, _timeout("request_timeout")
+    return {"provider": provider, "modelId": model_id}
+
+
+def _set_thinking(link, effort):
+    """pi's thinking level, checked against the levels it lists for the current model."""
+    timeout = _timeout("request_timeout")
+    listed = link.peer.request("get_available_thinking_levels", {}, timeout)
+    levels = listed.get("levels") if isinstance(listed, dict) else None
+    levels = (
+        [level for level in levels if isinstance(level, str)] if isinstance(levels, list) else []
     )
-    link.model = model
-    return {"model": model, "applies": "next-turn" if working else "now"}
+    if effort not in levels:
+        offered = ", ".join(levels) or "no thinking level"
+        raise CaptainError(f"[effort-unsupported] pi's model takes {offered}, not {effort!r}.")
+    link.peer.request("set_thinking_level", {"level": effort}, timeout)
+
+
+def set_model(link, model, effort=None):
+    """pi's set_model, then set_thinking_level; a refused level restores the previous model."""
+    params = None if model is None else _model_params(model)
+    working = state(link) != "idle"
+    timeout = _timeout("request_timeout")
+    previous = current(link)["model"] if params and effort is not None else None
+    if params:
+        link.peer.request("set_model", params, timeout)
+    if effort is not None:
+        try:
+            _set_thinking(link, effort)
+        except CaptainError:
+            if previous:
+                link.peer.request("set_model", _model_params(previous), timeout)
+            raise
+    if model is not None:
+        link.model = model
+    return {**current(link), "applies": "next-turn" if working else "now"}
+
+
+def current(link):
+    """The model and thinking level pi's get_state reports."""
+    native = _state(link)
+    model = native.get("model") if isinstance(native.get("model"), dict) else {}
+    provider, model_id = model.get("provider"), model.get("id")
+    named = f"{provider}/{model_id}" if provider and model_id else link.model
+    level = native.get("thinkingLevel")
+    return {"model": named, "effort": level if isinstance(level, str) else None}
+
+
+def commands(link):
+    """pi's get_commands split into skills and the rest; pi lists no TUI built-in there."""
+    listed = link.peer.request("get_commands", {}, _timeout("request_timeout"))
+    rows = listed.get("commands") if isinstance(listed, dict) else None
+    found = {"commands": [], "skills": []}
+    for row in rows if isinstance(rows, list) else ():
+        if isinstance(row, dict) and isinstance(row.get("name"), str):
+            kind = "skills" if row.get("source") == "skill" else "commands"
+            found[kind].append({"name": row["name"], "description": row.get("description")})
+    return found
 
 
 def _settled(link):

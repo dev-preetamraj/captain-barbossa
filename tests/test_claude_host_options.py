@@ -130,9 +130,80 @@ class ClaudeHostOptionsTests(unittest.TestCase):
         host = claude_host.Host(["/opt/bin/claude"], 1)
         with (
             patch.dict(sys.modules, {"claude_agent_sdk": None}),
-            self.assertRaisesRegex(CaptainError, r"\[claude-sdk-missing\].*\[app\]"),
+            self.assertRaisesRegex(
+                CaptainError, r"\[claude-sdk-missing\] A supervised Claude captain or crew.*\[app\]"
+            ),
         ):
             asyncio.run(host.connect())
+
+    def test_a_start_effort_becomes_the_sdk_effort_option(self):
+        built, _ = claude_host.options(fake_claude_host, ["/opt/bin/claude"], "/w", effort="max")
+        self.assertEqual(built.given["effort"], "max")
+        plain, _ = claude_host.options(fake_claude_host, ["/opt/bin/claude"], "/w")
+        self.assertNotIn("effort", plain.given)
+
+    def test_connect_returns_claudes_initialize_commands(self):
+        listed = [{"name": "compact", "description": "Compact", "argumentHint": ""}]
+
+        class Client:
+            def __init__(self, options):
+                self.options = options
+
+            async def connect(self):
+                pass
+
+            async def get_server_info(self):
+                return {"commands": listed, "output_style": "default"}
+
+            async def receive_messages(self):
+                return
+                yield
+
+        sdk = SimpleNamespace(
+            ClaudeAgentOptions=fake_claude_host.ClaudeAgentOptions,
+            ClaudeSDKClient=Client,
+            ClaudeSDKError=fake_claude_host.ClaudeSDKError,
+            ProcessError=fake_claude_host.ProcessError,
+        )
+        host = claude_host.Host(["/opt/bin/claude", "--session-id", "sid-1"], 1)
+        with patch.dict(sys.modules, {"claude_agent_sdk": sdk}):
+            started = asyncio.run(host.connect(effort="low"))
+        self.assertEqual(started, {"session_id": "sid-1", "commands": listed})
+        self.assertEqual(host.client.options.given["effort"], "low")
+
+    def changed(self, params, refuse=None):
+        sent = []
+
+        async def set_model(model):
+            sent.append(("set_model", model))
+
+        async def control(request):
+            if refuse:
+                raise Exception(refuse)
+            sent.append(("control", request))
+            return {}
+
+        host = claude_host.Host(["/opt/bin/claude"], 1)
+        host.client = SimpleNamespace(
+            set_model=set_model, _query=SimpleNamespace(_send_control_request=control)
+        )
+        asyncio.run(host.call("set_model", params))
+        return sent
+
+    def test_set_model_sends_the_model_and_claudes_flag_settings_effort(self):
+        effort = (
+            "control",
+            {"subtype": "apply_flag_settings", "settings": {"effortLevel": "high"}},
+        )
+        self.assertEqual(self.changed({"model": "opus"}), [("set_model", "opus")])
+        self.assertEqual(self.changed({"effort": "high"}), [effort])
+        self.assertEqual(
+            self.changed({"model": "opus", "effort": "high"}), [("set_model", "opus"), effort]
+        )
+
+    def test_a_refused_effort_change_keeps_a_typed_code(self):
+        with self.assertRaisesRegex(CaptainError, r"^\[claude-model\] .*bad level"):
+            self.changed({"effort": "high"}, refuse="bad level")
 
     def test_claude_closed_by_us_exits_clean_and_its_own_exit_keeps_its_code(self):
         host = claude_host.Host(["/opt/bin/claude"], 1)
