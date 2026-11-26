@@ -369,6 +369,16 @@ def begin(
         actions=actions,
         verify=verify,
         handoff=handoff,
+        **(
+            {
+                "provider": crew.record.get("provider"),
+                "model": crew.record.get("model"),
+                "checkout": crew.record.get("checkout"),
+                "sources": crew.record.get("sources", {}),
+            }
+            if not previous
+            else {}
+        ),
     )
     return assignment
 
@@ -752,8 +762,7 @@ def unlanded(project, assignment, *, ignore_uncommitted=False):
 
 
 def grant(crew, assignment_id, command, request=None):
-    """Captain-only: let this assignment run one exact command text once. The gate spends it
-    on the first exact match; a handoff starts a new assignment, so it is never inherited."""
+    """Grant one exact command once, scoped to this assignment."""
     if os.environ.get("CAPTAIN_ROLE") == "crew":
         raise CaptainError("grant is captain-only; crew run captain ask instead.")
     if not isinstance(command, str) or not command.strip():
@@ -768,6 +777,14 @@ def grant(crew, assignment_id, command, request=None):
         if added:
             grants.append({"command": command, "at": time.time()})
         response = {"assignment_id": assignment["id"], "grants": len(grants)}
+        linked = next(
+            (row for row in assignment.get("grant_requests", ()) if row["id"] == request),
+            {},
+        )
+        denial = assignment.get("denial", {})
+        question = assignment.get("question") or {}
+        gate_reason = linked.get("reason") or REASONS.get(denial.get("code"), (None, None))[1]
+        words = linked.get("words") or question.get("text")
     if added or request:
         record_action(
             crew.session.directory,
@@ -778,6 +795,8 @@ def grant(crew, assignment_id, command, request=None):
             state="granted",
             command=command,
             request=request,
+            gate_reason=gate_reason,
+            words=words,
         )
     return response
 
@@ -938,7 +957,8 @@ def grant_request(crew, assignment, question):
         supervised=supervised(crew),
         defer=True,
         state="requested",
-        **{key: request[key] for key in ("command", "tool", "cwd", "code", "category")},
+        **{key: request[key] for key in ("command", "tool", "cwd", "code", "category", "words")},
+        gate_reason=request["reason"],
         request=request["id"],
         question=question["id"],
     )
@@ -990,6 +1010,8 @@ def resolve_request(crew, request_id, decision, reason=None):
             command=request["command"],
             request=request_id,
             reason=reason.strip(),
+            gate_reason=request["reason"],
+            words=request["words"],
         )
         text = (
             f"Denied: {reason.strip()}\nDo not run it or try another route; "
@@ -1400,6 +1422,23 @@ def _ring(crew, message_id):
         ):
             record["noticed"] = held_notice(crew, message_id, gate, now - record["held_since"])
     write_json(drain_stamp(crew), record)
+    if (
+        crew.is_supervised
+        and not landed
+        and unreachable is None
+        and (not prior or prior["id"] != message_id or prior["landed"] or prior.get("gate") != gate)
+    ):
+        assignment = active_assignment(crew)
+        record_action(
+            crew.session.directory,
+            "mail",
+            crew.crew_id,
+            assignment["id"] if assignment else None,
+            supervised=True,
+            message=message_id,
+            state="held",
+            gate=gate,
+        )
     if unreachable is not None:
         bounce(crew, message_id, unreachable)
 
@@ -1623,6 +1662,11 @@ def deliver(
                 "kind": kind,
                 "question_id": question_id,
                 "delivery": "prepared",
+                **(
+                    {"actor": "captain" if os.environ.get("CAPTAIN_ROLE") == "captain" else "human"}
+                    if supervised(crew)
+                    else {}
+                ),
             }
             assignment["messages"].append(message)
         assignment_id = assignment["id"]
@@ -1646,6 +1690,7 @@ def deliver(
         mail_kind=message["kind"],
         question=message["question_id"],
         text=text,
+        actor=message.get("actor"),
     )
     if not queue_only:
         ring(crew, message_id)

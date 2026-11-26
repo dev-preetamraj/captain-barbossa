@@ -10,6 +10,7 @@ import tempfile
 import threading
 import time
 import types
+import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -26,6 +27,7 @@ from captain_barbossa import (
     supervision,
     supervisor,
 )
+from captain_barbossa.runtime import CaptainError
 
 
 class Peer:
@@ -274,12 +276,41 @@ class CaptainApprovalRouteTests(SessionCase):
         while not (rows := self.call("captain_requests")["requests"]):
             self.assertLess(time.monotonic(), deadline)
             time.sleep(0.02)
-        self.assertEqual((rows[0]["kind"], rows[0]["payload"]), ("approval", payload))
-        self.call("answer_captain", {"request": rows[0]["id"], "decision": "deny"})
+        normal = {**payload, "input": {}, "rules": []}
+        self.assertEqual((rows[0]["kind"], rows[0]["payload"]), ("approval", normal))
+        self.assertEqual(self.call("captain_state")["state"], "blocked")
+        self.call(
+            "answer_captain", {"request": rows[0]["id"], "decision": "approve", "remember": True}
+        )
         while not replies:
             self.assertLess(time.monotonic(), deadline)
             time.sleep(0.02)
-        self.assertEqual(replies, ["deny"])
+        self.assertEqual(replies, ["approve"])  # pi keeps no rule: one approval
+        self.assertEqual(self.call("captain_state")["state"], "idle")
+
+    def test_an_always_allow_answer_offers_the_rules_and_returns_remember(self):
+        self.call("start_captain", {"provider": "fake"})
+        captain = self.holder["link"]
+        rules = [{"type": "addRules", "behavior": "allow"}]
+        event = {
+            "hook_event_name": "PermissionRequest",
+            "tool_name": "Bash",
+            "tool_input": {"command": "make"},
+            "cwd": "/w",
+            "permission_rules": rules,
+        }
+        replies = []
+        threading.Thread(target=lambda: replies.append(captain.relay(event)), daemon=True).start()
+        (row,) = self.until(lambda: self.call("captain_requests")["requests"], "the request")
+        self.assertEqual(row["payload"]["rules"], rules)
+        with self.assertRaisesRegex(CaptainError, r"\[captain-request-answer\]"):
+            self.call(
+                "answer_captain", {"request": row["id"], "decision": "approve", "remember": "yes"}
+            )
+        self.call("answer_captain", {"request": row["id"], "decision": "approve", "remember": True})
+        (reply,) = self.until(lambda: replies, "the answer")
+        decision = reply[1]["hookSpecificOutput"]["decision"]
+        self.assertEqual(decision, {"behavior": "allow", "remember": True})
 
     def until(self, check, what):
         deadline = time.monotonic() + 10
@@ -327,6 +358,52 @@ class CaptainApprovalRouteTests(SessionCase):
         rows = self.call("captain_requests")["requests"]
         self.assertEqual(len(rows), 2)
         self.assertEqual(rows[-1]["id"], newest["id"])
+
+
+class CaptainRequestPayloadTests(unittest.TestCase):
+    def test_questions_take_one_shape_whichever_provider_asked(self):
+        codex = {
+            "threadId": "t",
+            "questions": [
+                {
+                    "id": "q1",
+                    "header": "Pick",
+                    "question": "Which?",
+                    "isOther": True,
+                    "isSecret": False,
+                    "options": [{"label": "A", "description": "first"}],
+                }
+            ],
+        }
+        claude = {
+            "questions": [
+                {
+                    "id": "Which?",
+                    "question": "Which?",
+                    "options": [{"label": "A"}],
+                    "multiSelect": True,
+                }
+            ]
+        }
+        pi = {
+            "method": "editor",
+            "questions": [{"id": "value", "question": "Notes?", "prefill": "x"}],
+        }
+        keys = {"id", "header", "question", "options", "multi_select", "other", "secret"}
+        keys |= {"multiline", "prefill"}
+        for raw in (codex, claude, pi):
+            (question,) = captain_bridge.request_payload("question", raw)["questions"]
+            self.assertEqual(set(question), keys)
+        shaped = captain_bridge.request_payload("question", codex)
+        self.assertEqual(set(shaped), {"questions"})
+        self.assertEqual(
+            shaped["questions"][0]["options"], [{"label": "A", "description": "first"}]
+        )
+        self.assertTrue(shaped["questions"][0]["other"])
+        claude_question = captain_bridge.request_payload("question", claude)["questions"][0]
+        self.assertTrue(claude_question["multi_select"])
+        pi_question = captain_bridge.request_payload("question", pi)["questions"][0]
+        self.assertEqual((pi_question["multiline"], pi_question["prefill"]), (True, "x"))
 
 
 class CodexCaptainSandboxTests(SessionCase):

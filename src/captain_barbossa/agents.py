@@ -166,12 +166,7 @@ def focus_crew(args, pane, project):
 
 
 def interrupt_crew(args, pane, project):
-    """Stop a crew's current turn, keeping its pane, conversation and assignment.
-
-    The lifecycle channel beside mail: mail is read at a turn boundary, which is right
-    for a message and wrong for "stop". Escape leaves the session alive, so nothing is
-    torn down and no work is discarded.
-    """
+    """Stop the current turn without discarding its conversation or assignment."""
     current, crew = Crew.for_args(args, pane, project)
     if crew.is_dismissed:
         raise CaptainError(f"{crew.display_name} was already dismissed.")
@@ -180,17 +175,29 @@ def interrupt_crew(args, pane, project):
         # Only the owner's confirmation proves this turn was actually interrupted.
         if outcome == "cancelled":
             add_memory(current.graph, crew.record["agent"], "interrupted", args.reason or "captain")
-        print(f"{crew.display_name}: {outcome}.")
+        print(
+            json.dumps({"crew": crew.display_name, "state": outcome})
+            if getattr(args, "json", False)
+            else f"{crew.display_name}: {outcome}."
+        )
         return
     if crew.is_supervised:
         from . import supervision  # local: Herdr commands never load the supervisor door
 
         if supervision.interrupt(crew, args.reason) != "interrupted":
-            print(f"{crew.display_name} was idle; nothing was interrupted.")
+            print(
+                json.dumps({"crew": crew.display_name, "state": "idle"})
+                if getattr(args, "json", False)
+                else f"{crew.display_name} was idle; nothing was interrupted."
+            )
             return
         add_memory(current.graph, crew.record["agent"], "interrupted", args.reason or "captain")
         # The supervisor rings held mail itself when the interrupted turn ends.
-        print(f"Interrupted {crew.display_name}.")
+        print(
+            json.dumps({"crew": crew.display_name, "state": "interrupted"})
+            if getattr(args, "json", False)
+            else f"Interrupted {crew.display_name}."
+        )
         return
     try:
         runtime.herdr("agent", "send-keys", crew.record["agent"], "escape")
@@ -203,7 +210,9 @@ def interrupt_crew(args, pane, project):
     if waiting:
         protocol.ring(crew, waiting[0]["id"])
     print(
-        f"Interrupted {crew.display_name}."
+        json.dumps({"crew": crew.display_name, "state": "interrupted"})
+        if getattr(args, "json", False)
+        else f"Interrupted {crew.display_name}."
         + (f" Rang {len(waiting)} waiting message(s)." if waiting else "")
     )
 
@@ -211,7 +220,7 @@ def interrupt_crew(args, pane, project):
 def status_crew(args, pane, project):
     """Print a table of this session's crew, refreshing status from Herdr best-effort."""
     current = read_session(project, args.session, pane)
-    rows = []
+    rows, records = [], []
     path = current.directory / "protocol.json"
     state = read_json(path) if path.exists() else None
     for crew in Crew.members(current):
@@ -244,6 +253,21 @@ def status_crew(args, pane, project):
         )
         if held:
             status = f"{status}; mail held: {held}"
+        records.append(
+            {
+                "id": crew.crew_id,
+                "crew": crew.display_name,
+                "provider": crew.record.get("provider"),
+                "model": crew.record.get("model"),
+                "pane": crew.record.get("pane"),
+                "execution": crew.record.get("execution", "foreground"),
+                "state": current_state.state,
+                "source": current_state.source,
+                "detail": current_state.detail,
+                "mail_held": held,
+                "task": "\n".join(task),
+            }
+        )
         rows.append(
             (
                 crew.display_name,
@@ -261,6 +285,9 @@ def status_crew(args, pane, project):
                 truncate_label(task[0], 60) if task else "-",
             )
         )
+    if getattr(args, "json", False):
+        print(json.dumps({"session_id": current.meta["id"], "crew": records}))
+        return
     if not rows:
         print("No crew.")
         return
@@ -323,7 +350,11 @@ def switch_model(args, pane, project):
             meta["crew"][crew.crew_id]["model"] = model
         add_memory(current.graph, crew.display_name, "model", model)
         when = "from its next turn" if applies == "next-turn" else "now"
-        print(f"{crew.display_name} switched to {model}; it applies {when}.")
+        print(
+            json.dumps({"crew": crew.display_name, "model": model, "applies": applies})
+            if getattr(args, "json", False)
+            else f"{crew.display_name} switched to {model}; it applies {when}."
+        )
         return
     crew_agent = crew.record["agent"]
     names = [name.casefold() for name in model_names(provider, model)]
@@ -366,7 +397,11 @@ def switch_model(args, pane, project):
     with crew_meta(current.directory) as meta:
         meta["crew"][crew.crew_id]["model"] = model
     add_memory(current.graph, crew.display_name, "model", model)
-    print(f"{crew.display_name} switched to {model}.")
+    print(
+        json.dumps({"crew": crew.display_name, "model": model, "applies": "now"})
+        if getattr(args, "json", False)
+        else f"{crew.display_name} switched to {model}."
+    )
 
 
 def never_read(crew, assignment):
@@ -430,6 +465,7 @@ def dismiss_crew(args, pane, project):
     dead_workspace = not supervised and current.meta["workspace"] != pane["workspace_id"]
     bounced, undelivered = [], False
     unreported = None
+    untracked = []
     with crew_meta(current.directory) as meta:
         current = current._replace(meta=meta)
         crew = Crew.resolve(current, args.name)
@@ -464,7 +500,7 @@ def dismiss_crew(args, pane, project):
                     allow_unreported=dead_workspace or retrying or forced or gone,
                 )
                 untracked = [path for path in assignment["paths"] if Path(path).is_absolute()]
-                if untracked:
+                if untracked and not getattr(args, "json", False):
                     print(
                         f"Owned paths outside the checkout, not Git-tracked: {', '.join(untracked)}"
                     )
@@ -545,6 +581,19 @@ def dismiss_crew(args, pane, project):
     if not dead_workspace and not supervised:
         relayout_session(current)
     add_memory(current.graph, f"session:{meta['id']}", "dismissed", crew.record["agent"])
+    if getattr(args, "json", False):
+        print(
+            json.dumps(
+                {
+                    "crew": crew.display_name,
+                    "state": "dismissed",
+                    "bounced": [message["id"] for message in bounced],
+                    "unreported": unreported,
+                    "untracked_paths": untracked,
+                }
+            )
+        )
+        return
     for message in bounced:
         print(f"Bounced unread mail to {crew.display_name}: {message['id']}.")
     if unreported:
@@ -628,6 +677,27 @@ def begin_recruitment(crew, project, args):
         raise
 
 
+def recruitment_result(args, record):
+    if not getattr(args, "json", False):
+        return {
+            key: value
+            for key, value in record.items()
+            if key != "task" and (key != "sources" or "profile" in record)
+        }
+    return {
+        "id": record["id"],
+        "crew": record["name"],
+        "assignment_id": record["assignment_id"],
+        "provider": record["provider"],
+        "model": record.get("model"),
+        "checkout": record["checkout"],
+        "execution": record.get("execution", "foreground"),
+        "state": record["status"],
+        "pane": record.get("pane"),
+        "sources": record.get("sources", {}),
+    }
+
+
 def launch_background(crew, current, project, provider, binary, model, args, context=""):
     """Start a paneless crew. The roster entry is written before the assignment is
     reserved, so a recruiter that dies at any later point leaves a crew status shows
@@ -671,7 +741,7 @@ def launch_background(crew, current, project, provider, binary, model, args, con
     add_memory(current.graph, f"session:{current.meta['id']}", "crew", record["agent"])
     add_memory(current.graph, record["agent"], "name", record["name"])
     add_memory(current.graph, record["agent"], "assigned", task)
-    print(json.dumps({key: value for key, value in record.items() if key != "task"}))
+    print(json.dumps(recruitment_result(args, record)))
 
 
 def unreserved(crew):
@@ -841,7 +911,7 @@ def launch_supervised(crew, current, project, binary, model, args, context=""):
     add_memory(current.graph, record["agent"], "assigned", args.task)
     if model:
         add_memory(current.graph, record["agent"], "model", model)
-    print(json.dumps({key: value for key, value in record.items() if key != "task"}))
+    print(json.dumps(recruitment_result(args, record)))
 
 
 def create_crew(args, pane, project):
@@ -968,6 +1038,7 @@ def create_crew(args, pane, project):
                 "incarnation_id": incarnation,
                 "checkout": checkout,
                 "provider": provider,
+                **({"sources": sources} if supervised or getattr(args, "json", False) else {}),
                 **recruitment,
             },
             current,
@@ -1181,4 +1252,6 @@ def create_crew(args, pane, project):
                 "before using tell to deliver any unsent task; "
                 "the task was not automatically retried."
             ) from exc
-    print(json.dumps({key: value for key, value in record.items() if key != "task"}))
+    if getattr(args, "json", False):
+        record = {**record, "sources": sources}
+    print(json.dumps(recruitment_result(args, record)))

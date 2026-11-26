@@ -333,8 +333,17 @@ class SupervisedCrewTests(SessionCase):
         asked = json.loads(
             self.captain("ask", "jack", "May I push release?", env=self.as_crew(assignment))
         )
-        with self.assertRaisesRegex(CaptainError, r"\[grant-request-reason\]"):
-            supervision.resolve_grant(self.current.directory, asked["grant_request"], "deny")
+        silent = supervision.resolve_grant(self.current.directory, asked["grant_request"], "deny")
+        mail = store.read_json(
+            protocol.mail_dir(self.current.directory, "jack") / f"{silent['message_id']}.json"
+        )
+        self.assertIn(f"Denied: {supervisor.DENIED_REASON}", mail["text"])
+
+        self.control(do="approve", command="git push origin hotfix", cwd=str(self.project))
+        self.until(lambda: len(self.replies()) == 4, "the third declined approval")
+        asked = json.loads(
+            self.captain("ask", "jack", "May I push hotfix?", env=self.as_crew(assignment))
+        )
         denied = supervision.resolve_grant(
             self.current.directory, asked["grant_request"], "deny", "release is frozen"
         )

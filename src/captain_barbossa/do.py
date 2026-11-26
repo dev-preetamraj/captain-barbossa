@@ -43,6 +43,19 @@ AUTHORIZATION_ENV = "CAPTAIN_AUTHORIZATION"
 # An approval unspent this long expires, so a stale yes never authorizes a later run.
 APPROVAL_TTL = 900
 AUTHORIZATION_LIMIT = 256
+WHY = {
+    "commit": "Stages the named paths and commits them in this checkout.",
+    "push": "Pushes the current branch to its remote: it leaves this machine.",
+    "branch": "Creates a branch in this checkout and switches to it.",
+    "switch": "Switches this checkout to another branch.",
+    "fetch": "Fetches from the remote: it talks to the network, touching no file.",
+    "pull": "Fast-forwards the current branch from its remote: it talks to the network.",
+    "run": "Runs a Makefile recipe, which can do anything this user can.",
+}
+QUIET_WHY = {
+    False: "Runs one headless model turn that reads this checkout.",
+    True: "Runs one headless model turn that may edit files in this checkout.",
+}
 FIELDS = ("do_command", "message", "path", "name", "target", "task", "diff", "write")
 FIELDS += ("read", "model", "timeout")
 QUIET_PROMPT = (
@@ -347,6 +360,13 @@ def category(args):
     return CATEGORIES.get(args.do_command, "local")
 
 
+def why(args):
+    """Plain words on an authorization card: what the command does that needs the user's yes."""
+    if args.do_command == "quiet":
+        return QUIET_WHY[bool(args.write)]
+    return WHY[args.do_command]
+
+
 def _expire(rows, now):
     for row in rows:
         if row["state"] in ("open", "approved"):
@@ -432,11 +452,14 @@ def request_authorization(session_directory, args, origin, argv=None):
             "argv": argv,
             "command": wanted,
             "category": category(args),
+            "cwd": read_json(session_directory / "session.json")["project"],
+            "reason": why(args),
             "state": "open",
             "at": time.time(),
         }
         rows.append(row)
-    _log(session_directory, row, origin=origin, argv=argv, command=wanted, category=row["category"])
+    card = {key: row[key] for key in ("origin", "argv", "command", "category", "cwd", "reason")}
+    _log(session_directory, row, **card)
     return dict(row)
 
 
@@ -456,11 +479,11 @@ def resolve_authorization(session_directory, request_id, decision, reason=None):
             raise CaptainError(f"[authorization-closed] Request {request_id} is {row['state']}.")
         row.update(
             state="approved" if decision == "approve" else "denied",
-            reason=reason,
+            decision_reason=reason,
             resolved_at=time.time(),
         )
         row = dict(row)
-    _log(session_directory, row, reason=reason)
+    _log(session_directory, row, decision_reason=reason)
     return row
 
 

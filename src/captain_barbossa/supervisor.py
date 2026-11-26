@@ -38,6 +38,7 @@ from . import (
     pi_rpc,
     processes,
     protocol,
+    provider_status,
     results,
     runtime,
     store,
@@ -127,6 +128,8 @@ USAGE_OUTPUT = "captain/usage"
 # How long a device-code sign-in may wait for the user, and the output lines it keeps.
 SIGN_IN_TIMEOUT = 900
 SIGN_IN_LINES = 20
+# What a crew reads when the user denies its grant request without saying why.
+DENIED_REASON = "The user denied this in the app without a reason; do not retry it."
 
 
 @dataclass
@@ -522,12 +525,20 @@ def ring(supervisor, params):
 
 def interrupt(supervisor, params):
     link = _link(supervisor, params)
-    return {"crew": link.crew_id, "outcome": link.adapter.interrupt(link, params.get("reason"))}
+    reason = params.get("reason") if isinstance(params.get("reason"), str) else None
+    outcome = link.adapter.interrupt(link, reason)
+    if outcome == "interrupted":
+        lifecycle(supervisor, link.crew_id, "interrupted", reason or "interrupted")
+    return {"crew": link.crew_id, "outcome": outcome}
 
 
 def set_model(supervisor, params):
     link = _link(supervisor, params)
-    return {"crew": link.crew_id, **link.adapter.set_model(link, _text(params, "model"))}
+    changed = link.adapter.set_model(link, _text(params, "model"))
+    lifecycle(
+        supervisor, link.crew_id, "model-changed", f"{changed['model']} ({changed['applies']})"
+    )
+    return {"crew": link.crew_id, **changed}
 
 
 def interrupt_all(supervisor, params):
@@ -564,19 +575,24 @@ def interrupt_all(supervisor, params):
     outcomes = []
     for link in links:
         outcome = results.get(link.crew_id) or {"crew": link.crew_id, "outcome": "pending"}
-        if outcome["outcome"] == "interrupted" and not link.captain:
+        if outcome["outcome"] == "interrupted" and link.captain:
+            lifecycle_captain(supervisor, "interrupted", reason or "interrupted")
+        elif outcome["outcome"] == "interrupted":
             agent = crew_of(supervisor, link.crew_id).record["agent"]
             add_memory(supervisor.session.graph, agent, "interrupted", reason or "captain")
+            lifecycle(supervisor, link.crew_id, "interrupted", reason or "interrupted")
         outcomes.append(outcome)
     return {"crews": outcomes}
 
 
 def resolve_grant(supervisor, params):
-    """Answer a grant request: grant its exact command once, or deny it with a reason."""
+    """Grant a request's exact command once, or deny it (DENIED_REASON when no reason given)."""
     request_id = _text(params, "request")
     reason = params.get("reason")
     if reason is not None and not isinstance(reason, str):
         raise CaptainError("[supervisor-params] reason must be a string.")
+    if params.get("decision") == "deny" and not (reason or "").strip():
+        reason = DENIED_REASON
     recorded = store.read_json(supervisor.session.directory / "protocol.json")
     crew_id = next(
         (
@@ -787,10 +803,18 @@ def captain_approval(supervisor, run, event):
         "command": inputs.get("command"),
         "cwd": event.get("cwd"),
         "input": inputs,
+        "rules": event.get("permission_rules") or [],
     }
     decision = captain_ask(supervisor, run, "approval", payload)
-    behavior = "allow" if decision == "approve" else "deny"
-    return 0, {"hookSpecificOutput": {"decision": {"behavior": behavior}}}
+    verdict = {"behavior": "allow" if plain_approval(decision) == "approve" else "deny"}
+    if decision == "approve_always":
+        verdict["remember"] = True
+    return 0, {"hookSpecificOutput": {"decision": verdict}}
+
+
+def plain_approval(decision):
+    """An approval as one run, for adapters that keep no rule."""
+    return "approve" if decision == "approve_always" else decision
 
 
 def captain_question(supervisor, run, params):
@@ -813,25 +837,44 @@ def report_captain(supervisor, run, code, message, delivery_id=None):
         attention(supervisor, CAPTAIN, f"[{code}] {message}", **fields)
 
 
+def acknowledge(supervisor, delivery):
+    crew = Crew.resolve(current_session(supervisor), delivery["crew"])
+    with supervision.acting_as(supervisor.token):
+        protocol.poll(crew, ack=delivery["delivery_id"])
+
+
+def ack_delivery(supervisor, params):
+    """The user acknowledges one pending delivery; the captain is then never told of it."""
+    delivery_id = _text(params, "delivery_id")
+    with supervisor.bridge_lock:
+        with supervision.acting_as(supervisor.token):
+            pending = protocol.wait_all(supervisor.session, 0)["deliveries"]
+        delivery = next((row for row in pending if row["delivery_id"] == delivery_id), None)
+        if delivery is None:
+            raise CaptainError(f"[delivery-unknown] No pending delivery {delivery_id}.")
+        acknowledge(supervisor, delivery)
+        with contextlib.suppress(CaptainError):
+            captain_bridge.resolve_claim(supervisor.session.directory, delivery_id, "ack")
+    return {"delivery_id": delivery_id, "state": "acknowledged"}
+
+
 def bridge_captain(supervisor, run):
     """Deliver prompts, crew results, notes and authorization outcomes until the captain stops."""
     directory = supervisor.session.directory
     link = run.link
 
     def ack(delivery):
-        current = current_session(supervisor)
         with contextlib.suppress(CaptainError, KeyError):
-            crew = Crew.resolve(current, delivery["crew"])
-            with supervision.acting_as(supervisor.token):
-                protocol.poll(crew, ack=delivery["delivery_id"])
+            acknowledge(supervisor, delivery)
 
     ring, report = partial(ring_captain, run), partial(report_captain, supervisor, run)
     link.ready.wait()
     while live(link) and not supervisor.stopped.is_set():
         try:
-            with supervision.acting_as(supervisor.token):
-                pending = protocol.wait_all(supervisor.session, 0)["deliveries"]
+            # The projection is read under the lock, so ack_delivery never races a round.
             with supervisor.bridge_lock:
+                with supervision.acting_as(supervisor.token):
+                    pending = protocol.wait_all(supervisor.session, 0)["deliveries"]
                 captain_bridge.step(directory, pending, ring, ack, run.mine, report)
         except (CaptainError, OSError, KeyError) as exc:
             report("captain-bridge", str(exc))
@@ -874,7 +917,7 @@ def start_captain(supervisor, params):
     link.ask = lambda kind, params: (
         captain_question(supervisor, run, params)
         if kind == "question"
-        else captain_ask(supervisor, run, kind, params)
+        else plain_approval(captain_ask(supervisor, run, kind, params))
     )
     link.usage = lambda frame: live_usage(supervisor, link, frame)
     threading.Thread(
@@ -904,7 +947,8 @@ def captain_state(supervisor, params):
     run = supervisor.captain
     if run is None or not live(run.link):
         return {"state": None}
-    return {"state": run.link.adapter.state(run.link), "provider": run.provider}
+    state_name = "blocked" if run.asks else run.link.adapter.state(run.link)
+    return {"state": state_name, "provider": run.provider}
 
 
 def message_captain(supervisor, params):
@@ -942,7 +986,11 @@ def message_captain(supervisor, params):
 
 def interrupt_captain(supervisor, params):
     run = _captain(supervisor)
-    return {"outcome": run.link.adapter.interrupt(run.link, params.get("reason"))}
+    reason = params.get("reason") if isinstance(params.get("reason"), str) else None
+    outcome = run.link.adapter.interrupt(run.link, reason)
+    if outcome == "interrupted":
+        lifecycle_captain(supervisor, "interrupted", reason or "interrupted")
+    return {"outcome": outcome}
 
 
 def stop_captain(supervisor, params=None):
@@ -1078,34 +1126,7 @@ def agent_usage(supervisor, params):
 
 
 def probe(provider, root):
-    """One provider's install, version and sign-in status, each None when it cannot be read."""
-    timeout = config.number("supervisor", "startup_timeout")
-    row = {
-        "provider": provider,
-        "installed": False,
-        "version": None,
-        "signed_in": None,
-        "account": None,
-        "detail": None,
-        "checked_at": time.time(),
-    }
-    try:
-        binary = runtime.executable(provider)
-    except CaptainError as exc:
-        row["detail"] = str(exc)
-        return row
-    row["installed"] = True
-    with contextlib.suppress(CaptainError, OSError):
-        result = processes.capture(root, [binary, "--version"], timeout)
-        lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
-        row["version"] = lines[0] if result.returncode == 0 and lines else None
-    if provider not in ADAPTERS:
-        return row
-    try:
-        row.update(ADAPTERS[provider].account(binary, root, timeout))
-    except (CaptainError, OSError) as exc:
-        row["detail"] = str(exc)
-    return row
+    return provider_status.probe(provider, root)
 
 
 def check_providers(supervisor, names):
@@ -1330,8 +1351,10 @@ def command(supervisor, params):
         return {"authorization": row}
     if verb not in COMMANDS:
         raise CaptainError(f"[command-refused] {verb!r} is not a whitelisted captain verb.")
-    if verb == "dashboard" and argv[1:] != ["--once"]:
-        raise CaptainError("[command-refused] dashboard runs only as `dashboard --once`.")
+    if verb == "dashboard" and argv[1:] not in (["--once"], ["--json"]):
+        raise CaptainError(
+            "[command-refused] dashboard runs only as `dashboard --once` or `dashboard --json`."
+        )
     reply = run_command(supervisor, argv, COMMANDS[verb])
     if verb in captain_bridge.NOTE_VERBS and reply["exit"] == 0:
         captain_bridge.add_note(supervisor.session.directory, argv)
@@ -1344,6 +1367,11 @@ def typed(reply):
         with contextlib.suppress(ValueError):
             reply["result"] = json.loads(reply["stdout"])
         return reply
+    with contextlib.suppress(ValueError, TypeError, KeyError, AttributeError):
+        error = json.loads(reply["stdout"])["error"]
+        if isinstance(error.get("code"), str) and isinstance(error.get("message"), str):
+            reply["refusal"] = {"code": error["code"], "message": error["message"]}
+            return reply
     message = reply["stderr"].strip().removeprefix("captain:").strip() or reply["stdout"].strip()
     match = PROTOCOL_CODE.search(message)
     reply["refusal"] = {"code": match[1] if match else "captain-error", "message": message}
@@ -1395,13 +1423,18 @@ def resolve_authorization(supervisor, params):
     row = do.resolve_authorization(
         directory, _text(params, "request"), _text(params, "decision"), reason
     )
-    reply = {"request": row["id"], "state": row["state"]}
-    if row["state"] == "approved" and row["origin"] == "app":
-        extra = {do.AUTHORIZATION_ENV: row["id"]}
-        reply["run"] = run_command(supervisor, row["argv"], AUTHORIZED[row["argv"][0]], extra)
-        rows = store.read_json(directory / "protocol.json").get("authorizations", [])
-        reply["state"] = next(r["state"] for r in rows if r["id"] == row["id"])
-    return reply
+    if row["state"] != "approved" or row["origin"] != "app":
+        return {"request": row["id"], "state": row["state"], "authorization": row}
+    extra = {do.AUTHORIZATION_ENV: row["id"]}
+    try:
+        run = run_command(supervisor, row["argv"], AUTHORIZED[row["argv"][0]], extra)
+    except CaptainError as exc:
+        failed = refusal(str(exc))
+        refused = {"code": failed["data"]["code"], "message": failed["message"]}
+        run = {"exit": None, "stdout": "", "stderr": "", "refusal": refused}
+    rows = authorizations(supervisor, params)["authorizations"]
+    row = next(r for r in rows if r["id"] == row["id"])
+    return {"request": row["id"], "state": row["state"], "authorization": row, "run": run}
 
 
 def authorizations(supervisor, params):
@@ -1763,6 +1796,7 @@ METHODS = {
     "cancel_sign_in": cancel_sign_in,
     "usage": agent_usage,
     "models": model_list,
+    "ack_delivery": ack_delivery,
     "resolve_captain_delivery": resolve_captain_delivery,
     "uncertain_deliveries": uncertain_deliveries,
 }

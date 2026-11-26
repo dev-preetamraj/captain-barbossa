@@ -2,6 +2,7 @@
 prompts put to the user, told what the user did, and given Herdr-free instructions."""
 
 import contextlib
+import io
 import json
 import os
 import re
@@ -19,6 +20,7 @@ from home_isolation import SessionCase
 
 from captain_barbossa import (
     captain_bridge,
+    cli,
     config,
     do,
     eventlog,
@@ -167,6 +169,21 @@ class SupervisedCaptainTests(SessionCase):
         self.assertIsNone(self.holder["seed"])
         self.assertEqual(store.read_json(record)["provider"], "other")
 
+    def test_the_user_acknowledges_a_pending_delivery_once(self):
+        record = {"id": "will", "agent": "c-will", "incarnation_id": "b" * 32}
+        record["execution"] = "supervised"
+        with sessions.crew_meta(self.current.directory) as meta:
+            meta["crew"]["will"] = record
+        crew = Crew("will", record, self.current._replace(meta=meta))
+        protocol.begin(crew, self.project, "Map the repo.")
+        protocol.once(crew, "hooks_untrusted", "[codex-hooks-untrusted] Trust them once.")
+        (pending,) = protocol.wait_all(crew.session, 0)["deliveries"]
+        reply = self.call("ack_delivery", {"delivery_id": pending["delivery_id"]})
+        self.assertEqual(reply, {"delivery_id": pending["delivery_id"], "state": "acknowledged"})
+        self.assertEqual(protocol.wait_all(crew.session, 0)["deliveries"], [])
+        with self.assertRaisesRegex(CaptainError, r"\[delivery-unknown\]"):
+            self.call("ack_delivery", {"delivery_id": pending["delivery_id"]})
+
     def test_operator_notes_reach_the_captain_before_its_next_turn(self):
         self.call("start_captain", {"provider": "fake"})
         self.state["value"] = "busy"
@@ -312,6 +329,128 @@ class SupervisedCaptainTests(SessionCase):
     def notified(self):
         rows = store.read_json(self.current.directory / "protocol.json")["authorizations"]
         return rows[0].get("notified_at")
+
+
+class SupervisedLifecycleTests(SessionCase):
+    def setUp(self):
+        super().setUp()
+        self.enterContext(contextlib.chdir(self.project))
+        self.current = supervisor.open_session(self.project, None)
+        record = {"id": "will", "agent": "c-will", "incarnation_id": "b" * 32}
+        with sessions.crew_meta(self.current.directory) as meta:
+            meta["crew"]["will"] = {**record, "execution": "supervised"}
+        self.owner = supervisor.Supervisor(self.current, "token", threading.Event())
+
+    def test_an_interrupt_and_a_model_change_are_lifecycle_actions(self):
+        adapter = fake_captain([], {"value": "busy"}, {})
+        link = supervisor.Link("will", "ref", adapter, self.current.events("will"))
+        link.ready.set()
+        self.owner.links["will"] = link
+        supervisor.interrupt(self.owner, {"crew": "will", "reason": "wrong file"})
+        supervisor.set_model(self.owner, {"crew": "will", "model": "m2"})
+        eventlog.flush_actions(self.current.directory)
+        actions, _ = eventlog.read_events(self.current.directory / eventlog.ACTIONS, 0)
+        self.assertEqual(
+            [(a["crew"], a["state"], a["detail"]) for a in actions if a["kind"] == "lifecycle"],
+            [("will", "interrupted", "wrong file"), ("will", "model-changed", "m2 (now)")],
+        )
+
+    def test_an_app_command_runs_without_the_captain_role(self):
+        seen = {}
+
+        def spawn(argv, **options):
+            seen.update(options["env"])
+            raise OSError("stopped here")
+
+        with (
+            patch.dict(os.environ, {"CAPTAIN_ROLE": "captain"}),
+            patch.object(supervisor.subprocess, "Popen", side_effect=spawn),
+            self.assertRaisesRegex(CaptainError, r"\[command-failed\]"),
+        ):
+            supervisor.command(self.owner, {"argv": ["status", "--json"]})
+        self.assertNotIn("CAPTAIN_ROLE", seen)
+        self.assertEqual(seen["CAPTAIN_SESSION"], self.current.meta["id"])
+
+    def test_dashboard_runs_from_the_app_only_as_one_frame_or_json(self):
+        for argv in (["dashboard"], ["dashboard", "--interval", "1"]):
+            with self.subTest(argv=argv), self.assertRaisesRegex(CaptainError, "command-refused"):
+                supervisor.command(self.owner, {"argv": argv})
+
+
+class CliJsonTests(SessionCase):
+    def setUp(self):
+        super().setUp()
+        self.enterContext(contextlib.chdir(self.project))
+
+    def test_app_verbs_take_json_and_providers_needs_no_session(self):
+        parser = cli.parser()
+        for argv in (
+            ["crew", "--task", "t", "--json"],
+            ["tell", "will", "hi", "--json"],
+            ["answer", "will", "--assignment", "a", "q", "yes", "--json"],
+            ["interrupt", "will", "--json"],
+            ["model", "will", "cheap", "--json"],
+            ["dismiss", "will", "--json"],
+            ["status", "--json"],
+            ["dashboard", "--json"],
+            ["providers", "--agent", "pi", "--json"],
+        ):
+            with self.subTest(argv=argv):
+                self.assertTrue(parser.parse_args(argv).json)
+        self.assertFalse(parser.parse_args(["status"]).json)
+        rows = {
+            "version": 1,
+            "providers": [
+                {"provider": "pi", "installed": True, "version": "0.9", "signed_in": False},
+                {"provider": "codex", "installed": False, "version": None, "signed_in": None},
+            ],
+        }
+        from captain_barbossa import provider_status
+
+        for argv, printed in (
+            (["providers", "--json"], json.dumps(rows) + "\n"),
+            (["providers"], "pi: 0.9, signed out\ncodex: not installed\n"),
+        ):
+            output = io.StringIO()
+            with (
+                self.subTest(argv=argv),
+                patch.object(provider_status, "catalogue", return_value=rows) as catalogue,
+                contextlib.redirect_stdout(output),
+            ):
+                self.assertEqual(cli.main(argv), 0)
+                self.assertEqual(output.getvalue(), printed)
+                self.assertEqual(catalogue.call_args.args[1], None)
+
+    def test_a_json_failure_is_an_envelope_on_stdout_and_text_stays_on_stderr(self):
+        from captain_barbossa import provider_status
+
+        failure = CaptainError("[provider-check] pi would not answer.")
+        envelope = json.dumps({"error": {"code": "provider-check", "message": str(failure)}})
+        for argv, out, err in (
+            (["providers", "--json"], envelope + "\n", ""),
+            (["providers"], "", f"captain: {failure}\n"),
+        ):
+            stdout, stderr = io.StringIO(), io.StringIO()
+            with (
+                self.subTest(argv=argv),
+                patch.object(provider_status, "catalogue", side_effect=failure),
+                contextlib.redirect_stdout(stdout),
+                contextlib.redirect_stderr(stderr),
+            ):
+                self.assertEqual(cli.main(argv), 1)
+            self.assertEqual((stdout.getvalue(), stderr.getvalue()), (out, err))
+        reply = supervisor.typed({"exit": 1, "stdout": envelope, "stderr": ""})
+        self.assertEqual(reply["refusal"], {"code": "provider-check", "message": str(failure)})
+
+
+class SuperviseCommandTests(unittest.TestCase):
+    def test_supervise_takes_session_before_or_after_the_subcommand(self):
+        parser = cli.parser()
+        for argv in (["--session", "s1", "supervise"], ["supervise", "--session", "s1"]):
+            with self.subTest(argv=argv):
+                self.assertEqual(parser.parse_args(argv).session, "s1")
+        with patch.dict(os.environ, {"CAPTAIN_SESSION": "from-env"}):
+            self.assertEqual(cli.parser().parse_args(["supervise"]).session, "from-env")
 
 
 class EscalateTests(SessionCase):

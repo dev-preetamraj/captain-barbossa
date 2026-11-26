@@ -59,6 +59,7 @@ ACTION_KINDS = (
     "question",
     "grant",
     "report",
+    "result",
     "lifecycle",
     "authorization",
     "review",

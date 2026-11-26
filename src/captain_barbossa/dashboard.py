@@ -362,6 +362,42 @@ def _notice(rows, retired):
     return "\n".join(lines)
 
 
+def snapshot(current):
+    """One unformatted usage frame; unknown readings remain null."""
+    current = _fresh(current)
+    agents = [] if current.meta.get("transport") == "supervisor" else _live_agents()
+    rows, retired, crew_count = _roster(current, agents)
+    total, incomplete = _total(rows, retired)
+    return {
+        "session_id": current.meta["id"],
+        "crew_count": crew_count,
+        "agents": [
+            {
+                "crew": row[0],
+                "provider": None if row[1][0] == "-" else row[1][0],
+                "model": row[1][1],
+                "state": None if row[2] == "-" else row[2],
+                "context_percent": row[3],
+                "tokens": row[4],
+                "cost": row[5],
+                "rate": row[6],
+            }
+            for row in rows
+        ],
+        "total": {
+            "tokens": total[4],
+            "cost": total[5],
+            "rate": total[6],
+            "incomplete": incomplete,
+        },
+        "retired": {
+            "count": len(retired),
+            "tokens": _agg([item[0] for item in retired])[0],
+            "cost": _agg([item[1] for item in retired])[0],
+        },
+    }
+
+
 def render(current, size=None):
     """The frame as text: an optional header, the roster, TOTAL, and its annotation."""
     current = _fresh(current)

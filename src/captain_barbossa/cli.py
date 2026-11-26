@@ -3,6 +3,7 @@
 import argparse
 import json
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -46,6 +47,11 @@ from .update_check import upgrade
 # supervision.TOKEN_ENV, named here so a Herdr command never imports the supervisor door.
 SUPERVISOR_TOKEN_ENV = "CAPTAIN_SUPERVISOR_TOKEN"
 VERIFY_HELP = "Makefile target captain runs at done; its receipt rides the report"
+JSON_HELP = "print the outcome as one JSON line instead of text"
+# Verbs whose --json failure is a JSON envelope on stdout, {"error": {code, message}}.
+JSON_VERBS = ("crew", "tell", "answer", "interrupt", "model", "dismiss", "status", "dashboard")
+JSON_VERBS += ("providers",)
+REFUSAL_CODE = re.compile(r"\[([a-z0-9-]+)\] ")
 
 
 class PlanParser(argparse.ArgumentParser):
@@ -174,6 +180,7 @@ def parser(*, plan=False):
         "([crew] model when omitted, so routine work never silently lands on an expensive "
         "default)",
     )
+    crew.add_argument("--json", action="store_true", help=JSON_HELP)
     wait = commands.add_parser("wait", help="wait for a crew notification")
     wait.add_argument("name", nargs="?", help="crew name or ID (case-insensitive)")
     wait.add_argument(
@@ -191,6 +198,7 @@ def parser(*, plan=False):
     tell.add_argument("name", help="crew name or ID (case-insensitive)")
     tell.add_argument("message")
     tell.add_argument("--assignment", help="the crew's live assignment ID (required)")
+    tell.add_argument("--json", action="store_true", help=JSON_HELP)
     inbox = commands.add_parser(
         "inbox", help="print a crew's queued mail oldest first and write the read receipt"
     )
@@ -212,6 +220,7 @@ def parser(*, plan=False):
         elif verb == "answer":
             command.add_argument("question_id")
             command.add_argument("message")
+            command.add_argument("--json", action="store_true", help=JSON_HELP)
         elif verb == "done":
             command.add_argument("--report", required=True)
         elif verb == "check":
@@ -236,6 +245,7 @@ def parser(*, plan=False):
     model = commands.add_parser("model", help="switch a running crew to another model")
     model.add_argument("name", help="crew name or ID (case-insensitive)")
     model.add_argument("model", help=f"tier ({'|'.join(TIER_NAMES)}), model name, or alias")
+    model.add_argument("--json", action="store_true", help=JSON_HELP)
     models_cmd = commands.add_parser(
         "models", help="list valid model IDs, aliases, and tier resolutions per agent CLI"
     )
@@ -254,12 +264,21 @@ def parser(*, plan=False):
     )
     stop.add_argument("name", help="crew name or ID (case-insensitive)")
     stop.add_argument("--reason", help="why, recorded in session memory")
+    stop.add_argument("--json", action="store_true", help=JSON_HELP)
+    providers = commands.add_parser(
+        "providers", help="installed agent CLIs and their sign-in status, with no session"
+    )
+    providers.add_argument(
+        "--agent", choices=PROVIDERS, help="check only this provider (checks all when omitted)"
+    )
+    providers.add_argument("--json", action="store_true", help="the status rows as one JSON line")
     commands.add_parser("session", help="print the current session id")
     commands.add_parser("sessions", help="JSON list of every project's sessions and their state")
     commands.add_parser("recover", help="JSON digest of memory, assignments and pending deliveries")
-    commands.add_parser(
+    supervise = commands.add_parser(
         "supervise", help="own this session's crew behind a socket for an app, with no Herdr"
     )
+    supervise.add_argument("--session", default=argparse.SUPPRESS, help="supervise this session")
     commands.add_parser("update", help="upgrade the installed captain-barbossa tool")
     start = commands.add_parser(
         "init", help="create .captain/settings.toml without changing an existing file"
@@ -272,6 +291,7 @@ def parser(*, plan=False):
     )
     status = commands.add_parser("status", help="print a table of this session's crew")
     status.add_argument("--all", action="store_true", help="include dismissed crew")
+    status.add_argument("--json", action="store_true", help=JSON_HELP)
     board = commands.add_parser(
         "dashboard", help="refresh a crew token-usage table in this pane until interrupted"
     )
@@ -291,6 +311,9 @@ def parser(*, plan=False):
         action="store_true",
         help="print one frame and exit, for a token and cost reading with no pane",
     )
+    board.add_argument(
+        "--json", action="store_true", help="print one unformatted usage snapshot as JSON and exit"
+    )
     commands.add_parser("relayout", help="repack auto-placed crew into the declared tab shapes")
     dismiss = commands.add_parser("dismiss", help="close an existing crew's pane and retire it")
     dismiss.add_argument("name", help="crew name or ID (case-insensitive)")
@@ -304,6 +327,7 @@ def parser(*, plan=False):
         action="store_true",
         help="the user said to dismiss without a report; skips report, ack and unlanded checks",
     )
+    dismiss.add_argument("--json", action="store_true", help=JSON_HELP)
     mem = commands.add_parser(
         "memory", help="session, project, committed repo, and user preference graph memory"
     )
@@ -466,6 +490,27 @@ def print_models(args):
         print(f"  tiers: {' '.join(f'{name}={tiers[name]}' for name in TIER_NAMES)}")
 
 
+def print_providers(args):
+    """Install and sign-in status per agent CLI; needs no session, Herdr or supervisor."""
+    # Local: the probes load the supervised adapters, which no other command needs.
+    from .provider_status import catalogue
+
+    status = catalogue(active_project(), args.agent)
+    if args.json:
+        print(json.dumps(status))
+        return
+    signed = {True: "signed in", False: "signed out", None: "sign-in unknown"}
+    for row in status["providers"]:
+        if row["installed"] is None:
+            print(f"{row['provider']}: {row['detail']}")
+            continue
+        if not row["installed"]:
+            print(f"{row['provider']}: not installed")
+            continue
+        version = row["version"] or "version unknown"
+        print(f"{row['provider']}: {version}, {signed[row['signed_in']]}")
+
+
 def pump_mail(args, pane, project):
     """Retry held doorbells for every live crew, so captain activity drains mail outside a wait.
 
@@ -611,6 +656,9 @@ def main(argv=None):
         if args.command == "memory" and args.memory_command in ("show", "path"):
             memory(args, None, active_project())
             return 0
+        if args.command == "providers":
+            print_providers(args)
+            return 0
         if args.command == "models":
             if args.json:
                 from .model_catalogue import catalogue
@@ -655,7 +703,9 @@ def main(argv=None):
             current = read_session(project, args.session, pane)
             do.run(args, current.directory, project, current.meta)
         elif args.command == "dashboard":
-            if args.once:
+            if args.json:
+                print(json.dumps(dashboard.snapshot(read_session(project, args.session, pane))))
+            elif args.once:
                 print(dashboard.render(read_session(project, args.session, pane)))
             else:
                 dashboard.run_dashboard(args, pane, project)
@@ -696,6 +746,11 @@ def main(argv=None):
                     }
                 )
             )
+            return 1
+        if args.command in JSON_VERBS and args.json:
+            match = REFUSAL_CODE.match(str(exc))
+            code = match[1] if match else "captain-error"
+            print(json.dumps({"error": {"code": code, "message": str(exc)}}))
             return 1
         print(f"captain: {exc}", file=sys.stderr)
         return 1

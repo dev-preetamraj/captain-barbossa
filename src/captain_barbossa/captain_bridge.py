@@ -209,7 +209,8 @@ def authorization_text(row):
             f"The user approved authorization {row['id']} for `do {command}`: run that exact "
             "command again now; the approval covers one run."
         )
-    reason = f": {row['reason']}" if row.get("reason") else ""
+    given = row.get("decision_reason")
+    reason = f": {given}" if given else ""
     return f"The user denied authorization {row['id']} for `do {command}`{reason}. Do not run it."
 
 
@@ -347,12 +348,58 @@ def step(directory, deliveries, ring, ack, mine, report):
     return True
 
 
+def _string(value):
+    return value if isinstance(value, str) else None
+
+
+def _question(raw, multiline):
+    options = [
+        {"label": option["label"], "description": _string(option.get("description"))}
+        for option in raw.get("options") or ()
+        if isinstance(option, dict) and isinstance(option.get("label"), str)
+    ]
+    return {
+        "id": raw["id"],
+        "header": _string(raw.get("header")),
+        "question": _string(raw.get("question")) or "",
+        "options": options,
+        "multi_select": raw.get("multiSelect") is True,
+        "other": raw.get("isOther") is True,
+        "secret": raw.get("isSecret") is True,
+        "multiline": multiline,
+        "prefill": _string(raw.get("prefill")),
+    }
+
+
+def request_payload(kind, payload):
+    """One payload shape per request kind, whichever provider asked."""
+    payload = payload if isinstance(payload, dict) else {}
+    if kind == "approval":
+        rules = payload.get("rules")
+        return {
+            "tool": _string(payload.get("tool")),
+            "command": _string(payload.get("command")),
+            "cwd": _string(payload.get("cwd")),
+            "input": payload.get("input") if isinstance(payload.get("input"), dict) else {},
+            "rules": rules if isinstance(rules, list) else [],
+        }
+    multiline = payload.get("method") == "editor"
+    questions = payload.get("questions") if isinstance(payload.get("questions"), list) else []
+    return {
+        "questions": [
+            _question(raw, multiline)
+            for raw in questions
+            if isinstance(raw, dict) and isinstance(raw.get("id"), str)
+        ]
+    }
+
+
 def open_request(directory, kind, payload):
     """Put a native ask-user or approval prompt of the captain's to the user."""
     request = {
         "id": uuid4().hex,
         "kind": kind,
-        "payload": redact(payload),
+        "payload": redact(request_payload(kind, payload)),
         "state": "open",
         "at": time.time(),
     }
@@ -401,12 +448,14 @@ def close_request(directory, request_id, state_name, answer=None):
 
 
 def answer_for(kind, params):
-    """Validate the user's answer: approve|deny for an approval, text per question otherwise."""
+    """approve, approve_always (with remember) or deny for an approval; text per question."""
     if kind == "approval":
-        decision = params.get("decision")
+        decision, remember = params.get("decision"), params.get("remember", False)
         if decision not in ("approve", "deny"):
             raise CaptainError("[captain-request-answer] Decide approve or deny.")
-        return decision
+        if type(remember) is not bool:
+            raise CaptainError("[captain-request-answer] remember must be true or false.")
+        return "approve_always" if decision == "approve" and remember else decision
     answers = params.get("answers")
     if not isinstance(answers, dict) or not all(
         isinstance(key, str) and isinstance(value, str) for key, value in answers.items()

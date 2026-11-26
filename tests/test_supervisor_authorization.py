@@ -205,7 +205,24 @@ class CaptainAuthorizationTests(SessionCase):
             [(a["kind"], a["request"], a["state"]) for a in actions],
             [("authorization", row["id"], "open"), ("authorization", row["id"], "denied")],
         )
-        self.assertEqual((actions[0]["argv"], actions[1]["reason"]), (["do", "push"], "Not today."))
+        self.assertEqual(
+            (actions[0]["argv"], actions[1]["decision_reason"]), (["do", "push"], "Not today.")
+        )
+
+    def test_a_request_card_names_where_it_runs_and_why_it_needs_a_yes(self):
+        row = do.request_authorization(
+            self.directory, do.parse(["do", "push"]), "app", ["do", "push"]
+        )
+        self.assertEqual(row["cwd"], str(self.project))
+        self.assertIn("leaves this machine", row["reason"])
+        do.resolve_authorization(self.directory, row["id"], "deny", "Not today.")
+        denied = store.read_json(self.directory / "protocol.json")["authorizations"][0]
+        self.assertEqual(
+            (denied["reason"], denied["decision_reason"]), (row["reason"], "Not today.")
+        )
+        eventlog.flush_actions(self.directory)
+        opened, _ = eventlog.read_events(self.directory / eventlog.ACTIONS, 0)
+        self.assertEqual((opened[0]["cwd"], opened[0]["reason"]), (row["cwd"], row["reason"]))
 
 
 class SupervisorAuthorizationTests(SessionCase):
@@ -271,6 +288,21 @@ class SupervisorAuthorizationTests(SessionCase):
         self.assertIn("make hello passed.", result["run"]["stdout"])
         error = self.call("resolve_authorization", {"request": row["id"], "decision": "deny"})
         self.assertEqual(error["error"]["data"], {"code": "authorization-closed"})
+
+    def test_an_approved_run_that_fails_returns_its_approval_and_a_typed_run(self):
+        store.write_text(self.project / "Makefile", "hello:\n\t@echo hi\n")
+        row = self.call("command", {"argv": ["do", "run", "hello"]})["result"]["authorization"]
+        failure = CaptainError("[command-timeout] do exceeded 960s.")
+        with patch.object(supervisor, "run_command", side_effect=failure):
+            reply = self.call(
+                "resolve_authorization", {"request": row["id"], "decision": "approve"}
+            )
+        result = reply["result"]
+        self.assertEqual(
+            (result["state"], result["authorization"]["state"]), ("approved", "approved")
+        )
+        self.assertEqual(result["run"]["exit"], None)
+        self.assertEqual(result["run"]["refusal"]["code"], "command-timeout")
 
     def test_a_refused_verb_comes_back_typed(self):
         reply = self.call("command", {"argv": ["tell", "nobody", "hi"]})["result"]
