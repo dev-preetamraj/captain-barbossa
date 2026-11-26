@@ -123,6 +123,47 @@ class AssignmentDiffTests(SessionCase):
         view = protocol.assignment_diff(current.directory, assignment["id"])
         self.assertEqual([row["path"] for row in view["files"]], ["a*.txt"])
 
+    def test_clean_filtered_files_reuse_index_blobs_without_hashing(self):
+        (self.project / ".gitattributes").write_text("*.txt text eol=crlf\n")
+        (self.project / "a.txt").write_bytes(b"one\r\n")
+        git(self.project, "add", ".")
+        git(self.project, "commit", "-qm", "normalize")
+        git(self.project, "update-index", "--refresh")
+        with patch.object(protocol, "_file_rows", wraps=protocol._file_rows) as rows:
+            assignment = protocol.begin(self.crew(self.current), self.project, "Read.")
+        hashed = {path for call in rows.call_args_list for path in call.args[1] if path}
+        self.assertEqual(hashed, set())
+        self.assertEqual(
+            assignment["baseline"], git(self.project, "rev-parse", "HEAD^{tree}").strip()
+        )
+
+    def test_repeated_diffs_do_not_grow_snapshot_store(self):
+        assignment = protocol.begin(
+            self.crew(self.current), self.project, "Edit.", ["a.txt"], ["edit"]
+        )
+        objects = self.current.directory / protocol.SNAPSHOTS
+        before = {
+            path.relative_to(objects): path.read_bytes()
+            for path in objects.rglob("*")
+            if path.is_file()
+        }
+        for value in ("two\n", "three\n"):
+            (self.project / "a.txt").write_text(value)
+            view = protocol.assignment_diff(self.current.directory, assignment["id"])
+            self.assertIn("+" + value, view["diff"])
+        after = {
+            path.relative_to(objects): path.read_bytes()
+            for path in objects.rglob("*")
+            if path.is_file()
+        }
+        self.assertEqual(before, after)
+
+    def test_baseline_filesystem_error_is_recorded_without_aborting_assignment(self):
+        with patch.object(protocol, "_file_rows", side_effect=PermissionError("unreadable")):
+            assignment = protocol.begin(self.crew(self.current), self.project, "Read.")
+        self.assertIsNone(assignment["baseline"])
+        self.assertIn("unreadable", assignment["baseline_error"])
+
     def test_a_baseline_follows_validation_and_its_failure_is_reported(self):
         crew = self.crew(self.current)
         protocol.begin(crew, self.project, "Edit a.", ["a.txt"], ["edit"])

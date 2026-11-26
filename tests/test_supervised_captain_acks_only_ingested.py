@@ -72,6 +72,54 @@ class BridgeStepTests(SessionCase):
         self.assertEqual(self.acks, ["d1"])
         self.assertIn("Captain wait for will (done):\nReport.", self.rings[-1][1])
 
+    def test_busy_refusal_is_retried_after_restart(self):
+        self.landing = False
+        self.step([delivery("busy")])
+        self.mine.clear()
+        self.landing = True
+        self.step([delivery("busy")])
+        self.assertEqual(self.acks, ["busy"])
+        self.assertEqual(self.reports, [])
+
+    def test_uncertain_send_is_not_retried_even_before_restart(self):
+        for result in ({"landed": False, "gate": "delivery unconfirmed"}, OSError("lost")):
+            with self.subTest(result=result):
+                item = delivery(str(result))
+
+                def ring(*args):
+                    if isinstance(result, Exception):
+                        raise result
+                    return result
+
+                try:
+                    captain_bridge.step(
+                        self.directory,
+                        [item],
+                        ring,
+                        self.acks.append,
+                        self.mine,
+                        lambda *args: None,
+                    )
+                except OSError:
+                    pass
+                self.step([item])
+                self.assertEqual(self.rings, [])
+                self.assertEqual(self.acks, [])
+
+    def test_malformed_claim_can_be_explicitly_resent_or_acknowledged(self):
+        for decision in ("resend", "ack"):
+            with self.subTest(decision=decision):
+                item = delivery(decision)
+                captain_bridge.claim(self.directory, item, self.mine)
+                captain_bridge._claim_path(self.directory, decision).write_text("{")
+                self.mine.clear()
+                self.step([item])
+                self.assertNotIn(decision, self.acks)
+                captain_bridge.resolve_claim(self.directory, decision, decision)
+                self.step([item])
+                self.assertIn(decision, self.acks)
+        self.assertEqual([item[0] for item in self.rings], ["resend"])
+
     def test_quiet_statuses_are_acknowledged_without_a_captain_turn(self):
         self.step([delivery("d1", "idle"), delivery("d2", "working")])
         self.assertEqual((self.rings, self.acks), ([], ["d1", "d2"]))
@@ -81,8 +129,8 @@ class BridgeStepTests(SessionCase):
         self.mine.clear()  # a restarted supervisor
         self.assertTrue(self.step([delivery("d1")]))
         self.assertEqual(self.acks, ["d1", "d1"])  # delivered before: acknowledged, not resent
-        self.landing = False
-        self.step([delivery("d2")])
+        captain_bridge.claim(self.directory, delivery("d2"), self.mine)
+        self.rings.append(("d2", "unconfirmed send"))
         self.mine.clear()
         self.landing = True
         self.step([delivery("d2")])

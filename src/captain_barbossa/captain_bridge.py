@@ -26,6 +26,28 @@ def _claim_path(directory, delivery_id):
     return directory / CLAIMS / f"{hashlib.sha256(delivery_id.encode()).hexdigest()}.json"
 
 
+def _read_claim(path):
+    try:
+        value = read_json(path)
+    except (CaptainError, ValueError, OSError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def resolve_claim(directory, delivery_id, decision):
+    """Resolve an uncertain send under the supervisor's bridge lock, on the user's decision."""
+    if decision not in ("resend", "ack"):
+        raise CaptainError("[captain-delivery-decision] Decide resend or ack.")
+    path = _claim_path(directory, delivery_id)
+    if not path.exists():
+        raise CaptainError(f"[captain-delivery-unknown] No claim for {delivery_id}.")
+    if decision == "resend":
+        path.unlink()
+    else:
+        write_json(path, {**_read_claim(path), "delivered": True, "delivered_at": time.time()})
+    return {"delivery_id": delivery_id, "decision": decision}
+
+
 def claim(directory, delivery, mine):
     """`send`, `ack` (delivered already) or `uncertain`; a claim precedes the send, never resent."""
     path = _claim_path(directory, delivery["delivery_id"])
@@ -33,8 +55,11 @@ def claim(directory, delivery, mine):
     try:
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
     except FileExistsError:
-        if read_json(path).get("delivered"):
+        previous = _read_claim(path)
+        if previous.get("delivered") is True:
             return "ack"
+        if previous.get("delivery") != delivery or previous.get("delivered") is not False:
+            return "uncertain"
         return "send" if delivery["delivery_id"] in mine else "uncertain"
     with os.fdopen(fd, "w", encoding="utf-8") as file:
         json.dump({"delivery": delivery, "at": time.time(), "delivered": False}, file)
@@ -142,7 +167,11 @@ def step(directory, deliveries, ring, ack, mine, report):
         if outcome == "send":
             notes = pending_notes(directory)
             text = render(delivery, notes, directory)
-            if not ring(delivery["delivery_id"], text)["landed"]:
+            mine.discard(delivery["delivery_id"])
+            result = ring(delivery["delivery_id"], text)
+            if not result["landed"]:
+                if result.get("gate") in ("agent not idle", "captain stopped"):
+                    _claim_path(directory, delivery["delivery_id"]).unlink()
                 return False
             delivered(directory, delivery)
             notes_delivered(directory, notes)

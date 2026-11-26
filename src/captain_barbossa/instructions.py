@@ -105,7 +105,11 @@ crew, reported through wait; no tell, answer, focus or model; interrupt NAME can
   CAPTAIN crew --agent codex|claude|pi|grok --task 'assignment' --placement pane|tab
     [--direction vertical|horizontal|auto --split-pane <pane-id>|auto]
 """,
-        "Run, for every crew:\n  CAPTAIN crew --agent codex|claude|pi --task 'assignment'\n",
+        "Run, for every crew:\n  CAPTAIN crew --agent codex|claude|pi|grok --task 'assignment'\n",
+    ),
+    (
+        "grok has no hook, so only its own\nauto mode applies.",
+        "supervised Grok uses the supervisor gate.",
     ),
     ("use it for CAPTAIN and Herdr commands:", "use it for CAPTAIN commands:"),
     ("; never type into a crew pane to approve.", "."),

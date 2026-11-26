@@ -471,7 +471,7 @@ def take_baseline(crew, assignment_id, execution_root):
     """Snapshot a validated, reserved assignment's tree before its crew gets the task."""
     try:
         fields = {"baseline": snapshot(execution_root, crew.session.directory / SNAPSHOTS)}
-    except CaptainError as exc:
+    except (CaptainError, OSError) as exc:
         fields = {"baseline": None, "baseline_error": str(exc)}
     with checkpoint(crew.session.directory) as state:
         assignment = state["assignments"][assignment_id]
@@ -552,13 +552,15 @@ def _run(root, *args, **options):
     return done.stdout
 
 
-def _snapshot_env(root, objects):
+def _snapshot_env(root, objects, alternates=()):
     """Write new objects to the session's own store, reading the repository's through alternates."""
     common = _run(root, "rev-parse", "--path-format=absolute", "--git-common-dir").strip()
     private_dir(objects)
     return {
         "GIT_OBJECT_DIRECTORY": str(objects),
-        "GIT_ALTERNATE_OBJECT_DIRECTORIES": str(Path(common) / "objects"),
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES": os.pathsep.join(
+            str(path) for path in (*alternates, Path(common) / "objects")
+        ),
         "GIT_LITERAL_PATHSPECS": "1",
     }
 
@@ -588,28 +590,54 @@ def _file_rows(top, paths, extra):
     return rows
 
 
-def snapshot(root, objects, base=None, paths=()):
-    """An unfiltered review tree in a private object store: all files, or `paths` over `base`."""
+def _worktree_rows(root, top, extra, paths=()):
+    """Reuse clean index blobs and hash only modified or untracked files without filters."""
+    keys = _run(root, "config", "--null", "--name-only", "--list").split("\0")
+    filters = []
+    for key in keys:
+        if key.startswith("filter.") and key.rsplit(".", 1)[-1] in ("clean", "process", "required"):
+            value = "false" if key.endswith(".required") else ""
+            filters.extend(("-c", f"{key}={value}"))
+    options = (*filters, "ls-files", "-z", "--full-name")
+    changed = set(
+        _run(root, *options, "-m", "-o", "--exclude-standard", "--", *paths, extra=extra).split(
+            "\0"
+        )
+    )
+    rows = []
+    staged = _run(root, *options, "-s", "--", *paths, extra=extra)
+    for entry in staged.split("\0"):
+        if not entry:
+            continue
+        metadata, path = entry.split("\t", 1)
+        mode, blob, stage = metadata.split()
+        if stage == "0" and path not in changed and "\n" not in path:
+            rows.append(f"{mode} {blob}\t{path}")
+        elif stage != "0":
+            changed.add(path)
+    return rows + _file_rows(top, sorted(changed), extra)
+
+
+def snapshot(root, objects, base=None, paths=(), alternates=()):
+    """A review tree reusing clean index blobs and capturing changed files without filters."""
     inside = _git(root, "rev-parse", "--show-toplevel")
     if inside is None or inside.returncode:
         raise CaptainError(f"[no-git] {root} is not a Git work tree.")
     top = Path(inside.stdout.strip())
-    extra = _snapshot_env(root, objects)
+    extra = _snapshot_env(root, objects, alternates)
     width = 64 if _run(top, "rev-parse", "--show-object-format").strip() == "sha256" else 40
-    listed = ("ls-files", "-z", "--full-name", "--cached", "--others", "--exclude-standard")
     with tempfile.TemporaryDirectory(prefix="captain-snapshot-") as scratch:
         index = Path(scratch) / "index"
         if base is None:
             _run(top, "read-tree", "--empty", index=index, extra=extra)
-            rows = _file_rows(top, _run(top, *listed, extra=extra).split("\0"), extra)
+            rows = _worktree_rows(top, top, extra)
         else:
             _run(top, "read-tree", base, index=index, extra=extra)
             held = _run(
                 root, "ls-files", "-z", "--full-name", "--", *paths, index=index, extra=extra
             )
-            present = _run(root, *listed, "--", *paths, extra=extra).split("\0")
             gone = [f"0 {'0' * width}\t{path}" for path in held.split("\0") if path]
-            rows = gone + _file_rows(top, present, extra)
+            rows = gone + _worktree_rows(root, top, extra, paths)
         if rows:
             _run(
                 top,
@@ -645,13 +673,21 @@ def assignment_diff(directory, assignment_id):
     view = {"assignment": assignment_id, "baseline": base, "root": root, "paths": paths}
     if not paths:
         return {**view, "current": base, "files": [], "diff": "", "truncated": False}
-    objects = directory / SNAPSHOTS
-    current = snapshot(root, objects, base, paths)
-    extra = _snapshot_env(root, objects)
-    # --relative: trees are whole-repository, while paths are the execution root's.
-    options = ("diff", "--no-ext-diff", "--no-textconv", "--no-color", "--no-renames", "--relative")
-    numstat = _run(root, *options, "--numstat", base, current, "--", *paths, extra=extra)
-    patch = _run(root, *options, base, current, "--", *paths, extra=extra)
+    with tempfile.TemporaryDirectory(prefix="captain-diff-") as scratch:
+        objects = Path(scratch) / "objects"
+        alternates = (directory / SNAPSHOTS,)
+        current = snapshot(root, objects, base, paths, alternates)
+        extra = _snapshot_env(root, objects, alternates)
+        options = (
+            "diff",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--no-color",
+            "--no-renames",
+            "--relative",
+        )
+        numstat = _run(root, *options, "--numstat", base, current, "--", *paths, extra=extra)
+        patch = _run(root, *options, base, current, "--", *paths, extra=extra)
     files = []
     for line in numstat.splitlines():
         added, deleted, path = line.split("\t", 2)
