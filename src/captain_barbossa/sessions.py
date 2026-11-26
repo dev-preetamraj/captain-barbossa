@@ -8,6 +8,7 @@ from collections import namedtuple
 from contextlib import contextmanager
 from pathlib import Path
 
+from .eventlog import record_action
 from .runtime import HERDR_ERRORS, CaptainError, herdr
 from .store import (
     lock,
@@ -185,13 +186,33 @@ def session_card(row, now=None):
 
 
 def rename_session(directory, name, *, if_unnamed=False):
-    """if_unnamed is the captain titling its own session; it never replaces a name."""
+    """if_unnamed never replaces a name; a supervised session logs each change."""
     name = name.strip()
     if not name or len(name) > 60 or SESSION_ID.fullmatch(name):
         raise CaptainError("A session name is 1-60 characters and not a session id.")
     with lock(directory / "session.lock"):
-        if not (if_unnamed and session_name(directory)):
-            write_json(directory / "name.json", {"name": name})
+        previous = session_name(directory)
+        if if_unnamed and previous:
+            return
+        write_json(directory / "name.json", {"name": name})
+        if name != previous:
+            record_action(
+                directory,
+                "session-renamed",
+                None,
+                None,
+                supervised=_is_supervised(directory),
+                session_id=directory.name,
+                name=name,
+                previous=previous,
+            )
+
+
+def _is_supervised(directory):
+    try:
+        return read_json(directory / "session.json").get("transport") == "supervisor"
+    except (CaptainError, OSError, AttributeError):
+        return False
 
 
 def find_session(current, target):
