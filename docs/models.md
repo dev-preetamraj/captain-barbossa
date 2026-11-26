@@ -20,7 +20,16 @@ Grok is excluded from JSON discovery.
       "tiers": {"cheap": "claude-haiku-5-5", "mid": "claude-sonnet-5-5", "strong": "claude-opus-5-5"},
       "models": [
         {
+          "id": "claude-fable-5-1",
+          "name": "Claude Fable 5.1",
+          "aliases": [],
+          "context_window": 1000000,
+          "effort_levels": ["low", "medium", "high", "xhigh", "max"],
+          "legacy": true
+        },
+        {
           "id": "claude-fable-5-2",
+          "name": "Claude Fable 5.2",
           "aliases": ["fable"],
           "context_window": 1000000,
           "effort_levels": ["low", "medium", "high", "xhigh", "max"]
@@ -34,15 +43,20 @@ Grok is excluded from JSON discovery.
 
 The example abbreviates the model list; every known model is returned, including literal IDs configured as tiers.
 Tier mappings use the same layered `[models.*]` settings as recruitment, with unrankable pi tiers set to `null`.
+Every row has a non-null display `name`.
+Superseded rows have `legacy: true`; current rows omit `legacy`.
 Unknown context windows and effort lists are `null`; an empty effort list means the tool explicitly returned no levels.
 A failed native probe preserves bundled and configured IDs and sets that provider's `error` string.
 Each native probe has a 15-second request budget and bounded process cleanup.
 
-- Codex: `codex app-server` initialization followed by paginated `model/list`, including hidden models, supplies `supportedReasoningEfforts` and a context window only if reported.
-- Pi: isolated, offline `pi --mode rpc --no-session` supplies `get_available_models` metadata; `set_model` and `get_available_thinking_levels` query each model's supported levels in that in-memory session.
+- Codex: `codex app-server` initialization followed by paginated `model/list` supplies `displayName`, `supportedReasoningEfforts`, native upgrade/default signals and a context window only if reported.
+  Hidden or explicitly non-chat entries are excluded; otherwise the newest version of each GPT family is current.
+- Pi: isolated, offline `pi --mode rpc --no-session` supplies `get_available_models` names and metadata; `set_model` and `get_available_thinking_levels` query each model's supported levels in that in-memory session.
+  The newest version within each upstream provider and model family is current.
   An unavailable per-model query leaves its effort list `null` without hiding the other metadata.
   Extensions, MCP, tools and project resources are disabled.
-- Claude: the bundled model catalogue supplies known context windows and Claude Code's supported effort levels `low`, `medium`, `high`, `xhigh`, `max`.
+- Claude: the bundled model catalogue derives display names, supplies known context windows and Claude Code's supported effort levels `low`, `medium`, `high`, `xhigh`, `max`.
+  The newest Haiku, Sonnet, Opus and Fable versions are current.
 
 ## How resolution works
 

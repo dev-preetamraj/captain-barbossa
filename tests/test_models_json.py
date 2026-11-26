@@ -60,11 +60,20 @@ class ModelsJsonTests(unittest.TestCase):
             [row["provider"] for row in document["providers"]], ["codex", "claude", "pi"]
         )
         self.assertTrue(all(row["error"] is None for row in document["providers"]))
+        self.assertTrue(
+            all(model["name"] for provider in document["providers"] for model in provider["models"])
+        )
 
     def test_claude_alias_moves_but_exact_old_id_and_context_remain(self) -> None:
         rows = {row["id"]: row for row in self.provider("claude")["models"]}
         self.assertEqual(rows["claude-fable-5-2"]["aliases"], ["fable"])
         self.assertEqual(rows["claude-fable-5-1"]["aliases"], [])
+        self.assertEqual(rows["claude-fable-5-2"]["name"], "Claude Fable 5.2")
+        self.assertNotIn("legacy", rows["claude-fable-5-2"])
+        self.assertTrue(rows["claude-fable-5-1"]["legacy"])
+        self.assertNotIn("legacy", rows["claude-haiku-5-5"])
+        self.assertNotIn("legacy", rows["claude-sonnet-5-5"])
+        self.assertNotIn("legacy", rows["claude-opus-5-5"])
         self.assertEqual(models.resolve_model("claude", "fable"), "claude-fable-5-2")
         for identifier in ("claude-fable-5-1", "claude-fable-5-2"):
             self.assertEqual(models.resolve_model("claude", identifier), identifier)
@@ -89,6 +98,7 @@ class ModelsJsonTests(unittest.TestCase):
             {"cheap": "claude-fable-5-2", "mid": "claude-fable-5-2", "strong": "future-model"},
         )
         future = next(row for row in result["models"] if row["id"] == "future-model")
+        self.assertEqual(future["name"], "future-model")
         self.assertIsNone(future["context_window"])
         self.assertIsNone(future["effort_levels"])
 
@@ -97,10 +107,21 @@ class ModelsJsonTests(unittest.TestCase):
         self.assertIsNone(result["error"])
         rows = {row["id"]: row for row in result["models"]}
         self.assertEqual(rows["gpt-6.2-astra"]["aliases"], ["astra"])
+        self.assertEqual(rows["gpt-6.2-astra"]["name"], "GPT-6.2-Astra")
         self.assertEqual(rows["gpt-6.2-astra"]["effort_levels"], ["low", "ultra"])
         self.assertIsNone(rows["gpt-6.2-astra"]["context_window"])
+        self.assertNotIn("legacy", rows["gpt-6.2-astra"])
+        self.assertTrue(rows["gpt-6-astra"]["legacy"])
+        self.assertNotIn("legacy", rows["gpt-6.2-sol"])
+        self.assertTrue(rows["gpt-6.1-sol"]["legacy"])
+        self.assertNotIn("legacy", rows["gpt-6-luna"])
+        self.assertTrue(rows["gpt-5.6-luna"]["legacy"])
+        self.assertEqual(rows["native-new"]["name"], "Native New")
+        self.assertTrue(rows["native-new"]["legacy"])
         self.assertEqual(rows["native-new"]["context_window"], 123_456)
         self.assertEqual(rows["native-new"]["effort_levels"], [])
+        self.assertNotIn("gpt-reserve", rows)
+        self.assertNotIn("codex-auto-review", rows)
         self.assertIsNone(rows["gpt-5.6-luna"]["effort_levels"])
         self.assertEqual(self.argv, [["codex", "app-server"]])
 
@@ -110,6 +131,9 @@ class ModelsJsonTests(unittest.TestCase):
         self.assertEqual(result["error"], "not installed")
         self.assertEqual(len(result["models"]), len(models.MODELS["codex"]))
         self.assertTrue(all(row["effort_levels"] is None for row in result["models"]))
+        rows = {row["id"]: row for row in result["models"]}
+        self.assertTrue(rows["gpt-5.6-sol"]["legacy"])
+        self.assertNotIn("legacy", rows["gpt-6.2-sol"])
         self.assertEqual(result["tiers"], models.TIERS["codex"])
 
     def fail_probe(self) -> None:
@@ -122,6 +146,11 @@ class ModelsJsonTests(unittest.TestCase):
         self.assertEqual(rows["first/shared"]["aliases"], [])
         self.assertEqual(rows["second/shared"]["aliases"], [])
         self.assertEqual(rows["local/tiny"]["aliases"], ["tiny"])
+        self.assertEqual(rows["first/shared"]["name"], "Shared First")
+        self.assertEqual(rows["second/shared"]["name"], "second/shared")
+        self.assertEqual(rows["anthropic/claude-opus-5"]["name"], "Claude Opus 5")
+        self.assertTrue(rows["anthropic/claude-opus-4-8"]["legacy"])
+        self.assertNotIn("legacy", rows["anthropic/claude-opus-5"])
         self.assertEqual(rows["first/shared"]["effort_levels"], ["off", "high", "max"])
         self.assertEqual(rows["second/shared"]["effort_levels"], ["off", "low"])
         self.assertEqual(rows["local/tiny"]["effort_levels"], ["off"])
@@ -135,7 +164,7 @@ class ModelsJsonTests(unittest.TestCase):
         (self.root / "settings.toml").write_text('[models.pi]\ncheap = "tiny"\n')
         result = self.provider("pi")
         self.assertEqual(result["tiers"], {"cheap": "local/tiny", "mid": None, "strong": None})
-        self.assertEqual(len(result["models"]), 3)
+        self.assertEqual(len(result["models"]), 5)
 
     def test_pi_failed_model_switch_does_not_reuse_previous_models_levels(self) -> None:
         os.environ["CATALOGUE_TEST_MODE"] = "switch-fails"
@@ -250,6 +279,9 @@ def fake_native(provider: str) -> None:
                             {
                                 "id": "picker-id",
                                 "model": "gpt-6.2-astra",
+                                "displayName": "GPT-6.2-Astra",
+                                "hidden": False,
+                                "isDefault": True,
                                 "supportedReasoningEfforts": [
                                     {"reasoningEffort": "low"},
                                     {"reasoningEffort": "ultra"},
@@ -263,18 +295,45 @@ def fake_native(provider: str) -> None:
                         "data": [
                             {
                                 "id": "native-new",
+                                "displayName": 3 if mode == "bad-metadata" else "Native New",
+                                "upgrade": "native-next",
                                 "contextWindow": True if mode == "bad-metadata" else 123_456,
                                 "supportedReasoningEfforts": [{}] if mode == "bad-metadata" else [],
-                            }
+                            },
+                            {
+                                "id": "gpt-reserve",
+                                "displayName": "GPT Reserve",
+                                "hidden": True,
+                            },
+                            {
+                                "id": "codex-auto-review",
+                                "displayName": "Auto Review",
+                                "hidden": True,
+                            },
                         ],
                         "nextCursor": "page-two" if mode == "repeat-cursor" else None,
                     }
             case "get_available_models":
                 data = {
                     "models": [
-                        {"id": "shared", "provider": "first", "contextWindow": 1_000_000},
+                        {
+                            "id": "shared",
+                            "name": "Shared First",
+                            "provider": "first",
+                            "contextWindow": 1_000_000,
+                        },
                         {"id": "shared", "provider": "second"},
-                        {"id": "tiny", "provider": "local", "contextWindow": -1},
+                        {"id": "tiny", "name": "", "provider": "local", "contextWindow": -1},
+                        {
+                            "id": "claude-opus-4-8",
+                            "name": "Claude Opus 4.8",
+                            "provider": "anthropic",
+                        },
+                        {
+                            "id": "claude-opus-5",
+                            "name": "Claude Opus 5",
+                            "provider": "anthropic",
+                        },
                     ]
                 }
             case "set_model":
@@ -299,6 +358,7 @@ def fake_native(provider: str) -> None:
                     "first": ["off", "high", "max"],
                     "second": ["off", "low"],
                     "local": ["off"],
+                    "anthropic": ["off", "high"],
                 }
                 data = {"levels": [False] if mode == "bad-metadata" else levels[selected]}
             case _:

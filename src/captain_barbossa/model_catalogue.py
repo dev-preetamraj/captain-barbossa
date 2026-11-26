@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import re
 import subprocess
 import time
 from collections import Counter
@@ -17,6 +18,9 @@ from .runtime import CaptainError
 PROVIDERS = ("codex", "claude", "pi")
 CLAUDE_EFFORTS = ("low", "medium", "high", "xhigh", "max")
 PROBE_TIMEOUT = 15.0
+MODEL_VERSION = re.compile(r"(?<!\d)(\d+(?:\.\d+)*)(?!\d)")
+FAMILY_WORD = re.compile(r"[a-z]+|\d+")
+FAMILY_NOISE = frozenset(("latest", "preview"))
 
 
 class Peer(Protocol):
@@ -109,13 +113,76 @@ def _window(value: object) -> int | None:
     return value if type(value) is int and value > 0 else None
 
 
-def _model(identifier: str, aliases: tuple[str, ...] = ()) -> dict:
+def _name(value: object, identifier: str) -> str:
+    return value.strip() if isinstance(value, str) and value.strip() else identifier
+
+
+def _model(identifier: str, aliases: tuple[str, ...] = (), name: object = None) -> dict:
     return {
         "id": identifier,
+        "name": _name(name, identifier),
         "aliases": list(aliases),
         "context_window": None,
         "effort_levels": None,
     }
+
+
+def _family_version(row: dict, provider: str) -> tuple[str, tuple[int, ...]] | None:
+    source = row["name"]
+    scope = ""
+    if provider == "pi" and "/" in row["id"]:
+        scope, _, model_id = row["id"].partition("/")
+        if source == row["id"]:
+            source = model_id
+    match = MODEL_VERSION.search(source)
+    if match is None:
+        return None
+    words = FAMILY_WORD.findall(f"{source[: match.start()]} {source[match.end() :]}".lower())
+    family = " ".join(
+        word
+        for word in words
+        if word not in FAMILY_NOISE and not (len(word) == 8 and word.isdigit())
+    )
+    if not family:
+        return None
+    return f"{scope}/{family}" if scope else family, tuple(
+        int(part) for part in match.group(1).split(".")
+    )
+
+
+def _mark_legacy(rows: list[dict], provider: str) -> None:
+    versions = [(row, _family_version(row, provider)) for row in rows]
+    latest: dict[str, tuple[int, ...]] = {}
+    for _, parsed in versions:
+        if parsed is not None:
+            family, version = parsed
+            latest[family] = max(latest.get(family, version), version)
+    for row, parsed in versions:
+        forced_legacy = row.pop("_legacy", False)
+        forced_current = row.pop("_current", False)
+        if forced_legacy or (
+            not forced_current and parsed is not None and parsed[1] < latest[parsed[0]]
+        ):
+            row["legacy"] = True
+        else:
+            row.pop("legacy", None)
+
+
+def _claude_name(identifier: str) -> str:
+    match = re.fullmatch(r"claude-([a-z]+)-(\d+(?:-\d+)*)", identifier)
+    if match is None:
+        return identifier
+    return f"Claude {match.group(1).title()} {match.group(2).replace('-', '.')}"
+
+
+def _exclude_codex(native: dict) -> bool:
+    if native.get("hidden") is True:
+        return True
+    kind = native.get("type") or native.get("kind")
+    if isinstance(kind, str) and kind.lower() not in {"chat", "model"}:
+        return True
+    modalities = native.get("inputModalities")
+    return isinstance(modalities, list) and "text" not in modalities
 
 
 def codex_models(root: Path) -> list[dict]:
@@ -135,7 +202,13 @@ def codex_models(root: Path) -> list[dict]:
                 "model/list", {"includeHidden": True, "cursor": cursor}, _remaining(deadline)
             )
             for native in _rows(result, "data"):
-                row = _model(_identifier(native.get("model") or native.get("id")))
+                identifier = _identifier(native.get("model") or native.get("id"))
+                if _exclude_codex(native):
+                    rows.append({"id": identifier, "_exclude": True})
+                    continue
+                row = _model(identifier, name=native.get("displayName"))
+                row["_legacy"] = isinstance(native.get("upgrade"), str) and bool(native["upgrade"])
+                row["_current"] = native.get("isDefault") is True
                 efforts = native.get("supportedReasoningEfforts")
                 if isinstance(efforts, list):
                     row["effort_levels"] = _levels(
@@ -179,7 +252,11 @@ def pi_models(root: Path) -> list[dict]:
         rows = []
         for native in native_rows:
             model_id, provider = _identifier(native.get("id")), _identifier(native.get("provider"))
-            row = _model(f"{provider}/{model_id}", (model_id,) if counts[model_id] == 1 else ())
+            row = _model(
+                f"{provider}/{model_id}",
+                (model_id,) if counts[model_id] == 1 else (),
+                native.get("name"),
+            )
             row["context_window"] = _window(native.get("contextWindow"))
             rows.append(row)
         for row, native in zip(rows, native_rows, strict=True):
@@ -201,7 +278,7 @@ def pi_models(root: Path) -> list[dict]:
 def claude_models(root: Path) -> list[dict]:
     return [
         {
-            **_model(identifier, aliases),
+            **_model(identifier, aliases, _claude_name(identifier)),
             "context_window": usage.CONTEXT_WINDOWS.get(identifier),
             "effort_levels": list(CLAUDE_EFFORTS),
         }
@@ -229,9 +306,13 @@ def catalogue(root: Path, agent: str | None = None) -> dict:
             error = str(exc)
         else:
             for row in discovered:
+                if row.pop("_exclude", False):
+                    rows.pop(row["id"], None)
+                    continue
                 if row["id"] in rows:
                     row["aliases"] = rows[row["id"]]["aliases"]
                 rows[row["id"]] = row
+        _mark_legacy(list(rows.values()), provider)
         entries = tuple((row["id"], tuple(row["aliases"])) for row in rows.values())
         tiers = models.tier_mapping(provider, entries)
         for identifier in tiers.values():
