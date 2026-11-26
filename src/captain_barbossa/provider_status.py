@@ -3,13 +3,31 @@
 from __future__ import annotations
 
 import contextlib
+import re
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
-from . import claude_agent, codex_app_server, config, eventlog, pi_rpc, processes, runtime
+from . import (
+    __version__,
+    claude_agent,
+    codex_app_server,
+    config,
+    eventlog,
+    instructions,
+    jsonrpc,
+    model_catalogue,
+    pi_rpc,
+    processes,
+    runtime,
+)
 from .models import CAPABILITIES, PROVIDERS
 from .runtime import CaptainError
+
+# Any crew-named events path: the hook command Codex trusts drops it, so one probe covers all.
+TRUST_PROBE = Path("hook-trust.jsonl")
+HOOK_CODE = re.compile(r"\[codex-hooks-(missing|untrusted)\] ")
 
 ACCOUNT_PROBES = {
     "codex": codex_app_server.account,
@@ -28,6 +46,7 @@ def probe(provider: str, root: str | Path) -> dict:
         "signed_in": None,
         "account": None,
         "detail": None,
+        "hooks": None,
         "checked_at": time.time(),
     }
     try:
@@ -46,7 +65,27 @@ def probe(provider: str, root: str | Path) -> dict:
             row.update(account(binary, root, timeout))
         except (CaptainError, OSError) as exc:
             row["detail"] = str(exc)
+    if provider == "codex":
+        row["hooks"] = codex_hooks(binary, root, timeout)
     return row
+
+
+def codex_hooks(binary, root, timeout):
+    """Codex's trust of captain's crew hooks, read with `hooks/list`; trust is never written."""
+    flags = instructions.native_args("codex", "", events=TRUST_PROBE, transport="app-server")
+    try:
+        with model_catalogue._native(
+            [binary, "app-server", *flags], Path(root), jsonrpc.Peer
+        ) as peer:
+            client = {"name": "captain-barbossa", "version": __version__}
+            peer.request("initialize", {"clientInfo": client}, timeout)
+            peer.notify("initialized", timeout)
+            listed = peer.request("hooks/list", {"cwds": [str(root)]}, timeout)
+        codex_app_server.require_live_hooks(SimpleNamespace(events=TRUST_PROBE), listed)
+    except (CaptainError, OSError) as exc:
+        match = HOOK_CODE.match(str(exc))
+        return {"state": match[1] if match else "unknown", "detail": str(exc)}
+    return {"state": "trusted", "detail": None}
 
 
 def catalogue(root: str | Path, provider: str | None = None) -> dict:
@@ -75,6 +114,7 @@ def catalogue(root: str | Path, provider: str | None = None) -> dict:
                 "version": None,
                 "signed_in": None,
                 "account": None,
+                "hooks": None,
                 "checked_at": None,
                 "detail": "[provider-check] The check did not finish before its deadline.",
                 **found.get(name, {}),

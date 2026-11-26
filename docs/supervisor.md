@@ -74,6 +74,7 @@ Every refusal is a JSON-RPC error whose message starts with its protocol code an
 | `command` | the verb's deadline (`supervisor.COMMANDS`: 30 to 180, `wait` 600) |
 | `resolve_authorization` | an approved app request runs its verb: `do` and `quiet` 960 |
 | `diff` | 5 per Git call |
+| `checkout_diff` | 5 per Git call, two calls |
 | `models` | 15 per native probe (Codex `model/list`, pi), run in turn (30 for all) |
 | `subscribe` | its reply at once; the stream until the client leaves |
 | every other method | captain-state and file reads with no native call; a backward `transcript` page rescans the session files |
@@ -97,6 +98,7 @@ Every refusal is a JSON-RPC error whose message starts with its protocol code an
 | `authorizations` | none | `{authorizations: [request, ...]}` |
 | `questions` | none | `{questions: [{crew, assignment, question, text, grant_request, delivered_at, escalated, waiting_on}]}` |
 | `diff` | `assignment` | `{assignment, baseline, current, root, paths, files, diff, truncated}` |
+| `checkout_diff` | `scope` (optional: `working`, the default, or `staged`) | `{scope, root, files: [{index, worktree, path}], diff}`; the project checkout through `inspection`'s hardened Git: `files` is `git status --porcelain` (untracked too), `diff` is `git diff` (working: unstaged changes; staged: `--cached`); past 64 KiB of output it is refused with `[checkout-diff]` |
 | `mark_reviewed` | `assignment`, `result` (optional), `note` (optional) | `{assignment, result, at, note}` |
 | `start_captain` | `provider`, `model` (optional, default `[captain]` settings), `effort` (pi only) | `{provider, transport, model, state: "started"}` |
 | `captain_state` | none | `{state, provider?}`; state `idle`, `working`, `blocked` (a captain request waits on the user, any provider) or `null` |
@@ -112,7 +114,7 @@ Every refusal is a JSON-RPC error whose message starts with its protocol code an
 | `step` | `agent`, `id`, `incarnation` (optional) | one entry with its whole text |
 | `rename` | `name` | `{session_id, name}` |
 | `sessions` | none | the session list (see Session hub) |
-| `providers` | `recheck` (optional bool), `provider` (optional) | `{providers: [{provider, installed, version, signed_in, account, detail, checked_at, sign_in, attempt}]}` |
+| `providers` | `recheck` (optional bool), `provider` (optional) | `{providers: [{provider, installed, version, signed_in, account, detail, hooks, checked_at, sign_in, attempt}]}` |
 | `sign_in` | `provider`, `method` (optional), `api_key` (with `apiKey`) | the attempt, or `{provider, state: "guidance", guidance}` |
 | `cancel_sign_in` | `provider` | the attempt, or `{provider, state: "not-running"}` |
 | `usage` | none | `{agents: [{agent, usage}]}`; `usage` is a frame or null |
@@ -130,7 +132,7 @@ An app calls every other method directly.
 - `ring` with a `message_id` Codex already accepted lands again without starting a second turn.
   A `turn/start` Codex never answered reports `"delivery unconfirmed"`: held, never bounced, and settled by the next turn notice.
 
-Refusal codes by method: `supervisor-params` (any), `supervisor-crew`, `supervisor-transport`, `supervisor-closing`, `supervisor-startup`, `codex-hooks-missing`, `codex-hooks-untrusted`, `claude-sdk-missing`, `claude-start` (start), `grant-request-unknown`, `grant-request-closed`, `grant-request-decision`, `grant-request-unsupported` (resolve_grant), `command-refused`, `command-timeout`, `command-failed` (command), `transcript-agent`, `transcript-range`, `transcript-entry`, `transcript-file`, `transcript-gone` (transcript, step), `session-name` (rename), `supervisor-captain-token` (any method but the captain CLI's, with the captain's token), `captain-delivery-decision`, `captain-delivery-unknown` (resolve_captain_delivery), `sign-in-method`, `sign-in-running`, `sign-in-missing` (sign_in), `supervisor-params` for an unknown `agent` (models), `authorization-argv` (command), `authorization-unknown`, `authorization-closed`, `authorization-decision` (resolve_authorization), `diff-assignment`, `diff-no-baseline`, `diff-git` (diff), `review-assignment`, `review-no-report`, `review-result` (mark_reviewed), `captain-transport`, `captain-running`, `captain-start` (start_captain), `captain-not-running` (message, interrupt and answer), `captain-message-id` (message_captain), `captain-request-closed`, `captain-request-answer`, `captain-request-unknown` (answer_captain), `delivery-unknown` (ack_delivery).
+Refusal codes by method: `supervisor-params` (any), `supervisor-crew`, `supervisor-transport`, `supervisor-closing`, `supervisor-startup`, `codex-hooks-missing`, `codex-hooks-untrusted`, `claude-sdk-missing`, `claude-start` (start), `grant-request-unknown`, `grant-request-closed`, `grant-request-decision`, `grant-request-unsupported` (resolve_grant), `command-refused`, `command-timeout`, `command-failed` (command), `transcript-agent`, `transcript-range`, `transcript-entry`, `transcript-file`, `transcript-gone` (transcript, step), `session-name` (rename), `supervisor-captain-token` (any method but the captain CLI's, with the captain's token), `captain-delivery-decision`, `captain-delivery-unknown` (resolve_captain_delivery), `sign-in-method`, `sign-in-running`, `sign-in-missing` (sign_in), `supervisor-params` for an unknown `agent` (models), `authorization-argv` (command), `authorization-unknown`, `authorization-closed`, `authorization-decision` (resolve_authorization), `diff-assignment`, `diff-no-baseline`, `diff-git` (diff), `checkout-diff` (checkout_diff), `review-assignment`, `review-no-report`, `review-result` (mark_reviewed), `captain-transport`, `captain-running`, `captain-start` (start_captain), `captain-not-running` (message, interrupt and answer), `captain-message-id` (message_captain), `captain-request-closed`, `captain-request-answer`, `captain-request-unknown` (answer_captain), `delivery-unknown` (ack_delivery).
 
 ### hello
 
@@ -287,6 +289,8 @@ The captain can route a question to the user itself, for good, with `captain esc
 ## Provider status and sign-in
 
 - `captain providers [--agent NAME] [--json]` reads the same status with no session, Herdr or supervisor (`provider_status.catalogue`: `{version: 1, providers: [row, ...]}`), for a settings screen opened before any session exists.
+- `hooks` is null except for an installed Codex, where it is `{state, detail}`: a short-lived `codex app-server` declares captain's four crew hooks as a crew launch does and reads `hooks/list`, checked by the same rule as a crew `start`.
+  `state` is `trusted`, `untrusted` or `missing` (`detail` is the `[codex-hooks-untrusted]` or `[codex-hooks-missing]` text a crew start would refuse with), or `unknown` when the probe could not run; it never writes Codex's trust store.
 - `providers` probes each provider once and caches the result until `recheck: true`; probes run in parallel and one that outlasts twice `startup_timeout` reads as unknown with `[provider-check]`.
   `installed` is whether the CLI is on PATH, `version` the first line of its `--version`, and `signed_in` true, false or null (unknown).
   Codex reads `account/read` from a short-lived bare `codex app-server`; Claude runs `claude auth status --json` (Captain never reads, stores or proxies Claude credentials, and keeps only the auth method and email); pi is signed in when `pi --list-models` lists a model; Grok, with no supervised transport, reports only `installed` and `version`.
@@ -341,10 +345,14 @@ A Herdr session never reads a live frame.
 The app keeps no session list of its own; it reads captain state, and needs no second long-running process.
 
 - List: `captain sessions`, run in any project with no Herdr and no supervisor, prints the list as one JSON line; a running supervisor's `sessions` method returns the same: `{projects: [{project, exists, sessions: [{id, name, transport, state, last_activity, ended_at, crew}]}]}`, the current project first, then by project, newest first.
+  `captain sessions --json` also gives each app session `needs_you` and `unreviewed`, read from its state files whether or not it runs (a running one's live figures are in `snapshot`); a Herdr session has null for both.
+  `needs_you` counts the user's open decisions: questions waiting on the human (or escalated) and open grant requests, counted once per question, open unexpired authorizations, uncertain captain deliveries, and, only while running, open captain requests.
+  `unreviewed` counts done supervised assignments whose report is not reviewed plus isolated results not reviewed.
   `transport` is `supervisor` or `herdr`; `state` is `running` (a supervisor holds the lock), `ended`, `stopped` or `herdr` (a Herdr session, which the app cannot resume).
 - Start: run `captain supervise` in the project; resume: `captain supervise --session ID` (or `captain --session ID supervise`) there, which clears `ended_at`.
 - Rename: `rename`, or `captain --session ID --rename NAME` with no supervisor running.
 - End: `shutdown` with `end: true` stops every crew, records `ended_at` in `session.json` and exits; plain `shutdown` (quitting the app) stops without ending.
+  A stopped session ends with `captain end --session ID` (or `captain --session ID end`) in its project, with no supervisor: it holds `supervisor.lock` while it records `ended_at`, prints `{session_id, ended_at}`, and is refused with `[supervisor-running]` while a supervisor holds the lock and `[supervisor-herdr-session]` for a session that is not an app session; ending an ended session keeps its `ended_at`.
 
 ## Transcripts
 

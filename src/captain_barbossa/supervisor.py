@@ -32,6 +32,7 @@ from . import (
     dashboard,
     do,
     eventlog,
+    inspection,
     instructions,
     jsonrpc,
     launch,
@@ -51,7 +52,7 @@ from .crew import Crew, event_status
 from .memory import add_memory
 from .models import CAPABILITIES, PROVIDERS, TRANSPORTS, resolve_model
 from .runtime import CaptainError
-from .sessions import Session, catalog, crew_meta, rename_session, session
+from .sessions import Session, catalog, crew_meta, locate, rename_session, session
 
 # Provider -> adapter module (open, ring, interrupt, set_model, state over a Link).
 # A provider without a row is refused at start.
@@ -1172,7 +1173,9 @@ def providers(supervisor, params):
         statuses = {name: supervisor.statuses[name] for name in names}
     rows = []
     for name in names:
-        unknown = dict.fromkeys(("installed", "version", "signed_in", "account", "checked_at"))
+        unknown = dict.fromkeys(
+            ("installed", "version", "signed_in", "account", "hooks", "checked_at")
+        )
         rows.append(
             {
                 **unknown,
@@ -1543,6 +1546,25 @@ def diff(supervisor, params):
     return protocol.assignment_diff(supervisor.session.directory, _text(params, "assignment"))
 
 
+def checkout_diff(supervisor, params):
+    """The project checkout's working-tree or staged diff, through the hardened inspection Git."""
+    scope = params.get("scope", "working")
+    if scope not in ("working", "staged"):
+        raise CaptainError("[supervisor-params] scope must be working or staged.")
+    root = supervisor.session.meta["project"]
+    try:
+        status = inspection.git_text(root, "status")
+        text = inspection.git_text(root, "diff", staged=scope == "staged")
+    except CaptainError as exc:
+        raise CaptainError(f"[checkout-diff] {exc}") from exc
+    files = [
+        {"index": line[0], "worktree": line[1], "path": line[3:]}
+        for line in status.splitlines()
+        if len(line) > 3
+    ]
+    return {"scope": scope, "root": root, "files": files, "diff": text}
+
+
 def mark_reviewed(supervisor, params):
     """Mark a report reviewed, or with `result` one isolated result of that assignment."""
     assignment_id, result_id = _text(params, "assignment"), params.get("result")
@@ -1561,6 +1583,86 @@ def mark_reviewed(supervisor, params):
 
 def sessions(supervisor, params):
     return catalog(Path(supervisor.session.meta["project"]))
+
+
+def counted_catalog(project):
+    """The session list with each app session's sidebar counts read from its state files."""
+    listed = catalog(project)
+    for row in listed["projects"]:
+        for item in row["sessions"]:
+            counts = {"needs_you": None, "unreviewed": None}
+            if item["transport"] == "supervisor":
+                with contextlib.suppress(CaptainError, OSError, KeyError, TypeError, ValueError):
+                    directory = locate(Path(row["project"]), item["id"])
+                    counts = sidebar_counts(directory, item["state"] == "running")
+            item.update(counts)
+    return listed
+
+
+def sidebar_counts(directory, running):
+    """needs_you: decisions only the user can make; unreviewed: reports and results unreviewed."""
+    path = directory / "protocol.json"
+    state = store.read_json(path) if path.exists() else {"active": {}, "assignments": {}}
+    active = [state["assignments"][key] for key in state["active"].values()]
+    waiting = {
+        (row["id"], row["question"]["id"])
+        for row in active
+        if row.get("supervised")
+        and row.get("question")
+        and (row["question"].get("waiting_on") == "human" or row["question"].get("escalated"))
+    }
+    waiting |= {
+        (row["id"], request["question"])
+        for row in active
+        for request in row.get("grant_requests", ())
+        if request["state"] == "open"
+    }
+    now = time.time()
+    opened = [
+        row
+        for row in state.get("authorizations", ())
+        if row["state"] == "open" and now - row["at"] <= do.APPROVAL_TTL
+    ]
+    asked = [row for row in state.get("captain_requests", ()) if row["state"] == "open"]
+    uncertain = captain_bridge.uncertain_claims(directory, set())
+    needs = len(waiting) + len(opened) + len(uncertain) + (len(asked) if running else 0)
+    current = Session(directory, store.read_json(directory / "session.json"))
+    reports = [
+        row
+        for row in state["assignments"].values()
+        if row.get("supervised") and row["state"] == "done" and not row.get("reviewed")
+    ]
+    results_left = [
+        manifest
+        for manifest in results.inventory(current)
+        if manifest["id"]
+        not in (
+            (state["assignments"].get(manifest["assignment_id"]) or {}).get("reviewed_results")
+            or {}
+        )
+    ]
+    return {"needs_you": needs, "unreviewed": len(reports) + len(results_left)}
+
+
+def end_session(directory):
+    """End a stopped app session; refused while a supervisor holds supervisor.lock."""
+    meta = store.read_json(directory / "session.json")
+    if meta.get("transport") != "supervisor":
+        raise CaptainError(
+            f"[supervisor-herdr-session] Session {meta['id']} is not an app session; "
+            "end it in Herdr."
+        )
+    with ExitStack() as stack:
+        try:
+            stack.enter_context(store.lock(directory / supervision.LOCK, timeout=LOCK_WAIT))
+        except CaptainError as exc:
+            raise CaptainError(
+                f"[supervisor-running] A supervisor runs session {meta['id']}; end it with "
+                "its shutdown method."
+            ) from exc
+        with crew_meta(directory) as meta:
+            meta["ended_at"] = meta.get("ended_at") or time.time()
+    return {"session_id": meta["id"], "ended_at": meta["ended_at"]}
 
 
 def snapshot(supervisor, params):
@@ -1892,6 +1994,7 @@ METHODS = {
     "authorizations": authorizations,
     "questions": questions,
     "diff": diff,
+    "checkout_diff": checkout_diff,
     "mark_reviewed": mark_reviewed,
     "start_captain": start_captain,
     "captain_state": captain_state,
