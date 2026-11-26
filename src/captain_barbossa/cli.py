@@ -51,7 +51,7 @@ VERIFY_HELP = "Makefile target captain runs at done; its receipt rides the repor
 JSON_HELP = "print the outcome as one JSON line instead of text"
 # Verbs whose --json failure is a JSON envelope on stdout, {"error": {code, message}}.
 JSON_VERBS = ("crew", "tell", "answer", "interrupt", "model", "dismiss", "status", "dashboard")
-JSON_VERBS += ("providers",)
+JSON_VERBS += ("providers", "commands")
 ARCHIVE_VERBS = {
     "archive": archive_session,
     "unarchive": lambda directory: set_archived(directory, False),
@@ -267,6 +267,12 @@ def parser(*, plan=False):
         action="store_true",
         help="JSON catalogue with native capabilities (codex, claude, pi)",
     )
+    listed = commands.add_parser(
+        "commands", help="slash commands and skills an agent CLI offers here, with no session"
+    )
+    listed.add_argument("--agent", required=True, choices=("claude", "codex", "pi"))
+    listed.add_argument("--cwd", help="list for this project directory (default: this project)")
+    listed.add_argument("--json", action="store_true", help="the listing as one JSON line")
     focus = commands.add_parser("focus", help="focus an existing crew's pane and tab")
     focus.add_argument("name", help="crew name or ID (case-insensitive)")
     stop = commands.add_parser(
@@ -528,6 +534,25 @@ def print_settings(args):
         print(f"{dotted} = {json.dumps(value)}  ({described['sources'][dotted]})")
 
 
+def print_commands(args):
+    """One agent CLI's slash commands and skills for a project; needs no session or supervisor."""
+    # Local so no other command pays for the native probes.
+    from .command_catalogue import catalogue
+
+    root = Path(args.cwd).expanduser().resolve() if args.cwd else active_project()
+    if not root.is_dir():
+        raise CaptainError(f"[commands-cwd] {root} is not a directory.")
+    listing = catalogue(root, args.agent)
+    if args.json:
+        print(json.dumps(listing))
+        return
+    for row in listing["commands"]:
+        usage = " ".join(part for part in (f"/{row['name']}", row["argument_hint"]) if part)
+        print(f"{usage}  {row['description'] or ''}".rstrip())
+    for row in listing["skills"]:
+        print(f"skill {row['name']}  {row['description'] or ''}".rstrip())
+
+
 def print_providers(args):
     """Install and sign-in status per agent CLI; needs no session, Herdr or supervisor."""
     # Local: the probes load the supervised adapters, which no other command needs.
@@ -716,6 +741,9 @@ def main(argv=None):
         if args.command == "settings":
             active_project()
             print_settings(args)
+            return 0
+        if args.command == "commands":
+            print_commands(args)
             return 0
         if args.command == "models":
             if args.json:

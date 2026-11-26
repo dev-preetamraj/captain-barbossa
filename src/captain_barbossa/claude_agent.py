@@ -2,8 +2,9 @@
 
 import json
 import threading
+from uuid import uuid4
 
-from . import config, jsonrpc, model_catalogue, processes, usage
+from . import command_catalogue, config, jsonrpc, model_catalogue, processes, usage
 from .pane import WAKE_LINE
 from .runtime import CaptainError
 
@@ -118,19 +119,14 @@ def current(link):
 
 
 def commands(link):
-    """Slash commands from claude's initialize reply; skills from its newest init message."""
-    listed = [row for row in link.native.get("commands", ()) if isinstance(row, dict)]
-    described = {row.get("name"): row.get("description") for row in listed}
-    init = link.native.get("init") or {}
-    skills = [name for name in init.get("skills") or () if isinstance(name, str)]
-    return {
-        "commands": [
-            {"name": row["name"], "description": row.get("description")}
-            for row in listed
-            if isinstance(row.get("name"), str) and row["name"] not in skills
-        ],
-        "skills": [{"name": name, "description": described.get(name)} for name in skills],
-    }
+    """Claude's initialize-reply commands, its skills told apart by their SKILL.md files."""
+    return command_catalogue.claude_listing(link.native.get("commands") or [], link.root)
+
+
+def run_command(link, name, args):
+    """Claude runs a command or skill typed as the prompt `/name args`."""
+    text = f"/{name} {args}".rstrip()
+    return ring(link, f"command-{uuid4().hex}", text)
 
 
 def idle_event(link):

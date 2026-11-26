@@ -154,7 +154,8 @@ class CaptainModelStateTests(SessionCase):
         with self.assertRaisesRegex(CaptainError, r"\[captain-not-running\]"):
             self.call("captain_commands")
         self.call("start_captain", {"provider": "fake"})
-        self.assertEqual(self.call("captain_commands"), COMMANDS)
+        compact = {**COMMANDS["commands"][0], "argument_hint": None}
+        self.assertEqual(self.call("captain_commands"), {"commands": [compact], "skills": []})
 
 
 if __name__ == "__main__":

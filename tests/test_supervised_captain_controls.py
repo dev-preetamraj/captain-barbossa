@@ -72,7 +72,12 @@ class ClaudeControlTests(unittest.TestCase):
 
     def listed(self):
         return [
-            {"name": "compact", "description": "Clear history but keep a summary"},
+            {
+                "name": "compact",
+                "description": "Clear history but keep a summary",
+                "argumentHint": "<notes>",
+                "builtin": True,
+            },
             {"name": "review-pr", "description": "Review a pull request", "argumentHint": ""},
         ]
 
@@ -123,7 +128,11 @@ class ClaudeControlTests(unittest.TestCase):
             claude_agent.commands(agent),
             {
                 "commands": [
-                    {"name": "compact", "description": "Clear history but keep a summary"}
+                    {
+                        "name": "compact",
+                        "description": "Clear history but keep a summary",
+                        "argument_hint": "<notes>",
+                    }
                 ],
                 "skills": [{"name": "review-pr", "description": "Review a pull request"}],
             },
@@ -196,7 +205,7 @@ class CodexControlTests(unittest.TestCase):
         self.assertEqual(self.peer.sent[-1], ("skills/list", {"cwds": ["/work"]}))
         self.assertEqual(listed["skills"], [{"name": "ship", "description": "Ship it"}])
         self.assertEqual(
-            [row["name"] for row in listed["commands"]], ["compact", "review", "model"]
+            [row["name"] for row in listed["commands"]], ["compact", "review", "goal", "feedback"]
         )
 
 
@@ -268,7 +277,10 @@ class PiControlTests(unittest.TestCase):
         self.assertEqual(
             pi_rpc.commands(agent),
             {
-                "commands": [{"name": "fix-tests", "description": "Fix tests"}],
+                "commands": [
+                    {**pi_rpc.BUILTINS[0]},
+                    {"name": "fix-tests", "description": "Fix tests"},
+                ],
                 "skills": [{"name": "skill:ship", "description": "Ship it"}],
             },
         )

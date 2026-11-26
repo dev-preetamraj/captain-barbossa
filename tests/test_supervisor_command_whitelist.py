@@ -78,7 +78,8 @@ class SupervisorCommandWhitelistTests(SessionCase):
         self.assertFalse(hello["capabilities"]["grok"]["supervised"])
         self.assertIn("fails open", " ".join(hello["capabilities"]["grok"]["limits"]))
         self.assertEqual(
-            hello["notifications"], ["event", "delivery", "output", "attention", "heartbeat"]
+            hello["notifications"],
+            ["event", "delivery", "output", "attention", "heartbeat", "captain_commands"],
         )
         self.assertIn("subscribe", hello["methods"])
         self.assertNotIn("do", hello["commands"])

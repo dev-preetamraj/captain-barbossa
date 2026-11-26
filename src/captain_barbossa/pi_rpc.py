@@ -4,12 +4,24 @@ import json
 import os
 import threading
 import time
+from uuid import uuid4
 
 from . import attachments, config, jsonrpc, models, usage
 from .runtime import CaptainError
 
 STARTING = "starting"
 FINISHING = "finishing"
+COMPACTING = "compacting"
+# pi answers compact only after its summary model call ends.
+COMPACT_TIMEOUT = 600
+# pi's TUI built-ins its RPC serves as commands; typed as prompt text they reach the model.
+BUILTINS = (
+    {
+        "name": "compact",
+        "description": "Summarize the session to free context.",
+        "argument_hint": "[instructions]",
+    },
+)
 UNCONFIRMED = "delivery unconfirmed"
 DIALOG_METHODS = frozenset(("select", "confirm", "input", "editor"))
 # pi echoes a prompt's images in its event lines, which the reader caps at jsonrpc.MAX_LINE.
@@ -286,16 +298,57 @@ def current(link):
     return {"model": named, "effort": level if isinstance(level, str) else None}
 
 
-def commands(link):
-    """pi's get_commands split into skills and the rest; pi lists no TUI built-in there."""
-    listed = link.peer.request("get_commands", {}, _timeout("request_timeout"))
+def listing(listed):
+    """pi's RPC-served built-ins, then get_commands split into skills and the rest."""
     rows = listed.get("commands") if isinstance(listed, dict) else None
-    found = {"commands": [], "skills": []}
+    found = {"commands": [dict(builtin) for builtin in BUILTINS], "skills": []}
     for row in rows if isinstance(rows, list) else ():
         if isinstance(row, dict) and isinstance(row.get("name"), str):
             kind = "skills" if row.get("source") == "skill" else "commands"
             found[kind].append({"name": row["name"], "description": row.get("description")})
     return found
+
+
+def commands(link):
+    return listing(link.peer.request("get_commands", {}, _timeout("request_timeout")))
+
+
+def run_command(link, name, args):
+    """`compact` runs pi's RPC compact in the background; the rest go as the prompt `/name args`."""
+    if name != "compact":
+        return ring(link, f"command-{uuid4().hex}", f"/{name} {args}".rstrip())
+    with link.guard:
+        if link.turn is not None:
+            return {"landed": False, "gate": "agent not idle"}
+        link.turn = COMPACTING
+    try:
+        streaming = _state(link)["isStreaming"]
+    except (CaptainError, OSError):
+        _release_compact(link)
+        raise
+    if streaming:
+        _release_compact(link)
+        return {"landed": False, "gate": "agent not idle"}
+    threading.Thread(target=_compact, args=(link, args), daemon=True).start()
+    return {"landed": True, "gate": None}
+
+
+def _release_compact(link):
+    with link.guard:
+        if link.turn == COMPACTING:
+            link.turn = None
+
+
+def _compact(link, args):
+    """Wait out pi's compaction, a model call of its own, then free the slot and end the turn."""
+    try:
+        params = {"customInstructions": args} if args else {}
+        link.peer.request("compact", params, COMPACT_TIMEOUT)
+    except (CaptainError, OSError) as exc:
+        link.notice("pi_compact", f"[pi-compact] pi could not compact: {exc}")
+    finally:
+        _release_compact(link)
+        link.ended(None)
 
 
 def _settled(link):

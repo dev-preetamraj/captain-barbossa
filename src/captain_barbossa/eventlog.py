@@ -64,6 +64,7 @@ ACTION_KINDS = (
     "authorization",
     "review",
     "prompt",
+    "captain-command",
     "session-renamed",
     "session-archived",
     "session-unarchived",

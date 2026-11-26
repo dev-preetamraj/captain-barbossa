@@ -61,7 +61,7 @@ Every refusal is a JSON-RPC error whose message starts with its protocol code an
 | `start` | `startup_timeout` (30) |
 | `stop` | `stop_timeout` (15) |
 | `shutdown` | the captain's stop, then every crew's, then every sign-in's: 2×`stop_timeout` + 1, + `stop_timeout`, + `stop_timeout` (61) |
-| `ring`, `interrupt`, `set_model`, `state`, `interrupt_captain`, `captain_state`, `set_captain_model`, `captain_commands` | `request_timeout` per native request; a pi ring and a Codex effort check make two or more (20) |
+| `ring`, `interrupt`, `set_model`, `state`, `interrupt_captain`, `captain_state`, `set_captain_model`, `captain_commands`, `run_captain_command` | `request_timeout` per native request; a pi ring and a Codex effort check make two or more (20) |
 | `interrupt_all` | `request_timeout`, every agent in parallel (10) |
 | `message_captain` | any bridge round in flight, then at most two native requests per prompt it sends; budget 60 |
 | `ack_delivery`, `uncertain_deliveries`, `resolve_captain_delivery` | any bridge round in flight; budget 30 |
@@ -103,7 +103,8 @@ Every refusal is a JSON-RPC error whose message starts with its protocol code an
 | `start_captain` | `provider`, `model` (optional), `effort` (optional); each absent one is the one `captain.json` records for that provider, else the `[captain]` settings default | `{provider, transport, model, effort, state: "started"}`; `model` and `effort` are what the native reports once open |
 | `captain_state` | none | `{state, provider, model, effort}`; state `idle`, `working`, `blocked` (a captain request waits on the user, any provider) or `null` (not running: provider, model and effort are the last recorded) |
 | `set_captain_model` | `model` (optional; a tier, id or alias), `effort` (optional); at least one | `{model, effort, applies}`; applies `now` or `next-turn` |
-| `captain_commands` | none | `{commands: [{name, description}], skills: [{name, description}]}` (Claude's skills are names only) |
+| `captain_commands` | none | `{commands: [{name, description, argument_hint}], skills: [{name, description}]}`; null where the native gives none |
+| `run_captain_command` | `name` (a listed command or skill; a leading `/` is dropped), `args` (optional string) | `{name, args, state}`; state `started`, or `unconfirmed` when the native never confirmed it |
 | `message_captain` | `text`, `message_id` (optional, 1 to 128 of `A-Za-z0-9_-`; minted when absent), `attachments` (optional, at most 10 of `{path, name?, mime?}`) | `{message_id, delivery_id, state, landed, error?}`; state `delivered`, `queued` or `uncertain`; `error` `{code, message}` when the send failed |
 | `interrupt_captain` | `reason` (optional) | `{outcome}` |
 | `stop_captain` | none | `{outcome}`; `stopped`, `pending` or `not-running` |
@@ -115,7 +116,10 @@ Every refusal is a JSON-RPC error whose message starts with its protocol code an
 | `transcript` | `agent`, `after` or `before` (optional cursors), `limit` (1 to 500, default 200), `incarnation` (optional) | `{agent, provider, files, entries, start, end, more}`; for the captain, `files` holds every provider's conversation in order (null where not yet found) and `provider` is the newest |
 | `step` | `agent`, `id`, `incarnation` (optional) | one entry with its whole text |
 | `rename` | `name` | `{session_id, name}` |
-| `sessions` | none | the session list (see Session hub) |
+| `sessions` | `all` (optional bool: include archived sessions) | the session list (see Session hub) |
+| `archive_session` | `session_id` | `{session_id, archived: true, archived_at, stopped}` |
+| `unarchive_session` | `session_id` | `{session_id, archived: false, archived_at: null}` |
+| `delete_session` | `session_id` | `{session_id, deleted: true}` |
 | `providers` | `recheck` (optional bool), `provider` (optional) | `{providers: [{provider, installed, version, signed_in, account, detail, hooks, checked_at, sign_in, attempt}]}` |
 | `sign_in` | `provider`, `method` (optional), `api_key` (with `apiKey`) | the attempt, or `{provider, state: "guidance", guidance}` |
 | `cancel_sign_in` | `provider` | the attempt, or `{provider, state: "not-running"}` |
@@ -135,7 +139,7 @@ An app calls every other method directly.
 - `ring` with a `message_id` Codex already accepted lands again without starting a second turn.
   A `turn/start` Codex never answered reports `"delivery unconfirmed"`: held, never bounced, and settled by the next turn notice.
 
-Refusal codes by method: `supervisor-params` (any), `supervisor-crew`, `supervisor-transport`, `supervisor-closing`, `supervisor-startup`, `codex-hooks-missing`, `codex-hooks-untrusted`, `claude-sdk-missing`, `claude-start` (start), `grant-request-unknown`, `grant-request-closed`, `grant-request-decision`, `grant-request-unsupported` (resolve_grant), `command-refused`, `command-timeout`, `command-failed` (command), `transcript-agent`, `transcript-range`, `transcript-entry`, `transcript-file`, `transcript-gone` (transcript, step), `session-name` (rename), `supervisor-captain-token` (any method but the captain CLI's, with the captain's token), `captain-delivery-decision`, `captain-delivery-unknown` (resolve_captain_delivery), `sign-in-method`, `sign-in-running`, `sign-in-missing` (sign_in), `supervisor-params` for an unknown `agent` (models), `authorization-argv` (command), `authorization-unknown`, `authorization-closed`, `authorization-decision` (resolve_authorization), `diff-assignment`, `diff-no-baseline`, `diff-git` (diff), `checkout-diff` (checkout_diff), `review-assignment`, `review-no-report`, `review-result` (mark_reviewed), `captain-transport`, `captain-running`, `captain-start` (start_captain), `effort-unsupported`, `claude-model` (start_captain, set_captain_model), `captain-not-running` (message, interrupt, answer, set_captain_model and captain_commands), `captain-message-id`, `attachment-missing`, `attachment-unsupported`, `attachment-too-large` (message_captain), `captain-request-closed`, `captain-request-answer`, `captain-request-unknown` (answer_captain), `delivery-unknown` (ack_delivery).
+Refusal codes by method: `supervisor-params` (any), `supervisor-crew`, `supervisor-transport`, `supervisor-closing`, `supervisor-startup`, `codex-hooks-missing`, `codex-hooks-untrusted`, `claude-sdk-missing`, `claude-start` (start), `grant-request-unknown`, `grant-request-closed`, `grant-request-decision`, `grant-request-unsupported` (resolve_grant), `command-refused`, `command-timeout`, `command-failed` (command), `transcript-agent`, `transcript-range`, `transcript-entry`, `transcript-file`, `transcript-gone` (transcript, step), `session-name` (rename), `session-unknown`, `supervisor-running`, `session-live-agents`, `session-unlanded-work`, `session-unreviewed-results`, `session-unresolved`, `delete-outside-session`, `delete-failed` (archive_session, delete_session; `session-unknown` also unarchive_session), `supervisor-captain-token` (any method but the captain CLI's, with the captain's token), `captain-delivery-decision`, `captain-delivery-unknown` (resolve_captain_delivery), `sign-in-method`, `sign-in-running`, `sign-in-missing` (sign_in), `supervisor-params` for an unknown `agent` (models), `authorization-argv` (command), `authorization-unknown`, `authorization-closed`, `authorization-decision` (resolve_authorization), `diff-assignment`, `diff-no-baseline`, `diff-git` (diff), `checkout-diff` (checkout_diff), `review-assignment`, `review-no-report`, `review-result` (mark_reviewed), `captain-transport`, `captain-running`, `captain-start` (start_captain), `effort-unsupported`, `claude-model` (start_captain, set_captain_model), `captain-not-running` (message, interrupt, answer, set_captain_model, captain_commands and run_captain_command), `captain-command-unsupported`, `captain-command-busy`, `captain-command-args` (run_captain_command), `captain-message-id`, `attachment-missing`, `attachment-unsupported`, `attachment-too-large` (message_captain), `captain-request-closed`, `captain-request-answer`, `captain-request-unknown` (answer_captain), `delivery-unknown` (ack_delivery).
 
 ### hello
 
@@ -182,6 +186,7 @@ Notifications, all redacted (see below):
 | `output` | `{crew, method, params}`: a native notification as the provider sent it, or with `method: "captain/usage"` a live usage frame (see Live usage) | no |
 | `attention` | `{crew, code, message}`: a start refused (hooks missing or untrusted, SDK missing), a native auth failure, with `code: "captain-delivery-uncertain"` and `delivery_id` an unconfirmed captain delivery, or with `code: "sign-in"` and `sign_in` a sign-in's progress | no |
 | `heartbeat` | `{at}` (epoch seconds), sent when nothing else was sent for 10 seconds | no |
+| `captain_commands` | the running captain's whole `captain_commands` listing, when it changed since the last read | no |
 
 - A client keeps the latest `cursor` per stream and passes them to its next `subscribe`, so a reconnect misses no line and repeats none.
 - `delivery` is the projection `wait --all` returns, sent once per subscription while its `delivery_id` stays pending; it never acknowledges.
@@ -216,7 +221,11 @@ A Herdr session writes no action log and reads nothing extra to decide that: cal
 | `authorization` | `captain do`, `command`, resolve_authorization (crew is `captain`, assignment null) | `request, state` (`open`, `approved`, `denied`, `spent`), plus `origin, argv, command, category, cwd, reason` when opened and `decision_reason` when decided |
 | `review` | mark_reviewed | `result` (null for the report), `note` |
 | `prompt` | message_captain, the delivery bridge (crew is `captain`, assignment null) | `message, state` (`queued`, `delivered`), `attachments`, plus `text` when queued |
+| `captain-command` | run_captain_command (crew is `captain`, assignment null) | `name, args, state` (`started`, `unconfirmed`) |
 | `session-renamed` | `sessions.rename_session` for every source (`rename`, `captain --rename`), supervised sessions only (crew and assignment null) | `session_id, name, previous` (null when it had no name) |
+| `session-archived` | `sessions.set_archived` (archive_session, `captain archive`), supervised sessions only (crew and assignment null) | `session_id` |
+| `session-unarchived` | the same, for unarchive_session and `captain unarchive` | `session_id` |
+| `session-deleted` | delete_session, on the calling supervisor's own stream since the deleted session's is removed (crew and assignment null) | `session_id` |
 
 Lines are capped at 64 KiB; an oversized action drops its largest payload fields and keeps its identity, with `payload_truncated: true`.
 
@@ -270,7 +279,18 @@ The captain can route a question to the user itself, for good, with `captain esc
   A Herdr captain launch writes its own `captain.json` without them, unchanged.
 - Effort: Codex takes the levels `model/list` advertises for the model, Claude `low` to `max`, pi its thinking levels; any other is refused with `[effort-unsupported]`, and a Claude SDK refusal of a model with `[claude-model]`.
   `set_captain_model` resolves a tier or alias like `start_captain`, and applies at once to an idle captain or from its next turn.
-- `captain_commands` lists the native's slash commands and skills for the composer. Sent as `message_captain` text, `/compact` runs natively only for Claude; Codex compacts with `thread/compact/start` and pi with its RPC `compact`, neither reachable as message text.
+- `captain_commands` lists the native's slash commands and skills for the composer, in the same shape as the session-less `command_catalogue` listing.
+  Claude: the commands of its initialize reply (`get_server_info`), `argumentHint` as `argument_hint`; a built-in or a `commands/*.md` file (user, project or plugin) is a command and every other entry a skill, described by its SKILL.md frontmatter when that has a one-line description.
+  A skill whose SKILL.md says `user-invocable: false` is left out; one with `disable-model-invocation: true` stays a skill though Claude hides it from the model.
+  Codex: the commands the app-server serves as methods (`compact`, `review`, `goal`, `feedback`) and the enabled skills `skills/list` reports for the project; pi: its RPC `compact`, then `get_commands` split by `source: "skill"`.
+  `captain commands --agent claude|codex|pi [--cwd DIR] [--json]` prints the same listing with no session, Herdr or supervisor, from short-lived native processes and no model turn (Claude through `claude_host --commands`, which needs the Agent SDK); a failure is `[command-discovery]`, or `[commands-cwd]` for a missing directory.
+  The supervisor re-reads the listing when the captain starts and after each of its turns, and sends a `captain_commands` notification with the whole listing when it changed.
+- `run_captain_command` runs one listed command or skill, anything unlisted or a provider without a runner refused with `[captain-command-unsupported]` and a working captain with `[captain-command-busy]`; each run is a `captain-command` action.
+  Claude takes every one as the prompt `/name args`.
+  Codex: `compact` is `thread/compact/start`, `review` `review/start` (the working tree, or the args as custom instructions), `goal TEXT` `thread/goal/set` (active, so Codex starts working on it) and `goal clear` `thread/goal/clear` (no text is `[captain-command-args]`), `feedback` `feedback/upload` (classification `other`, the args as its reason, no logs; it leaves the machine); compact, review and a set goal each open a turn and hold the captain busy. A skill goes as `$name args` with its `skill` input item, as Codex's composer sends it.
+  pi: `compact` is its RPC `compact` (the args as custom instructions), run in the background with the captain busy until it ends; a failure is an `attention` with `[pi-compact]`. Anything else goes as the prompt `/name args`, skills as `/skill:name`.
+  Sent as `message_captain` text instead, only Claude runs a slash command; Codex and pi pass it to the model.
+  An adapter runs one through `run_command(link, name, args)`, returning a ring's `{landed, gate}`.
 - The scoped token reaches only the methods the captain CLI calls (`hello`, `start`, `stop`, `state`, `ring`, `interrupt`, `set_model`); every other method, such as `answer_captain`, `resolve_authorization`, `resolve_grant`, `resolve_captain_delivery` or `command`, is refused with `[supervisor-captain-token]`, so nothing the captain runs can answer the user's own decisions.
 - Its adapter link has `captain` set: Codex skips the crew-only four-hook check and starts its thread with the user's own sandbox and approval settings, as a terminal captain does, and Claude's ring carries the text instead of the crew wake line.
 - A captain's turn record (pi's turn-complete, Claude's idle notification) goes to its own hook; only a native permission request becomes a captain request.
@@ -296,7 +316,10 @@ The captain can route a question to the user itself, for good, with `captain esc
   an approval is `{tool, command, cwd, input, rules}`, and a question is `{questions: [{id, header, question, options: [{label, description}], multi_select, other, secret, multiline, prefill}]}` (`other`: free text allowed beside the options, `secret`: hide the typed answer, `multiline`: pi's `editor`).
 - `rules` are Claude's own allow-rule suggestions for that call (empty elsewhere).
   Answering an approval with `remember: true` approves it and, when `rules` is not empty, has Claude save them like a terminal "don't ask again"; elsewhere it is one approval. A non-bool `remember` is refused with `[captain-request-answer]`.
+  The app approves once, approves with `remember`, or denies: Codex takes these as `accept`, `acceptForSession` and `decline`; Claude saves the allow rules it offered only with `remember`; pi has no native command approval, so its confirmation dialogs stay one-shot.
 - The supervised Claude captain pre-allows its own session's `captain` commands (`Bash(<captain command> *)` in its `--settings`), so they never reach the user as approvals; a terminal captain's settings are unchanged.
+  A Codex captain auto-accepts only a literal invocation of its exact session `captain` CLI, optionally wrapped in one standard `sh -lc` style shell; shell composition or another session's CLI still asks the user.
+  Neither shortcut bypasses the CLI's own authorization checks.
   `start_captain` expires any request still open from an earlier captain, `stop_captain` expires and declines the ones its captain waits on, and only the newest 200 closed requests are kept.
 - Supervised-session instructions swap the Herdr-only lines (panes, tabs, focus, placement, background crew, wait) for app ones and never grow the text; crew recruited in the session get the same swap. Herdr text is unchanged.
 
@@ -372,7 +395,8 @@ A Herdr session never reads a live frame.
 
 The app keeps no session list of its own; it reads captain state, and needs no second long-running process.
 
-- List: `captain sessions`, run in any project with no Herdr and no supervisor, prints the list as one JSON line; a running supervisor's `sessions` method returns the same: `{projects: [{project, exists, sessions: [{id, name, transport, state, last_activity, ended_at, crew}]}]}`, the current project first, then by project, newest first.
+- List: `captain sessions`, run in any project with no Herdr and no supervisor, prints the list as one JSON line; a running supervisor's `sessions` method returns the same: `{projects: [{project, exists, sessions: [{id, name, transport, state, last_activity, ended_at, archived, crew}]}]}`, the current project first, then by project, newest first.
+  Archived sessions are left out unless `all: true` (method) or `--all` (CLI).
   `captain sessions --json` also gives each app session `needs_you` and `unreviewed`, read from its state files whether or not it runs (a running one's live figures are in `snapshot`); a Herdr session has null for both.
   `needs_you` counts the user's open decisions: questions waiting on the human (or escalated) and open grant requests, counted once per question, open unexpired authorizations, uncertain captain deliveries, and, only while running, open captain requests.
   `unreviewed` counts done supervised assignments whose report is not reviewed plus isolated results not reviewed.
@@ -381,6 +405,12 @@ The app keeps no session list of its own; it reads captain state, and needs no s
 - Rename: `rename`, or `captain --session ID --rename NAME` with no supervisor running.
 - End: `shutdown` with `end: true` stops every crew, records `ended_at` in `session.json` and exits; plain `shutdown` (quitting the app) stops without ending.
   A stopped session ends with `captain end --session ID` (or `captain --session ID end`) in its project, with no supervisor: it holds `supervisor.lock` while it records `ended_at`, prints `{session_id, ended_at}`, and is refused with `[supervisor-running]` while a supervisor holds the lock and `[supervisor-herdr-session]` for a session that is not an app session; ending an ended session keeps its `ended_at`.
+- Archive: `archive_session` hides a session from `sessions`, recording `archived_at` in `session.json`.
+  For this session it first shuts down with `end` (stops every crew, records `ended_at`), replies, and then exits; for another session it archives only when stopped.
+  `captain archive --session ID` does the same for a stopped session with no supervisor; it is refused with `[supervisor-running]` while a supervisor holds the lock and with `[session-live-agents]` for a Herdr session with live agents.
+  `unarchive_session` or `captain unarchive --session ID` clears `archived_at`; it is never refused for a known session.
+- Delete: `delete_session` or `captain delete --session ID` removes a stopped session's state directory and nothing outside it.
+  It is refused with `[supervisor-running]` (including this session), `[session-live-agents]`, `[session-unlanded-work]` (lists crew worktrees not yet removed), `[session-unreviewed-results]` (lists results neither applied, discarded nor reviewed), or `[session-unresolved]`; an unknown id is `[session-unknown]`.
 
 ## Transcripts
 

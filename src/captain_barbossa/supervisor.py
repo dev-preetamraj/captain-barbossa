@@ -28,6 +28,7 @@ from . import (
     captain_bridge,
     claude_agent,
     codex_app_server,
+    command_catalogue,
     config,
     dashboard,
     do,
@@ -42,6 +43,7 @@ from . import (
     protocol,
     provider_status,
     results,
+    retention,
     runtime,
     store,
     supervision,
@@ -52,7 +54,18 @@ from .crew import Crew, event_status
 from .memory import add_memory
 from .models import CAPABILITIES, PROVIDERS, TRANSPORTS, resolve_model
 from .runtime import CaptainError
-from .sessions import Session, catalog, crew_meta, locate, rename_session, session, session_name
+from .sessions import (
+    SESSION_ID,
+    Session,
+    catalog,
+    crew_meta,
+    find_session,
+    locate,
+    rename_session,
+    session,
+    session_name,
+    set_archived,
+)
 
 # Provider -> adapter module (open, ring, interrupt, set_model, state over a Link).
 # A provider without a row is refused at start.
@@ -102,7 +115,7 @@ CREW_ENV = (
     "CAPTAIN_WORKTREE_ID",
     "CAPTAIN_CREW_LAUNCHER",
 )
-NOTIFICATIONS = ("event", "delivery", "output", "attention", "heartbeat")
+NOTIFICATIONS = ("event", "delivery", "output", "attention", "heartbeat", "captain_commands")
 # Subscription pacing: event re-reads, delivery projections, the longest silence, and bytes of
 # one file per notification.
 STREAM_INTERVAL = 0.5
@@ -636,6 +649,7 @@ class CaptainRun:
     mine: set = field(default_factory=set)
     reported: set = field(default_factory=set)
     asks: dict = field(default_factory=dict)
+    commands: dict | None = None
 
 
 def live(link):
@@ -806,6 +820,7 @@ def captain_turn_ended(supervisor, run, event):
         with contextlib.suppress(CaptainError, OSError):
             relay_hook(run.link, event)
     run.wake.set()
+    watch_commands(supervisor, run)
 
 
 def captain_ask(supervisor, run, kind, payload):
@@ -972,6 +987,9 @@ def start_captain(supervisor, params):
     threading.Thread(
         target=bridge_captain, args=(supervisor, run), name="captain-bridge", daemon=True
     ).start()
+    threading.Thread(
+        target=watch_commands, args=(supervisor, run), name="captain-commands", daemon=True
+    ).start()
     lifecycle_captain(supervisor, "started", provider)
     chosen = current_model(link)
     reply = {"provider": provider, "transport": transport, **chosen}
@@ -1014,9 +1032,55 @@ def set_captain_model(supervisor, params):
     return changed
 
 
+def refresh_commands(supervisor, run):
+    """The captain's current listing, sent as `captain_commands` when it differs from the last."""
+    lister = getattr(run.link.adapter, "commands", None)
+    listing = command_catalogue.normalize(lister(run.link) if lister else None)
+    previous, run.commands = run.commands, listing
+    if previous is not None and listing != previous:
+        publish(supervisor, "captain_commands", listing)
+    return listing
+
+
+def watch_commands(supervisor, run):
+    """Refresh the listing at start and after each turn, so a change reaches subscribers."""
+    with contextlib.suppress(CaptainError, OSError):
+        refresh_commands(supervisor, run)
+
+
 def captain_commands(supervisor, params):
+    return refresh_commands(supervisor, _captain(supervisor))
+
+
+def run_captain_command(supervisor, params):
+    """Run a command or skill the captain lists, recorded as a `captain-command` action."""
     run = _captain(supervisor)
-    return run.link.adapter.commands(run.link)
+    name = _text(params, "name").removeprefix("/")
+    args = params.get("args")
+    if args is not None and not isinstance(args, str):
+        raise CaptainError("[supervisor-params] args must be a string.")
+    runner = getattr(run.link.adapter, "run_command", None)
+    if runner is None or name not in command_catalogue.names(refresh_commands(supervisor, run)):
+        raise CaptainError(
+            f"[captain-command-unsupported] The {run.provider} captain cannot run {name}."
+        )
+    with supervisor.bridge_lock:
+        result = runner(run.link, name, args or "")
+    if not result["landed"] and result.get("gate") == "agent not idle":
+        raise CaptainError("[captain-command-busy] The captain is working; run it once idle.")
+    state_name = "started" if result["landed"] else "unconfirmed"
+    with contextlib.suppress(CaptainError, OSError):
+        eventlog.record_action(
+            supervisor.session.directory,
+            "captain-command",
+            CAPTAIN,
+            None,
+            supervised=True,
+            name=name,
+            args=args or "",
+            state=state_name,
+        )
+    return {"name": name, "args": args or "", "state": state_name}
 
 
 def message_captain(supervisor, params):
@@ -1645,12 +1709,51 @@ def mark_reviewed(supervisor, params):
 
 
 def sessions(supervisor, params):
-    return catalog(Path(supervisor.session.meta["project"]))
+    return catalog(
+        Path(supervisor.session.meta["project"]), include_archived=params.get("all") is True
+    )
 
 
-def counted_catalog(project):
+def _session_directory(supervisor, params):
+    session_id = _text(params, "session_id")
+    try:
+        if not SESSION_ID.fullmatch(session_id):
+            raise CaptainError(f"{session_id} is not a session id.")
+        return find_session(Path(supervisor.session.meta["project"]), session_id)[4]
+    except CaptainError as exc:
+        raise CaptainError(f"[session-unknown] {exc}") from exc
+
+
+def archive_session(supervisor, params):
+    """Archive a session: this one after a shutdown with end, another one only when stopped."""
+    directory = _session_directory(supervisor, params)
+    if directory.name != supervisor.session.meta["id"]:
+        return {**retention.archive_session(directory), "stopped": False}
+    shutdown(supervisor, {"end": True})
+    return {**set_archived(directory, True), "stopped": True}
+
+
+def unarchive_session(supervisor, params):
+    return set_archived(_session_directory(supervisor, params), False)
+
+
+def delete_session(supervisor, params):
+    """Delete a stopped session's state; its own lock refuses this running session."""
+    deleted = retention.delete_session(_session_directory(supervisor, params))
+    eventlog.record_action(
+        supervisor.session.directory,
+        "session-deleted",
+        None,
+        None,
+        supervised=True,
+        session_id=deleted["session_id"],
+    )
+    return deleted
+
+
+def counted_catalog(project, include_archived=False):
     """The session list with each app session's sidebar counts read from its state files."""
-    listed = catalog(project)
+    listed = catalog(project, include_archived=include_archived)
     for row in listed["projects"]:
         for item in row["sessions"]:
             counts = {"needs_you": None, "unreviewed": None}
@@ -2056,6 +2159,9 @@ METHODS = {
     "step": step,
     "rename": rename,
     "sessions": sessions,
+    "archive_session": archive_session,
+    "unarchive_session": unarchive_session,
+    "delete_session": delete_session,
     "resolve_authorization": resolve_authorization,
     "authorizations": authorizations,
     "questions": questions,
@@ -2079,6 +2185,7 @@ METHODS = {
     "snapshot": snapshot,
     "set_captain_model": set_captain_model,
     "captain_commands": captain_commands,
+    "run_captain_command": run_captain_command,
     "resolve_captain_delivery": resolve_captain_delivery,
     "uncertain_deliveries": uncertain_deliveries,
 }
@@ -2139,7 +2246,10 @@ class Handler(socketserver.BaseRequestHandler):
             reply = {"error": refusal(str(exc), INVALID_REQUEST)}
         else:
             reply = self.answer(supervisor, message["method"], params)
-            ends = message["method"] == "shutdown" and "result" in reply
+            ends = "result" in reply and (
+                message["method"] == "shutdown"
+                or (message["method"] == "archive_session" and reply["result"]["stopped"])
+            )
             if message["method"] == "subscribe" and "result" in reply:
                 feed = join(supervisor)
         try:

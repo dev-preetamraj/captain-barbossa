@@ -390,6 +390,28 @@ async def one_shot(argv, out):
         await client.disconnect()
 
 
+async def list_commands(argv, out):
+    """Write claude's slash commands from its initialize reply, then disconnect; no turn runs."""
+    try:
+        import claude_agent_sdk as sdk
+    except ImportError:
+        jsonrpc.write(out, {"error": SDK_MISSING})
+        return 1
+    built, _ = options(sdk, argv, os.getcwd())
+    client = sdk.ClaudeSDKClient(built)
+    try:
+        await client.connect()
+        info = await client.get_server_info()
+        commands = info.get("commands") if isinstance(info, dict) else None
+        jsonrpc.write(out, {"commands": plain(commands or [])})
+        return 0
+    except (sdk.ClaudeSDKError, OSError, CaptainError) as exc:
+        jsonrpc.write(out, {"error": f"[claude-start] claude did not start: {exc}"})
+        return 1
+    finally:
+        await client.disconnect()
+
+
 def main(argv):
     if not argv:
         raise SystemExit("usage: python -m captain_barbossa.claude_host CLAUDE [--flag value ...]")
@@ -400,6 +422,8 @@ def main(argv):
     async def serve():
         if argv[0] == "--one-shot":
             return await one_shot(argv[1:], out)
+        if argv[0] == "--commands":
+            return await list_commands(argv[1:], out)
         return await Host(argv, out).run()
 
     return asyncio.run(serve())

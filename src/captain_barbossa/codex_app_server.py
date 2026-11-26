@@ -6,6 +6,7 @@ import shlex
 import subprocess
 import threading
 import time
+from uuid import uuid4
 
 from . import __version__, attachments, config, instructions, jsonrpc, processes, usage
 from .runtime import CaptainError
@@ -23,9 +24,26 @@ RUNNING = ("trusted", "managed")
 RESUME_REFUSED = "[jsonrpc-error] thread/resume:"
 # Codex's TUI built-ins the app-server serves as methods; typed as message text they reach the model.
 BUILTINS = (
-    {"name": "compact", "description": "Summarize the thread to free context."},
-    {"name": "review", "description": "Review the working tree's changes."},
-    {"name": "model", "description": "Choose the model and reasoning effort."},
+    {
+        "name": "compact",
+        "description": "Summarize the thread to free context.",
+        "argument_hint": None,
+    },
+    {
+        "name": "review",
+        "description": "Review the working tree's changes, or what the instructions name.",
+        "argument_hint": "[instructions]",
+    },
+    {
+        "name": "goal",
+        "description": "Set a goal Codex keeps working toward; clear drops it.",
+        "argument_hint": "<objective> | clear",
+    },
+    {
+        "name": "feedback",
+        "description": "Send feedback on this thread to OpenAI, without logs.",
+        "argument_hint": "[note]",
+    },
 )
 
 
@@ -143,6 +161,10 @@ def state(link):
 
 def ring(link, message_id, text, attached=()):
     """Start a turn carrying text; a crew mid-turn holds it, as a busy pane holds a doorbell."""
+    return _start_turn(link, message_id, text, attached)
+
+
+def _start_turn(link, message_id, text, attached=(), extra=()):
     with link.guard:
         if message_id in link.native.setdefault("accepted", set()):
             return {"landed": True, "gate": None}
@@ -153,6 +175,7 @@ def ring(link, message_id, text, attached=()):
     text, images = attachments.prompt(text, attached)
     link.native["inputs"] = [text]
     items = [{"type": "localImage", "path": record["path"]} for record, _ in images]
+    items.extend(extra)
     params = {"threadId": link.thread, "input": [{"type": "text", "text": text}, *items]}
     if link.model:
         params["model"] = link.model
@@ -245,18 +268,84 @@ def _effort(link, model, effort):
     return effort
 
 
-def commands(link):
-    """Enabled skills from skills/list for the thread's cwd, with the app-served built-ins."""
-    listed = link.peer.request("skills/list", {"cwds": [link.root]}, _timeout("request_timeout"))
+def enabled_skills(listed):
+    """The enabled skills of a skills/list reply, as Codex reports them."""
     rows = listed.get("data") if isinstance(listed, dict) else None
-    skills = [
-        {"name": skill["name"], "description": skill.get("description")}
+    return [
+        skill
         for row in (rows if isinstance(rows, list) else ())
         if isinstance(row, dict) and isinstance(row.get("skills"), list)
         for skill in row["skills"]
         if isinstance(skill, dict) and isinstance(skill.get("name"), str) and skill.get("enabled")
     ]
+
+
+def listing(listed):
+    skills = [
+        {"name": skill["name"], "description": skill.get("description")}
+        for skill in enabled_skills(listed)
+    ]
     return {"commands": [dict(builtin) for builtin in BUILTINS], "skills": skills}
+
+
+def _skills(link):
+    return link.peer.request("skills/list", {"cwds": [link.root]}, _timeout("request_timeout"))
+
+
+def commands(link):
+    """Enabled skills from skills/list for the thread's cwd, with the app-served built-ins."""
+    return listing(_skills(link))
+
+
+def _method_turn(link, text, method, params):
+    """Run an app-server method that opens a turn, holding the slot as turn/start does."""
+    with link.guard:
+        if link.turn is not None:
+            return {"landed": False, "gate": "agent not idle"}
+        link.turn = STARTING
+        link.native.update(inputs=[text], reply="", sending=None)
+    try:
+        link.peer.request(method, {"threadId": link.thread, **params}, _timeout("request_timeout"))
+    except CaptainError as exc:
+        if "[jsonrpc-timeout]" in str(exc):
+            return {"landed": False, "gate": UNCONFIRMED}
+        with link.guard:
+            if link.turn == STARTING:
+                link.turn = None
+        raise
+    return {"landed": True, "gate": None}
+
+
+def run_command(link, name, args):
+    """A built-in runs as its app-server method; a skill as `$name args` with its skill item."""
+    text = f"/{name} {args}".rstrip()
+    timeout = _timeout("request_timeout")
+    match name:
+        case "compact":
+            return _method_turn(link, text, "thread/compact/start", {})
+        case "review":
+            target = {"type": "custom", "instructions": args} if args else None
+            target = target or {"type": "uncommittedChanges"}
+            return _method_turn(link, text, "review/start", {"target": target})
+        case "goal" if args.strip() == "clear":
+            link.peer.request(
+                "thread/goal/clear", {"threadId": link.thread, "origin": "user"}, timeout
+            )
+            return {"landed": True, "gate": None}
+        case "goal":
+            if not args.strip():
+                raise CaptainError("[captain-command-args] /goal takes an objective, or clear.")
+            goal = {"objective": args.strip(), "origin": "user", "status": "active"}
+            return _method_turn(link, text, "thread/goal/set", goal)
+        case "feedback":
+            note = {"classification": "other", "reason": args or None, "includeLogs": False}
+            link.peer.request("feedback/upload", {"threadId": link.thread, **note}, timeout)
+            return {"landed": True, "gate": None}
+    skill = next((row for row in enabled_skills(_skills(link)) if row["name"] == name), None)
+    if skill is None or not isinstance(skill.get("path"), str):
+        raise CaptainError(f"[captain-command-unsupported] Codex has no skill {name}.")
+    item = {"type": "skill", "name": name, "path": skill["path"]}
+    return _start_turn(link, f"command-{uuid4().hex}", f"${name} {args}".rstrip(), (), [item])
 
 
 def _turn_id(params):
