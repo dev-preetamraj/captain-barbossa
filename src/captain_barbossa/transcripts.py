@@ -11,6 +11,7 @@ import stat
 from collections import deque
 from functools import partial
 from pathlib import Path
+from typing import NamedTuple
 
 from . import captain_bridge, eventlog, safe_read, usage
 from .runtime import CaptainError
@@ -26,6 +27,30 @@ ENTRY = re.compile(r"(\d+):(\d+):(\d+)")
 INCARNATION = re.compile(r"[a-f0-9]{32}")
 # The text items Codex wraps around each local image of a user message.
 CODEX_IMAGE_TAG = re.compile(r"<image(?: name=[^>]*)?>|</image>")
+# Leading text of the context a native injects as a user message, and its label.
+CONTEXT = {
+    "codex": (
+        ("# AGENTS.md instructions for ", "AGENTS.md instructions"),
+        ("<environment_context>", "Environment context"),
+        ("<user_instructions>", "User instructions"),
+    ),
+    "claude": (
+        ("<task-notification>", "Task notification"),
+        ("<system-reminder>", "System reminder"),
+        ("<local-command-caveat>", "Local command caveat"),
+        ("Base directory for this skill:", "Skill"),
+    ),
+}
+
+
+class Source(NamedTuple):
+    """A session file (None until found), its root, provider, parser and any provider it follows."""
+
+    path: Path | None
+    root: Path | None
+    provider: str | None
+    parse: object
+    switched: str | None = None
 
 
 def events_path(session, agent, incarnation=None):
@@ -68,6 +93,7 @@ def _block(role, kind, text, tool=None, call=None, origin=None, message=None):
         "origin": origin,
         "message": message,
         "attachments": [],
+        "label": None,
     }
 
 
@@ -168,7 +194,20 @@ def _message_queues(directory):
     return messages
 
 
-def _captain(parse, prompts, messages, record):
+def _context(provider, record, text):
+    """The label of context the native injected as a user message, else None."""
+    head = text.lstrip()
+    for prefix, label in CONTEXT.get(provider, ()):
+        if head.startswith(prefix):
+            return label
+    if provider == "claude" and record.get("isCompactSummary") is True:
+        return "Compaction summary"
+    if provider == "claude" and record.get("isMeta") is True:
+        return "Claude context"
+    return None
+
+
+def _captain(parse, provider, prompts, messages, record):
     """Split captain input and pair delivered prompts with their message ids in order."""
     blocks = []
     for block in parse(record):
@@ -176,17 +215,31 @@ def _captain(parse, prompts, messages, record):
             blocks.append(block)
             continue
         for origin, text in captain_bridge.parts(block["text"], prompts):
+            label = _context(provider, record, text) if origin == "native" else None
             ids = messages.get(hashlib.sha256(text.strip().encode()).hexdigest())
             message, attached = ids.popleft() if origin == "user" and ids else (None, [])
             blocks.append(
                 {
                     **block,
                     "text": text,
-                    "origin": origin,
+                    "origin": "context" if label else origin,
                     "message": message,
                     "attachments": attached,
+                    "label": label,
                 }
             )
+    return blocks
+
+
+def _blocks(source, position, record):
+    """A record's blocks tagged with their provider; a switch boundary opens a new provider's file."""
+    blocks = [{**block, "provider": source.provider} for block in source.parse(record)]
+    if source.switched and position[1] == 0:
+        text = f"Provider switched from {source.switched} to {source.provider}."
+        boundary = _block("system", "text", text, origin="provider-switch")
+        boundary.update(provider=source.provider, to=source.provider)
+        boundary["from"] = source.switched
+        blocks.insert(0, boundary)
     return blocks
 
 
@@ -208,11 +261,14 @@ def _open(path, root=None):
     return os.fdopen(fd, "rb")
 
 
-def _records(files, root, start=(0, 0)):
-    """(position, end, record) for each complete JSON object line at or after `start`."""
-    for index in range(start[0], len(files)):
+def _records(sources, start=(0, 0)):
+    """(position, end, record, source) for each complete JSON object line at or after `start`."""
+    for index in range(start[0], len(sources)):
+        source = sources[index]
+        if source.path is None or source.parse is None:
+            continue
         try:
-            file = _open(files[index], root)
+            file = _open(source.path, source.root)
         except FileNotFoundError:
             continue  # cleaned up with the crew's native history
         with file:
@@ -227,7 +283,7 @@ def _records(files, root, start=(0, 0)):
                 except ValueError:
                     continue
                 if isinstance(record, dict):
-                    yield position, (index, offset), record
+                    yield position, (index, offset), record, source
 
 
 def _clip(text, limit):
@@ -236,9 +292,9 @@ def _clip(text, limit):
     return text[:limit], len(text) > limit
 
 
-def _entries(parse, position, record):
+def _entries(source, position, record):
     entries = []
-    for number, block in enumerate(parse(record)):
+    for number, block in enumerate(_blocks(source, position, record)):
         text, clipped = _clip(block["text"], TEXT_CHARS)
         entries.append(
             {
@@ -264,23 +320,28 @@ def _position(value, name):
 
 
 def _sources(session, agent, incarnation):
-    provider, files, root = usage.native_files(events_path(session, agent, incarnation))
-    parse = PARSERS.get(provider)
-    if agent == "captain" and parse is not None:
-        parse = partial(
-            _captain,
-            parse,
-            captain_bridge.prompt_digests(session.directory),
-            _message_queues(session.directory),
-        )
-    return provider, [Path(file) for file in files], root, parse
+    """(provider, sources): a crew's files, or every captain conversation in order."""
+    path = events_path(session, agent, incarnation)
+    if agent != "captain":
+        provider, files, root = usage.native_files(path)
+        parse = PARSERS.get(provider)
+        return provider, [Source(Path(file), root, provider, parse) for file in files]
+    prompts = captain_bridge.prompt_digests(session.directory)
+    messages = _message_queues(session.directory)
+    sources, previous = [], None
+    for provider, file, root in usage.captain_conversations(path):
+        parse = partial(_captain, PARSERS[provider], provider, prompts, messages)
+        switched = previous if previous not in (None, provider) else None
+        sources.append(Source(Path(file) if file else None, root, provider, parse, switched))
+        previous = provider
+    return previous, sources
 
 
-def _prime(parse, files, root, stop):
-    for position, _, record in _records(files, root):
+def _prime(sources, stop):
+    for position, _, record, source in _records(sources):
         if position >= stop:
             break
-        parse(record)
+        source.parse(record)
 
 
 def read(session, agent, *, after=None, before=None, limit=DEFAULT_LIMIT, incarnation=None):
@@ -291,30 +352,29 @@ def read(session, agent, *, after=None, before=None, limit=DEFAULT_LIMIT, incarn
         raise CaptainError("[transcript-range] Pass after or before, not both.")
     first = _position(after, "after") if after is not None else (0, 0)
     stop = _position(before, "before") if before is not None else None
-    provider, files, root, parse = _sources(session, agent, incarnation)
+    provider, sources = _sources(session, agent, incarnation)
     pages, end, more = deque(), first, False
-    if parse is not None:
-        if agent == "captain" and first != (0, 0):
-            _prime(parse, files, root, first)
-        count = 0
-        for position, finish, record in _records(files, root, first):
-            if stop is not None and position >= stop:
-                break
-            found = _entries(parse, position, record)
-            if after is not None and found and count >= limit:
+    if agent == "captain" and first != (0, 0):
+        _prime(sources, first)
+    count = 0
+    for position, finish, record, source in _records(sources, first):
+        if stop is not None and position >= stop:
+            break
+        found = _entries(source, position, record)
+        if after is not None and found and count >= limit:
+            more = True
+            break
+        end = finish
+        if found:
+            pages.append((position, found))
+            count += len(found)
+            while after is None and count - len(pages[0][1]) >= limit:
+                count -= len(pages.popleft()[1])
                 more = True
-                break
-            end = finish
-            if found:
-                pages.append((position, found))
-                count += len(found)
-                while after is None and count - len(pages[0][1]) >= limit:
-                    count -= len(pages.popleft()[1])
-                    more = True
     return {
         "agent": agent,
         "provider": provider,
-        "files": [str(file) for file in files],
+        "files": [str(source.path) if source.path else None for source in sources],
         "entries": [entry for _, found in pages for entry in found],
         "start": _cursor(pages[0][0] if pages else first if after is not None else stop),
         "end": _cursor(end),
@@ -328,15 +388,16 @@ def step(session, agent, entry, *, incarnation=None):
     if match is None:
         raise CaptainError("[transcript-entry] An entry id is FILE:OFFSET:BLOCK.")
     index, offset, number = (int(group) for group in match.groups())
-    _, files, root, parse = _sources(session, agent, incarnation)
-    if parse is None or index >= len(files):
+    _, sources = _sources(session, agent, incarnation)
+    source = sources[index] if index < len(sources) else None
+    if source is None or source.parse is None or source.path is None:
         raise CaptainError(f"[transcript-entry] {agent} has no entry {entry}.")
     if agent == "captain" and (index, offset) != (0, 0):
-        _prime(parse, files, root, (index, offset))
+        _prime(sources, (index, offset))
     try:
-        file = _open(files[index], root)
+        file = _open(source.path, source.root)
     except FileNotFoundError as exc:
-        raise CaptainError(f"[transcript-gone] {files[index]} no longer exists.") from exc
+        raise CaptainError(f"[transcript-gone] {source.path} no longer exists.") from exc
     with file:
         if offset:
             file.seek(offset - 1)
@@ -348,7 +409,7 @@ def step(session, agent, entry, *, incarnation=None):
         record = json.loads(line)
     except ValueError:
         record = None
-    blocks = parse(record) if isinstance(record, dict) else []
+    blocks = _blocks(source, (index, offset), record) if isinstance(record, dict) else []
     if number >= len(blocks):
         raise CaptainError(f"[transcript-entry] {agent} has no entry {entry}.")
     text, clipped = _clip(blocks[number]["text"], STEP_CHARS)

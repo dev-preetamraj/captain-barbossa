@@ -47,7 +47,9 @@ class TranscriptMessageIdTests(unittest.TestCase):
             session = Session(directory)
 
             with patch.object(
-                transcripts.usage, "native_files", return_value=("claude", [history], None)
+                transcripts.usage,
+                "captain_conversations",
+                return_value=[("claude", str(history), None)],
             ):
                 first = transcripts.read(session, "captain", after="0:0", limit=1)
                 typed_page = transcripts.read(session, "captain", after=first["end"], limit=1)

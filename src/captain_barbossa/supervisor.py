@@ -52,7 +52,7 @@ from .crew import Crew, event_status
 from .memory import add_memory
 from .models import CAPABILITIES, PROVIDERS, TRANSPORTS, resolve_model
 from .runtime import CaptainError
-from .sessions import Session, catalog, crew_meta, locate, rename_session, session
+from .sessions import Session, catalog, crew_meta, locate, rename_session, session, session_name
 
 # Provider -> adapter module (open, ring, interrupt, set_model, state over a Link).
 # A provider without a row is refused at start.
@@ -1736,7 +1736,12 @@ def snapshot(supervisor, params):
         # An action landing during the read retries, so the cursor sits after what was read.
         if stream_ends(supervisor).get("actions") == cursors.get("actions"):
             break
-    reply = {"session_id": supervisor.session.meta["id"], "at": time.time(), "cursors": cursors}
+    reply = {
+        "session_id": supervisor.session.meta["id"],
+        "name": session_name(supervisor.session.directory),
+        "at": time.time(),
+        "cursors": cursors,
+    }
     return eventlog.redact({**reply, **view}, supervisor.literals)
 
 

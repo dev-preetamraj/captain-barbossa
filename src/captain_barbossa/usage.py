@@ -148,6 +148,69 @@ def native_files(events_path):
     return ("codex", [str(rollout)], root) if rollout else (None, [], None)
 
 
+def captain_conversations(events_path):
+    """(provider, file or None, root) per native session the captain's events name, found or not."""
+    named = {}
+    for record in records(events_path):
+        provider = record.get("provider") or ("claude" if "hook_event_name" in record else "codex")
+        if provider == "claude":
+            native = record.get("session_id") if "transcript_path" in record else None
+        else:
+            native = record.get("thread-id") or record.get("session_id")
+        if (
+            provider not in CAPTAIN_LOCATORS
+            or not isinstance(native, str)
+            or not _THREAD_ID.fullmatch(native)
+        ):
+            continue
+        paths = named.setdefault((provider, native), {})
+        if isinstance(record.get("transcript_path"), str):
+            paths[record["transcript_path"]] = None
+    return [
+        (provider, *CAPTAIN_LOCATORS[provider](native, list(paths)))
+        for (provider, native), paths in named.items()
+    ]
+
+
+def _captain_claude(session, paths):
+    alias = _native_home("CLAUDE_CONFIG_DIR", ".claude") / "projects"
+    if not alias.is_absolute():
+        return None, None
+    root = alias.resolve()
+    owned = _under(root, alias, paths[0]) if len(paths) == 1 else None
+    return (str(owned) if owned and owned.name == f"{session}.jsonl" else None), root
+
+
+def _captain_codex(thread, paths):
+    alias = _native_home("CODEX_HOME", ".codex") / "sessions"
+    if not alias.is_absolute():
+        return None, None
+    root = alias.resolve()
+    return _unique(root, (f"*/*/*/rollout-*-{thread}.jsonl",)), root
+
+
+def _captain_pi(session, paths):
+    configured = os.environ.get("PI_CODING_AGENT_SESSION_DIR")
+    alias = Path(configured).expanduser() if configured else None
+    alias = alias or _native_home("PI_CODING_AGENT_DIR", ".pi/agent") / "sessions"
+    if not alias.is_absolute():
+        return None, None
+    root = alias.resolve()
+    return _unique(root, (f"*_{session}.jsonl", f"*/*_{session}.jsonl")), root
+
+
+def _unique(root, patterns):
+    """The one file the patterns match under root, or None when none or several do."""
+    try:
+        matches = [path for pattern in patterns for path in root.glob(pattern)]
+    except OSError:
+        return None
+    return str(matches[0]) if len(matches) == 1 else None
+
+
+CAPTAIN_LOCATORS = {"claude": _captain_claude, "codex": _captain_codex, "pi": _captain_pi}
+
+
 def _incarnation(events_path):
     """The incarnation an events file is named for, or None for the captain and bare crew ids."""
     head, _, tail = events_path.stem.rpartition("-")

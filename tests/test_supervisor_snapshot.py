@@ -105,8 +105,10 @@ class SupervisorSnapshotTests(SessionCase):
         self.call("start_captain", {"provider": "fake", "model": "m1", "effort": "high"})
         asked = captain_bridge.open_request(directory, "approval", {"tool": "Bash"})
         self.call("message_captain", {"text": "Plan it.", "message_id": "m1"})
+        self.call("rename", {"name": "Release prep"})
         found = self.call("snapshot")
         self.assertEqual(found["session_id"], self.current.meta["id"])
+        self.assertEqual(found["name"], "Release prep")
         self.assertIn("actions", found["cursors"])
         captain = found["captain"]
         self.assertEqual(

@@ -112,7 +112,7 @@ Every refusal is a JSON-RPC error whose message starts with its protocol code an
 | `ack_delivery` | `delivery_id` | `{delivery_id, state: "acknowledged"}` |
 | `snapshot` | none | the read model at `cursors` (see Snapshot) |
 | `subscribe` | `cursors` (optional object: stream name to `{offset, generation}` or a bare offset) | `{session_id, ends}`, then notifications on the same connection |
-| `transcript` | `agent`, `after` or `before` (optional cursors), `limit` (1 to 500, default 200), `incarnation` (optional) | `{agent, provider, files, entries, start, end, more}` |
+| `transcript` | `agent`, `after` or `before` (optional cursors), `limit` (1 to 500, default 200), `incarnation` (optional) | `{agent, provider, files, entries, start, end, more}`; for the captain, `files` holds every provider's conversation in order (null where not yet found) and `provider` is the newest |
 | `step` | `agent`, `id`, `incarnation` (optional) | one entry with its whole text |
 | `rename` | `name` | `{session_id, name}` |
 | `sessions` | none | the session list (see Session hub) |
@@ -120,7 +120,7 @@ Every refusal is a JSON-RPC error whose message starts with its protocol code an
 | `sign_in` | `provider`, `method` (optional), `api_key` (with `apiKey`) | the attempt, or `{provider, state: "guidance", guidance}` |
 | `cancel_sign_in` | `provider` | the attempt, or `{provider, state: "not-running"}` |
 | `usage` | none | `{agents: [{agent, usage}]}`; `usage` is a frame or null |
-| `models` | `agent` (optional: `codex`, `claude` or `pi`; all when absent) | `{version: 1, providers: [{provider, tiers: {cheap, mid, strong}, models: [{id, aliases, context_window, effort_levels}], error}]}` |
+| `models` | `agent` (optional: `codex`, `claude` or `pi`; all when absent) | `{version: 1, providers: [{provider, tiers: {cheap, mid, strong}, models: [{id, name, aliases, context_window, effort_levels, legacy?}], error}]}`; `legacy` is present and true only for superseded models. |
 | `settings` | none | `{version: 1, settings, sources, paths}` (see Settings read) |
 | `resolve_captain_delivery` | `delivery_id`, `decision` (`resend` or `ack`) | `{delivery_id, decision}` |
 | `uncertain_deliveries` | none | `{deliveries: [{delivery_id, at, delivery}]}`, oldest first |
@@ -216,6 +216,7 @@ A Herdr session writes no action log and reads nothing extra to decide that: cal
 | `authorization` | `captain do`, `command`, resolve_authorization (crew is `captain`, assignment null) | `request, state` (`open`, `approved`, `denied`, `spent`), plus `origin, argv, command, category, cwd, reason` when opened and `decision_reason` when decided |
 | `review` | mark_reviewed | `result` (null for the report), `note` |
 | `prompt` | message_captain, the delivery bridge (crew is `captain`, assignment null) | `message, state` (`queued`, `delivered`), `attachments`, plus `text` when queued |
+| `session-renamed` | `sessions.rename_session` for every source (`rename`, `captain --rename`), supervised sessions only (crew and assignment null) | `session_id, name, previous` (null when it had no name) |
 
 Lines are capped at 64 KiB; an oversized action drops its largest payload fields and keeps its identity, with `payload_truncated: true`.
 
@@ -330,9 +331,10 @@ A Herdr session never reads a live frame.
 ## Snapshot
 
 `snapshot` is the app's read model: everything it shows, read at once, with the stream cursors to `subscribe` from.
+`name` is the session's name, null when unnamed; a later rename arrives as a `session-renamed` action.
 
 ```json
-{"session_id": "...", "at": 1795675819.4, "cursors": {"actions": {"offset": 18342, "generation": "16777232-1789"}, "captain": {...}},
+{"session_id": "...", "name": "Release prep", "at": 1795675819.4, "cursors": {"actions": {"offset": 18342, "generation": "16777232-1789"}, "captain": {...}},
  "captain": {"state": "idle", "provider": "codex", "transport": "app-server", "model": "gpt-5", "effort": null},
  "agents": [{"id": "will", "crew": "Will", "provider": "codex", "model": "gpt-5", "effort": null, "incarnation": "<32 hex>", "execution": "supervised", "checkout": "shared", "worktree_id": null, "execution_root": "/path", "status": "started", "state": "working", "source": "supervisor", "detail": "native state"}],
  "assignments": [{"id": "...", "crew": "Will", "incarnation_id": "...", "state": "working", "task": "...", "paths": [], "actions": [], "verify": null, "question": null, "report": null, "outcome": null, "execution_root": "/path", "worktree_id": null, "reviewed": null, "reviewed_results": null, "active": true}],
@@ -385,13 +387,18 @@ The app keeps no session list of its own; it reads captain state, and needs no s
 `transcript` and `step` read an agent's own native session files, never a copy: the Claude transcript, the Codex rollout and the pi session file, found from the crew's native-history manifest, else from the transcript path or Codex thread its events name.
 `agent` is a crew id or `captain`; `incarnation` reads an earlier incarnation of that crew.
 Files removed by native-history cleanup after a dismissal are skipped, so that crew's transcript reads as empty.
+The captain's transcript is every native session its events name, in the order they first appear, across providers: a Claude session by its transcript path, a Codex thread by its rollout, a pi session by `<stamp>_<session id>.jsonl` under pi's sessions directory (`PI_CODING_AGENT_SESSION_DIR`, else `PI_CODING_AGENT_DIR/sessions`).
+A session not found yet keeps its place in `files` as null, so ids into later files stay valid; page `provider` is the newest session's.
 
 ```json
-{"id": "0:18342:2", "at": "2026-11-26T10:32:51.264Z", "role": "assistant", "kind": "tool_call", "text": "{\"command\": \"ls\"}", "tool": "Bash", "call": "toolu_01", "origin": null, "message": null, "attachments": [], "clipped": false}
+{"id": "0:18342:2", "at": "2026-11-26T10:32:51.264Z", "role": "assistant", "kind": "tool_call", "text": "{\"command\": \"ls\"}", "tool": "Bash", "call": "toolu_01", "origin": null, "message": null, "attachments": [], "label": null, "provider": "claude", "clipped": false}
 ```
 
 - An entry is one block of one native record: `role` `user`, `assistant`, `tool` or `system`, `kind` `text`, `thinking`, `tool_call` or `tool_result`; `call` links a result to its call.
-- In the captain's transcript, a `user` text block is split into one entry per part, each with `origin`: `operator-note` (the notes in front), then `user` (a `message_captain` prompt), `delivery` (a crew delivery), `authorization` (an authorization outcome) or `native` (the provider's own context).
+- Every entry carries the `provider` whose file it came from.
+- In the captain's transcript, a `user` text block is split into one entry per part, each with `origin`: `operator-note` (the notes in front), then `user` (a `message_captain` prompt), `delivery` (a crew delivery), `authorization` (an authorization outcome), `context` (context the native injected) or `native` (anything else from the provider).
+  A `context` entry has a short `label`, never a `message` id: Codex `AGENTS.md instructions`, `Environment context` and `User instructions`; Claude `Task notification`, `System reminder`, `Local command caveat`, `Skill`, `Compaction summary`, and `Claude context` for its other meta records; pi keeps injected context out of user messages. `label` is null on every other entry.
+- Where the captain's provider changes, the new provider's first record opens with an entry `{origin: "provider-switch", role: "system", from, to, text}`, id `FILE:0:0`, before that record's own blocks.
   A prompt is known by a digest kept in `sessions/<id>/captain-prompts`; every other entry has `origin: null`.
   A `user` entry carries its `message` id and the prompt's `attachments`, its text without the appended path references; every other entry has `attachments: []`.
 - `id` is `FILE:OFFSET:BLOCK`: the index into `files`, the record's byte offset and the block; native files only grow, so it stays valid.
