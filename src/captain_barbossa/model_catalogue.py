@@ -29,7 +29,7 @@ NativePeer = TypeVar("NativePeer", bound=Peer)
 
 
 @contextlib.contextmanager
-def _native(
+def native_peer(
     argv: list[str], root: Path, factory: Callable[..., NativePeer]
 ) -> Iterator[NativePeer]:
     """Own the probe's pipes and process group, including failed startup and timed-out requests."""
@@ -52,7 +52,7 @@ def _native(
     except OSError as exc:
         os.close(write_fd)
         os.close(read_fd)
-        raise CaptainError(f"Model discovery could not start {argv[0]}: {exc}") from exc
+        raise CaptainError(f"Native probe could not start {argv[0]}: {exc}") from exc
     finally:
         os.close(native_in)
         os.close(native_out)
@@ -122,7 +122,7 @@ def codex_models(root: Path) -> list[dict]:
     from .jsonrpc import Peer
 
     deadline = time.monotonic() + PROBE_TIMEOUT
-    with _native([runtime.executable("codex"), "app-server"], root, Peer) as peer:
+    with native_peer([runtime.executable("codex"), "app-server"], root, Peer) as peer:
         peer.request(
             "initialize",
             {"clientInfo": {"name": "captain-barbossa", "version": __version__}},
@@ -172,7 +172,7 @@ def pi_models(root: Path) -> list[dict]:
         "--no-tools",
     ]
     deadline = time.monotonic() + PROBE_TIMEOUT
-    with _native(argv, root, Peer) as peer:
+    with native_peer(argv, root, Peer) as peer:
         result = peer.request("get_available_models", {}, _remaining(deadline))
         native_rows = _rows(result, "models")
         counts = Counter(_identifier(row.get("id")) for row in native_rows)

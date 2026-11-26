@@ -166,6 +166,7 @@ class Link:
     captain: bool = False
     ask: object = None
     usage: object = None
+    effort: str | None = None
 
 
 @dataclass
@@ -635,7 +636,6 @@ class CaptainRun:
     mine: set = field(default_factory=set)
     reported: set = field(default_factory=set)
     asks: dict = field(default_factory=dict)
-    effort: str | None = None
 
 
 def live(link):
@@ -647,8 +647,8 @@ def captain_command(supervisor, provider, model, effort):
     transport = next(iter(TRANSPORTS.get(provider, ())), None)
     if transport not in launch.CAPTAIN_TRANSPORTS or provider not in ADAPTERS:
         raise CaptainError(f"[captain-transport] {provider} cannot run as a supervised captain.")
-    if effort is not None and (provider != "pi" or not isinstance(effort, str)):
-        raise CaptainError("[supervisor-params] effort is a string, for a pi captain only.")
+    if effort is not None and not isinstance(effort, str):
+        raise CaptainError("[supervisor-params] effort must be a string.")
     current = current_session(supervisor)
     model = resolve_model(provider, model) if model else None
     argv, overlay = launch.prepare_launch(
@@ -660,8 +660,6 @@ def captain_command(supervisor, provider, model, effort):
         transport=transport,
         bridge=False,
     )
-    if effort:
-        argv += ["--thinking", effort]
     env = {
         key: value
         for key, value in os.environ.items()
@@ -685,14 +683,33 @@ def _captain_record(directory):
 def record_captain(directory, provider):
     """Mark the captain in captain.json, keeping (and returning) a same-provider native session id."""
     previous = _captain_record(directory)
+    same = previous.get("provider") == provider
     native = previous.get("native_session_id")
-    if previous.get("provider") != provider or not isinstance(native, str):
+    if not same or not isinstance(native, str):
         native = None
     record = {"provider": provider, "pane": None, "transport": "supervisor"}
+    record.update(model=previous.get("model") if same else None)
+    record.update(effort=previous.get("effort") if same else None)
     if native:
         record["native_session_id"] = native
     store.write_json(directory / "captain.json", record)
     return native
+
+
+def record_model(supervisor, provider, chosen):
+    """Keep the captain's model and effort in captain.json; changing a recorded one is an action."""
+    directory = supervisor.session.directory
+    record = _captain_record(directory)
+    if record.get("provider") != provider:
+        return
+    model, effort = chosen.get("model"), chosen.get("effort")
+    if (record.get("model"), record.get("effort")) == (model, effort):
+        return
+    store.write_json(directory / "captain.json", {**record, "model": model, "effort": effort})
+    if record.get("model") is None:
+        return
+    detail = f"{model} ({effort})" if effort else str(model)
+    lifecycle_captain(supervisor, "model-changed", detail, model=model, effort=effort)
 
 
 def remember_native(directory, provider, native):
@@ -727,6 +744,7 @@ def own_captain(supervisor, run, argv, env):
         link.adapter.open(link)
         with contextlib.suppress(CaptainError, OSError):
             remember_native(supervisor.session.directory, run.provider, link.thread)
+            record_model(supervisor, run.provider, current_model(link))
         if link.peer is not None:
             tee_output(supervisor, link)
         link.ready.set()
@@ -758,7 +776,7 @@ def own_captain(supervisor, run, argv, env):
         run.wake.set()
 
 
-def lifecycle_captain(supervisor, state, detail):
+def lifecycle_captain(supervisor, state, detail, **fields):
     with contextlib.suppress(CaptainError, OSError):
         eventlog.record_action(
             supervisor.session.directory,
@@ -768,7 +786,18 @@ def lifecycle_captain(supervisor, state, detail):
             supervised=True,
             state=state,
             detail=detail,
+            **fields,
         )
+
+
+def current_model(link):
+    """{model, effort} the captain's native reports, else what it was started with."""
+    found = {"model": link.model, "effort": link.effort}
+    reader = getattr(link.adapter, "current", None)
+    if reader is not None:
+        with contextlib.suppress(CaptainError, OSError):
+            found.update({key: value for key, value in reader(link).items() if value})
+    return found
 
 
 def captain_turn_ended(supervisor, run, event):
@@ -890,12 +919,15 @@ def bridge_captain(supervisor, run):
 def start_captain(supervisor, params):
     """Start the session's captain on its structured transport, fed by the delivery bridge."""
     provider = params.get("provider") or config.text("captain", "agent")
-    model = params.get("model") or config.text("captain", "model")
+    recorded = _captain_record(supervisor.session.directory)
+    kept = recorded if recorded.get("provider") == provider else {}
+    model = params.get("model") or kept.get("model") or config.text("captain", "model")
+    effort = params.get("effort") or kept.get("effort")
     if not isinstance(provider, str) or (model is not None and not isinstance(model, str)):
         raise CaptainError("[supervisor-params] provider and model must be strings.")
     if supervisor.captain is not None and not supervisor.captain.link.done.is_set():
         raise CaptainError("[captain-running] The captain is already running.")
-    argv, env, model, transport = captain_command(supervisor, provider, model, params.get("effort"))
+    argv, env, model, transport = captain_command(supervisor, provider, model, effort)
     native = record_captain(supervisor.session.directory, provider)
     project = supervisor.session.meta["project"]
     expire_captain_requests(supervisor)
@@ -914,10 +946,9 @@ def start_captain(supervisor, params):
             model=model,
             captain=True,
             thread=native,
+            effort=effort,
         )
-        run = supervisor.captain = CaptainRun(
-            link, provider, transport, effort=params.get("effort")
-        )
+        run = supervisor.captain = CaptainRun(link, provider, transport)
     link.relay = lambda event: captain_relay(supervisor, run, event)
     link.ended = lambda event: captain_turn_ended(supervisor, run, event)
     link.notice = lambda key, summary: attention(supervisor, CAPTAIN, summary)
@@ -940,7 +971,9 @@ def start_captain(supervisor, params):
         target=bridge_captain, args=(supervisor, run), name="captain-bridge", daemon=True
     ).start()
     lifecycle_captain(supervisor, "started", provider)
-    return {"provider": provider, "transport": transport, "model": model, "state": "started"}
+    chosen = current_model(link)
+    reply = {"provider": provider, "transport": transport, **chosen}
+    return {**reply, "state": "started"}
 
 
 def _captain(supervisor):
@@ -951,11 +984,37 @@ def _captain(supervisor):
 
 
 def captain_state(supervisor, params):
+    """The running captain's state, model and effort; a stopped one's last recorded ones."""
     run = supervisor.captain
     if run is None or not live(run.link):
-        return {"state": None}
+        record = _captain_record(supervisor.session.directory)
+        recorded = {key: record.get(key) for key in ("provider", "model", "effort")}
+        return {"state": None, **recorded}
     state_name = "blocked" if run.asks else run.link.adapter.state(run.link)
-    return {"state": state_name, "provider": run.provider}
+    return {"state": state_name, "provider": run.provider, **current_model(run.link)}
+
+
+def set_captain_model(supervisor, params):
+    """Switch the running captain's model, effort or both, recorded in captain.json."""
+    run = _captain(supervisor)
+    model, effort = params.get("model"), params.get("effort")
+    if model is None and effort is None:
+        raise CaptainError("[supervisor-params] Give a model, an effort or both.")
+    if any(value is not None and not isinstance(value, str) for value in (model, effort)):
+        raise CaptainError("[supervisor-params] model and effort must be strings.")
+    if model is not None:
+        model = resolve_model(run.provider, model)
+    changed = run.link.adapter.set_model(run.link, model, effort)
+    if effort is not None:
+        run.link.effort = effort
+    with contextlib.suppress(CaptainError, OSError):
+        record_model(supervisor, run.provider, changed)
+    return changed
+
+
+def captain_commands(supervisor, params):
+    run = _captain(supervisor)
+    return run.link.adapter.commands(run.link)
 
 
 def message_captain(supervisor, params):
@@ -1694,13 +1753,7 @@ def read_model(supervisor):
     assignments = list(state["assignments"].values())
     active = set(state["active"].values())
     return {
-        "captain": {
-            **captain_state(supervisor, {}),
-            "provider": run.provider if run else _captain_record(directory).get("provider"),
-            "transport": run.transport if run else None,
-            "model": run.link.model if run else None,
-            "effort": run.effort if run else None,
-        },
+        "captain": {**captain_state(supervisor, {}), "transport": run.transport if run else None},
         "agents": [agent_row(supervisor, crew) for crew in Crew.members(current)],
         "assignments": [assignment_row(row, row["id"] in active) for row in assignments],
         "mail": mail,
@@ -2010,6 +2063,8 @@ METHODS = {
     "models": model_list,
     "ack_delivery": ack_delivery,
     "snapshot": snapshot,
+    "set_captain_model": set_captain_model,
+    "captain_commands": captain_commands,
     "resolve_captain_delivery": resolve_captain_delivery,
     "uncertain_deliveries": uncertain_deliveries,
 }

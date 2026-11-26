@@ -29,12 +29,14 @@ class ModelsJsonTests(unittest.TestCase):
         self.enterContext(patch.object(config.Path, "home", return_value=self.root))
         config.settings.cache_clear()
         self.addCleanup(config.settings.cache_clear)
-        self.native = model_catalogue._native
+        self.native = model_catalogue.native_peer
         self.argv = []
         self.enterContext(
             patch.object(model_catalogue.runtime, "executable", side_effect=lambda name: name)
         )
-        self.enterContext(patch.object(model_catalogue, "_native", side_effect=self.fake_native))
+        self.enterContext(
+            patch.object(model_catalogue, "native_peer", side_effect=self.fake_native)
+        )
 
     def fake_native(self, argv: list[str], root: Path, factory: object) -> object:
         self.argv.append(argv)

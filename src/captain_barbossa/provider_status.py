@@ -74,7 +74,7 @@ def codex_hooks(binary, root, timeout):
     """Codex's trust of captain's crew hooks, read with `hooks/list`; trust is never written."""
     flags = instructions.native_args("codex", "", events=TRUST_PROBE, transport="app-server")
     try:
-        with model_catalogue._native(
+        with model_catalogue.native_peer(
             [binary, "app-server", *flags], Path(root), jsonrpc.Peer
         ) as peer:
             client = {"name": "captain-barbossa", "version": __version__}

@@ -37,7 +37,7 @@ class CodexHookTrustTests(SessionCase):
             self.argv = argv
             yield peer
 
-        with patch.object(model_catalogue, "_native", side_effect=native):
+        with patch.object(model_catalogue, "native_peer", side_effect=native):
             found = provider_status.codex_hooks("codex", self.project, 5)
         self.assertEqual(peer.asked, ["initialize", "initialized", "hooks/list"])
         return found
@@ -57,7 +57,7 @@ class CodexHookTrustTests(SessionCase):
             raise CaptainError("codex app-server did not start")
             yield
 
-        with patch.object(model_catalogue, "_native", side_effect=broken):
+        with patch.object(model_catalogue, "native_peer", side_effect=broken):
             found = provider_status.codex_hooks("codex", self.project, 5)
         self.assertEqual(found["state"], "unknown")
 

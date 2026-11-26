@@ -145,7 +145,10 @@ class SupervisedCaptainTests(SessionCase):
         with self.assertRaisesRegex(CaptainError, r"\[captain-running\]"):
             self.call("start_captain", {"provider": "fake"})
         self.assertEqual(self.call("stop_captain"), {"outcome": "stopped"})
-        self.assertEqual(self.call("captain_state"), {"state": None})
+        self.assertEqual(
+            self.call("captain_state"),
+            {"state": None, "provider": "fake", "model": "m", "effort": None},
+        )
         states = [a["state"] for a in self.actions() if a["kind"] == "lifecycle"]
         self.assertEqual(states, ["started", "stopped"])
         with self.assertRaisesRegex(CaptainError, r"\[captain-not-running\]"):
