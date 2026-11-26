@@ -54,7 +54,7 @@ cheap = "fable"
 ```
 
 resolve to `[captain] model = "strong"` (only the global file sets it),
-`[models.claude] cheap = "claude-fable-5-1"` (the project file wins), and
+`[models.claude] cheap = "claude-fable-5-2"` (the project file wins), and
 `mid`/`strong` still on their built-in defaults (neither file mentions them).
 
 ## Explicit recruitment profiles
@@ -160,7 +160,7 @@ dashboard prints `captain: no dashboard pane: ...` but does not stop the captain
 | Situation | What happens |
 | --- | --- |
 | A tier value in `[models.<provider>]` that matches no known model | Kept literally and passed to that CLI as written, so a model newer than this release still works. |
-| `[captain] model` that matches no known model | The launch fails, naming the options: `No claude model matches 'gigantic'. Tiers: cheap, mid, strong. Options: claude-haiku-5-5, claude-sonnet-5-5, claude-opus-5-5, claude-fable-5-1.` |
+| `[captain] model` that matches no known model | The launch fails, naming the options: `No claude model matches 'gigantic'. Tiers: cheap, mid, strong. Options: claude-haiku-5-5, claude-sonnet-5-5, claude-opus-5-5, claude-fable-5-1, claude-fable-5-2.` |
 | `[captain] agent` outside `claude`, `codex`, `pi`, `grok` | The launch fails naming them, rather than trying to run it. |
 | A value of the wrong type (`model = 123`, `enabled = "true"`, `interval = "5"`) | Ignored, and the setting falls back to the shipped default. Malformed `[placement]` shapes and selected profiles fail loudly. Nothing is coerced across types: a string is never read as a boolean or a number. The one latitude is an int where a float is wanted, so `interval = 5` works. |
 | An unknown table or key | Ignored, except unknown keys in a selected profile, which fail. |

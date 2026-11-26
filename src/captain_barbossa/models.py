@@ -15,7 +15,8 @@ MODELS = {
         ("claude-haiku-5-5", ("haiku",)),
         ("claude-sonnet-5-5", ("sonnet",)),
         ("claude-opus-5-5", ("opus",)),
-        ("claude-fable-5-1", ("fable",)),
+        ("claude-fable-5-1", ()),
+        ("claude-fable-5-2", ("fable",)),
     ),
     # Keep explicit IDs for older builds; bare aliases follow the newest picker entries.
     "codex": (
@@ -187,10 +188,10 @@ def pi_models():
     )
 
 
-def pi_tiers():
-    """The tiers pi_models() can be ranked into with confidence; {} when it cannot."""
+def pi_tiers(entries=None):
+    """The tiers pi's entries can be ranked into with confidence; {} when it cannot."""
     served = {}
-    for model_id in model_ids("pi"):
+    for model_id, _ in pi_models() if entries is None else entries:
         served.setdefault(model_id.partition("/")[2], model_id)
     for family in PI_FAMILIES:
         if all(model in served for model in TIERS[family].values()):
@@ -209,21 +210,23 @@ def models_for(provider):
     return pi_models() if provider == "pi" else MODELS[provider]
 
 
-def tiers_for(provider):
-    """The built-in tiers, with any tier named in [models.<provider>] settings replacing one.
-
-    Settings may name a model however the user says it, so aliases are mapped here rather
-    than through resolve_model, which calls this and would recurse.
-    """
-    if provider == "pi":
-        tiers = pi_tiers()
-    else:
-        tiers = dict(TIERS[provider])
-    names = {name: model for model, aliases in models_for(provider) for name in (model, *aliases)}
+def tier_mapping(
+    provider: str, entries: tuple[tuple[str, tuple[str, ...]], ...] | None = None
+) -> dict[str, str]:
+    """Resolve configured aliases without recursing through resolve_model; omit unranked tiers."""
+    entries = models_for(provider) if entries is None else entries
+    tiers = pi_tiers(entries) if provider == "pi" else dict(TIERS[provider])
+    names = {name: model for model, aliases in entries for name in (model, *aliases)}
     for tier in TIER_NAMES:
         choice = config.text("models", provider, tier)
         if choice:
             tiers[tier] = names.get(normalized(choice), choice)
+    return tiers
+
+
+def tiers_for(provider):
+    """Resolve all configured tiers, refusing incomplete rankings."""
+    tiers = tier_mapping(provider)
     missing = [tier for tier in TIER_NAMES if tier not in tiers]
     if missing:
         # A guessed default is worse than an error: a weak model fails every crew turn.

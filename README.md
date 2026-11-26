@@ -206,7 +206,7 @@ mechanical follow-up on a strong crew.
 
 Free text also works and is matched to the closest model the chosen CLI
 offers (exact IDs and aliases first, then prefixes, substrings, and close
-spellings): Claude Code additionally offers `claude-fable-5-1` (fable);
+spellings): Claude Code additionally offers `claude-fable-5-2` (fable);
 Codex additionally offers `gpt-5.6-terra` (terra), `gpt-6-luna` (luna),
 `gpt-6-sol`, and `gpt-6.1-sol` (sol); Grok additionally
 offers `grok-4.5`. Ambiguous or unknown text reports the options and creates nothing.

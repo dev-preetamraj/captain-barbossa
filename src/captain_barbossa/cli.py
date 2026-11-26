@@ -242,6 +242,11 @@ def parser(*, plan=False):
     models_cmd.add_argument(
         "--agent", choices=PROVIDERS, help="show only this provider (shows all when omitted)"
     )
+    models_cmd.add_argument(
+        "--json",
+        action="store_true",
+        help="JSON catalogue with native capabilities (codex, claude, pi)",
+    )
     focus = commands.add_parser("focus", help="focus an existing crew's pane and tab")
     focus.add_argument("name", help="crew name or ID (case-insensitive)")
     stop = commands.add_parser(
@@ -607,7 +612,12 @@ def main(argv=None):
             memory(args, None, active_project())
             return 0
         if args.command == "models":
-            print_models(args)
+            if args.json:
+                from .model_catalogue import catalogue
+
+                print(json.dumps(catalogue(active_project(), args.agent)))
+            else:
+                print_models(args)
             return 0
         if args.command == "memory" and args.memory_command == "prune":
             config.in_range(args.older_than, "--older-than", below=float("inf"))

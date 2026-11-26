@@ -5,6 +5,45 @@ free text resolves to a model ID. `captain models [--agent claude|codex|pi|grok]
 prints this same information live, including any `[models.*]` overrides and, for
 `pi`, whatever models this install has actually authenticated.
 
+## JSON catalogue
+
+`captain models --json [--agent codex|claude|pi]` returns metadata without a Captain session, Herdr, or a supervisor.
+It starts no model turns; the existing text command retains its format.
+Grok is excluded from JSON discovery.
+
+```json
+{
+  "version": 1,
+  "providers": [
+    {
+      "provider": "claude",
+      "tiers": {"cheap": "claude-haiku-5-5", "mid": "claude-sonnet-5-5", "strong": "claude-opus-5-5"},
+      "models": [
+        {
+          "id": "claude-fable-5-2",
+          "aliases": ["fable"],
+          "context_window": 1000000,
+          "effort_levels": ["low", "medium", "high", "xhigh", "max"]
+        }
+      ],
+      "error": null
+    }
+  ]
+}
+```
+
+The example abbreviates the model list; every known model is returned, including literal IDs configured as tiers.
+Tier mappings use the same layered `[models.*]` settings as recruitment, with unrankable pi tiers set to `null`.
+Unknown context windows and effort lists are `null`; an empty effort list means the tool explicitly returned no levels.
+A failed native probe preserves bundled and configured IDs and sets that provider's `error` string.
+Each native probe has a 15-second request budget and bounded process cleanup.
+
+- Codex: `codex app-server` initialization followed by paginated `model/list`, including hidden models, supplies `supportedReasoningEfforts` and a context window only if reported.
+- Pi: isolated, offline `pi --mode rpc --no-session` supplies `get_available_models` metadata; `set_model` and `get_available_thinking_levels` query each model's supported levels in that in-memory session.
+  An unavailable per-model query leaves its effort list `null` without hiding the other metadata.
+  Extensions, MCP, tools and project resources are disabled.
+- Claude: the bundled model catalogue supplies known context windows and Claude Code's supported effort levels `low`, `medium`, `high`, `xhigh`, `max`.
+
 ## How resolution works
 
 A `--model`/`[models.*]` value is a tier (`cheap`, `mid`, `strong`), a model ID, or
@@ -22,15 +61,17 @@ newer than this release still works; see
 
 ## claude
 
-Four models, weakest to strongest. IDs and aliases, from the installed Claude
-Code CLI's own model catalog:
+Current models and the still-served Fable 5.1, from Claude Code's model catalog:
 
 | Tier (shipped default) | ID | Alias |
 | --- | --- | --- |
 | `cheap` | `claude-haiku-5-5` | `haiku` |
 | `mid` | `claude-sonnet-5-5` | `sonnet` |
 | `strong` | `claude-opus-5-5` | `opus` |
-| (none) | `claude-fable-5-1` | `fable` |
+| (none) | `claude-fable-5-1` | (none) |
+| (none) | `claude-fable-5-2` | `fable` |
+
+Fable 5.2 has a 1,000,000-token context window and a 128,000-token output limit.
 
 ## codex
 
