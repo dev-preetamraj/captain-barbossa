@@ -78,6 +78,69 @@ class AssignmentDiffTests(SessionCase):
         self.assertNotIn("other.txt", view["diff"])
         self.assertEqual(git(self.project, "ls-files", "--stage"), index)  # real index untouched
 
+    def loose_objects(self):
+        return sorted(
+            path.relative_to(self.project).as_posix()
+            for path in (self.project / ".git" / "objects").rglob("*")
+            if path.is_file() and path.parent.name not in ("pack", "info")
+        )
+
+    def test_a_snapshot_leaves_the_repository_untouched_and_runs_no_user_code(self):
+        marker = self.root / "ran"
+        git(self.project, "update-index", "--split-index")
+        indexes = sorted((self.project / ".git").glob("*index*"))
+        index = {path.name: path.read_bytes() for path in indexes}
+        objects = self.loose_objects()
+        hook = f"sh -c 'touch {marker}; cat'"
+        git(self.project, "config", "filter.mark.clean", hook)
+        git(self.project, "config", "core.fsmonitor", f"sh -c 'touch {marker}'")
+        (self.project / ".gitattributes").write_text("*.txt filter=mark\n", encoding="utf-8")
+        marker.unlink(missing_ok=True)
+        assignment = protocol.begin(
+            self.crew(self.current), self.project, "Edit a.", ["a.txt"], ["edit"]
+        )
+        (self.project / "a.txt").write_text("one\ntwo\n", encoding="utf-8")
+        view = protocol.assignment_diff(self.current.directory, assignment["id"])
+        self.assertEqual(view["files"], [{"path": "a.txt", "added": 1, "deleted": 0}])
+        self.assertFalse(marker.exists())
+        self.assertEqual(self.loose_objects(), objects)
+        self.assertEqual({path.name: path.read_bytes() for path in indexes}, index)
+        self.assertEqual(len(indexes), 2)  # the split index and its shared index
+        self.assertTrue(any((self.current.directory / protocol.SNAPSHOTS).rglob("*")))
+
+    def test_paths_are_literal_and_relative_to_an_execution_root_inside_the_repo(self):
+        project = self.project / "app"
+        project.mkdir()
+        for name in ("a*.txt", "ab.txt"):
+            (project / name).write_text("one\n", encoding="utf-8")
+        git(self.project, "add", ".")
+        git(self.project, "commit", "-qm", "app")
+        current = supervisor.open_session(project, None)
+        crew = self.crew(current)
+        assignment = protocol.begin(crew, project, "Edit.", ["a*.txt"], ["edit"])
+        for name in ("a*.txt", "ab.txt"):
+            (project / name).write_text("two\n", encoding="utf-8")
+        view = protocol.assignment_diff(current.directory, assignment["id"])
+        self.assertEqual([row["path"] for row in view["files"]], ["a*.txt"])
+
+    def test_a_baseline_follows_validation_and_its_failure_is_reported(self):
+        crew = self.crew(self.current)
+        protocol.begin(crew, self.project, "Edit a.", ["a.txt"], ["edit"])
+        other = self.crew(supervisor.open_session(self.project, None))
+        with (
+            patch.object(protocol, "snapshot", side_effect=AssertionError("snapshot")),
+            self.assertRaisesRegex(CaptainError, r"\[owned-path-conflict\]"),
+        ):
+            protocol.begin(other, self.project, "Edit a too.", ["a.txt"], ["edit"])
+        plain = self.root / "plain"
+        plain.mkdir()
+        current = supervisor.open_session(plain, None)
+        assignment = protocol.begin(self.crew(current), plain, "Edit b.", ["b.txt"], ["edit"])
+        self.assertIsNone(assignment["baseline"])
+        self.assertIn("[no-git]", assignment["baseline_error"])
+        with self.assertRaisesRegex(CaptainError, r"\[diff-no-baseline\].*\[no-git\]"):
+            protocol.assignment_diff(current.directory, assignment["id"])
+
     def test_a_herdr_assignment_takes_no_snapshot(self):
         herdr = sessions.session(self.project, self.pane, create=True)
         with patch.object(protocol, "snapshot", side_effect=AssertionError("snapshot")):

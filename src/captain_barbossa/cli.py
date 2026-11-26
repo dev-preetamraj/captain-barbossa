@@ -217,6 +217,11 @@ def parser(*, plan=False):
         elif verb == "check":
             command.add_argument("action", choices=protocol.ACTIONS)
             command.add_argument("path", nargs="*")
+    escalate = commands.add_parser(
+        "escalate", help="in an app session, route a crew's pending question to the user"
+    )
+    escalate.add_argument("name", help="crew name or ID (case-insensitive)")
+    escalate.add_argument("question_id")
     grant = commands.add_parser(
         "grant", help="let a crew assignment run one exact flagged command once"
     )
@@ -627,6 +632,9 @@ def main(argv=None):
         elif args.command == "grant":
             _, member = Crew.for_args(args, pane, project)
             print(json.dumps(protocol.grant(member, args.assignment, args.command_text)))
+        elif args.command == "escalate":
+            _, member = Crew.for_args(args, pane, project)
+            print(json.dumps(protocol.escalate(member, args.question_id)))
         elif args.command == "model":
             switch_model(args, pane, project)
         elif args.command == "focus":

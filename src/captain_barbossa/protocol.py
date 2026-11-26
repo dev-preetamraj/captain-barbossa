@@ -1,12 +1,11 @@
 """Explicit assignment state and acknowledged delivery, local to one session."""
 
-import contextlib
 import hashlib
 import json
 import os
 import re
 import shlex
-import shutil
+import stat
 import subprocess
 import tempfile
 import time
@@ -33,7 +32,15 @@ from .pane import DRAFT_GATE, HOLD_EXPIRY, UNREADABLE_EXPIRY, UNREADABLE_GATE, i
 from .processes import TARGET, capture, makefile_targets
 from .runtime import HERDR_ERRORS, CaptainError, check_text, inside_project
 from .sessions import session_directories
-from .store import lock, read_json, state_root, state_storage, temp_root, write_json
+from .store import (
+    lock,
+    private_dir,
+    read_json,
+    state_root,
+    state_storage,
+    temp_root,
+    write_json,
+)
 
 ACTIONS = ("read", "search", "edit", "test", "build", "format", "commit", "version", "delete")
 WRITE_ACTIONS = ("edit", "format", "commit", "version", "delete")
@@ -92,6 +99,11 @@ PATH_PLACEHOLDER = re.compile(r"\b(?:TODO|TBD|FIXME)\b|<[^<>]+>|\{\{[^{}]+\}\}",
 GIT_TIMEOUT = 5
 # A whole-tree snapshot hashes every changed file, so it gets longer than a status read.
 SNAPSHOT_TIMEOUT = 60
+# Review snapshots run no fsmonitor, hooks or untracked cache of the user's.
+SNAPSHOT_CONFIG = ("-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null")
+SNAPSHOT_CONFIG += ("-c", "core.untrackedCache=false")
+# A supervised session's own object store for review snapshots, beside its other state.
+SNAPSHOTS = "snapshots"
 DIFF_CHARS = 1024 * 1024
 # Enough of a --verify run's output to see why it failed; the full log is on disk.
 VERIFY_LINES = 15
@@ -266,8 +278,6 @@ def begin(
     if set(actions) - set(ACTIONS):
         raise CaptainError("Unknown assignment action.")
     require_current(crew)
-    # Taken before the locks, so a slow snapshot never holds up another recruit.
-    baseline = snapshot(execution_root) if supervised(crew) else None
     # One lock for the project, whichever root a session lives in.
     with (
         lock(state_storage(project) / "allocation.lock"),
@@ -344,9 +354,10 @@ def begin(
         if supervised(crew):
             # Read back by receipt, which a delivery hook calls with no session metadata.
             assignment["supervised"] = True
-            assignment["baseline"] = baseline
         state["assignments"][assignment["id"]] = assignment
         state["active"][crew.crew_id] = assignment["id"]
+    if supervised(crew):
+        assignment = take_baseline(crew, assignment["id"], execution_root)
     record_action(
         crew.session.directory,
         "assign" if previous else "recruit",
@@ -401,6 +412,33 @@ def route_questions(directory, routes):
     return moved
 
 
+def escalate(crew, question_id):
+    """The captain routes a crew's pending question to the user, for good."""
+    if not supervised(crew):
+        raise CaptainError(
+            "[escalate-supervised] Only an app session routes questions to the user."
+        )
+    with checkpoint(crew.session.directory) as state:
+        assignment = active(state, crew)
+        question = assignment["question"]
+        if not question or question["id"] != question_id:
+            raise CaptainError(f"[stale-question-id] {question_id} is not the pending question.")
+        question.update(waiting_on="human", escalated_by="captain")
+        assignment_id = assignment["id"]
+    record_action(
+        crew.session.directory,
+        "question",
+        crew.crew_id,
+        assignment_id,
+        supervised=True,
+        question=question_id,
+        state="routed",
+        waiting_on="human",
+        by="captain",
+    )
+    return {"crew": crew.display_name, "question": question_id, "waiting_on": "human"}
+
+
 def mark_reviewed(directory, assignment_id, result_id=None, note=None):
     """Record that a report, or one isolated result of it, was reviewed."""
     if note is not None:
@@ -427,6 +465,18 @@ def mark_reviewed(directory, assignment_id, result_id=None, note=None):
         note=note,
     )
     return {"assignment": assignment_id, "result": result_id, **mark}
+
+
+def take_baseline(crew, assignment_id, execution_root):
+    """Snapshot a validated, reserved assignment's tree before its crew gets the task."""
+    try:
+        fields = {"baseline": snapshot(execution_root, crew.session.directory / SNAPSHOTS)}
+    except CaptainError as exc:
+        fields = {"baseline": None, "baseline_error": str(exc)}
+    with checkpoint(crew.session.directory) as state:
+        assignment = state["assignments"][assignment_id]
+        assignment.update(fields)
+    return assignment
 
 
 def notice(assignment, status, summary):
@@ -471,19 +521,21 @@ def check_action(assignment, project, action, paths, held=lambda paths: False):
             raise CaptainError(f"[outside-grant] Path is not owned by this assignment: {path}")
 
 
-def _git(project, *args, timeout=GIT_TIMEOUT, index=None):
-    """Git in the project, or None when there is no readable work tree; `index` swaps the index."""
+def _git(project, *args, timeout=GIT_TIMEOUT, index=None, extra=None, input=None):
+    """Git in the project, or None when it cannot run; `index` and `extra` add environment."""
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
     env["GIT_OPTIONAL_LOCKS"] = "0"
     if index is not None:
         env["GIT_INDEX_FILE"] = str(index)
+    env.update(extra or {})
     try:
         result = subprocess.run(
             ["git", "-C", str(project), *args],
             capture_output=True,
             text=True,
             timeout=timeout,
-            stdin=subprocess.DEVNULL,
+            input=input,
+            stdin=subprocess.DEVNULL if input is None else None,
             env=env,
         )
     except (OSError, subprocess.TimeoutExpired):
@@ -491,20 +543,83 @@ def _git(project, *args, timeout=GIT_TIMEOUT, index=None):
     return result
 
 
-def snapshot(root):
-    """A tree id of the whole working tree as it stands, built in a scratch index; None off Git."""
-    found = _git(root, "rev-parse", "--path-format=absolute", "--git-path", "index")
-    if found is None or found.returncode:
-        return None
+def _run(root, *args, **options):
+    """A snapshot's git step, refused with the step named when it fails."""
+    done = _git(root, *SNAPSHOT_CONFIG, *args, timeout=SNAPSHOT_TIMEOUT, **options)
+    if done is None or done.returncode:
+        detail = done.stderr.strip()[-500:] if done is not None else "did not run"
+        raise CaptainError(f"[snapshot-git] git {args[0]} failed in {root}: {detail}")
+    return done.stdout
+
+
+def _snapshot_env(root, objects):
+    """Write new objects to the session's own store, reading the repository's through alternates."""
+    common = _run(root, "rev-parse", "--path-format=absolute", "--git-common-dir").strip()
+    private_dir(objects)
+    return {
+        "GIT_OBJECT_DIRECTORY": str(objects),
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES": str(Path(common) / "objects"),
+        "GIT_LITERAL_PATHSPECS": "1",
+    }
+
+
+def _file_rows(top, paths, extra):
+    """--index-info rows for the files and symlinks among top-relative `paths`, unfiltered."""
+    rows, files = [], []
+    for path in paths:
+        if not path or "\n" in path:
+            continue  # cannot cross --stdin-paths
+        try:
+            info = (top / path).lstat()
+        except FileNotFoundError:
+            continue
+        if stat.S_ISLNK(info.st_mode):
+            target = os.readlink(top / path)
+            blob = _run(top, "hash-object", "-w", "--stdin", extra=extra, input=target)
+            rows.append(f"120000 {blob.strip()}\t{path}")
+        elif stat.S_ISREG(info.st_mode):
+            files.append(("100755" if info.st_mode & 0o111 else "100644", path))
+    if files:
+        listing = "".join(f"{path}\n" for _, path in files)
+        blobs = _run(
+            top, "hash-object", "-w", "--no-filters", "--stdin-paths", extra=extra, input=listing
+        ).split()
+        rows += [f"{mode} {blob}\t{path}" for (mode, path), blob in zip(files, blobs)]
+    return rows
+
+
+def snapshot(root, objects, base=None, paths=()):
+    """An unfiltered review tree in a private object store: all files, or `paths` over `base`."""
+    inside = _git(root, "rev-parse", "--show-toplevel")
+    if inside is None or inside.returncode:
+        raise CaptainError(f"[no-git] {root} is not a Git work tree.")
+    top = Path(inside.stdout.strip())
+    extra = _snapshot_env(root, objects)
+    width = 64 if _run(top, "rev-parse", "--show-object-format").strip() == "sha256" else 40
+    listed = ("ls-files", "-z", "--full-name", "--cached", "--others", "--exclude-standard")
     with tempfile.TemporaryDirectory(prefix="captain-snapshot-") as scratch:
         index = Path(scratch) / "index"
-        with contextlib.suppress(FileNotFoundError):
-            shutil.copyfile(found.stdout.strip(), index)
-        added = _git(root, "add", "--all", "--", ".", timeout=SNAPSHOT_TIMEOUT, index=index)
-        if added is None or added.returncode:
-            return None
-        tree = _git(root, "write-tree", timeout=SNAPSHOT_TIMEOUT, index=index)
-    return tree.stdout.strip() if tree is not None and not tree.returncode else None
+        if base is None:
+            _run(top, "read-tree", "--empty", index=index, extra=extra)
+            rows = _file_rows(top, _run(top, *listed, extra=extra).split("\0"), extra)
+        else:
+            _run(top, "read-tree", base, index=index, extra=extra)
+            held = _run(
+                root, "ls-files", "-z", "--full-name", "--", *paths, index=index, extra=extra
+            )
+            present = _run(root, *listed, "--", *paths, extra=extra).split("\0")
+            gone = [f"0 {'0' * width}\t{path}" for path in held.split("\0") if path]
+            rows = gone + _file_rows(top, present, extra)
+        if rows:
+            _run(
+                top,
+                "update-index",
+                "--index-info",
+                index=index,
+                extra=extra,
+                input="\n".join(rows) + "\n",
+            )
+        return _run(top, "write-tree", index=index, extra=extra).strip()
 
 
 def assignment_diff(directory, assignment_id):
@@ -515,7 +630,10 @@ def assignment_diff(directory, assignment_id):
         raise CaptainError(f"[diff-assignment] No assignment {assignment_id}.")
     base = assignment.get("baseline")
     if not base:
-        raise CaptainError(f"[diff-no-baseline] Assignment {assignment_id} has no baseline.")
+        reason = assignment.get("baseline_error") or "none was taken"
+        raise CaptainError(
+            f"[diff-no-baseline] Assignment {assignment_id} has no baseline: {reason}"
+        )
     root = assignment["execution_root"]
     paths = sorted(
         {
@@ -527,19 +645,15 @@ def assignment_diff(directory, assignment_id):
     view = {"assignment": assignment_id, "baseline": base, "root": root, "paths": paths}
     if not paths:
         return {**view, "current": base, "files": [], "diff": "", "truncated": False}
-    current = snapshot(root)
-    if current is None:
-        raise CaptainError(f"[diff-git] Cannot snapshot {root}.")
-    options = ("diff", "--no-ext-diff", "--no-textconv", "--no-color", "--no-renames")
-    numstat = _git(
-        root, *options, "--numstat", base, current, "--", *paths, timeout=SNAPSHOT_TIMEOUT
-    )
-    options += (base, current, "--")
-    patch = _git(root, *options, *paths, timeout=SNAPSHOT_TIMEOUT)
-    if numstat is None or patch is None or numstat.returncode or patch.returncode:
-        raise CaptainError(f"[diff-git] git diff failed in {root}.")
+    objects = directory / SNAPSHOTS
+    current = snapshot(root, objects, base, paths)
+    extra = _snapshot_env(root, objects)
+    # --relative: trees are whole-repository, while paths are the execution root's.
+    options = ("diff", "--no-ext-diff", "--no-textconv", "--no-color", "--no-renames", "--relative")
+    numstat = _run(root, *options, "--numstat", base, current, "--", *paths, extra=extra)
+    patch = _run(root, *options, base, current, "--", *paths, extra=extra)
     files = []
-    for line in numstat.stdout.splitlines():
+    for line in numstat.splitlines():
         added, deleted, path = line.split("\t", 2)
         files.append(
             {
@@ -548,7 +662,7 @@ def assignment_diff(directory, assignment_id):
                 "deleted": None if deleted == "-" else int(deleted),
             }
         )
-    text = patch.stdout
+    text = patch
     return {
         **view,
         "current": current,

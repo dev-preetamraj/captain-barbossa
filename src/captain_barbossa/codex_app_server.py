@@ -33,7 +33,9 @@ def open(link):
     client = {"name": "captain-barbossa", "version": __version__}
     link.peer.request("initialize", {"clientInfo": client}, timeout)
     link.peer.notify("initialized", timeout)
-    require_live_hooks(link, link.peer.request("hooks/list", {"cwds": [link.root]}, timeout))
+    if not link.captain:
+        # The captain keeps its native prompts, which the supervisor puts to the user instead.
+        require_live_hooks(link, link.peer.request("hooks/list", {"cwds": [link.root]}, timeout))
     params = {"cwd": link.root, "sandbox": "workspace-write", "approvalPolicy": "on-request"}
     if link.model:
         params["model"] = link.model
@@ -237,6 +239,8 @@ def answer(link, message):
     elif method == "item/fileChange/requestApproval":
         item = link.native.get("items", {}).get(params.get("itemId"))
         result = {"decision": decision(link, params, "apply_patch", _patch(item))}
+    elif method == "item/tool/requestUserInput" and link.captain:
+        result = {"answers": link.ask("question", params) or {}}
     elif method == "item/tool/requestUserInput":
         questions = params.get("questions") if isinstance(params.get("questions"), list) else []
         result = {

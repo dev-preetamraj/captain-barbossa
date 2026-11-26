@@ -768,8 +768,9 @@ def crew_launch(
         else {"argv": [], "env": {}}
     )
     env.update(history["env"])
+    app = {"supervised": True} if crew.session.meta.get("transport") == "supervisor" else {}
     instruction_text = instructions.agent_instructions(
-        crew.session.directory, f"crew member {crew.display_name}", provider
+        crew.session.directory, f"crew member {crew.display_name}", provider, **app
     )
     instruction_text += plugin_context
     events = crew.events

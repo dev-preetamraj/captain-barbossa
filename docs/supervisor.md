@@ -71,6 +71,13 @@ Every refusal is a JSON-RPC error whose message starts with its protocol code an
 | `questions` | none | `{questions: [{crew, assignment, question, text, grant_request, delivered_at, escalated, waiting_on}]}` |
 | `diff` | `assignment` | `{assignment, baseline, current, root, paths, files, diff, truncated}` |
 | `mark_reviewed` | `assignment`, `result` (optional), `note` (optional) | `{assignment, result, at, note}` |
+| `start_captain` | `provider`, `model` (optional, default `[captain]` settings), `effort` (pi only) | `{provider, transport, model, state: "started"}` |
+| `captain_state` | none | `{state, provider?}`; state `idle`, `working`, `blocked` or `null` |
+| `message_captain` | `text` | `{landed, gate}`, like `ring` |
+| `interrupt_captain` | `reason` (optional) | `{outcome}` |
+| `stop_captain` | none | `{outcome}`; `stopped`, `pending` or `not-running` |
+| `captain_requests` | none | `{requests: [{id, kind, payload, state, at, answer?, resolved_at?}]}` |
+| `answer_captain` | `request`, `decision` (`approve`/`deny`, for an approval) or `answers` ({question id: text}) | `{request, state: "answered"}` |
 | `subscribe` | `cursors` (optional object: stream name to `{offset, generation}` or a bare offset) | `{session_id, cursors}`, then notifications on the same connection |
 | `transcript` | `agent`, `after` or `before` (optional cursors), `limit` (1 to 500, default 200), `incarnation` (optional) | `{agent, provider, files, entries, start, end, more}` |
 | `step` | `agent`, `id`, `incarnation` (optional) | one entry with its whole text |
@@ -87,7 +94,7 @@ An app calls every other method directly.
 - `ring` with a `message_id` Codex already accepted lands again without starting a second turn.
   A `turn/start` Codex never answered reports `"delivery unconfirmed"`: held, never bounced, and settled by the next turn notice.
 
-Refusal codes by method: `supervisor-params` (any), `supervisor-crew`, `supervisor-transport`, `supervisor-closing`, `supervisor-startup`, `codex-hooks-missing`, `codex-hooks-untrusted`, `claude-sdk-missing`, `claude-start` (start), `grant-request-unknown`, `grant-request-closed`, `grant-request-reason`, `grant-request-decision`, `grant-request-unsupported` (resolve_grant), `command-refused`, `command-timeout`, `command-failed` (command), `transcript-agent`, `transcript-range`, `transcript-entry`, `transcript-file`, `transcript-gone` (transcript, step), `session-name` (rename), `authorization-argv` (command), `authorization-unknown`, `authorization-closed`, `authorization-decision` (resolve_authorization), `diff-assignment`, `diff-no-baseline`, `diff-git` (diff), `review-assignment`, `review-no-report`, `review-result` (mark_reviewed).
+Refusal codes by method: `supervisor-params` (any), `supervisor-crew`, `supervisor-transport`, `supervisor-closing`, `supervisor-startup`, `codex-hooks-missing`, `codex-hooks-untrusted`, `claude-sdk-missing`, `claude-start` (start), `grant-request-unknown`, `grant-request-closed`, `grant-request-reason`, `grant-request-decision`, `grant-request-unsupported` (resolve_grant), `command-refused`, `command-timeout`, `command-failed` (command), `transcript-agent`, `transcript-range`, `transcript-entry`, `transcript-file`, `transcript-gone` (transcript, step), `session-name` (rename), `authorization-argv` (command), `authorization-unknown`, `authorization-closed`, `authorization-decision` (resolve_authorization), `diff-assignment`, `diff-no-baseline`, `diff-git` (diff), `review-assignment`, `review-no-report`, `review-result` (mark_reviewed), `captain-transport`, `captain-running`, `captain-start` (start_captain), `captain-not-running` (message, interrupt and answer), `captain-request-closed`, `captain-request-answer`, `captain-request-unknown` (answer_captain).
 
 ### hello
 
@@ -100,7 +107,7 @@ Refusal codes by method: `supervisor-params` (any), `supervisor-crew`, `supervis
 
 - `supervised` is whether this supervisor can start that provider's crew; `transport` is null when it cannot.
 - `delivery` is `body` (the ring carries the rendered mail) or `hook` (the ring is a wake line and the crew's own hook hands the body over).
-- `gate` is `hooks`, `extension` (pi) or `none` (grok: its own auto mode is the whole gate, so it fails open).
+- `gate` is `hooks`, `extension` (pi) or `relay` (grok over ACP: every permission request goes through `captain hook`; supervised grok crew run without `--permission-mode auto`, which a Herdr grok crew keeps as its whole gate).
 - `output` is `items` (Codex app-server item and turn notifications), `events` (pi RPC session events), `turns` (Claude: turn state only) or null.
 - `limits` states each provider's known gaps in plain words.
 
@@ -178,6 +185,7 @@ A Herdr session is unchanged and reads or writes nothing for this.
   Approving it with `resolve_authorization` runs it at once as the captain, with `CAPTAIN_AUTHORIZATION` naming the request, and the reply carries the run's typed `command` result as `run`.
 - An approval authorizes exactly one run of exactly that command (`command` holds the parsed fields), is spent by it, and expires unspent after 15 minutes; a denial is final.
 - Every request and decision is an `authorization` protocol action, so a subscribed app shows the card as soon as the request opens.
+- A supervised captain learns the outcome of a request it opened: the delivery bridge sends it "approved: run that exact command again now" or "denied" once, and records `notified_at` on the request.
 
 ## Questions: waitingOn
 
@@ -186,14 +194,30 @@ It moves to the human, and stays there, once it is escalated (unanswered through
 The supervisor decides this from the delivery acknowledgement (`delivered_at`, set when `wait` acks the question) and the captain's own turn-end hook events, on each subscription projection and drain tick and on `questions`.
 Each change is recorded as the question's `waiting_on` in `protocol.json` and as a `question` action with `state: "routed"`.
 Answering is unchanged: `answer`, through `command`.
+The captain can route a question to the user itself, for good, with `captain escalate NAME QUESTION_ID` (an app session only; `[escalate-supervised]` elsewhere), recorded as `waiting_on: "human"`, `escalated_by: "captain"` and a `routed` action.
 
 ## Review: per-assignment diff and reviewed state
 
-- When a supervised assignment begins, `protocol.begin` records `baseline`: a Git tree id of the whole working tree (tracked, changed and untracked, ignores respected), built in a scratch index so the real index never changes.
-  A worktree crew's baseline is taken in its own worktree; a Herdr assignment takes none.
-- `diff` snapshots the tree again and returns `git diff baseline current` limited to the assignment's owned and claimed paths inside the checkout, so another crew's edits and earlier uncommitted work stay out.
+- Once a supervised assignment is validated and reserved, and before its crew gets the task, `protocol.begin` records `baseline`: a Git tree id of every tracked and untracked, non-ignored file as it stands.
+  A failure is recorded as `baseline_error` and named by `diff` (`[diff-no-baseline]`); a worktree crew's baseline is taken in its own worktree; a Herdr assignment takes none.
+- Snapshots never touch the repository: files are hashed as they stand with `hash-object --no-filters` into the session's own object store (`sessions/<id>/snapshots`, reading the repository's through alternates) and built in a scratch index from `read-tree`, so no object, index (split or not), hook, filter or fsmonitor of the user's is written or run.
+- `diff` re-hashes only the assignment's owned and claimed paths over the baseline and returns `git diff --relative baseline current` for them, with literal pathspecs relative to the execution root, so another crew's edits and earlier uncommitted work stay out.
   `files` is the numstat (`added`/`deleted` null for binary); `diff` is cut at 1 MiB with `truncated: true`.
 - `mark_reviewed` records `reviewed: {at, note}` on the assignment for its report, or `reviewed_results[result]` for one isolated result of it, and logs a `review` action; the CLI reads both from `protocol.json`.
+
+## Supervised captain
+
+`start_captain` runs the session's captain itself: the provider's first `TRANSPORTS` entry (`codex app-server`, Claude through `claude_host`, `pi --mode rpc`; grok is refused until it has a captain transport), with `prepare_launch`'s instructions and launch state, the supervised-session instruction text and no pi delivery extension.
+
+- The captain is not a crew: no lifetime record. It runs in its own process group with `CAPTAIN_SUPERVISOR_TOKEN` in its environment, so its `captain` commands reach this supervisor. `stop_captain`, `shutdown` and the supervisor's own exit close its input, wait `stop_timeout`, then kill the whole group.
+- Its adapter link has `captain` set: Codex skips the crew-only four-hook check (a captain keeps native prompts), and Claude's ring carries the text instead of the crew wake line.
+- The delivery bridge replaces `captain wait` and pi's extension. Each round it reads `wait --all`'s projection, acknowledges `idle` and `working` at once, and rings every other delivery into the captain as one message (the summary cut at 2000 characters).
+  A delivery is claimed in `sessions/<id>/captain-deliveries/` before it is first sent, acknowledged with `wait --ack` only after the adapter reports it landed, and retried while the captain is busy.
+  A claim left unconfirmed by an earlier supervisor is never resent or acknowledged; it is reported once as `[captain-delivery-uncertain]`.
+- Operator notes: the user's `tell`, `answer`, `interrupt`, `model` and `dismiss` through `command`, `interrupt_all` and `resolve_grant` are recorded under `operator_notes` in `protocol.json` and put in front of whatever next starts a captain turn (a delivery, an authorization outcome or `message_captain`), then marked delivered.
+- `interrupt_all` interrupts the captain too, as `{crew: "captain", outcome}`.
+- The captain's native prompts go to the user: a Codex approval request or ask-user (`requestUserInput`) opens a `captain_requests` entry and a `question` action (crew `captain`, `waiting_on: "human"`), an `attention` notification with `[captain-request]`, and waits up to 30 minutes for `answer_captain`; unanswered, it expires and is declined.
+- Supervised-session instructions swap the Herdr-only lines (panes, tabs, focus, placement, background crew, wait) for app ones and never grow the text; crew recruited in the session get the same swap. Herdr text is unchanged.
 
 ## Session hub
 
