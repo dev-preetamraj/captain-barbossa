@@ -5,13 +5,15 @@ import os
 import threading
 import time
 
-from . import config, jsonrpc, models, usage
+from . import attachments, config, jsonrpc, models, usage
 from .runtime import CaptainError
 
 STARTING = "starting"
 FINISHING = "finishing"
 UNCONFIRMED = "delivery unconfirmed"
 DIALOG_METHODS = frozenset(("select", "confirm", "input", "editor"))
+# pi echoes a prompt's images in its event lines, which the reader caps at jsonrpc.MAX_LINE.
+IMAGE_BUDGET = jsonrpc.MAX_LINE // 2
 
 
 def _timeout(name):
@@ -168,7 +170,7 @@ def _cancel_start(link):
         link.native.pop("sending", None)
 
 
-def ring(link, message_id, text):
+def ring(link, message_id, text, attached=()):
     with link.guard:
         if message_id in link.native.setdefault("accepted", set()):
             return {"landed": True, "gate": None}
@@ -184,8 +186,16 @@ def ring(link, message_id, text):
     if current["isStreaming"]:
         _cancel_start(link)
         return {"landed": False, "gate": "agent not idle"}
+    text, images = attachments.prompt(text, attached, IMAGE_BUDGET)
+    link.native["inputs"] = [text]
+    params = {"message": text}
+    if images:
+        params["images"] = [
+            {"type": "image", "data": attachments.encoded(data), "mimeType": record["mime"]}
+            for record, data in images
+        ]
     try:
-        result = link.peer.request("prompt", {"message": text}, _timeout("request_timeout"))
+        result = link.peer.request("prompt", params, _timeout("request_timeout"))
     except (CaptainError, OSError) as exc:
         if "[pi-rpc-timeout]" in str(exc):
             return {"landed": False, "gate": UNCONFIRMED}

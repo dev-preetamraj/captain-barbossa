@@ -857,9 +857,11 @@ def captain_question(supervisor, run, params):
     return {key: {"answers": [value]} for key, value in (answers or {}).items()} or None
 
 
-def ring_captain(run, message_id, text):
+def ring_captain(run, message_id, text, attached=()):
     if not live(run.link):
         return {"landed": False, "gate": "captain stopped"}
+    if attached:
+        return run.link.adapter.ring(run.link, message_id, text, attached)
     return run.link.adapter.ring(run.link, message_id, text)
 
 
@@ -1025,7 +1027,9 @@ def message_captain(supervisor, params):
     message_id = uuid4().hex if message_id is None else message_id
     if not isinstance(message_id, str):
         raise CaptainError("[supervisor-params] message_id must be a string.")
-    captain_bridge.queue_message(directory, message_id, _text(params, "text"))
+    captain_bridge.queue_message(
+        directory, message_id, _text(params, "text"), params.get("attachments")
+    )
     error = None
     with supervisor.bridge_lock:
         try:

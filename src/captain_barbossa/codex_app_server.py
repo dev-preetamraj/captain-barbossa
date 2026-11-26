@@ -7,7 +7,7 @@ import subprocess
 import threading
 import time
 
-from . import __version__, config, instructions, jsonrpc, processes, usage
+from . import __version__, attachments, config, instructions, jsonrpc, processes, usage
 from .runtime import CaptainError
 
 # Set while turn/start is in flight, so a second ring cannot start a turn beside it.
@@ -141,7 +141,7 @@ def state(link):
     return "working" if link.turn is not None else "idle"
 
 
-def ring(link, message_id, text):
+def ring(link, message_id, text, attached=()):
     """Start a turn carrying text; a crew mid-turn holds it, as a busy pane holds a doorbell."""
     with link.guard:
         if message_id in link.native.setdefault("accepted", set()):
@@ -150,7 +150,10 @@ def ring(link, message_id, text):
             return {"landed": False, "gate": "agent not idle"}
         link.turn = STARTING
         link.native.update(inputs=[text], reply="", sending=message_id)
-    params = {"threadId": link.thread, "input": [{"type": "text", "text": text}]}
+    text, images = attachments.prompt(text, attached)
+    link.native["inputs"] = [text]
+    items = [{"type": "localImage", "path": record["path"]} for record, _ in images]
+    params = {"threadId": link.thread, "input": [{"type": "text", "text": text}, *items]}
     if link.model:
         params["model"] = link.model
     if link.native.get("effort"):

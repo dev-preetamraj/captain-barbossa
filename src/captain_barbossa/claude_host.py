@@ -14,7 +14,7 @@ import signal
 import sys
 import threading
 
-from . import jsonrpc
+from . import attachments, jsonrpc
 from .runtime import CaptainError
 
 SDK_MISSING = (
@@ -27,6 +27,8 @@ NO_PERSISTENCE = "--no-session-persistence"
 CLOSED = (0, 143, -signal.SIGTERM)
 # Outlasts the supervisor's own wait for the user's answer, which declines when it expires.
 ASK_TIMEOUT = 1860
+# Base64 image bytes per prompt, kept well inside the Messages API's 32 MB request limit.
+IMAGE_BUDGET = 20 * 1024 * 1024
 
 
 def options(sdk, argv, cwd, *, isolated=False, partial=False, can_use_tool=None, effort=None):
@@ -181,7 +183,9 @@ class Host:
                 if not isinstance(params.get("text"), str):
                     raise CaptainError("[claude-host] query needs text.")
                 self.working = True
-                await self.client.query(params["text"])
+                attached = params.get("attachments") or []
+                prompt = await asyncio.to_thread(user_prompt, params["text"], attached)
+                await self.client.query(prompt)
                 return {}
             case "interrupt":
                 if not self.working:
@@ -316,6 +320,34 @@ class Host:
         if code in CLOSED:
             return 0
         return code if isinstance(code, int) and code > 0 else 1
+
+
+def user_prompt(text, attached):
+    """The text alone, or one user message streamed with its images ahead of the text."""
+    text, images = attachments.prompt(text, attached, IMAGE_BUDGET)
+    if not images:
+        return text
+    blocks = [
+        {
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": record["mime"],
+                "data": attachments.encoded(data),
+            },
+        }
+        for record, data in images
+    ]
+    message = {
+        "type": "user",
+        "message": {"role": "user", "content": [*blocks, {"type": "text", "text": text}]},
+        "parent_tool_use_id": None,
+    }
+
+    async def stream():
+        yield message
+
+    return stream()
 
 
 def plain(value):

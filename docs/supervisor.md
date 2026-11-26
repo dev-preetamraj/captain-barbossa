@@ -104,7 +104,7 @@ Every refusal is a JSON-RPC error whose message starts with its protocol code an
 | `captain_state` | none | `{state, provider, model, effort}`; state `idle`, `working`, `blocked` (a captain request waits on the user, any provider) or `null` (not running: provider, model and effort are the last recorded) |
 | `set_captain_model` | `model` (optional; a tier, id or alias), `effort` (optional); at least one | `{model, effort, applies}`; applies `now` or `next-turn` |
 | `captain_commands` | none | `{commands: [{name, description}], skills: [{name, description}]}` (Claude's skills are names only) |
-| `message_captain` | `text`, `message_id` (optional, 1 to 128 of `A-Za-z0-9_-`; minted when absent) | `{message_id, delivery_id, state, landed, error?}`; state `delivered`, `queued` or `uncertain`; `error` `{code, message}` when the send failed |
+| `message_captain` | `text`, `message_id` (optional, 1 to 128 of `A-Za-z0-9_-`; minted when absent), `attachments` (optional, at most 10 of `{path, name?, mime?}`) | `{message_id, delivery_id, state, landed, error?}`; state `delivered`, `queued` or `uncertain`; `error` `{code, message}` when the send failed |
 | `interrupt_captain` | `reason` (optional) | `{outcome}` |
 | `stop_captain` | none | `{outcome}`; `stopped`, `pending` or `not-running` |
 | `captain_requests` | none | `{requests: [{id, kind, payload, state, at, answer?, resolved_at?}]}`; `payload` shapes under Supervised captain |
@@ -135,7 +135,7 @@ An app calls every other method directly.
 - `ring` with a `message_id` Codex already accepted lands again without starting a second turn.
   A `turn/start` Codex never answered reports `"delivery unconfirmed"`: held, never bounced, and settled by the next turn notice.
 
-Refusal codes by method: `supervisor-params` (any), `supervisor-crew`, `supervisor-transport`, `supervisor-closing`, `supervisor-startup`, `codex-hooks-missing`, `codex-hooks-untrusted`, `claude-sdk-missing`, `claude-start` (start), `grant-request-unknown`, `grant-request-closed`, `grant-request-decision`, `grant-request-unsupported` (resolve_grant), `command-refused`, `command-timeout`, `command-failed` (command), `transcript-agent`, `transcript-range`, `transcript-entry`, `transcript-file`, `transcript-gone` (transcript, step), `session-name` (rename), `supervisor-captain-token` (any method but the captain CLI's, with the captain's token), `captain-delivery-decision`, `captain-delivery-unknown` (resolve_captain_delivery), `sign-in-method`, `sign-in-running`, `sign-in-missing` (sign_in), `supervisor-params` for an unknown `agent` (models), `authorization-argv` (command), `authorization-unknown`, `authorization-closed`, `authorization-decision` (resolve_authorization), `diff-assignment`, `diff-no-baseline`, `diff-git` (diff), `checkout-diff` (checkout_diff), `review-assignment`, `review-no-report`, `review-result` (mark_reviewed), `captain-transport`, `captain-running`, `captain-start` (start_captain), `effort-unsupported`, `claude-model` (start_captain, set_captain_model), `captain-not-running` (message, interrupt, answer, set_captain_model and captain_commands), `captain-message-id` (message_captain), `captain-request-closed`, `captain-request-answer`, `captain-request-unknown` (answer_captain), `delivery-unknown` (ack_delivery).
+Refusal codes by method: `supervisor-params` (any), `supervisor-crew`, `supervisor-transport`, `supervisor-closing`, `supervisor-startup`, `codex-hooks-missing`, `codex-hooks-untrusted`, `claude-sdk-missing`, `claude-start` (start), `grant-request-unknown`, `grant-request-closed`, `grant-request-decision`, `grant-request-unsupported` (resolve_grant), `command-refused`, `command-timeout`, `command-failed` (command), `transcript-agent`, `transcript-range`, `transcript-entry`, `transcript-file`, `transcript-gone` (transcript, step), `session-name` (rename), `supervisor-captain-token` (any method but the captain CLI's, with the captain's token), `captain-delivery-decision`, `captain-delivery-unknown` (resolve_captain_delivery), `sign-in-method`, `sign-in-running`, `sign-in-missing` (sign_in), `supervisor-params` for an unknown `agent` (models), `authorization-argv` (command), `authorization-unknown`, `authorization-closed`, `authorization-decision` (resolve_authorization), `diff-assignment`, `diff-no-baseline`, `diff-git` (diff), `checkout-diff` (checkout_diff), `review-assignment`, `review-no-report`, `review-result` (mark_reviewed), `captain-transport`, `captain-running`, `captain-start` (start_captain), `effort-unsupported`, `claude-model` (start_captain, set_captain_model), `captain-not-running` (message, interrupt, answer, set_captain_model and captain_commands), `captain-message-id`, `attachment-missing`, `attachment-unsupported`, `attachment-too-large` (message_captain), `captain-request-closed`, `captain-request-answer`, `captain-request-unknown` (answer_captain), `delivery-unknown` (ack_delivery).
 
 ### hello
 
@@ -215,7 +215,7 @@ A Herdr session writes no action log and reads nothing extra to decide that: cal
 | `lifecycle` | supervisor and `wait` | `state` (`started`, `failed`, `stopped`, `retained`, `pending`, `exited`, `lost`, `interrupted`, `model-changed`), `detail` (for `interrupted` the reason, for `model-changed` `<model> (now\|next-turn)`, or for the captain `<model> (<effort>)` with `model` and `effort` fields); `interrupt`, `interrupt_all`, `interrupt_captain` and `set_model` record the last two, crew `captain` for the captain, whose `model-changed` comes from a recorded model or effort changing (see Supervised captain) |
 | `authorization` | `captain do`, `command`, resolve_authorization (crew is `captain`, assignment null) | `request, state` (`open`, `approved`, `denied`, `spent`), plus `origin, argv, command, category, cwd, reason` when opened and `decision_reason` when decided |
 | `review` | mark_reviewed | `result` (null for the report), `note` |
-| `prompt` | message_captain, the delivery bridge (crew is `captain`, assignment null) | `message, state` (`queued`, `delivered`), plus `text` when queued |
+| `prompt` | message_captain, the delivery bridge (crew is `captain`, assignment null) | `message, state` (`queued`, `delivered`), `attachments`, plus `text` when queued |
 
 Lines are capped at 64 KiB; an oversized action drops its largest payload fields and keeps its identity, with `payload_truncated: true`.
 
@@ -280,7 +280,11 @@ The captain can route a question to the user itself, for good, with `captain esc
   The user settles it with `resolve_captain_delivery{delivery_id, decision}`: `resend` drops the claim so the next round sends it again, `ack` marks it delivered so the next round acknowledges it (`[captain-delivery-decision]`, `[captain-delivery-unknown]`); it runs between bridge rounds, never during one.
 - `message_captain` queues the user's prompt under `captain_messages` in `protocol.json`, records a `prompt` action, and sends what the captain will take at once; a busy captain gets it from the bridge when its turn ends, and a stopped one from the next `start_captain`.
   Its claim id is `user-<message_id>`, and the ring carries that id, so Codex never starts a second turn for it.
-  `message_id` makes a retry safe: a known id returns that prompt's state and sends nothing again, and a known id with other text is refused with `[captain-message-id]`; ids stay known for the newest 200 delivered prompts.
+  `message_id` makes a retry safe: a known id returns that prompt's state and sends nothing again, and a known id with other text or other attachment paths and names is refused with `[captain-message-id]`; ids stay known for the newest 200 delivered prompts.
+  Each attachment `path` is an absolute path to a regular, readable file, never a symlink; it is checked when queued and recorded on the queued row and both `prompt` actions as `{path, name, mime, kind, size}`, `name` defaulting to the file name.
+  A png, jpeg, gif or webp by its own bytes is `kind: "image"` and goes to the model natively (Codex `localImage`, pi `images`, Claude image blocks) up to 5 MiB each; any other file is `kind: "file"`, has no size limit, and goes as a path reference appended to the prompt text.
+  An image unreadable at send time, or past the provider's per-prompt budget (pi 2 MiB, Claude 20 MiB of base64), goes as a path reference too.
+  Refusals: `[attachment-missing]` (not absolute, absent or unreadable), `[attachment-unsupported]` (not a list, more than 10, a malformed entry, a symlink or not a regular file), `[attachment-too-large]` (an image over 5 MiB).
   `state` is `delivered`, `queued` (waiting for the captain), or `uncertain` (settle it with `resolve_captain_delivery`); a send that raised instead of reporting a gate leaves the prompt `uncertain` and names the failure in `error`, never refusing the call.
 - Operator notes: the user's `tell`, `answer`, `interrupt`, `model` and `dismiss` through `command`, `interrupt_all` and `resolve_grant` are recorded under `operator_notes` in `protocol.json` and put, one line each, in front of whatever next starts a captain turn (a prompt, a delivery or an authorization outcome), then marked delivered.
 - `interrupt_all` interrupts the captain too, as `{crew: "captain", outcome}`.
@@ -338,7 +342,7 @@ A Herdr session never reads a live frame.
 - `captain` is `captain_state` plus provider, transport, model and effort; with no captain running, `state` is null and `provider` is the last one recorded.
 - `agents` holds every crew of the session, dismissed ones included (`status: "dismissed"`, `state` null); `state`, `source` and `detail` are `status`'s evidence-based crew state.
 - `assignments` is every assignment, done ones too, with `active` for the crew's current one; `results` is each isolated result with its `reviewed` record.
-- `mail` is unread mail per crew, `deliveries` the pending `wait --all` projection, `prompts` the user's queued `message_captain` prompts, `questions` what `questions` returns.
+- `mail` is unread mail per crew, `deliveries` the pending `wait --all` projection, `prompts` the user's queued `message_captain` prompts with their `attachments`, `questions` what `questions` returns.
 - `grant_requests`, `authorizations` and `captain_requests` hold only open ones (`authorizations` also approved, unspent ones); `usage` is the dashboard's snapshot (`captain dashboard --json`).
 - Cursor rule: `cursors` is taken before the read, at a line boundary, after spooled actions are flushed; the read is repeated while actions land during it, up to 5 times.
   There is no gap: every action before the cursor is reflected in the snapshot, and `subscribe` from `cursors` delivers every later one.
@@ -383,12 +387,13 @@ The app keeps no session list of its own; it reads captain state, and needs no s
 Files removed by native-history cleanup after a dismissal are skipped, so that crew's transcript reads as empty.
 
 ```json
-{"id": "0:18342:2", "at": "2026-11-26T10:32:51.264Z", "role": "assistant", "kind": "tool_call", "text": "{\"command\": \"ls\"}", "tool": "Bash", "call": "toolu_01", "origin": null, "clipped": false}
+{"id": "0:18342:2", "at": "2026-11-26T10:32:51.264Z", "role": "assistant", "kind": "tool_call", "text": "{\"command\": \"ls\"}", "tool": "Bash", "call": "toolu_01", "origin": null, "message": null, "attachments": [], "clipped": false}
 ```
 
 - An entry is one block of one native record: `role` `user`, `assistant`, `tool` or `system`, `kind` `text`, `thinking`, `tool_call` or `tool_result`; `call` links a result to its call.
 - In the captain's transcript, a `user` text block is split into one entry per part, each with `origin`: `operator-note` (the notes in front), then `user` (a `message_captain` prompt), `delivery` (a crew delivery), `authorization` (an authorization outcome) or `native` (the provider's own context).
   A prompt is known by a digest kept in `sessions/<id>/captain-prompts`; every other entry has `origin: null`.
+  A `user` entry carries its `message` id and the prompt's `attachments`, its text without the appended path references; every other entry has `attachments: []`.
 - `id` is `FILE:OFFSET:BLOCK`: the index into `files`, the record's byte offset and the block; native files only grow, so it stays valid.
 - A page's `text` is cut at 4096 characters with `clipped: true`; `step` returns that entry's whole block (up to 1 MiB), for full step output on demand.
 - Without `after`, a page is the newest entries before `before` (default: the end); pass `start` back as `before` for older entries and `end` as `after` for newer ones.

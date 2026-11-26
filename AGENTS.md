@@ -68,6 +68,7 @@ src/captain_barbossa/
   claude_agent.py supervised Claude adapter over claude_host
   pi_rpc.py       supervised pi adapter over `pi --mode rpc`
   captain_bridge.py supervised captain: delivery bridge, claims, operator notes, requests
+  attachments.py  files on a captain message: validation, recorded shape, provider prompt
   transcripts.py  paged transcripts and full steps from a provider's own session files
   jsonrpc.py      line-delimited JSON-RPC framing, deadlines, multiplexed Peer
   update_check.py startup PyPI update check and `captain update`

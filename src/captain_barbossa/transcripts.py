@@ -24,6 +24,8 @@ MAX_LIMIT = 500
 CURSOR = re.compile(r"(\d+):(\d+)")
 ENTRY = re.compile(r"(\d+):(\d+):(\d+)")
 INCARNATION = re.compile(r"[a-f0-9]{32}")
+# The text items Codex wraps around each local image of a user message.
+CODEX_IMAGE_TAG = re.compile(r"<image(?: name=[^>]*)?>|</image>")
 
 
 def events_path(session, agent, incarnation=None):
@@ -65,6 +67,7 @@ def _block(role, kind, text, tool=None, call=None, origin=None, message=None):
         "call": call,
         "origin": origin,
         "message": message,
+        "attachments": [],
     }
 
 
@@ -102,7 +105,18 @@ def _codex(record):
     kind, call = item.get("type"), item.get("call_id")
     if kind == "message":
         role = {"developer": "system"}.get(item.get("role"), item.get("role"))
-        return [_block(role, "text", _text(item.get("content")))]
+        content = item.get("content")
+        if isinstance(content, list):
+            content = [
+                part
+                for part in content
+                if not (
+                    isinstance(part, dict)
+                    and part.get("type") == "input_text"
+                    and CODEX_IMAGE_TAG.fullmatch(str(part.get("text")))
+                )
+            ]
+        return [_block(role, "text", _text(content))]
     if kind == "reasoning":
         text = _text(item.get("summary"))
         return [_block("assistant", "thinking", text)] if text else []
@@ -148,7 +162,9 @@ def _message_queues(directory):
     )
     messages = {}
     for row in delivered:
-        messages.setdefault(row["digest"], deque()).append(row["id"])
+        attached = row.get("attachments")
+        attached = attached if isinstance(attached, list) else []
+        messages.setdefault(row["digest"], deque()).append((row["id"], attached))
     return messages
 
 
@@ -161,8 +177,16 @@ def _captain(parse, prompts, messages, record):
             continue
         for origin, text in captain_bridge.parts(block["text"], prompts):
             ids = messages.get(hashlib.sha256(text.strip().encode()).hexdigest())
-            message = ids.popleft() if origin == "user" and ids else None
-            blocks.append({**block, "text": text, "origin": origin, "message": message})
+            message, attached = ids.popleft() if origin == "user" and ids else (None, [])
+            blocks.append(
+                {
+                    **block,
+                    "text": text,
+                    "origin": origin,
+                    "message": message,
+                    "attachments": attached,
+                }
+            )
     return blocks
 
 

@@ -57,9 +57,9 @@ def state(link):
     return "working" if link.turn is not None else "idle"
 
 
-def ring(link, message_id, text):
+def ring(link, message_id, text, attached=()):
     """Start a turn: a crew gets the bare wake line and its hook hands over the body; the
-    captain, which has no mail, gets the text itself."""
+    captain, which has no mail, gets the text itself and its attachments."""
     with link.guard:
         if message_id in link.native.setdefault("accepted", set()):
             return {"landed": True, "gate": None}
@@ -68,8 +68,10 @@ def ring(link, message_id, text):
         link.turn = WORKING
         link.native["sending"] = message_id
     try:
-        text = text if link.captain else WAKE_LINE
-        link.peer.request("query", {"text": text}, _timeout("request_timeout"))
+        params = {"text": WAKE_LINE}
+        if link.captain:
+            params = {"text": text, "attachments": list(attached)}
+        link.peer.request("query", params, _timeout("request_timeout"))
     except CaptainError as exc:
         if "[jsonrpc-timeout]" in str(exc):
             # The host may have accepted it: the slot stays taken until a turn notice settles it.

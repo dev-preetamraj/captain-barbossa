@@ -9,7 +9,7 @@ import shlex
 import time
 from uuid import uuid4
 
-from . import protocol
+from . import attachments, protocol
 from .eventlog import record_action, redact
 from .runtime import CaptainError
 from .store import private_dir, read_json, write_json
@@ -145,16 +145,16 @@ def prompt_digests(directory):
 
 
 def parts(text, prompts):
-    """(origin, text) of each part of one message to the captain: notes apart from what they ride."""
-    if _digest(text) in prompts:
-        return [("user", text)]
+    """(origin, text) of each part of a message to the captain; a prompt drops its file references."""
+    if _digest(prompt := attachments.without_references(text)) in prompts:
+        return [("user", prompt)]
     found = []
     if text.startswith(NOTES_HEAD):
         notes, _, text = text.partition("\n\n")
         found.append(("operator-note", notes))
     if text or not found:
-        if _digest(text) in prompts:
-            origin = "user"
+        if _digest(prompt := attachments.without_references(text)) in prompts:
+            origin, text = "user", prompt
         elif text.startswith(DELIVERY_HEAD):
             origin = "delivery"
         elif text.startswith(AUTHORIZATION_HEADS):
@@ -221,7 +221,7 @@ def notified(directory, row_id):
                 row["notified_at"] = time.time()
 
 
-def send(directory, delivery, body, ring, mine, report):
+def send(directory, delivery, body, ring, mine, report, attached=()):
     """`landed`, `held` (end the round) or `uncertain`; a send left unconfirmed stays claimed."""
     outcome = claim(directory, delivery, mine)
     if outcome == "uncertain":
@@ -233,7 +233,10 @@ def send(directory, delivery, body, ring, mine, report):
     notes = pending_notes(directory)
     text = with_notes(body, notes)
     mine.discard(delivery["delivery_id"])
-    result = ring(delivery["delivery_id"], text)
+    if attached:
+        result = ring(delivery["delivery_id"], text, attached)
+    else:
+        result = ring(delivery["delivery_id"], text)
     if not result["landed"]:
         if result.get("gate") in NOT_SENT:
             _claim_path(directory, delivery["delivery_id"]).unlink()
@@ -243,24 +246,31 @@ def send(directory, delivery, body, ring, mine, report):
     return "landed"
 
 
-def queue_message(directory, message_id, text):
-    """Queue the user's prompt once per id; the same id with other text is refused."""
+def _same_files(records):
+    return [(record["path"], record["name"]) for record in records]
+
+
+def queue_message(directory, message_id, text, attached=None):
+    """Queue the user's prompt once per id; the same id with other text or files is refused."""
     if not MESSAGE_ID.fullmatch(message_id):
         raise CaptainError("[captain-message-id] message_id is 1 to 128 of A-Z, a-z, 0-9, - or _.")
+    records = attachments.validate(attached)
     digest = _digest(text)
     with protocol.checkpoint(directory) as state:
         rows = state.setdefault("captain_messages", [])
         row = next((row for row in rows if row["id"] == message_id), None)
         if row is not None:
-            if row["digest"] != digest:
+            files = _same_files(row.get("attachments", ()))
+            if row["digest"] != digest or files != _same_files(records):
                 raise CaptainError(
-                    f"[captain-message-id] Message {message_id} was queued with other text."
+                    f"[captain-message-id] Message {message_id} was queued with other content."
                 )
             return False
         rows.append(
             {
                 "id": message_id,
                 "text": text,
+                "attachments": records,
                 "digest": digest,
                 "at": time.time(),
                 "delivered_at": None,
@@ -282,6 +292,7 @@ def queue_message(directory, message_id, text):
         message=message_id,
         state="queued",
         text=text,
+        attachments=records,
     )
     return True
 
@@ -300,12 +311,21 @@ def message_state(directory, message_id):
 
 
 def message_delivered(directory, message_id):
+    records = []
     with protocol.checkpoint(directory) as state:
         for row in state.get("captain_messages", ()):
             if row["id"] == message_id:
                 row.update(text=None, delivered_at=time.time())
+                records = row.get("attachments", [])
     record_action(
-        directory, "prompt", "captain", None, supervised=True, message=message_id, state="delivered"
+        directory,
+        "prompt",
+        "captain",
+        None,
+        supervised=True,
+        message=message_id,
+        state="delivered",
+        attachments=records,
     )
 
 
@@ -315,7 +335,8 @@ def send_messages(directory, ring, mine, report):
         if row["delivered_at"] is not None:
             continue
         delivery = {"delivery_id": USER + row["id"], "message_id": row["id"]}
-        outcome = send(directory, delivery, row["text"], ring, mine, report)
+        attached = row.get("attachments", [])
+        outcome = send(directory, delivery, row["text"], ring, mine, report, attached)
         if outcome == "held":
             return False
         if outcome == "landed":
