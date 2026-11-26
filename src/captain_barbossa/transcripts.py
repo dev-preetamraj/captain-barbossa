@@ -3,6 +3,7 @@
 # An entry is one block of one native record, addressed FILE:OFFSET:BLOCK (session file index,
 # record byte offset, block); native session files only grow, so addresses stay valid.
 
+import hashlib
 import json
 import os
 import re
@@ -13,6 +14,7 @@ from pathlib import Path
 
 from . import captain_bridge, eventlog, safe_read, usage
 from .runtime import CaptainError
+from .store import read_json
 
 # Characters of an entry's text in a page; `step` returns its whole block up to STEP_CHARS.
 TEXT_CHARS = 4096
@@ -54,8 +56,16 @@ def _arguments(value):
     return json.dumps(eventlog.redact(value, eventlog.known_secrets()), ensure_ascii=False)
 
 
-def _block(role, kind, text, tool=None, call=None, origin=None):
-    return {"role": role, "kind": kind, "text": text, "tool": tool, "call": call, "origin": origin}
+def _block(role, kind, text, tool=None, call=None, origin=None, message=None):
+    return {
+        "role": role,
+        "kind": kind,
+        "text": text,
+        "tool": tool,
+        "call": call,
+        "origin": origin,
+        "message": message,
+    }
 
 
 def _content(role, content):
@@ -122,15 +132,37 @@ def _pi(record):
 PARSERS = {"claude": _claude, "codex": _codex, "pi": _pi}
 
 
-def _captain(parse, prompts, record):
-    """The captain's user text split into parts, each with the origin the bridge wrote it for."""
+def _message_queues(directory):
+    path = directory / "protocol.json"
+    rows = read_json(path).get("captain_messages", []) if path.exists() else []
+    delivered = sorted(
+        (
+            row
+            for row in rows
+            if isinstance(row, dict)
+            and isinstance(row.get("id"), str)
+            and isinstance(row.get("digest"), str)
+            and isinstance(row.get("delivered_at"), int | float)
+        ),
+        key=lambda row: row["delivered_at"],
+    )
+    messages = {}
+    for row in delivered:
+        messages.setdefault(row["digest"], deque()).append(row["id"])
+    return messages
+
+
+def _captain(parse, prompts, messages, record):
+    """Split captain input and pair delivered prompts with their message ids in order."""
     blocks = []
     for block in parse(record):
         if block["role"] != "user" or block["kind"] != "text":
             blocks.append(block)
             continue
         for origin, text in captain_bridge.parts(block["text"], prompts):
-            blocks.append({**block, "text": text, "origin": origin})
+            ids = messages.get(hashlib.sha256(text.strip().encode()).hexdigest())
+            message = ids.popleft() if origin == "user" and ids else None
+            blocks.append({**block, "text": text, "origin": origin, "message": message})
     return blocks
 
 
@@ -211,8 +243,20 @@ def _sources(session, agent, incarnation):
     provider, files, root = usage.native_files(events_path(session, agent, incarnation))
     parse = PARSERS.get(provider)
     if agent == "captain" and parse is not None:
-        parse = partial(_captain, parse, captain_bridge.prompt_digests(session.directory))
+        parse = partial(
+            _captain,
+            parse,
+            captain_bridge.prompt_digests(session.directory),
+            _message_queues(session.directory),
+        )
     return provider, [Path(file) for file in files], root, parse
+
+
+def _prime(parse, files, root, stop):
+    for position, _, record in _records(files, root):
+        if position >= stop:
+            break
+        parse(record)
 
 
 def read(session, agent, *, after=None, before=None, limit=DEFAULT_LIMIT, incarnation=None):
@@ -226,6 +270,8 @@ def read(session, agent, *, after=None, before=None, limit=DEFAULT_LIMIT, incarn
     provider, files, root, parse = _sources(session, agent, incarnation)
     pages, end, more = deque(), first, False
     if parse is not None:
+        if agent == "captain" and first != (0, 0):
+            _prime(parse, files, root, first)
         count = 0
         for position, finish, record in _records(files, root, first):
             if stop is not None and position >= stop:
@@ -261,6 +307,8 @@ def step(session, agent, entry, *, incarnation=None):
     _, files, root, parse = _sources(session, agent, incarnation)
     if parse is None or index >= len(files):
         raise CaptainError(f"[transcript-entry] {agent} has no entry {entry}.")
+    if agent == "captain" and (index, offset) != (0, 0):
+        _prime(parse, files, root, (index, offset))
     try:
         file = _open(files[index], root)
     except FileNotFoundError as exc:
