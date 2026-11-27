@@ -53,6 +53,7 @@ from . import (
 from .crew import Crew, event_status
 from .memory import add_memory
 from .models import CAPABILITIES, PROVIDERS, TRANSPORTS, resolve_model
+from .retirement import dispose as cleanup_worktree
 from .runtime import CaptainError
 from .sessions import (
     SESSION_ID,
@@ -214,12 +215,17 @@ class Supervisor:
 
 
 def refusal(message, code=REFUSED):
-    """A JSON-RPC error whose message leads with, and whose data names, a protocol code."""
+    """A JSON-RPC error whose data preserves structured refusal details."""
+    blockers = getattr(message, "blockers", None)
+    message = str(message)
     match = PROTOCOL_CODE.match(message)
     protocol = match[1] if match else "supervisor-error"
     if not match:
         message = f"[{protocol}] {message}"
-    return {"code": code, "message": message, "data": {"code": protocol}}
+    data = {"code": protocol}
+    if blockers is not None:
+        data["blockers"] = blockers
+    return {"code": code, "message": message, "data": data}
 
 
 def _text(params, key):
@@ -1844,17 +1850,34 @@ def unarchive_session(supervisor, params):
 
 
 def delete_session(supervisor, params):
-    """Delete a stopped session's state; its own lock refuses this running session."""
-    deleted = retention.delete_session(_session_directory(supervisor, params))
-    eventlog.record_action(
-        supervisor.session.directory,
-        "session-deleted",
-        None,
-        None,
-        supervised=True,
-        session_id=deleted["session_id"],
-    )
-    return deleted
+    """Delete a stopped session with explicit force and worktree discard choices."""
+    force = params.get("force", False)
+    discard_worktrees = params.get("discard_worktrees", False)
+    if type(force) is not bool or type(discard_worktrees) is not bool:
+        raise retention.SessionDeleteError(
+            "[supervisor-params] force and discard_worktrees must be booleans.", []
+        )
+    try:
+        directory = _session_directory(supervisor, params)
+        deleted = retention.delete_session(
+            directory,
+            force=force,
+            discard_worktrees=discard_worktrees,
+            worktree_cleanup=cleanup_worktree,
+        )
+        eventlog.record_action(
+            supervisor.session.directory,
+            "session-deleted",
+            None,
+            None,
+            supervised=True,
+            session_id=deleted["session_id"],
+        )
+        return deleted
+    except retention.SessionDeleteError:
+        raise
+    except (CaptainError, OSError) as exc:
+        raise retention.SessionDeleteError(str(exc), []) from exc
 
 
 def counted_catalog(project, include_archived=False):
@@ -2392,7 +2415,7 @@ class Handler(socketserver.BaseRequestHandler):
         try:
             return {"result": METHODS[method](supervisor, params)}
         except (CaptainError, OSError) as exc:
-            return {"error": refusal(str(exc))}
+            return {"error": refusal(exc)}
 
 
 class Server(socketserver.ThreadingUnixStreamServer):

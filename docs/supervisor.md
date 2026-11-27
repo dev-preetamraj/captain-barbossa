@@ -49,6 +49,9 @@ Every refusal is a JSON-RPC error whose message starts with its protocol code an
 {"jsonrpc": "2.0", "id": 1, "error": {"code": -32000, "message": "[supervisor-crew] jack is not running under this supervisor.", "data": {"code": "supervisor-crew"}}}
 ```
 
+A `delete_session` refusal also has `data.blockers`, including an empty list when the refusal is not caused by retained session state.
+Each blocker is `{kind, crew, assignment_id, summary}`; `kind` is `question`, `report`, `mail`, `delivery`, `result`, `worktree`, `lifetime` or `history`, and `crew` and `assignment_id` may be null.
+
 | JSON-RPC code | When |
 | --- | --- |
 | -32600 | malformed line or envelope (`jsonrpc-malformed`) |
@@ -121,7 +124,7 @@ Every refusal is a JSON-RPC error whose message starts with its protocol code an
 | `sessions` | `all` (optional bool: include archived sessions) | the session list (see Session hub) |
 | `archive_session` | `session_id` | `{session_id, archived: true, archived_at, stopped}` |
 | `unarchive_session` | `session_id` | `{session_id, archived: false, archived_at: null}` |
-| `delete_session` | `session_id` | `{session_id, deleted: true}` |
+| `delete_session` | `session_id`, `force` (optional bool), `discard_worktrees` (optional bool) | `{session_id, deleted: true}` |
 | `providers` | `recheck` (optional bool), `provider` (optional) | `{providers: [{provider, installed, version, signed_in, account, detail, hooks, permission_modes, checked_at, sign_in, attempt}]}` |
 | `sign_in` | `provider`, `method` (optional), `api_key` (with `apiKey`) | the attempt, or `{provider, state: "guidance", guidance}` |
 | `cancel_sign_in` | `provider` | the attempt, or `{provider, state: "not-running"}` |
@@ -143,6 +146,7 @@ An app calls every other method directly.
 - `interrupt_all` interrupts every running crew in parallel and records `interrupted` in session memory for each confirmed one.
 - `ring` with a `message_id` Codex already accepted lands again without starting a second turn.
   A `turn/start` Codex never answered reports `"delivery unconfirmed"`: held, never bounced, and settled by the next turn notice.
+  When a supervised crew's first assignment ring bounced, its next message requeues and delivers that assignment mail first, recording another `mail` `sent` action with the same message id.
 
 Refusal codes by method: `supervisor-params` (any), `supervisor-crew`, `supervisor-transport`, `supervisor-closing`, `supervisor-startup`, `codex-hooks-missing`, `codex-hooks-untrusted`, `claude-sdk-missing`, `claude-start` (start), `grant-request-unknown`, `grant-request-closed`, `grant-request-decision`, `grant-request-unsupported` (resolve_grant), `command-refused`, `command-timeout`, `command-failed` (command), `transcript-agent`, `transcript-range`, `transcript-entry`, `transcript-file`, `transcript-gone` (transcript, step), `session-name` (rename), `session-unknown`, `supervisor-running`, `session-live-agents`, `session-unlanded-work`, `session-unreviewed-results`, `session-unresolved`, `delete-outside-session`, `delete-failed` (archive_session, delete_session; `session-unknown` also unarchive_session), `supervisor-captain-token` (any method but the captain CLI's, with the captain's token), `captain-delivery-decision`, `captain-delivery-unknown` (resolve_captain_delivery), `sign-in-method`, `sign-in-running`, `sign-in-missing` (sign_in), `supervisor-params` for an unknown `agent` (models), `authorization-argv` (command), `authorization-unknown`, `authorization-closed`, `authorization-decision` (resolve_authorization), `diff-assignment`, `diff-no-baseline`, `diff-git` (diff), `checkout-diff` (checkout_diff), `review-assignment`, `review-no-report`, `review-result` (mark_reviewed), `captain-transport`, `captain-running`, `captain-start` (start_captain), `effort-unsupported`, `claude-model` (start_captain, set_captain_model), `permission-mode-unsupported` (start_captain, set_captain_permission_mode), `permission-mode-refused` (set_captain_permission_mode), `captain-not-running` (message, interrupt, answer, set_captain_model, captain_commands and run_captain_command), `captain-command-unsupported`, `captain-command-busy`, `captain-command-args` (run_captain_command), `captain-message-id`, `attachment-missing`, `attachment-unsupported`, `attachment-too-large` (message_captain), `captain-message-unknown`, `captain-message-delivered`, `captain-message-uncertain` (cancel_captain_message), `captain-request-closed`, `captain-request-answer`, `captain-request-unknown` (answer_captain), `delivery-unknown` (ack_delivery).
 
@@ -428,7 +432,11 @@ The app keeps no session list of its own; it reads captain state, and needs no s
   `captain archive --session ID` does the same for a stopped session with no supervisor; it is refused with `[supervisor-running]` while a supervisor holds the lock and with `[session-live-agents]` for a Herdr session with live agents.
   `unarchive_session` or `captain unarchive --session ID` clears `archived_at`; it is never refused for a known session.
 - Delete: `delete_session` or `captain delete --session ID` removes a stopped session's state directory and nothing outside it.
-  It is refused with `[supervisor-running]` (including this session), `[session-live-agents]`, `[session-unlanded-work]` (lists crew worktrees not yet removed), `[session-unreviewed-results]` (lists results neither applied, discarded nor reviewed), or `[session-unresolved]`; an unknown id is `[session-unknown]`.
+  Every refusal returns `blockers` as described above; `captain delete --json` puts the same list in `error.data.blockers`, while plain stderr prints one blocker per line.
+  `force: true` or `--force` discards unreceived questions, reports, mail, deliveries and unreviewed results without recording acknowledgements or other protocol outcomes.
+  A running supervisor or live Herdr agent still refuses deletion.
+  Crew worktrees still refuse deletion unless `discard_worktrees: true` or `--discard-worktrees` is also given; that option uses the result and worktree cleanup path rather than removing an external worktree directory directly.
+  Refusal codes are `[supervisor-running]`, `[session-live-agents]`, `[session-unlanded-work]`, `[session-unreviewed-results]` or `[session-unresolved]`; an unknown id is `[session-unknown]`.
 
 ## Transcripts
 

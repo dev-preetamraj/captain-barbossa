@@ -32,6 +32,7 @@ from .onboarding import bootstrap
 from .prompts import PLACEMENTS, pick_session
 from .retention import PRUNE_DAYS, archive_session, delete_session
 from .retirement import artifact_command
+from .retirement import dispose as cleanup_worktree
 from .runtime import HERDR_ERRORS, CaptainError, current_pane
 from .sessions import (
     catalog,
@@ -303,11 +304,21 @@ def parser(*, plan=False):
     for verb, summary in (
         ("archive", "archive a stopped session, hiding it from `sessions`; prints JSON"),
         ("unarchive", "clear a session's archive mark; prints JSON"),
-        ("delete", "delete a stopped session's state with no unlanded work; prints JSON"),
     ):
         commands.add_parser(verb, help=summary).add_argument(
             "--session", default=argparse.SUPPRESS, help=f"{verb} this session"
         )
+    delete = commands.add_parser("delete", help="delete a stopped session's state; prints JSON")
+    delete.add_argument("--session", default=argparse.SUPPRESS, help="delete this session")
+    delete.add_argument(
+        "--force", action="store_true", help="discard unread questions, reports, mail and results"
+    )
+    delete.add_argument(
+        "--discard-worktrees",
+        action="store_true",
+        help="discard and remove stopped crew worktrees through their cleanup path",
+    )
+    delete.add_argument("--json", action="store_true", help=JSON_HELP)
     commands.add_parser("recover", help="JSON digest of memory, assignments and pending deliveries")
     supervise = commands.add_parser(
         "supervise", help="own this session's crew behind a socket for an app, with no Herdr"
@@ -694,7 +705,16 @@ def main(argv=None):
             return 0
         if args.command in ARCHIVE_VERBS:
             directory = read_session(active_project(), args.session).directory
-            print(json.dumps(ARCHIVE_VERBS[args.command](directory)))
+            options = (
+                {
+                    "force": args.force,
+                    "discard_worktrees": args.discard_worktrees,
+                    "worktree_cleanup": cleanup_worktree,
+                }
+                if args.command == "delete"
+                else {}
+            )
+            print(json.dumps(ARCHIVE_VERBS[args.command](directory, **options)))
             return 0
         if args.command == "end":
             from .supervisor import end_session  # local, as for supervise
@@ -832,6 +852,30 @@ def main(argv=None):
                     }
                 )
             )
+            return 1
+        if args.command == "delete":
+            blockers = getattr(exc, "blockers", [])
+            if args.json:
+                match = REFUSAL_CODE.match(str(exc))
+                code = match[1] if match else "captain-error"
+                print(
+                    json.dumps(
+                        {
+                            "error": {
+                                "code": code,
+                                "message": str(exc),
+                                "data": {"blockers": blockers},
+                            }
+                        }
+                    )
+                )
+            else:
+                print(f"captain: {exc}", file=sys.stderr)
+                for blocker in blockers:
+                    print(
+                        f"captain: blocker ({blocker['kind']}): {blocker['summary']}",
+                        file=sys.stderr,
+                    )
             return 1
         if args.command in JSON_VERBS and args.json:
             match = REFUSAL_CODE.match(str(exc))

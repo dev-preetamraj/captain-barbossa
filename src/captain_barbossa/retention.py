@@ -16,6 +16,24 @@ from .sessions import (
 from .store import lock, read_json, state_root, temp_root
 
 PRUNE_DAYS = 7
+FORCEABLE_BLOCKERS = {"question", "report", "mail", "delivery", "result"}
+
+
+class SessionDeleteError(CaptainError):
+    """A delete refusal with blockers the caller can present or override."""
+
+    def __init__(self, message, blockers):
+        super().__init__(message)
+        self.blockers = blockers
+
+
+def _blocker(kind, summary, *, crew=None, assignment_id=None):
+    return {
+        "kind": kind,
+        "crew": crew,
+        "assignment_id": assignment_id,
+        "summary": " ".join(str(summary).split()),
+    }
 
 
 def live_agents():
@@ -57,60 +75,237 @@ def session_terminal_id(directory):
     return terminal_id if isinstance(terminal_id, str) else None
 
 
-def unresolved(directory):
-    """Whether a session holds work or an outcome nobody has received yet, kept at any age.
+def _assignment_for(state, crew_id, incarnation_id=None):
+    for assignment in state.get("assignments", {}).values():
+        if assignment.get("crew", "").casefold() != str(crew_id).casefold():
+            continue
+        if incarnation_id is None or assignment.get("incarnation_id") == incarnation_id:
+            return assignment.get("id")
+    return None
 
-    A dismissed crew can receive nothing more, so only live roster entries count. State
-    that cannot be read cannot prove there is nothing left, so it counts too, and so does
-    a supervised session whose supervisor still holds its lock.
-    """
+
+def _protocol_blockers(current, state):
+    blockers = []
+    roster = current.meta.get("crew", {})
+    for crew_id, assignment_id in state.get("active", {}).items():
+        assignment = state.get("assignments", {}).get(assignment_id)
+        if not assignment:
+            continue
+        record = roster.get(crew_id)
+        if record is not None and (
+            record.get("status") == "dismissed"
+            or assignment.get("incarnation_id") != record.get("incarnation_id")
+        ):
+            continue
+        question = assignment.get("question")
+        if question:
+            blockers.append(
+                _blocker(
+                    "question",
+                    f"A question from {crew_id} is still waiting for an answer: "
+                    f"{question.get('text', 'question text unavailable')}",
+                    crew=crew_id,
+                    assignment_id=assignment_id,
+                )
+            )
+        mail_blocked = False
+        folder = current.directory / "mail" / crew_id
+        try:
+            messages = [read_json(path) for path in sorted(folder.glob("*.json"))]
+        except (CaptainError, OSError, ValueError, AttributeError, KeyError, TypeError):
+            messages = []
+            blockers.append(
+                _blocker(
+                    "mail",
+                    f"Mail for {crew_id} could not be read safely.",
+                    crew=crew_id,
+                    assignment_id=assignment_id,
+                )
+            )
+            mail_blocked = True
+        for message in messages:
+            if message.get("assignment_id") != assignment_id:
+                continue
+            if message.get("state") == "queued":
+                summary = f"Mail to {crew_id} has not been read."
+            elif message.get("state") == "bounced":
+                reason = message.get("reason") or "the crew could not receive it"
+                summary = f"Mail to {crew_id} bounced because {reason}."
+            else:
+                continue
+            blockers.append(_blocker("mail", summary, crew=crew_id, assignment_id=assignment_id))
+            mail_blocked = True
+        prepared = any(
+            message.get("delivery") == "prepared" for message in assignment.get("messages", [])
+        )
+        unreceived = bool(assignment.get("pending")) or assignment.get("ack_seq", 0) < len(
+            assignment.get("notices", [])
+        )
+        if assignment.get("state") == "done" and assignment.get("report") and unreceived:
+            blockers.append(
+                _blocker(
+                    "report",
+                    f"A report from {crew_id} has not been acknowledged.",
+                    crew=crew_id,
+                    assignment_id=assignment_id,
+                )
+            )
+        elif unreceived and not question:
+            blockers.append(
+                _blocker(
+                    "delivery",
+                    f"A notification from {crew_id} has not been acknowledged.",
+                    crew=crew_id,
+                    assignment_id=assignment_id,
+                )
+            )
+        if prepared:
+            blockers.append(
+                _blocker(
+                    "delivery",
+                    f"A message to {crew_id} was prepared but not sent.",
+                    crew=crew_id,
+                    assignment_id=assignment_id,
+                )
+            )
+        if assignment.get("state") != "done" and not question and not mail_blocked and not prepared:
+            blockers.append(
+                _blocker(
+                    "delivery",
+                    f"The assignment for {crew_id} is unfinished.",
+                    crew=crew_id,
+                    assignment_id=assignment_id,
+                )
+            )
+    return blockers
+
+
+def session_blockers(directory):
+    """Return every retained work, outcome and cleanup blocker for a session."""
     try:
-        path = directory / "session.json"
-        meta = read_json(path) if path.exists() else {}
+        meta = read_json(directory / "session.json")
+        current = Session(directory, meta)
+        path = directory / "protocol.json"
+        state = read_json(path) if path.exists() else {"active": {}, "assignments": {}}
+    except (CaptainError, OSError, ValueError, AttributeError, KeyError, TypeError):
+        return [_blocker("delivery", "The session state could not be read safely.")]
+    blockers = _protocol_blockers(current, state)
+    try:
+        records = worktrees.inventory(current)
+    except (CaptainError, OSError, ValueError, AttributeError, KeyError, TypeError):
+        records = []
+        blockers.append(_blocker("worktree", "Crew worktree state could not be read safely."))
+    for record in records:
+        if record.get("phase") == "removed":
+            continue
+        blockers.append(
+            _blocker(
+                "worktree",
+                f"worktree {record.get('id')} for {record.get('crew_id')} has not been removed.",
+                crew=record.get("crew_id"),
+                assignment_id=record.get("assignment_id"),
+            )
+        )
+    record_ids = {record.get("id") for record in records}
+    try:
+        manifests = results.inventory(current)
+    except (CaptainError, OSError, ValueError, AttributeError, KeyError, TypeError):
+        manifests = []
+        blockers.append(_blocker("result", "Crew result state could not be read safely."))
+    reviewed = {
+        result_id
+        for assignment in state.get("assignments", {}).values()
+        for result_id in (assignment.get("reviewed_results") or {})
+    }
+    for manifest in manifests:
+        folder = current.directory / "results" / manifest["id"]
+        try:
+            receipt = folder / "transfer.json"
+            applied = receipt.is_file() and read_json(receipt).get("state") == "applied"
+            settled = manifest["id"] in reviewed or applied or (folder / "discard.json").exists()
+        except (CaptainError, OSError, ValueError, AttributeError, KeyError, TypeError):
+            settled = False
+        if settled and manifest.get("worktree_id") in record_ids:
+            continue
+        summary = (
+            f"result {manifest.get('id')} has no worktree cleanup record."
+            if manifest.get("worktree_id") not in record_ids
+            else f"result {manifest.get('id')} has not been applied, discarded or reviewed."
+        )
+        blockers.append(
+            _blocker(
+                "result",
+                summary,
+                crew=manifest.get("crew_id"),
+                assignment_id=manifest.get("assignment_id"),
+            )
+        )
+    lifetimes = directory / "lifetimes"
+    try:
+        for path in sorted(lifetimes.glob("*.json")):
+            record = lifetime.read(current, path.stem)
+            verdict = lifetime.check(
+                current,
+                path.stem,
+                crew_id=record["crew_id"],
+                incarnation_id=record["incarnation_id"],
+                root=record["root"],
+                worktree=record["worktree_id"],
+            )
+            if verdict.ok:
+                continue
+            blockers.append(
+                _blocker(
+                    "lifetime",
+                    f"The managed writer for {record['crew_id']} is not confirmed stopped: "
+                    f"{verdict.reason}.",
+                    crew=record["crew_id"],
+                    assignment_id=_assignment_for(
+                        state, record["crew_id"], record.get("incarnation_id")
+                    ),
+                )
+            )
+    except (CaptainError, OSError, ValueError, AttributeError, KeyError, TypeError):
+        blockers.append(_blocker("lifetime", "Managed writer state could not be read safely."))
+    history = directory / "native-history"
+    history_blocked = False
+    try:
+        for path in sorted(history.glob("*.json")):
+            record = read_json(path)
+            if record.get("state") == "complete":
+                continue
+            crew_id = record.get("crew_id")
+            reason = record.get("reason") or "cleanup is incomplete"
+            blockers.append(
+                _blocker(
+                    "history",
+                    f"Native history cleanup for {crew_id or 'a crew member'} is incomplete: "
+                    f"{reason}.",
+                    crew=crew_id,
+                    assignment_id=_assignment_for(state, crew_id, record.get("incarnation_id")),
+                )
+            )
+            history_blocked = True
+    except (CaptainError, OSError, ValueError, AttributeError, KeyError, TypeError):
+        blockers.append(_blocker("history", "Native history state could not be read safely."))
+        history_blocked = True
+    if native_history.pending(directory) and not history_blocked:
+        blockers.append(_blocker("history", "Native history cleanup is incomplete."))
+    return blockers
+
+
+def unresolved(directory):
+    """Whether a session holds work or an outcome nobody has received yet."""
+    try:
+        meta = read_json(directory / "session.json")
         if meta.get("transport") == "supervisor":
             from . import supervision  # local: Herdr sessions never load the supervisor door
 
             if supervision.alive(directory):
                 return True
-        roster = meta.get("crew", {})
-        current = Session(directory, meta)
-        lifetimes = directory / "lifetimes"
-        if (
-            (lifetimes.exists() or lifetimes.is_symlink()) and lifetime.pending(directory)
-        ) or native_history.pending(directory):
-            return True
-        records = worktrees.inventory(current)
-        if any(record["phase"] != "removed" for record in records):
-            return True
-        manifests = results.inventory(current)
-        if any(
-            item["worktree_id"] not in {record["id"] for record in records} for item in manifests
-        ):
-            return True
-        path = directory / "protocol.json"
-        state = read_json(path) if path.exists() else {}
-        for crew_id, assignment_id in state.get("active", {}).items():
-            record = roster.get(crew_id)
-            assignment = state["assignments"].get(assignment_id)
-            if not assignment:
-                continue
-            if record is None:
-                # Reserved before its roster entry: a recruit that died part-way.
-                if assignment["state"] != "done":
-                    return True
-                continue
-            dismissed = record.get("status") == "dismissed"
-            if dismissed or assignment["incarnation_id"] != record.get("incarnation_id"):
-                continue
-            if (
-                assignment["state"] != "done"
-                or assignment["pending"]
-                or assignment["ack_seq"] < len(assignment["notices"])
-            ):
-                return True
+        return bool(session_blockers(directory))
     except (CaptainError, OSError, ValueError, AttributeError, KeyError, TypeError):
         return True
-    return False
 
 
 def prune_sessions(project, days=PRUNE_DAYS, current=None):
@@ -169,37 +364,18 @@ def archive_session(directory):
     return set_archived(directory, True)
 
 
-def unlanded_worktrees(current):
-    """One line per crew worktree not yet removed, since its owned work may not have landed."""
-    return [
-        f"worktree {record['id']} (crew {record['crew_id']}, {record['phase']}) "
-        f"at {record['execution_root']}"
-        for record in worktrees.inventory(current)
-        if record["phase"] != "removed"
-    ]
-
-
-def unreviewed_results(current):
-    """One line per result neither applied, discarded nor marked reviewed."""
-    path = current.directory / "protocol.json"
-    state = read_json(path) if path.exists() else {}
-    reviewed = {
-        result_id
-        for assignment in state.get("assignments", {}).values()
-        for result_id in assignment.get("reviewed_results") or {}
-    }
-    lines = []
-    for manifest in results.inventory(current):
-        folder = current.directory / "results" / manifest["id"]
-        receipt = folder / "transfer.json"
-        applied = receipt.is_file() and read_json(receipt).get("state") == "applied"
-        if manifest["id"] in reviewed or applied or (folder / "discard.json").exists():
+def _discard_worktrees(current, worktree_cleanup):
+    """Discard each stopped worktree through the injected retirement cleanup path."""
+    for record in worktrees.inventory(current):
+        if record["phase"] == "removed":
             continue
-        lines.append(
-            f"result {manifest['id']} (crew {manifest['crew_id']}, "
-            f"assignment {manifest['assignment_id']})"
-        )
-    return lines
+        if worktree_cleanup is None:
+            raise CaptainError("Worktree cleanup is unavailable.")
+        if not worktrees.stopped(current, record):
+            continue
+        manifest = results.collect(current, record["id"], ["."])
+        results.discard(current, manifest["id"], "Session deletion discarded this worktree.")
+        worktree_cleanup(current, record["id"])
 
 
 def session_directory_checked(directory):
@@ -218,43 +394,50 @@ def session_directory_checked(directory):
     return directory
 
 
-def delete_session(directory):
-    """Remove one stopped session's directory, refusing while work or agents remain in it.
-
-    Crew worktrees live outside the directory, so one not yet removed or a result not yet
-    landed, discarded or reviewed refuses, listing each; nothing outside the directory is touched.
-    """
-    directory = session_directory_checked(directory)
+def delete_session(directory, *, force=False, discard_worktrees=False, worktree_cleanup=None):
+    """Remove one stopped session after applying the caller's explicit discard choices."""
+    try:
+        directory = session_directory_checked(directory)
+    except CaptainError as exc:
+        raise SessionDeleteError(str(exc), []) from exc
     with lock(directory / "session.lock"):
-        check_stopped(directory)
-        current = Session(directory, read_json(directory / "session.json"))
         try:
-            held = unlanded_worktrees(current)
-            unreviewed = unreviewed_results(current)
-        except (CaptainError, OSError, ValueError, AttributeError, KeyError, TypeError) as exc:
-            raise CaptainError(
-                f"[session-unresolved] Session {directory.name} has unreadable worktree or "
-                f"result state ({exc}); keeping it."
-            ) from exc
-        if held:
-            raise CaptainError(
-                f"[session-unlanded-work] Session {directory.name} has crew worktrees not yet "
-                f"removed: {'; '.join(held)}. Land or discard their results, then remove them."
+            check_stopped(directory)
+        except CaptainError as exc:
+            raise SessionDeleteError(str(exc), []) from exc
+        current = Session(directory, read_json(directory / "session.json"))
+        cleanup_errors = []
+        if discard_worktrees:
+            try:
+                _discard_worktrees(current, worktree_cleanup)
+            except (CaptainError, OSError, ValueError, AttributeError, KeyError, TypeError) as exc:
+                cleanup_errors.append(
+                    _blocker("worktree", f"A crew worktree could not be discarded safely: {exc}.")
+                )
+        blockers = session_blockers(directory) + cleanup_errors
+        remaining = [
+            blocker
+            for blocker in blockers
+            if not force or blocker["kind"] not in FORCEABLE_BLOCKERS
+        ]
+        if remaining:
+            kinds = {blocker["kind"] for blocker in remaining}
+            code = (
+                "session-unlanded-work"
+                if "worktree" in kinds
+                else "session-unreviewed-results"
+                if kinds == {"result"}
+                else "session-unresolved"
             )
-        if unreviewed:
-            raise CaptainError(
-                f"[session-unreviewed-results] Session {directory.name} has unreviewed "
-                f"results: {'; '.join(unreviewed)}. Apply, discard or review them first."
-            )
-        if unresolved(directory):
-            raise CaptainError(
-                f"[session-unresolved] Session {directory.name} holds work or an outcome nobody "
-                "has received yet."
+            raise SessionDeleteError(
+                f"[{code}] Session {directory.name} cannot be deleted until its blockers are "
+                "resolved or explicitly discarded.",
+                remaining,
             )
         try:
             shutil.rmtree(directory)
         except OSError as exc:
-            raise CaptainError(
-                f"[delete-failed] Session {directory.name} was only partly removed: {exc}"
+            raise SessionDeleteError(
+                f"[delete-failed] Session {directory.name} was only partly removed: {exc}", []
             ) from exc
     return {"session_id": directory.name, "deleted": True}
