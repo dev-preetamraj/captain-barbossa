@@ -903,9 +903,10 @@ def launch_supervised(crew, current, project, binary, model, args, context=""):
         record.update(status="dismissed", startup_error=str(exc))
         write_json(current.meta_path, current.meta)
         raise
-    protocol.ring(crew, message_id)
+    # Rings skip a starting crew, so the record says started before this first one.
     record["status"] = "started"
     write_json(current.meta_path, current.meta)
+    protocol.ring(crew, message_id)
     add_memory(current.graph, f"session:{current.meta['id']}", "crew", record["agent"])
     add_memory(current.graph, record["agent"], "name", record["name"])
     add_memory(current.graph, record["agent"], "assigned", args.task)

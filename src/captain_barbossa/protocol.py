@@ -1337,6 +1337,8 @@ def ring(crew, message_id):
     Mail is already durable, so no outcome here can lose the message.
     """
     if crew.is_supervised:
+        if crew.record.get("status") == "starting":
+            return None  # the supervisor has no link yet; launch_supervised rings once it does
         # Ticks, turn ends and commands ring at once; a stale prior would erase a landing.
         with lock(mail_dir(crew.session.directory, crew.crew_id) / ".ring.lock"):
             return _ring(crew, message_id)
@@ -1349,14 +1351,25 @@ def _ring(crew, message_id):
     landed, unreachable, gate, draft, held = False, None, None, None, None
     # A hook-delivered crew gets the bare wake line; its own hook supplies the body. A
     # landed retry is content-free too, so the 600s drain never retypes work.
-    text = None
+    text, riders = None, []
     if provider not in HOOK_DELIVERED and not (
         prior and prior["id"] == message_id and prior["landed"]
     ):
         # The ring is this crew's only channel, so it carries the rendered body: it may
         # act straight off the ring without ever running `inbox`.
-        message = next((m for m in unread(crew) if m["id"] == message_id), None)
-        text = render(crew.session.directory, [message] if message else [])
+        waiting = unread(crew)
+        message = next((m for m in waiting if m["id"] == message_id), None)
+        if message and crew.is_supervised:
+            # A requeued bounce rides ahead of the mail that requeued it, until it lands.
+            skip = {message_id, *(prior.get("bodies", ()) if prior else ())}
+            riders = [
+                m
+                for m in waiting
+                if m.get("requeued_at")
+                and m["assignment_id"] == message["assignment_id"]
+                and m["id"] not in skip
+            ]
+        text = render(crew.session.directory, [*riders, message] if message else [])
     try:
         if crew.is_supervised:
             # The same text a pane nudge types, started as a turn by the supervisor.
@@ -1398,8 +1411,10 @@ def _ring(crew, message_id):
     record = {"id": message_id, "at": now, "landed": landed, "gate": gate}
     # Every body that landed, carried forward so a later held ring cannot erase one.
     bodies = list(prior.get("bodies", ())) if prior else []
-    if landed and text and message_id not in bodies:
-        bodies.append(message_id)
+    if landed and text:
+        for landed_id in (*(m["id"] for m in riders), message_id):
+            if landed_id not in bodies:
+                bodies.append(landed_id)
     if bodies:
         record["bodies"] = bodies
     if held is not None:
@@ -1676,9 +1691,23 @@ def deliver(
         message = next(m for m in assignment["messages"] if m["id"] == message_id)
         if message["delivery"] != "prepared":
             return message_id
+        requeued = requeue_bounced(crew, assignment) if crew.is_supervised else None
         enqueue(crew, text, kind, assignment_id, message_id)
         message["delivery"] = "sent"
         mark_sent(assignment, message)
+    if requeued:
+        record_action(
+            crew.session.directory,
+            "mail",
+            crew.crew_id,
+            assignment_id,
+            supervised=supervised(crew),
+            message=requeued["id"],
+            state="sent",
+            mail_kind=requeued["kind"],
+            question=None,
+            text=requeued["text"],
+        )
     record_action(
         crew.session.directory,
         "mail",
@@ -1695,6 +1724,23 @@ def deliver(
     if not queue_only:
         ring(crew, message_id)
     return message_id
+
+
+def requeue_bounced(crew, assignment):
+    """Requeue a supervised crew's bounced assignment mail; the caller holds protocol.lock."""
+    original = next((m for m in assignment["messages"] if m.get("kind") == "assignment"), None)
+    path = original and mail_dir(crew.session.directory, crew.crew_id) / f"{original['id']}.json"
+    if not path or not path.exists():
+        return None
+    mail = read_json(path)
+    if mail["state"] != "bounced" or mail.get("incarnation_id") != crew.record.get(
+        "incarnation_id"
+    ):
+        return None
+    mail.pop("reason", None)
+    mail.update(state="queued", requeued_at=time.time())
+    write_json(path, mail)
+    return mail
 
 
 def mark_sent(assignment, message):
