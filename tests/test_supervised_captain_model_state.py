@@ -124,7 +124,13 @@ class CaptainModelStateTests(SessionCase):
         stopped = self.call("captain_state")
         self.assertEqual(
             stopped,
-            {"state": None, "provider": "fake", "model": "native-default", "effort": "high"},
+            {
+                "state": None,
+                "provider": "fake",
+                "model": "native-default",
+                "effort": "high",
+                "permission_mode": None,
+            },
         )
         self.call("start_captain", {"provider": "fake"})
         self.assertEqual(self.opened[-1], ("native-default", "high"))

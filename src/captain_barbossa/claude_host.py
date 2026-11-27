@@ -31,7 +31,17 @@ ASK_TIMEOUT = 1860
 IMAGE_BUDGET = 20 * 1024 * 1024
 
 
-def options(sdk, argv, cwd, *, isolated=False, partial=False, can_use_tool=None, effort=None):
+def options(
+    sdk,
+    argv,
+    cwd,
+    *,
+    isolated=False,
+    partial=False,
+    can_use_tool=None,
+    effort=None,
+    permission_mode=None,
+):
     """Build native options, stripping executable user configuration for isolated turns."""
     cli, flags = argv[0], argv[1:]
     ephemeral = isolated and NO_PERSISTENCE in flags
@@ -74,6 +84,11 @@ def options(sdk, argv, cwd, *, isolated=False, partial=False, can_use_tool=None,
         typed["can_use_tool"] = can_use_tool
     if effort is not None:
         typed["effort"] = effort
+    if permission_mode is not None:
+        typed["permission_mode"] = permission_mode
+    if can_use_tool is not None and not isolated:
+        # The user, never claude, may switch an asking captain into bypassPermissions.
+        extra["allow-dangerously-skip-permissions"] = None
     built = sdk.ClaudeAgentOptions(
         cli_path=cli,
         system_prompt=prompt,
@@ -175,7 +190,11 @@ class Host:
 
     async def call(self, method, params):
         if method == "connect":
-            return await self.connect(ask=params.get("ask") is True, effort=params.get("effort"))
+            return await self.connect(
+                ask=params.get("ask") is True,
+                effort=params.get("effort"),
+                permission_mode=params.get("permission_mode"),
+            )
         if self.client is None:
             raise CaptainError(f"[claude-host] {method} before connect.")
         match method:
@@ -203,6 +222,14 @@ class Host:
                 except Exception as exc:  # the SDK raises bare Exception for a refused control
                     raise CaptainError(f"[claude-model] claude refused the change: {exc}") from exc
                 return {}
+            case "set_permission_mode":
+                try:
+                    await self.client.set_permission_mode(params.get("mode"))
+                except Exception as exc:  # the SDK raises bare Exception for a refused control
+                    raise CaptainError(
+                        f"[permission-mode-refused] claude refused the mode: {exc}"
+                    ) from exc
+                return {}
             case "close":
                 self.stop.set()
                 return {}
@@ -217,7 +244,7 @@ class Host:
             )
         await send({"subtype": "apply_flag_settings", "settings": {"effortLevel": effort}})
 
-    async def connect(self, ask=False, effort=None):
+    async def connect(self, ask=False, effort=None, permission_mode=None):
         if self.client is not None:
             raise CaptainError("[claude-host] Already connected.")
         try:
@@ -232,6 +259,7 @@ class Host:
             partial=True,
             can_use_tool=self.ask if ask else None,
             effort=effort,
+            permission_mode=permission_mode,
         )
         client = sdk.ClaudeSDKClient(built)
         try:

@@ -147,7 +147,13 @@ class SupervisedCaptainTests(SessionCase):
         self.assertEqual(self.call("stop_captain"), {"outcome": "stopped"})
         self.assertEqual(
             self.call("captain_state"),
-            {"state": None, "provider": "fake", "model": "m", "effort": None},
+            {
+                "state": None,
+                "provider": "fake",
+                "model": "m",
+                "effort": None,
+                "permission_mode": None,
+            },
         )
         states = [a["state"] for a in self.actions() if a["kind"] == "lifecycle"]
         self.assertEqual(states, ["started", "stopped"])

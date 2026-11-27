@@ -70,6 +70,11 @@ from .sessions import (
 # Provider -> adapter module (open, ring, interrupt, set_model, state over a Link).
 # A provider without a row is refused at start.
 ADAPTERS = {"codex": codex_app_server, "claude": claude_agent, "pi": pi_rpc}
+# Provider -> the permission modes a captain may run in; pi has none.
+PERMISSION_MODES = {
+    "claude": provider_status.CLAUDE_MODES,
+    "codex": provider_status.CODEX_PRESETS,
+}
 # Bytes of a native CLI's stderr kept per crew; the rest is read and dropped.
 STDERR_LIMIT = 1024 * 1024
 # How long a second supervisor waits for a lock probe to let go before refusing.
@@ -180,6 +185,9 @@ class Link:
     ask: object = None
     usage: object = None
     effort: str | None = None
+    permission_mode: str | None = None
+    permission: dict | None = None
+    mode_changed: object = None
 
 
 @dataclass
@@ -649,6 +657,7 @@ class CaptainRun:
     mine: set = field(default_factory=set)
     reported: set = field(default_factory=set)
     asks: dict = field(default_factory=dict)
+    permission_seen: str | None = None
     commands: dict | None = None
 
 
@@ -704,6 +713,7 @@ def record_captain(directory, provider):
     record = {"provider": provider, "pane": None, "transport": "supervisor"}
     record.update(model=previous.get("model") if same else None)
     record.update(effort=previous.get("effort") if same else None)
+    record.update(permission_mode=previous.get("permission_mode") if same else None)
     if native:
         record["native_session_id"] = native
     store.write_json(directory / "captain.json", record)
@@ -724,6 +734,50 @@ def record_model(supervisor, provider, chosen):
         return
     detail = f"{model} ({effort})" if effort else str(model)
     lifecycle_captain(supervisor, "model-changed", detail, model=model, effort=effort)
+
+
+def permission_preset(provider, mode):
+    """(mode, native preset) for a provider's permission mode; one it lacks is refused."""
+    modes = PERMISSION_MODES.get(provider, {})
+    if mode not in modes:
+        choices = ", ".join(modes) or "none"
+        raise CaptainError(
+            f"[permission-mode-unsupported] {provider} takes permission modes {choices}, "
+            f"not {mode!r}."
+        )
+    preset = modes[mode]
+    return mode, preset if isinstance(preset, dict) else None
+
+
+def current_permission_mode(link):
+    reader = getattr(link.adapter, "permission_mode", None)
+    mode = reader(link) if reader else link.permission_mode
+    return provider_status.CLAUDE_ALIASES.get(mode, mode)
+
+
+def record_permission_mode(supervisor, run, mode, chosen):
+    """Announce a changed mode; only a chosen one creates the captain.json record, which a
+    reported one may update, so a captain on the user's own settings keeps them."""
+    directory = supervisor.session.directory
+    record = _captain_record(directory)
+    if record.get("provider") == run.provider and record.get("permission_mode") != mode:
+        if chosen or record.get("permission_mode") is not None:
+            store.write_json(directory / "captain.json", {**record, "permission_mode": mode})
+    previous, run.permission_seen = run.permission_seen, mode
+    if previous != mode:
+        lifecycle_captain(
+            supervisor,
+            "permission-mode-changed",
+            str(mode),
+            permission_mode=mode,
+            previous=previous,
+        )
+
+
+def watch_permission_mode(supervisor, run, chosen=False):
+    """Record the mode the captain has now; serialized, since several threads report it."""
+    with contextlib.suppress(CaptainError, OSError), supervisor.lock:
+        record_permission_mode(supervisor, run, current_permission_mode(run.link), chosen)
 
 
 def remember_native(directory, provider, native):
@@ -821,21 +875,26 @@ def captain_turn_ended(supervisor, run, event):
             relay_hook(run.link, event)
     run.wake.set()
     watch_commands(supervisor, run)
+    watch_permission_mode(supervisor, run)
 
 
 def captain_ask(supervisor, run, kind, payload):
-    """Put a native prompt of the captain's to the user and wait for the answer, or None."""
+    return captain_answer(supervisor, run, kind, payload)[0]
+
+
+def captain_answer(supervisor, run, kind, payload):
+    """Put a native prompt of the captain's to the user; (answer, denial message) or (None, None)."""
     directory = supervisor.session.directory
     request = captain_bridge.open_request(directory, kind, payload)
-    slot = run.asks[request["id"]] = [threading.Event(), None]
+    slot = run.asks[request["id"]] = [threading.Event(), None, None]
     attention(supervisor, CAPTAIN, f"[captain-request] {request['id']}: the captain asks ({kind}).")
     answered = slot[0].wait(CAPTAIN_ASK_TIMEOUT)
     run.asks.pop(request["id"], None)
     if not answered:
         with contextlib.suppress(CaptainError):
             captain_bridge.close_request(directory, request["id"], "expired")
-        return None
-    return slot[1]
+        return None, None
+    return slot[1], slot[2]
 
 
 def captain_relay(supervisor, run, event):
@@ -854,10 +913,12 @@ def captain_approval(supervisor, run, event):
         "input": inputs,
         "rules": event.get("permission_rules") or [],
     }
-    decision = captain_ask(supervisor, run, "approval", payload)
+    decision, message = captain_answer(supervisor, run, "approval", payload)
     verdict = {"behavior": "allow" if plain_approval(decision) == "approve" else "deny"}
     if decision == "approve_always":
         verdict["remember"] = True
+    if message:
+        verdict["message"] = message
     return 0, {"hookSpecificOutput": {"decision": verdict}}
 
 
@@ -940,8 +1001,10 @@ def start_captain(supervisor, params):
     kept = recorded if recorded.get("provider") == provider else {}
     model = params.get("model") or kept.get("model") or config.text("captain", "model")
     effort = params.get("effort") or kept.get("effort")
+    mode = params.get("permission_mode") or kept.get("permission_mode")
     if not isinstance(provider, str) or (model is not None and not isinstance(model, str)):
         raise CaptainError("[supervisor-params] provider and model must be strings.")
+    mode, preset = permission_preset(provider, mode) if mode is not None else (None, None)
     if supervisor.captain is not None and not supervisor.captain.link.done.is_set():
         raise CaptainError("[captain-running] The captain is already running.")
     argv, env, model, transport = captain_command(supervisor, provider, model, effort)
@@ -964,8 +1027,11 @@ def start_captain(supervisor, params):
             captain=True,
             thread=native,
             effort=effort,
+            permission_mode=mode,
+            permission=preset,
         )
         run = supervisor.captain = CaptainRun(link, provider, transport)
+        run.permission_seen = kept.get("permission_mode")
     link.relay = lambda event: captain_relay(supervisor, run, event)
     link.ended = lambda event: captain_turn_ended(supervisor, run, event)
     link.notice = lambda key, summary: attention(supervisor, CAPTAIN, summary)
@@ -975,6 +1041,7 @@ def start_captain(supervisor, params):
         else plain_approval(captain_ask(supervisor, run, kind, params))
     )
     link.usage = lambda frame: live_usage(supervisor, link, frame)
+    link.mode_changed = lambda: watch_permission_mode(supervisor, run)
     threading.Thread(
         target=own_captain, args=(supervisor, run, argv, env), name="captain", daemon=True
     ).start()
@@ -991,9 +1058,10 @@ def start_captain(supervisor, params):
         target=watch_commands, args=(supervisor, run), name="captain-commands", daemon=True
     ).start()
     lifecycle_captain(supervisor, "started", provider)
+    watch_permission_mode(supervisor, run, chosen=params.get("permission_mode") is not None)
     chosen = current_model(link)
     reply = {"provider": provider, "transport": transport, **chosen}
-    return {**reply, "state": "started"}
+    return {**reply, "permission_mode": current_permission_mode(link), "state": "started"}
 
 
 def _captain(supervisor):
@@ -1008,10 +1076,26 @@ def captain_state(supervisor, params):
     run = supervisor.captain
     if run is None or not live(run.link):
         record = _captain_record(supervisor.session.directory)
-        recorded = {key: record.get(key) for key in ("provider", "model", "effort")}
-        return {"state": None, **recorded}
+        keys = ("provider", "model", "effort", "permission_mode")
+        return {"state": None, **{key: record.get(key) for key in keys}}
     state_name = "blocked" if run.asks else run.link.adapter.state(run.link)
-    return {"state": state_name, "provider": run.provider, **current_model(run.link)}
+    mode = current_permission_mode(run.link)
+    reply = {"state": state_name, "provider": run.provider, **current_model(run.link)}
+    return {**reply, "permission_mode": mode}
+
+
+def set_captain_permission_mode(supervisor, params):
+    """Switch the running captain's permission mode, recorded in captain.json."""
+    run = _captain(supervisor)
+    setter = getattr(run.link.adapter, "set_permission_mode", None)
+    if setter is None:
+        raise CaptainError(
+            f"[permission-mode-unsupported] A {run.provider} captain has no permission modes."
+        )
+    mode, preset = permission_preset(run.provider, _text(params, "mode"))
+    changed = setter(run.link, mode, preset)
+    watch_permission_mode(supervisor, run, chosen=True)
+    return changed
 
 
 def set_captain_model(supervisor, params):
@@ -1203,8 +1287,9 @@ def answer_captain(supervisor, params):
     if slot is None:
         raise CaptainError(f"[captain-request-closed] Request {request_id} is {row['state']}.")
     answer = captain_bridge.answer_for(row["kind"], params)
-    captain_bridge.close_request(directory, request_id, "answered", answer)
-    slot[1] = answer
+    message = captain_bridge.denial(row["kind"], params)
+    captain_bridge.close_request(directory, request_id, "answered", answer, message)
+    slot[1], slot[2] = answer, message
     slot[0].set()
     return {"request": request_id, "state": "answered"}
 
@@ -1301,7 +1386,15 @@ def providers(supervisor, params):
     rows = []
     for name in names:
         unknown = dict.fromkeys(
-            ("installed", "version", "signed_in", "account", "hooks", "checked_at")
+            (
+                "installed",
+                "version",
+                "signed_in",
+                "account",
+                "hooks",
+                "permission_modes",
+                "checked_at",
+            )
         )
         rows.append(
             {
@@ -2184,6 +2277,7 @@ METHODS = {
     "ack_delivery": ack_delivery,
     "snapshot": snapshot,
     "set_captain_model": set_captain_model,
+    "set_captain_permission_mode": set_captain_permission_mode,
     "captain_commands": captain_commands,
     "run_captain_command": run_captain_command,
     "resolve_captain_delivery": resolve_captain_delivery,

@@ -71,6 +71,8 @@ src/captain_barbossa/
   attachments.py  files on a captain message: validation, recorded shape, provider prompt
   transcripts.py  paged transcripts and full steps from a provider's own session files
   jsonrpc.py      line-delimited JSON-RPC framing, deadlines, multiplexed Peer
+  provider_status.py install, sign-in, hook trust and permission modes per agent CLI
+  command_catalogue.py slash commands and skills per agent CLI, running or session-less
   update_check.py startup PyPI update check and `captain update`
 tests/            unittest suite; Herdr and model sessions are mocked, a real PTY is used
 docs/             plan.md is current scope; settings, placement, dashboard, memory,

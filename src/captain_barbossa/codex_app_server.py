@@ -22,6 +22,12 @@ GATE_HOOKS = ("sessionStart", "stop", "preToolUse", "permissionRequest")
 # Codex runs a hook whose trust status is one of these; untrusted and modified ones never run.
 RUNNING = ("trusted", "managed")
 RESUME_REFUSED = "[jsonrpc-error] thread/resume:"
+# thread/start names a sandbox by its config spelling, turn/start by its policy type.
+SANDBOX_POLICIES = {
+    "read-only": "readOnly",
+    "workspace-write": "workspaceWrite",
+    "danger-full-access": "dangerFullAccess",
+}
 # Codex's TUI built-ins the app-server serves as methods; typed as message text they reach the model.
 BUILTINS = (
     {
@@ -85,6 +91,12 @@ def open(link):
     if not link.captain:
         # A captain keeps the user's own sandbox and approval settings, as in a terminal.
         params.update(sandbox="workspace-write", approvalPolicy="on-request")
+    elif (preset := getattr(link, "permission", None)) is not None:
+        params.update(
+            approvalPolicy=preset["approval"],
+            sandbox=preset["sandbox"],
+            approvalsReviewer=preset["reviewer"],
+        )
     if link.model:
         params["model"] = link.model
     method = "thread/start"
@@ -183,6 +195,12 @@ def _start_turn(link, message_id, text, attached=(), extra=()):
         params["effort"] = link.native["effort"]
     if link.writable:
         params["sandboxPolicy"] = {"type": "workspaceWrite", "writableRoots": list(link.writable)}
+    if (preset := getattr(link, "permission", None)) is not None:
+        params.update(
+            approvalPolicy=preset["approval"],
+            sandboxPolicy={"type": SANDBOX_POLICIES[preset["sandbox"]]},
+            approvalsReviewer=preset["reviewer"],
+        )
     try:
         started = link.peer.request("turn/start", params, _timeout("request_timeout"))
     except CaptainError as exc:
@@ -226,6 +244,16 @@ def set_model(link, model, effort=None):
     if effort is not None:
         link.native["effort"] = effort
     return {**current(link), "applies": "next-turn" if link.turn is not None else "now"}
+
+
+def set_permission_mode(link, mode, native):
+    """A preset's approval, sandbox and reviewer, sent with every turn/start from the next one."""
+    link.permission_mode, link.permission = mode, native
+    return {"permission_mode": mode, "applies": "next-turn" if link.turn is not None else "now"}
+
+
+def permission_mode(link):
+    return getattr(link, "permission_mode", None)
 
 
 def current(link):

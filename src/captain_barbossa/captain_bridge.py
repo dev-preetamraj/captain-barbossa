@@ -441,7 +441,7 @@ def open_request(directory, kind, payload):
     return request
 
 
-def close_request(directory, request_id, state_name, answer=None):
+def close_request(directory, request_id, state_name, answer=None, message=None):
     """Answer or expire an open captain request; only an open one changes."""
     with protocol.checkpoint(directory) as state:
         request = next(
@@ -454,6 +454,8 @@ def close_request(directory, request_id, state_name, answer=None):
                 f"[captain-request-closed] Request {request_id} is {request['state']}."
             )
         request.update(state=state_name, answer=redact(answer), resolved_at=time.time())
+        if message is not None:
+            request["message"] = redact(message)
         kind = request["kind"]
     record_action(
         directory,
@@ -466,6 +468,18 @@ def close_request(directory, request_id, state_name, answer=None):
         request_kind=kind,
     )
     return kind
+
+
+def denial(kind, params):
+    """The user's optional text for denying an approval, which Claude reads as its reason."""
+    message = params.get("message")
+    if message is None:
+        return None
+    if kind != "approval" or params.get("decision") != "deny" or not isinstance(message, str):
+        raise CaptainError(
+            "[captain-request-answer] message is text, only with deny on an approval."
+        )
+    return message.strip() or None
 
 
 def answer_for(kind, params):

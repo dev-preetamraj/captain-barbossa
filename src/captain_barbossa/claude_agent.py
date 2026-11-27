@@ -35,6 +35,8 @@ def open(link):
     params = {"ask": True} if link.captain else {}
     if (effort := getattr(link, "effort", None)) is not None:
         params["effort"] = _effort(effort, model_catalogue.CLAUDE_EFFORTS)
+    if (mode := getattr(link, "permission_mode", None)) is not None:
+        params["permission_mode"] = mode
     try:
         started = link.peer.request("connect", params, _timeout("startup_timeout"))
     except CaptainError as exc:
@@ -113,6 +115,18 @@ def set_model(link, model, effort=None):
     return {**current(link), "applies": applies}
 
 
+def set_permission_mode(link, mode, native=None):
+    """Claude's own set_permission_mode, applied at once, mid-turn included."""
+    link.peer.request("set_permission_mode", {"mode": mode}, _timeout("request_timeout"))
+    link.permission_mode = link.native["permission_mode"] = mode
+    return {"permission_mode": mode, "applies": "now"}
+
+
+def permission_mode(link):
+    """The mode claude last reported or was set to; None runs the user's own settings."""
+    return link.native.get("permission_mode") or getattr(link, "permission_mode", None)
+
+
 def current(link):
     """The model claude last reported, else the one asked for; effort is None at claude's default."""
     return {"model": link.native.get("model") or link.model, "effort": link.native.get("effort")}
@@ -179,7 +193,12 @@ def permission(link, message):
                 if verdict.get("remember") is True and rules:
                     result["remember"] = True
             else:
-                result = {"behavior": "deny", "message": "The user denied this in the app."}
+                given = verdict.get("message") if isinstance(verdict, dict) else None
+                given = given if isinstance(given, str) and given.strip() else None
+                result = {
+                    "behavior": "deny",
+                    "message": given or "The user denied this in the app.",
+                }
     except (CaptainError, OSError):
         pass  # an unanswerable request is denied
     try:
@@ -261,5 +280,11 @@ def handle(link, message):
             link.native["init"] = init
             if isinstance(init.get("model"), str):
                 link.native["model"] = init["model"]
+        mode = init.get("permissionMode")
+        if data.get("subtype") in ("init", "status") and isinstance(mode, str) and mode:
+            changed = link.native.get("permission_mode") != mode
+            link.native["permission_mode"] = mode
+            if changed and getattr(link, "mode_changed", None) is not None:
+                threading.Thread(target=link.mode_changed, daemon=True).start()
     elif message["method"] == "attention" and params.get("code") == "claude-auth":
         threading.Thread(target=link.notice, args=("claude_auth", AUTH), daemon=True).start()
