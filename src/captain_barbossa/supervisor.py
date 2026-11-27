@@ -883,10 +883,15 @@ def captain_ask(supervisor, run, kind, payload):
 
 
 def captain_answer(supervisor, run, kind, payload):
-    """Put a native prompt of the captain's to the user; (answer, denial message) or (None, None)."""
+    """(answer, denial message) from the user; the slot precedes the listed request, for instant answers."""
     directory = supervisor.session.directory
-    request = captain_bridge.open_request(directory, kind, payload)
-    slot = run.asks[request["id"]] = [threading.Event(), None, None]
+    request_id = uuid4().hex
+    slot = run.asks[request_id] = [threading.Event(), None, None]
+    try:
+        request = captain_bridge.open_request(directory, kind, payload, request_id)
+    except BaseException:
+        run.asks.pop(request_id, None)
+        raise
     attention(supervisor, CAPTAIN, f"[captain-request] {request['id']}: the captain asks ({kind}).")
     answered = slot[0].wait(CAPTAIN_ASK_TIMEOUT)
     run.asks.pop(request["id"], None)

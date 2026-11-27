@@ -415,10 +415,10 @@ def request_payload(kind, payload):
     }
 
 
-def open_request(directory, kind, payload):
+def open_request(directory, kind, payload, request_id=None):
     """Put a native ask-user or approval prompt of the captain's to the user."""
     request = {
-        "id": uuid4().hex,
+        "id": request_id or uuid4().hex,
         "kind": kind,
         "payload": redact(request_payload(kind, payload)),
         "state": "open",
