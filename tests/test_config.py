@@ -112,7 +112,7 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(
             models.tiers_for("claude"),
             {
-                "cheap": "claude-fable-5-1",  # project wins
+                "cheap": "claude-fable-5-2",  # project wins
                 "mid": "claude-opus-5-5",  # only home sets it
                 "strong": models.TIERS["claude"]["strong"],  # neither file sets it
             },
@@ -253,7 +253,7 @@ class CaptainModelTests(LaunchTestCase):
             [models.claude]
             cheap = "fable"
         """)
-        self.assertEqual(self.launch()[-2:], ["--model", "claude-fable-5-1"])
+        self.assertEqual(self.launch()[-2:], ["--model", "claude-fable-5-2"])
 
     def test_no_captain_model_launches_the_cli_without_a_model_flag(self):
         command = self.launch()

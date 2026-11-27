@@ -205,6 +205,7 @@ class RecruitmentProfilesTests(SessionCase):
             self.settings = {"profiles": table}
             with (
                 self.subTest(table=table, flags=flags),
+                patch.object(background, "supported", return_value=background.SUPPORTED),
                 self.assertRaisesRegex(runtime.CaptainError, error),
             ):
                 self.recruit("--profile", "review", *flags)

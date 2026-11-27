@@ -13,7 +13,7 @@ from .models import MODELS
 from .runtime import HERDR_ERRORS, CaptainError
 from .sessions import Session, read_session
 from .store import read_json, state_root, temp_root
-from .usage import RATE_WINDOW, model_for_events, usage_for_events
+from .usage import RATE_WINDOW, model_for_events, usage_for_events, with_live
 
 # Label, base width, right-aligned. A column grows to fit its content; the base keeps
 # the frame steady when a number briefly shortens. See docs/dashboard-layout.md.
@@ -120,7 +120,9 @@ def _captain_status(agents, record):
 def _row(crew, name, status):
     """A roster row: numbers stay None when unknown so no cell fabricates a zero."""
     provider = crew.record.get("provider", "-")
-    usage = usage_for_events(crew.events)
+    # The supervisor's live readings fill what the native files leave unknown, such as pi's CTX.
+    supervised = crew.session.meta.get("transport") == "supervisor"
+    usage = (with_live if supervised else usage_for_events)(crew.events)
     if usage is None:
         model = crew.record.get("model") or model_for_events(crew.events)
         return (name, (provider, model), status, None, None, None, None, ("", "", ""))
@@ -213,6 +215,16 @@ def _background_status(crew):
         return "-"
 
 
+def _supervised_status(crew):
+    """The supervisor's live state for a crew with no pane, or None when it cannot answer."""
+    from . import supervision  # local: Herdr sessions never load the supervisor door
+
+    try:
+        return supervision.state(crew)
+    except CaptainError:
+        return None
+
+
 def _roster(current, agents):
     """(current rows, dismissed crew's (tokens, cost), current crew count)."""
     live = _crew_status(agents)
@@ -228,6 +240,8 @@ def _roster(current, agents):
             continue
         if crew.is_background:
             status = _background_status(crew)
+        elif crew.is_supervised:
+            status = _supervised_status(crew) or crew.record.get("status") or "-"
         else:
             status = live.get(crew.record.get("agent")) or crew.record.get("status") or "-"
         rows.append(_safe_row(crew, name, status))
@@ -348,10 +362,47 @@ def _notice(rows, retired):
     return "\n".join(lines)
 
 
+def snapshot(current):
+    """One unformatted usage frame; unknown readings remain null."""
+    current = _fresh(current)
+    agents = [] if current.meta.get("transport") == "supervisor" else _live_agents()
+    rows, retired, crew_count = _roster(current, agents)
+    total, incomplete = _total(rows, retired)
+    return {
+        "session_id": current.meta["id"],
+        "crew_count": crew_count,
+        "agents": [
+            {
+                "crew": row[0],
+                "provider": None if row[1][0] == "-" else row[1][0],
+                "model": row[1][1],
+                "state": None if row[2] == "-" else row[2],
+                "context_percent": row[3],
+                "tokens": row[4],
+                "cost": row[5],
+                "rate": row[6],
+            }
+            for row in rows
+        ],
+        "total": {
+            "tokens": total[4],
+            "cost": total[5],
+            "rate": total[6],
+            "incomplete": incomplete,
+        },
+        "retired": {
+            "count": len(retired),
+            "tokens": _agg([item[0] for item in retired])[0],
+            "cost": _agg([item[1] for item in retired])[0],
+        },
+    }
+
+
 def render(current, size=None):
     """The frame as text: an optional header, the roster, TOTAL, and its annotation."""
     current = _fresh(current)
-    agents = _live_agents()
+    # A supervised session has no Herdr workspace to ask.
+    agents = [] if current.meta.get("transport") == "supervisor" else _live_agents()
     rows, retired, crew_count = _roster(current, agents)
     width, height = size or shutil.get_terminal_size((80, 24))
     # The last column stays empty so a full-width line cannot autowrap.

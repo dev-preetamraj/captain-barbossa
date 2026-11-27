@@ -8,14 +8,18 @@ Every run is recorded before it is reported, because work with no pane keeps the
 watch-your-crew rule only by being reviewable afterwards.
 """
 
+import argparse
+import hashlib
 import json
 import os
 import re
 import sys
 import time
 from pathlib import Path
+from uuid import uuid4
 
-from . import config, inspection, protocol
+from . import config, inspection, protocol, sessions
+from .eventlog import record_action
 from .models import PROVIDERS, headless_argv, headless_report, resolve_model
 from .processes import TARGET, TIMEOUT, capture, makefile_targets
 from .runtime import CaptainError, check_text, executable, inside_project
@@ -31,6 +35,29 @@ BRANCH = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]*")
 # A provider without one would need its own list here, and the refusal below is for it.
 # The prompt below must not restate that gate: a codex turn reads through the shell alone,
 # so telling it not to run commands leaves it nothing to read with and it refuses the task.
+# In a supervised session these verbs leave the machine or run arbitrary recipes, so each run
+# needs the user's approved authorization request; the rest need one only through the app.
+CATEGORIES = {"push": "outward", "fetch": "outward", "pull": "outward", "run": "destructive"}
+# Set by the supervisor on the one run an approved request authorizes.
+AUTHORIZATION_ENV = "CAPTAIN_AUTHORIZATION"
+# An approval unspent this long expires, so a stale yes never authorizes a later run.
+APPROVAL_TTL = 900
+AUTHORIZATION_LIMIT = 256
+WHY = {
+    "commit": "Stages the named paths and commits them in this checkout.",
+    "push": "Pushes the current branch to its remote: it leaves this machine.",
+    "branch": "Creates a branch in this checkout and switches to it.",
+    "switch": "Switches this checkout to another branch.",
+    "fetch": "Fetches from the remote: it talks to the network, touching no file.",
+    "pull": "Fast-forwards the current branch from its remote: it talks to the network.",
+    "run": "Runs a Makefile recipe, which can do anything this user can.",
+}
+QUIET_WHY = {
+    False: "Runs one headless model turn that reads this checkout.",
+    True: "Runs one headless model turn that may edit files in this checkout.",
+}
+FIELDS = ("do_command", "message", "path", "name", "target", "task", "diff", "write")
+FIELDS += ("read", "model", "timeout")
 QUIET_PROMPT = (
     "You are a one-shot agent for Captain Barbossa: do the task and finish. Nobody is "
     "watching, so there is nobody to ask and no pane to open; read whatever the task needs "
@@ -305,9 +332,222 @@ def _commit(args, root, session_directory):
         return f"Committed {head} on {_branch(root)}.", output
 
 
+def parse(argv):
+    """A `do` or `quiet` argv parsed exactly as the CLI parses it."""
+
+    class Parser(argparse.ArgumentParser):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **{**kwargs, "add_help": False})
+
+        def error(self, message):
+            raise CaptainError(f"[authorization-argv] {message}")
+
+    parser = Parser(prog="captain", add_help=False)
+    add_arguments(parser.add_subparsers(dest="command", parser_class=Parser))
+    if not argv or argv[0] not in ("do", "quiet"):
+        raise CaptainError("[authorization-argv] Only do and quiet need an authorization.")
+    return parser.parse_args(argv)
+
+
+def command_of(args):
+    """The fields that make two runs the same command, in a fixed order."""
+    return {field: getattr(args, field) for field in FIELDS if hasattr(args, field)}
+
+
+def category(args):
+    if args.do_command == "quiet" and args.write:
+        return "destructive"
+    return CATEGORIES.get(args.do_command, "local")
+
+
+def why(args):
+    """Plain words on an authorization card: what the command does that needs the user's yes."""
+    if args.do_command == "quiet":
+        return QUIET_WHY[bool(args.write)]
+    return WHY[args.do_command]
+
+
+def _expire(rows, now):
+    for row in rows:
+        if row["state"] in ("open", "approved"):
+            since = row["at"] if row["state"] == "open" else row["resolved_at"]
+            if now - since > APPROVAL_TTL:
+                row["state"] = "expired"
+
+
+def _context(session_directory, args):
+    """Bind approval to HEAD, remote configuration and the root recipe without storing secrets."""
+    root = Path(read_json(session_directory / "session.json")["project"])
+    values = [
+        _git(root, "symbolic-ref", "--quiet", "HEAD", check=False),
+        _git(root, "rev-parse", "--verify", "HEAD", check=False),
+        _git(root, "config", "--null", "--list", check=False),
+    ]
+    if args.do_command == "push" and values[1][0] == 0:
+        current = _branch(root)
+        command = _push_command(root, current)
+        values.extend(
+            (command, _git(root, "remote", "get-url", "--push", "--all", command[-2], check=False))
+        )
+    if args.do_command == "run":
+        makefile = root / "Makefile"
+        values.append(
+            hashlib.sha256(makefile.read_bytes()).hexdigest() if makefile.exists() else None
+        )
+    return hashlib.sha256(json.dumps(values).encode()).hexdigest()
+
+
+def _log(session_directory, row, **fields):
+    record_action(
+        session_directory,
+        "authorization",
+        "captain",
+        None,
+        supervised=True,
+        request=row["id"],
+        state=row["state"],
+        **fields,
+    )
+
+
+def request_authorization(session_directory, args, origin, argv=None):
+    """The open or approved request for this exact command, else a new open one."""
+    wanted = command_of(args)
+    context = _context(session_directory, args)
+    with protocol.checkpoint(session_directory) as state:
+        rows = state.setdefault("authorizations", [])
+        _expire(rows, time.time())
+        found = next(
+            (
+                row
+                for row in rows
+                if row["command"] == wanted
+                and row.get("context") == context
+                and row["origin"] == origin
+                and (
+                    row["state"] in ("open", "approved")
+                    or (
+                        row["state"] == "denied"
+                        and time.time() - row["resolved_at"] <= APPROVAL_TTL
+                    )
+                )
+            ),
+            None,
+        )
+        if found is not None:
+            return dict(found)
+        if len(rows) >= AUTHORIZATION_LIMIT:
+            rows[:] = [
+                row
+                for row in rows
+                if row["state"] in ("open", "approved")
+                or (row["state"] == "denied" and time.time() - row["resolved_at"] <= APPROVAL_TTL)
+            ]
+        if len(rows) >= AUTHORIZATION_LIMIT:
+            raise CaptainError("[authorization-limit] Too many pending authorization requests.")
+        row = {
+            "id": uuid4().hex,
+            "context": context,
+            "origin": origin,
+            "argv": argv,
+            "command": wanted,
+            "category": category(args),
+            "cwd": read_json(session_directory / "session.json")["project"],
+            "reason": why(args),
+            "state": "open",
+            "at": time.time(),
+        }
+        rows.append(row)
+    card = {key: row[key] for key in ("origin", "argv", "command", "category", "cwd", "reason")}
+    _log(session_directory, row, **card)
+    return dict(row)
+
+
+def resolve_authorization(session_directory, request_id, decision, reason=None):
+    """Approve an open request for one run, or deny it."""
+    if decision not in ("approve", "deny"):
+        raise CaptainError("[authorization-decision] Decide approve or deny.")
+    if reason is not None:
+        check_text(reason, "reason")
+    with protocol.checkpoint(session_directory) as state:
+        rows = state.get("authorizations", [])
+        _expire(rows, time.time())
+        row = next((row for row in rows if row["id"] == request_id), None)
+        if row is None:
+            raise CaptainError(f"[authorization-unknown] No authorization request {request_id}.")
+        if row["state"] != "open":
+            raise CaptainError(f"[authorization-closed] Request {request_id} is {row['state']}.")
+        row.update(
+            state="approved" if decision == "approve" else "denied",
+            decision_reason=reason,
+            resolved_at=time.time(),
+        )
+        row = dict(row)
+    _log(session_directory, row, decision_reason=reason)
+    return row
+
+
+def _spend(session_directory, args, request_id):
+    """Spend the approved request for this exact command (the named one when given), or None."""
+    wanted = command_of(args)
+    context = _context(session_directory, args)
+    captain = os.environ.get("CAPTAIN_ROLE", "captain") == "captain" and not os.environ.get(
+        "CAPTAIN_CREW"
+    )
+    with protocol.checkpoint(session_directory) as state:
+        rows = state.get("authorizations", [])
+        _expire(rows, time.time())
+        row = next(
+            (
+                row
+                for row in rows
+                if row["state"] == "approved"
+                and row["command"] == wanted
+                and row.get("context") == context
+                and (
+                    (row["origin"] == "app" and request_id == row["id"])
+                    or (row["origin"] == "captain" and captain and request_id is None)
+                )
+            ),
+            None,
+        )
+        if row is None:
+            return None
+        row.update(state="spent", spent_at=time.time())
+        row = dict(row)
+    _log(session_directory, row)
+    return row
+
+
+def authorize(args, session_directory):
+    """Refuse a supervised run that needs the user's approval and has none to spend."""
+    named = os.environ.get(AUTHORIZATION_ENV)
+    if not named and category(args) == "local":
+        return
+    if _spend(session_directory, args, named):
+        return
+    if named:
+        raise CaptainError(
+            f"[authorization-required] Request {named} is not an approved request for this command."
+        )
+    row = request_authorization(session_directory, args, "captain")
+    raise CaptainError(
+        f"[authorization-required] `{args.do_command}` is {row['category']}: the user must "
+        f"approve request {row['id']} in the app. Run the same command again once it is approved."
+    )
+
+
 def run(args, session_directory, project, meta=None):
     """Dispatch one `do` action; record a refusal once unless the run already was."""
     try:
+        inherited = os.environ.get("CAPTAIN_SESSION")
+        selected = getattr(args, "session", None)
+        if inherited and selected and selected != inherited:
+            source = sessions.read_session(Path(project), inherited)
+            if source.meta.get("transport") == "supervisor":
+                raise CaptainError("[authorization-session] Cannot change a supervised session.")
+        if (meta or {}).get("transport") == "supervisor":
+            authorize(args, session_directory)
         return _dispatch(args, session_directory, project, meta)
     except KeyboardInterrupt:
         command = ["captain", "do", args.do_command]
@@ -318,6 +558,23 @@ def run(args, session_directory, project, meta=None):
             command = ["captain", "do", args.do_command]
             record(session_directory, args.do_command, command, 1, str(exc))
         raise
+
+
+def _push_command(root, current):
+    if current == "HEAD":
+        raise CaptainError("Detached HEAD; nothing to push.")
+    tracked, _ = _git(root, "rev-parse", "--abbrev-ref", f"{current}@{{upstream}}", check=False)
+    command = ["git", "push"]
+    if tracked != 0:
+        _, remotes = _git(root, "remote")
+        names = remotes.splitlines()
+        command += ["--set-upstream", names[0] if len(names) == 1 else "origin", current]
+    else:
+        _, remote = _git(
+            root, "for-each-ref", "--format=%(push:remotename)", f"refs/heads/{current}"
+        )
+        command += [remote, current]
+    return command
 
 
 def _dispatch(args, session_directory, project, meta=None):
@@ -352,19 +609,7 @@ def _dispatch(args, session_directory, project, meta=None):
         summary = f"Fast-forwarded {_branch(root)}."
     elif action == "push":
         current = _branch(root)
-        if current == "HEAD":
-            raise CaptainError("Detached HEAD; nothing to push.")
-        tracked, _ = _git(root, "rev-parse", "--abbrev-ref", f"{current}@{{upstream}}", check=False)
-        command = ["git", "push"]
-        if tracked != 0:
-            _, remotes = _git(root, "remote")
-            names = remotes.splitlines()
-            command += ["--set-upstream", names[0] if len(names) == 1 else "origin", current]
-        else:
-            _, remote = _git(
-                root, "for-each-ref", "--format=%(push:remotename)", f"refs/heads/{current}"
-            )
-            command += [remote, current]
+        command = _push_command(root, current)
         output = _act(root, command, session_directory, action)
         summary = f"Pushed {current}."
     else:

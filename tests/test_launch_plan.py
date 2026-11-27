@@ -133,8 +133,8 @@ class LaunchPlanTests(SessionCase):
         for args, expected in (
             ([], "missing-choice"),
             (["--agent", "pi"], "missing-choice"),
-            (["--agent", "claude"], "unsupported-transport"),
-            (["--agent", "codex"], "unsupported-transport"),
+            (["--agent", "claude"], "missing-choice"),
+            (["--agent", "codex"], "missing-choice"),
             (["--agent", "grok"], "unsupported-transport"),
             (["--agent", "pi", "--session", "bad"], "invalid-session"),
             (["--model"], "invalid-arguments"),

@@ -1,5 +1,4 @@
 import shlex
-import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -134,7 +133,7 @@ class InstructionSizeTests(unittest.TestCase):
                     text = instruction_prompts.agent_instructions(
                         self.directory, f"crew member {name}", provider
                     )
-                    prefix = [sys.executable, "-m", "captain_barbossa"]
+                    prefix = [instruction_prompts.python_command(), "-m", "captain_barbossa"]
                     commands = [
                         shlex.split(line) for line in text.splitlines() if line.startswith("  ")
                     ]

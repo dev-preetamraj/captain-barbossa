@@ -468,7 +468,11 @@ class BackgroundCrewTests(SessionCase):
         cases = (
             ((), patch.object(background.config, "number", return_value=float("inf")), "finite"),
             (("--agent", "grok"), contextlib.nullcontext(), r"\[background-provider\]"),
-            (("--agent", "claude"), contextlib.nullcontext(), r"\[background-provider\]"),
+            (
+                ("--agent", "claude"),
+                patch.object(background, "supported", return_value=background.SUPPORTED),
+                r"\[background-provider\]",
+            ),
         )
         for extra, context, error in cases:
             args = self.args("crew", "--background", "--task", "find it", *extra)

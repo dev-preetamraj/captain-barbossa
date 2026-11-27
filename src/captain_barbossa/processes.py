@@ -49,6 +49,9 @@ def terminate_process_group(process):
             pass
 
 
+CHILD_SECRETS = ("CAPTAIN_SUPERVISOR_TOKEN", "CAPTAIN_AUTHORIZATION")
+
+
 def capture(root, command, timeout=TIMEOUT, *, text=True):
     """Run a bounded command, raising only when it could not run at all.
 
@@ -63,7 +66,10 @@ def capture(root, command, timeout=TIMEOUT, *, text=True):
             stderr=subprocess.PIPE,
             text=text,
             stdin=subprocess.DEVNULL,
-            env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+            env={
+                **{key: value for key, value in os.environ.items() if key not in CHILD_SECRETS},
+                "GIT_TERMINAL_PROMPT": "0",
+            },
             start_new_session=True,
         )
     except FileNotFoundError as exc:

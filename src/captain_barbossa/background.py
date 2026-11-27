@@ -9,6 +9,8 @@ also requires output readers to finish before publishing that receipt; an escape
 holder leaves cleanup pending. Cancellation is requested through a file.
 """
 
+import dataclasses
+import importlib
 import json
 import math
 import os
@@ -21,6 +23,7 @@ from pathlib import Path
 from . import config, execution, lifetime, native_history, protocol
 from .background_state import alive, held, paths, stem
 from .do import QUIET_PROMPT
+from .instructions import native_args
 from .models import headless_argv, headless_report
 from .runtime import CaptainError
 from .sessions import Session
@@ -41,19 +44,35 @@ STDERR_LIMIT = 64 * 1024
 REPORT_LIMIT = 4000
 TAIL = 1000
 READ_ONLY = {"read", "search"}
+
+
 # Providers whose read-only gate holds against the user's own configuration: codex
 # ignores it under an OS read-only sandbox; pi drops extensions, MCP and skills by flag
-# (models.headless_argv isolated=True). claude keeps user hooks and settings allow rules
-# and grok offers no flag to drop its MCP servers and plugins, so both are refused.
+# (models.headless_argv isolated=True). grok offers no flag to drop its MCP servers and
+# plugins, so it is refused; claude is added by supported() when its Agent SDK can isolate.
 SUPPORTED = ("codex", "pi")
+SDK_OPTIONS = ("tools", "can_use_tool", "setting_sources")
+
+
+def supported():
+    """SUPPORTED plus claude when the installed Agent SDK exposes every isolation option."""
+    try:
+        sdk = importlib.import_module("claude_agent_sdk")
+        names = {field.name for field in dataclasses.fields(sdk.ClaudeAgentOptions)}
+    except Exception:
+        return SUPPORTED
+    return (*SUPPORTED, "claude") if set(SDK_OPTIONS) <= names else SUPPORTED
 
 
 def check_provider(provider):
-    if provider not in SUPPORTED:
+    if provider in SUPPORTED:
+        return
+    providers = supported()
+    if provider not in providers:
         raise CaptainError(
             f"[background-provider] {provider}'s headless turn still runs the user's own "
             "hooks, plugins or permission rules, so it cannot be held read-only unwatched. "
-            f"Use {' or '.join(SUPPORTED)}, or quiet or a visual crew."
+            f"Use {' or '.join(providers)}, or quiet or a visual crew."
         )
 
 
@@ -113,8 +132,21 @@ def prepare(crew, project, provider, binary, model, task, assignment_id, context
     )
     environment.update(history["env"])
     prompt = f"{QUIET_PROMPT}{context}\n\n{task}"
-    argv = headless_argv(provider, binary, prompt, model=model, isolated=True)
-    argv[-1:-1] = history["argv"]
+    if provider == "claude":
+        events = directory / "events" / f"{crew.crew_id}-{crew.record['incarnation_id']}.jsonl"
+        argv = [
+            sys.executable,
+            "-m",
+            "captain_barbossa.claude_host",
+            "--one-shot",
+            binary,
+            *native_args(provider, "", model=model, events=events),
+            *history["argv"],
+            prompt,
+        ]
+    else:
+        argv = headless_argv(provider, binary, prompt, model=model, isolated=True)
+        argv[-1:-1] = history["argv"]
     ref = lifetime.prepare(crew.session, crew.record, argv, environment, execution_root)
     crew.record["lifetime_id"] = ref
     write_json(crew.session.meta_path, crew.session.meta)

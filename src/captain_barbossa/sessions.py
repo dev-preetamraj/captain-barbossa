@@ -6,7 +6,9 @@ import time
 import uuid
 from collections import namedtuple
 from contextlib import contextmanager
+from pathlib import Path
 
+from .eventlog import record_action
 from .runtime import HERDR_ERRORS, CaptainError, herdr
 from .store import (
     lock,
@@ -109,6 +111,45 @@ def all_sessions(current):
     return rows
 
 
+def catalog(current, include_archived=False):
+    """Every project's sessions as JSON for an app's session list, archived ones only if asked."""
+    projects = {}
+    for project, name, session_id, active, directory in all_sessions(current):
+        try:
+            meta = read_json(directory / "session.json")
+        except CaptainError:
+            meta = {}
+        meta = meta if isinstance(meta, dict) else {}
+        archived = bool(meta.get("archived_at"))
+        if archived and not include_archived:
+            continue
+        transport = "supervisor" if meta.get("transport") == "supervisor" else "herdr"
+        if transport == "herdr":
+            state = "herdr"
+        else:
+            from .supervision import alive  # local: Herdr commands never load the door
+
+            state = (
+                "running" if alive(directory) else "ended" if meta.get("ended_at") else "stopped"
+            )
+        row = projects.setdefault(
+            project, {"project": project, "exists": Path(project).is_dir(), "sessions": []}
+        )
+        row["sessions"].append(
+            {
+                "id": session_id,
+                "name": name,
+                "transport": transport,
+                "state": state,
+                "last_activity": active,
+                "ended_at": meta.get("ended_at"),
+                "archived": archived,
+                "crew": session_crew(directory),
+            }
+        )
+    return {"projects": list(projects.values())}
+
+
 def project_sessions(project):
     """Every readable session belonging to the current project, newest first."""
     current = str(project.resolve())
@@ -149,13 +190,55 @@ def session_card(row, now=None):
 
 
 def rename_session(directory, name, *, if_unnamed=False):
-    """if_unnamed is the captain titling its own session; it never replaces a name."""
+    """if_unnamed never replaces a name; a supervised session logs each change."""
     name = name.strip()
     if not name or len(name) > 60 or SESSION_ID.fullmatch(name):
         raise CaptainError("A session name is 1-60 characters and not a session id.")
     with lock(directory / "session.lock"):
-        if not (if_unnamed and session_name(directory)):
-            write_json(directory / "name.json", {"name": name})
+        previous = session_name(directory)
+        if if_unnamed and previous:
+            return
+        write_json(directory / "name.json", {"name": name})
+        if name != previous:
+            record_action(
+                directory,
+                "session-renamed",
+                None,
+                None,
+                supervised=_is_supervised(directory),
+                session_id=directory.name,
+                name=name,
+                previous=previous,
+            )
+
+
+def set_archived(directory, archived):
+    """Set or clear archived_at in session meta; a repeat is a no-op, a change is logged."""
+    with crew_meta(directory) as meta:
+        changed = bool(meta.get("archived_at")) != archived
+        if changed and archived:
+            meta["archived_at"] = time.time()
+        elif changed:
+            meta.pop("archived_at", None)
+        result = {"session_id": directory.name, "archived_at": meta.get("archived_at")}
+        supervised = meta.get("transport") == "supervisor"
+    if changed:
+        record_action(
+            directory,
+            "session-archived" if archived else "session-unarchived",
+            None,
+            None,
+            supervised=supervised,
+            session_id=directory.name,
+        )
+    return {**result, "archived": archived}
+
+
+def _is_supervised(directory):
+    try:
+        return read_json(directory / "session.json").get("transport") == "supervisor"
+    except (CaptainError, OSError, AttributeError):
+        return False
 
 
 def find_session(current, target):

@@ -1,9 +1,14 @@
-"""Native hook event files: bounded lines, incarnation stamps and offset reads."""
+"""Event files: native hook lines, a supervised session's protocol actions, bounded lines,
+incarnation stamps and offset reads."""
 
 import json
+import os
+import re
+import time
+from uuid import uuid4
 
 from .runtime import CaptainError
-from .store import read_json
+from .store import lock, private_dir, read_json, write_text
 
 
 def match_crew(stem, crews):
@@ -40,12 +45,151 @@ DELIVERY_HOOKS = ("SessionStart", "UserPromptSubmit", "Stop")
 
 
 MAX_EVENT_BYTES = 65536
+# A supervised session's protocol actions, one line each, read by byte offset like hook events.
+ACTIONS = "actions.jsonl"
+# Actions waiting for the log, each a file named so that sorting keeps their order.
+ACTION_SPOOL = "actions.spool"
+ACTION_LOCK_WAIT = 1.0
+# The token a supervisor hands its app; the action log and every reply redact it.
+TOKEN_ENV = "CAPTAIN_SUPERVISOR_TOKEN"
+ACTION_KINDS = (
+    "recruit",
+    "assign",
+    "mail",
+    "question",
+    "grant",
+    "report",
+    "result",
+    "lifecycle",
+    "authorization",
+    "review",
+    "prompt",
+    "captain-command",
+    "session-renamed",
+    "session-archived",
+    "session-unarchived",
+    "session-deleted",
+)
+ACTION_IDENTITY = ("id", "kind", "at", "crew", "assignment", "message", "question", "request")
+# Key suffixes, compared without case, dashes or underscores, whose values never leave in clear.
+SECRET_KEYS = ("apikey", "secret", "password", "authorization", "token")
+REDACTED = "[redacted]"
+# A quoted secret-named key and its colon; the value after it is one JSON value of any type.
+SECRET_KEY = re.compile(
+    r'"[^"\\]*?(?:api[-_]?key|secret|password|authorization|token)"\s*:\s*', re.IGNORECASE
+)
+QUOTED = re.compile(r'"(?:[^"\\]|\\.)*(?:"|$)')
+BARE = re.compile(r"[^,}\]\s]*")
+_decoder = json.JSONDecoder()
+# Literal secrets this process knows besides the token in its environment: a supervisor's own.
+_hidden = set()
 
 
-def event_line(event):
+def hide(secret):
+    _hidden.add(secret)
+
+
+def known_secrets():
+    return tuple(filter(None, {*_hidden, os.environ.get(TOKEN_ENV)}))
+
+
+def redact_text(text, literals=()):
+    """Serialized text with literal secrets and every secret-named key's value redacted."""
+    for secret in literals:
+        if secret:
+            text = text.replace(secret, REDACTED)
+    parts, at = [], 0
+    for match in SECRET_KEY.finditer(text):
+        if match.start() < at:
+            continue  # inside a value already redacted
+        parts += [text[at : match.end()], f'"{REDACTED}"']
+        at = _value_end(text, match.end())
+    return "".join(parts) + text[at:]
+
+
+def _value_end(text, start):
+    """Where the JSON value at `start` ends; one cut off by the end of the text runs to it."""
+    try:
+        return _decoder.raw_decode(text, start)[1]
+    except ValueError:
+        pass
+    if text.startswith('"', start):
+        return QUOTED.match(text, start).end()
+    if text.startswith(("[", "{"), start):
+        return len(text)
+    return BARE.match(text, start).end()
+
+
+def redact(value, secrets=()):
+    """A copy with secret-named keys and every literal in `secrets` replaced by REDACTED."""
+    if isinstance(value, dict):
+        return {
+            key: REDACTED
+            if isinstance(key, str)
+            and key.casefold().replace("-", "").replace("_", "").endswith(SECRET_KEYS)
+            else redact(item, secrets)
+            for key, item in value.items()
+        }
+    if isinstance(value, list | tuple):
+        return [redact(item, secrets) for item in value]
+    if isinstance(value, str):
+        return redact_text(value, secrets)
+    return value
+
+
+def record_action(directory, kind, crew, assignment, *, supervised, defer=False, **fields):
+    """Log one protocol action with a stable id when `supervised`; spools when `defer` or busy."""
+    if kind not in ACTION_KINDS:
+        raise ValueError(f"Unknown protocol action kind: {kind}")
+    if not supervised:
+        return None
+    action = {
+        "id": uuid4().hex,
+        "kind": kind,
+        "at": time.time(),
+        "crew": crew,
+        "assignment": assignment,
+        **fields,
+    }
+    try:
+        line = event_line(redact(action, known_secrets()), ACTION_IDENTITY)
+    except CaptainError:
+        return None
+    try:
+        if defer:
+            raise BlockingIOError
+        flush_actions(directory, line)
+    except (CaptainError, OSError):
+        try:
+            spool = private_dir(directory / ACTION_SPOOL)
+            write_text(spool / f"{time.time_ns():020d}-{action['id']}.jsonl", line)
+        except (CaptainError, OSError):
+            return None  # the protocol change stands; only its log line is lost
+    return action["id"]
+
+
+def flush_actions(directory, line=None):
+    """Append spooled actions, then `line`, under a bounded lock; a crash may repeat an id."""
+    spool = directory / ACTION_SPOOL
+    with lock(directory / "actions.lock", timeout=ACTION_LOCK_WAIT):
+        pending = sorted(spool.glob("*.jsonl")) if spool.is_dir() else []
+        if not pending and line is None:
+            return
+        flags = os.O_NOFOLLOW | os.O_APPEND | os.O_CREAT | os.O_WRONLY
+        with os.fdopen(os.open(directory / ACTIONS, flags, 0o600), "a", encoding="utf-8") as file:
+            for path in pending:
+                file.write(path.read_text(encoding="utf-8"))
+                file.flush()
+                path.unlink()
+            if line is not None:
+                file.write(line)
+
+
+def event_line(event, keep=()):
     """Bound persisted payloads, never the identity or the live permission request."""
     record = dict(event)
     protected = {
+        *keep,
         "hook_event_name",
         "type",
         "notification_type",

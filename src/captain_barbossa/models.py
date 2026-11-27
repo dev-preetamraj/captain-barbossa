@@ -15,7 +15,8 @@ MODELS = {
         ("claude-haiku-5-5", ("haiku",)),
         ("claude-sonnet-5-5", ("sonnet",)),
         ("claude-opus-5-5", ("opus",)),
-        ("claude-fable-5-1", ("fable",)),
+        ("claude-fable-5-1", ()),
+        ("claude-fable-5-2", ("fable",)),
     ),
     # Keep explicit IDs for older builds; bare aliases follow the newest picker entries.
     "codex": (
@@ -47,6 +48,73 @@ PI_SETTLED = ("stop", "end_turn")
 # No hook or notify mechanism, so crew state comes from Herdr's own agent status and the
 # pane, and a switch or a mail doorbell has to read the composer to know it is safe.
 HOOKLESS = ("pi", "grok")
+# Providers a `captain supervise` session can run with no terminal, and the structured
+# transports each offers, preferred first; Codex's is also its subcommand, Claude's runs the
+# user's claude under claude_host through the optional Agent SDK.
+TRANSPORTS = {"codex": ("app-server",), "claude": ("sdk",), "pi": ("rpc",)}
+# Per provider, limits stated plainly and the sign-in routes the supervisor offers; `hello`
+# adds `supervised`, and docs/supervisor.md names every field.
+CAPABILITIES = {
+    "codex": {
+        "transport": "app-server",
+        "delivery": "body",
+        "gate": "hooks",
+        "output": "items",
+        "limits": [
+            "Needs Codex 0.164.0 or newer, with captain's four hooks trusted once in a Herdr "
+            "Codex crew; Captain never writes Codex trust.",
+            "Native ask-user requests are declined; the crew uses captain ask.",
+        ],
+        "sign_in": {
+            "methods": ["chatgptDeviceCode", "apiKey"],
+            "guidance": "Sign in here with a ChatGPT device code or an OpenAI API key, which "
+            "Codex keeps in its own store; or run `codex login` in a terminal.",
+        },
+    },
+    "claude": {
+        "transport": "sdk",
+        "delivery": "hook",
+        "gate": "hooks",
+        "output": "messages",
+        "limits": [
+            "Needs the optional claude-agent-sdk: pip install captain-barbossa[app].",
+        ],
+        "sign_in": {
+            "methods": [],
+            "guidance": "Run `claude auth login` in a terminal, or set ANTHROPIC_API_KEY for "
+            "the supervisor; Captain never reads, stores or proxies Claude credentials.",
+        },
+    },
+    "pi": {
+        "transport": "rpc",
+        "delivery": "body",
+        "gate": "extension",
+        "output": "events",
+        "limits": [
+            "pi extension tools outside the tool map pass the gate.",
+            "A model switch needs a provider/model id.",
+        ],
+        "sign_in": {
+            "methods": [],
+            "guidance": "Run `pi auth login <provider>` (or `/login` in pi) in a terminal, or "
+            "set the provider's API key for the supervisor.",
+        },
+    },
+    "grok": {
+        "transport": None,
+        "delivery": "body",
+        "gate": "none",
+        "output": None,
+        "limits": [
+            "No supervised transport yet; recruit grok crew in a Herdr session.",
+            "No hook: grok's own auto mode is the whole gate, so the gate fails open.",
+        ],
+        "sign_in": {
+            "methods": [],
+            "guidance": "Grok runs only in a Herdr session; sign in with grok in a terminal.",
+        },
+    },
+}
 # Providers whose own hook can hand mail to their own model, so the body never crosses a
 # terminal. Codex's notify marks a turn boundary but cannot return context, so it stays out.
 HOOK_DELIVERED = ("claude",)
@@ -120,10 +188,10 @@ def pi_models():
     )
 
 
-def pi_tiers():
-    """The tiers pi_models() can be ranked into with confidence; {} when it cannot."""
+def pi_tiers(entries=None):
+    """The tiers pi's entries can be ranked into with confidence; {} when it cannot."""
     served = {}
-    for model_id in model_ids("pi"):
+    for model_id, _ in pi_models() if entries is None else entries:
         served.setdefault(model_id.partition("/")[2], model_id)
     for family in PI_FAMILIES:
         if all(model in served for model in TIERS[family].values()):
@@ -142,21 +210,23 @@ def models_for(provider):
     return pi_models() if provider == "pi" else MODELS[provider]
 
 
-def tiers_for(provider):
-    """The built-in tiers, with any tier named in [models.<provider>] settings replacing one.
-
-    Settings may name a model however the user says it, so aliases are mapped here rather
-    than through resolve_model, which calls this and would recurse.
-    """
-    if provider == "pi":
-        tiers = pi_tiers()
-    else:
-        tiers = dict(TIERS[provider])
-    names = {name: model for model, aliases in models_for(provider) for name in (model, *aliases)}
+def tier_mapping(
+    provider: str, entries: tuple[tuple[str, tuple[str, ...]], ...] | None = None
+) -> dict[str, str]:
+    """Resolve configured aliases without recursing through resolve_model; omit unranked tiers."""
+    entries = models_for(provider) if entries is None else entries
+    tiers = pi_tiers(entries) if provider == "pi" else dict(TIERS[provider])
+    names = {name: model for model, aliases in entries for name in (model, *aliases)}
     for tier in TIER_NAMES:
         choice = config.text("models", provider, tier)
         if choice:
             tiers[tier] = names.get(normalized(choice), choice)
+    return tiers
+
+
+def tiers_for(provider):
+    """Resolve all configured tiers, refusing incomplete rankings."""
+    tiers = tier_mapping(provider)
     missing = [tier for tier in TIER_NAMES if tier not in tiers]
     if missing:
         # A guessed default is worse than an error: a weak model fails every crew turn.

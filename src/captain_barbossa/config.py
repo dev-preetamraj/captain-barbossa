@@ -12,6 +12,8 @@ from .runtime import HERDR_ERRORS, CaptainError
 from .store import project_root
 
 SETTINGS_PATH = Path(".captain") / "settings.toml"
+# Tables only `captain supervise` reads; the `captain init` template leaves them out.
+TEMPLATE_OMITS = ("[supervisor]",)
 
 
 def defaults_text():
@@ -89,6 +91,28 @@ def source(*names):
         if found is not None:
             return path
     return None
+
+
+def leaves(table, names=()):
+    """(names, value) for every non-table value in table, depth first."""
+    for key, value in table.items():
+        if isinstance(value, dict):
+            yield from leaves(value, (*names, key))
+        else:
+            yield (*names, key), value
+
+
+def described():
+    """The merged settings read fresh, the layer that set each leaf, and the two user files."""
+    home, project = Path.home() / SETTINGS_PATH, project_settings()
+    merged = merge(merge(defaults(), read(home)), read(project) if project else {})
+    sources = {}
+    for names, _ in leaves(merged):
+        found = source(*names)
+        layer = "defaults" if found is None else "home" if found == home else "project"
+        sources[".".join(names)] = layer
+    paths = {"home": str(home), "project": str(project) if project else None}
+    return {"version": 1, "settings": merged, "sources": sources, "paths": paths}
 
 
 def _typed(table, names, kind):
@@ -169,8 +193,13 @@ def template():
         "# shipped defaults, one key at a time: whatever stays commented falls back.",
         "",
     ]
+    omitted = False
     for line in defaults_text().splitlines():
         stripped = line.strip()
+        if stripped.startswith("["):
+            omitted = stripped in TEMPLATE_OMITS
+        if omitted:
+            continue
         lines.append(f"# {line}" if stripped and not stripped.startswith(("#", "[")) else line)
     return "\n".join(lines).rstrip("\n") + "\n"
 

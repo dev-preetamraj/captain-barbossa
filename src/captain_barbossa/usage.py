@@ -26,6 +26,7 @@ JOURNAL_BYTES = 1 << 20  # cap on captain-written incarnation evidence
 # Codex rollout logs, one per thread, named rollout-<stamp>-<thread id>.jsonl.
 CODEX_SESSIONS_ROOT = Path.home() / ".codex" / "sessions"
 _THREAD_ID = re.compile(r"[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}")
+_INCARNATION = re.compile(r"[a-f0-9]{32}")
 
 # Bundled fallback for the Claude context windows, used only when the price cache is
 # cold; LiteLLM's max_input_tokens wins whenever it is warm. A window is a stable fact
@@ -40,6 +41,7 @@ CONTEXT_WINDOWS = {
     "claude-sonnet-5-5": 1_000_000,
     "claude-opus-5-5": 1_000_000,
     "claude-fable-5-1": 1_000_000,
+    "claude-fable-5-2": 1_000_000,
 }
 
 _FIELDS = {
@@ -48,6 +50,14 @@ _FIELDS = {
     "cache_read": "cache_read_input_tokens",
     "cache_write": "cache_creation_input_tokens",
 }
+_PI_FIELDS = {
+    "input": "input",
+    "output": "output",
+    "cache_read": "cacheRead",
+    "cache_write": "cacheWrite",
+}
+# A supervised agent's newest reading from its own protocol, beside its events file.
+LIVE_SUFFIX = ".live-usage.json"
 _PRICE_KEYS = (
     "input_cost_per_token",
     "output_cost_per_token",
@@ -67,15 +77,31 @@ def usage_for_events(events_path, *, cached_only=True):
         except CaptainError:
             return None
         return value.get("usage") if isinstance(value.get("usage"), dict) else None
-    directory = Path(events_path).parent.parent.resolve() / "native-history"
-    manifest = directory / f"{Path(events_path).stem}.json"
+    manifest = _manifest(events_path)
     if not os.path.lexists(manifest):
         return _live_usage(events_path, cached_only=cached_only)
     try:
-        owned = history_manifest.read_manifest(manifest)
-        identities = journal(manifest.with_suffix(".pi.jsonl")) if owned["provider"] == "pi" else []
+        owned = _owned(manifest)
     except CaptainError:
         return None
+    return _live_usage(
+        events_path,
+        cached_only=cached_only,
+        provider=owned.get("provider"),
+        transcripts=owned.get("transcripts"),
+        native_root=owned.get("native_root"),
+    )
+
+
+def _manifest(events_path):
+    directory = Path(events_path).parent.parent.resolve() / "native-history"
+    return directory / f"{Path(events_path).stem}.json"
+
+
+def _owned(manifest):
+    """The native-history manifest with every transcript its incarnation is known to own."""
+    owned = history_manifest.read_manifest(manifest)
+    identities = journal(manifest.with_suffix(".pi.jsonl")) if owned["provider"] == "pi" else []
     if owned["provider"] == "claude":
         owned["transcripts"] = owned["transcripts"] + owned.get("usage_transcripts", [])
     if owned["provider"] == "pi":
@@ -91,13 +117,143 @@ def usage_for_events(events_path, *, cached_only=True):
             if path.parent == root and path.suffix == ".jsonl" and not path.is_symlink():
                 transcripts[str(path)] = None
         owned["transcripts"] = list(transcripts)
-    return _live_usage(
+    return owned
+
+
+def native_files(events_path):
+    """(provider or None, session files, strict root); with no manifest, only files its events prove owned."""
+    manifest = _manifest(events_path)
+    if os.path.lexists(manifest):
+        owned = _owned(manifest)
+        files = owned["transcripts"]
+        if owned["provider"] == "codex" and not files:
+            rollout = _rollout_path(
+                events_path, sessions_root=Path(owned["native_root"]) / "sessions"
+            )
+            files = [str(rollout)] if rollout else []
+        return owned["provider"], files, None
+    incarnation = _incarnation(Path(events_path))
+    files, root = _claude_sources(events_path, incarnation)
+    if files:
+        return "claude", files, root
+    alias = _native_home("CODEX_HOME", ".codex") / "sessions"
+    if not alias.is_absolute():
+        return None, [], None
+    root = alias.resolve()
+    rollout = _rollout_path(
         events_path,
-        cached_only=cached_only,
-        provider=owned.get("provider"),
-        transcripts=owned.get("transcripts"),
-        native_root=owned.get("native_root"),
+        sessions_root=root,
+        accept=lambda record: record.get("incarnation_id") == incarnation,
     )
+    return ("codex", [str(rollout)], root) if rollout else (None, [], None)
+
+
+def captain_conversations(events_path):
+    """(provider, file or None, root) per native session the captain's events name, found or not."""
+    named = {}
+    for record in records(events_path):
+        provider = record.get("provider") or ("claude" if "hook_event_name" in record else "codex")
+        if provider == "claude":
+            native = record.get("session_id") if "transcript_path" in record else None
+        else:
+            native = record.get("thread-id") or record.get("session_id")
+        if (
+            provider not in CAPTAIN_LOCATORS
+            or not isinstance(native, str)
+            or not _THREAD_ID.fullmatch(native)
+        ):
+            continue
+        paths = named.setdefault((provider, native), {})
+        if isinstance(record.get("transcript_path"), str):
+            paths[record["transcript_path"]] = None
+    return [
+        (provider, *CAPTAIN_LOCATORS[provider](native, list(paths)))
+        for (provider, native), paths in named.items()
+    ]
+
+
+def _captain_claude(session, paths):
+    alias = _native_home("CLAUDE_CONFIG_DIR", ".claude") / "projects"
+    if not alias.is_absolute():
+        return None, None
+    root = alias.resolve()
+    owned = _under(root, alias, paths[0]) if len(paths) == 1 else None
+    return (str(owned) if owned and owned.name == f"{session}.jsonl" else None), root
+
+
+def _captain_codex(thread, paths):
+    alias = _native_home("CODEX_HOME", ".codex") / "sessions"
+    if not alias.is_absolute():
+        return None, None
+    root = alias.resolve()
+    return _unique(root, (f"*/*/*/rollout-*-{thread}.jsonl",)), root
+
+
+def _captain_pi(session, paths):
+    configured = os.environ.get("PI_CODING_AGENT_SESSION_DIR")
+    alias = Path(configured).expanduser() if configured else None
+    alias = alias or _native_home("PI_CODING_AGENT_DIR", ".pi/agent") / "sessions"
+    if not alias.is_absolute():
+        return None, None
+    root = alias.resolve()
+    return _unique(root, (f"*_{session}.jsonl", f"*/*_{session}.jsonl")), root
+
+
+def _unique(root, patterns):
+    """The one file the patterns match under root, or None when none or several do."""
+    try:
+        matches = [path for pattern in patterns for path in root.glob(pattern)]
+    except OSError:
+        return None
+    return str(matches[0]) if len(matches) == 1 else None
+
+
+CAPTAIN_LOCATORS = {"claude": _captain_claude, "codex": _captain_codex, "pi": _captain_pi}
+
+
+def _incarnation(events_path):
+    """The incarnation an events file is named for, or None for the captain and bare crew ids."""
+    head, _, tail = events_path.stem.rpartition("-")
+    return tail if head and _INCARNATION.fullmatch(tail) else None
+
+
+def _native_home(variable, default):
+    return Path(os.environ.get(variable) or Path.home() / default).expanduser()
+
+
+def _claude_sources(events_path, incarnation):
+    """(transcripts, root) this incarnation's events name as <session id>.jsonl; an ambiguous session is dropped."""
+    alias = _native_home("CLAUDE_CONFIG_DIR", ".claude") / "projects"
+    if not alias.is_absolute():
+        return [], None
+    root, named = alias.resolve(), {}
+    for record in records(events_path):
+        session, path = record.get("session_id"), record.get("transcript_path")
+        if (
+            record.get("provider") in {None, "claude"}
+            and record.get("incarnation_id") == incarnation
+            and isinstance(session, str)
+            and _THREAD_ID.fullmatch(session)
+            and isinstance(path, str)
+        ):
+            named.setdefault(session, {})[path] = None
+    files = []
+    for session, paths in named.items():
+        owned = _under(root, alias, next(iter(paths))) if len(paths) == 1 else None
+        if owned is not None and owned.name == f"{session}.jsonl":
+            files.append(str(owned))
+    return files, root
+
+
+def _under(root, alias, value):
+    """`value` re-based onto the resolved `root` when it sits under it or its alias, else None."""
+    path = Path(value)
+    if not path.is_absolute() or "." in path.parts or ".." in path.parts:
+        return None
+    for base in (root, alias):
+        if path.is_relative_to(base):
+            return root / path.relative_to(base)
+    return None
 
 
 def freeze(events_path, incarnation, *, provider=None, transcripts=None, native_root=None):
@@ -146,6 +302,91 @@ def _live_usage(
     return _claude_usage(events_path, cached_only=cached_only, transcripts=transcripts)
 
 
+def record_live(events_path, frame):
+    store.write_json(Path(events_path).with_suffix(LIVE_SUFFIX), {"version": 1, "usage": frame})
+
+
+def live_usage(events_path):
+    """The supervisor's live frame for an events file; a malformed value reads as unknown."""
+    ledger = _read_json(Path(events_path).with_suffix(LIVE_SUFFIX))
+    frame = ledger.get("usage") if ledger.get("version") == 1 else None
+    if not isinstance(frame, dict):
+        return None
+    counts = (*_FIELDS, "tokens", "context", "limit")
+    clean = {key: frame.get(key) if _known(frame.get(key), int) else None for key in counts}
+    for key in ("cost", "rate"):
+        clean[key] = frame.get(key) if _known(frame.get(key), (int, float)) else None
+    model = frame.get("model")
+    clean["model"] = model if isinstance(model, str) and model else None
+    return clean
+
+
+def _known(value, kinds):
+    return type(value) in (kinds if isinstance(kinds, tuple) else (kinds,)) and value >= 0
+
+
+def with_live(events_path, *, cached_only=True):
+    """Native usage, with a supervised agent's live frame filling only what it leaves unknown."""
+    native = usage_for_events(events_path, cached_only=cached_only)
+    live = live_usage(events_path)
+    if native is None or live is None:
+        return native or live
+    return {
+        key: live.get(key) if native.get(key) is None else native[key] for key in {*native, *live}
+    }
+
+
+def codex_live(token_usage, model):
+    """A frame from app-server's thread/tokenUsage/updated; Codex reports no cost there."""
+    if not isinstance(token_usage, dict) or not isinstance(token_usage.get("total"), dict):
+        return None
+
+    def counts(breakdown):
+        breakdown = breakdown if isinstance(breakdown, dict) else {}
+        return _codex_counts(
+            {
+                "input_tokens": breakdown.get("inputTokens"),
+                "cached_input_tokens": breakdown.get("cachedInputTokens"),
+                "output_tokens": breakdown.get("outputTokens"),
+                "cache_write_input_tokens": breakdown.get("cacheWriteInputTokens"),
+            }
+        )
+
+    last = token_usage.get("last")
+    context = _context(counts(last)) if isinstance(last, dict) else None
+    limit = _configured_limit() or _count(token_usage.get("modelContextWindow")) or None
+    return _frame(counts(token_usage["total"]), context, limit, model, None, [])
+
+
+def pi_live(stats, model):
+    """A frame from pi's get_session_stats; contextUsage is absent when pi knows no window."""
+    tokens = stats.get("tokens") if isinstance(stats, dict) else None
+    if not isinstance(tokens, dict):
+        return None
+    totals = {key: tokens.get(field) for key, field in _PI_FIELDS.items()}
+    if not all(_known(value, int) for value in totals.values()):
+        return None
+    cost = stats.get("cost") if _known(stats.get("cost"), (int, float)) else None
+    window = stats.get("contextUsage") if isinstance(stats.get("contextUsage"), dict) else {}
+    context = window.get("tokens") if _known(window.get("tokens"), int) else None
+    limit = window.get("contextWindow") if _known(window.get("contextWindow"), int) else None
+    return _frame(totals, context, _configured_limit() or limit, model, cost, [])
+
+
+def claude_live(totals, result, model):
+    """Fold one SDK ResultMessage into `totals`: usage is that query's, cost the session's."""
+    counts = result.get("usage") if isinstance(result.get("usage"), dict) else {}
+    for name, field in _FIELDS.items():
+        totals[name] = totals.get(name, 0) + _count(counts.get(field))
+    cost = result.get("total_cost_usd")
+    cost = cost if _known(cost, (int, float)) else None
+    by_model = result.get("model_usage") if isinstance(result.get("model_usage"), dict) else {}
+    entry = by_model.get(model) or (next(iter(by_model.values())) if len(by_model) == 1 else {})
+    window = entry.get("contextWindow") if isinstance(entry, dict) else None
+    limit = _configured_limit() or (window if _known(window, int) and window else None)
+    return _frame(dict(totals), None, limit, model, cost, [])
+
+
 def _combine(frames):
     known = [frame for frame in frames if frame is not None]
     if not known:
@@ -174,12 +415,7 @@ def _pi_usage(transcripts):
                 continue
             found = True
             model = data.get("model", model)
-            for key, field in (
-                ("input", "input"),
-                ("output", "output"),
-                ("cache_read", "cacheRead"),
-                ("cache_write", "cacheWrite"),
-            ):
+            for key, field in _PI_FIELDS.items():
                 totals[key] += _count(counts.get(field))
             prices = counts.get("cost")
             turn_cost = prices.get("total") if isinstance(prices, dict) else None
@@ -374,7 +610,7 @@ def _epoch(value):
         return None
 
 
-def _rollout_path(events_path, *, sessions_root=None):
+def _rollout_path(events_path, *, sessions_root=None, accept=None):
     """The rollout log for the newest notification naming a thread that has one.
 
     Codex notifies for its own title-generation turns too, but those run on a throwaway
@@ -384,6 +620,8 @@ def _rollout_path(events_path, *, sessions_root=None):
     for record in reversed(list(records(events_path))):
         thread = record.get("thread-id")
         if not isinstance(thread, str) or not _THREAD_ID.fullmatch(thread):
+            continue
+        if accept is not None and not accept(record):
             continue
         try:
             root = CODEX_SESSIONS_ROOT if sessions_root is None else sessions_root

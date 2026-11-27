@@ -1,0 +1,100 @@
+# Captain Barbossa settings. Every setting is commented out at the value in
+# force today, so this file changes nothing until you uncomment a line.
+# A project file overrides ~/.captain/settings.toml, which overrides the
+# shipped defaults, one key at a time: whatever stays commented falls back.
+
+[captain]
+# Which CLI the captain launches: claude, codex, pi, grok.
+# Empty asks at launch; setting it skips the question. --agent still wins.
+# agent = ""
+# The captain's own model: a tier (cheap|mid|strong), a model ID, or an alias.
+# Empty means the captain's CLI keeps whatever model it defaults to.
+# model = ""
+
+[crew]
+# Which CLI new crew run. Empty follows the captain's own CLI. --agent still wins.
+# agent = ""
+# Where new crew open: pane, tab, or auto (the next free slot, a new tab once all are taken).
+# placement = "auto"
+# isolation_enabled = false
+# checkout = "auto"
+# The model new crew are recruited with, when `captain crew` gets no --model.
+# model = "cheap"
+# Seconds `captain wait` watches before reporting a bare timeout. A timeout is not news,
+# and a captain woken to read one spent a model turn to learn nothing, so the default is a
+# full day: quiet stays quiet and only a real event returns. --timeout still wins, and 0
+# means "report whatever has already arrived".
+# wait_timeout = 86400
+# Seconds a `captain crew --background` turn may run before its owner stops it and
+# records a failure. Bounded so no unattended worker outlives its usefulness.
+# background_timeout = 1800
+
+[memory]
+# Load `--scope user` preferences into every captain launch, resume and `recover`.
+# A project's own settings can set false to keep them out of its sessions.
+# user_enabled = true
+# Characters all user preferences may take together, checked at `memory add`. They
+# lead every launch digest, which is cut at 32000, so it must stay below 16000.
+# user_limit = 4000
+
+[lifetime]
+# Seconds allowed for the managed native group to start.
+# startup_timeout = 5.0
+# Seconds between managed lifetime observations.
+# poll_interval = 0.1
+# Seconds allowed for graceful group termination before escalation.
+# terminate_timeout = 5.0
+# Seconds allowed to observe complete group shutdown after escalation.
+# shutdown_timeout = 5.0
+
+[dashboard]
+# Open the crew token-usage pane below the captain at launch.
+# `captain --no-dashboard` skips it even when this is true, and
+# `captain dashboard` still runs one by hand in any pane.
+# enabled = false
+# Seconds between refreshes. --interval still wins.
+# interval = 2.0
+# Share of the split the captain keeps, so the dashboard gets the remainder.
+# ratio = 0.8
+# Context window for the CTX column, for a model nothing else covers.
+# 0 derives it from the price data, then from the bundled table.
+# context_limit = 0
+# JSON file of per-token prices, in LiteLLM's shape, for contracted rates.
+# Empty uses the cached LiteLLM extract. `~` is expanded.
+# prices_file = ""
+
+[placement]
+# The shape of a tab, read left to right as columns: each number is how many panes
+# that column holds, stacked top to bottom. Crew fill it breadth first, a new column
+# before anything stacks, and the declared slot is created however small it lands.
+# captain_tab column 1 is the captain alone and must be 1, so [1, 2] means the captain
+# full height with two crew stacked beside it; the dashboard nests under the captain,
+# not in a slot. The captain's pane is never split in two.
+# captain_tab = [1, 2]
+# Every other tab. [2, 2] is two columns of two, so four crew to a tab.
+# crew_tab = [2, 2]
+
+# Which model each provider-neutral tier means, per agent CLI. Values take a
+# model ID or an alias, so `mid = "opus"` works. pi is absent on purpose: its
+# tiers are ranked from `pi --list-models`, but a [models.pi] table of your own
+# overrides them the same way, using pi's `provider/model` IDs.
+[models.claude]
+# cheap = "claude-haiku-5-5"
+# mid = "claude-sonnet-5-5"
+# strong = "claude-opus-5-5"
+
+[models.codex]
+# cheap = "gpt-5.6-luna"
+# mid = "gpt-5.6-sol"
+# strong = "gpt-6-astra"
+
+[models.grok]
+# cheap = "grok-4.7-build-fast"
+# mid = "grok-4.6"
+# strong = "grok-4.7"
+
+# None ship for pi, since the IDs differ per install. Uncomment to pin your own:
+# [models.pi]
+# cheap = "openai/gpt-5-mini"
+# mid = "anthropic/claude-sonnet-5"
+# strong = "anthropic/claude-opus-5"

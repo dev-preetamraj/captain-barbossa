@@ -9,7 +9,7 @@ import uuid
 from contextlib import contextmanager
 from pathlib import Path
 
-from . import store, worktrees
+from . import eventlog, store, worktrees
 from .runtime import CaptainError
 
 
@@ -224,6 +224,21 @@ def inventory(session):
     return [read(session, path.name) for path in sorted(directory.glob("*")) if path.is_dir()]
 
 
+def record_result(session, manifest, state, **fields):
+    eventlog.record_action(
+        session.directory,
+        "result",
+        manifest["crew_id"],
+        manifest["assignment_id"],
+        supervised=session.meta.get("transport") == "supervisor",
+        defer=True,
+        result=manifest["id"],
+        worktree=manifest["worktree_id"],
+        state=state,
+        **fields,
+    )
+
+
 def collect(session, worktree_id, owned_paths, report=""):
     with store.lock(session.directory / "worktrees.lock"):
         record = worktrees.read(session, worktree_id)
@@ -281,6 +296,7 @@ def collect(session, worktree_id, owned_paths, report=""):
         worktrees.durable(directory / "manifest.json", manifest)
         record.update(result_id=result_id, phase="retained")
         worktrees.durable(worktrees.record_path(session, worktree_id), record)
+        record_result(session, manifest, "collected", provisional=manifest["provisional"])
         return manifest
 
 
@@ -442,9 +458,9 @@ def apply(session, result_id):
             "entries": entries,
         }
         if at_post:
-            # Already integrated by hand; nothing to write.
             receipt["state"] = "applied"
             worktrees.durable(journal, receipt)
+            record_result(session, manifest, "applied")
             return receipt
         changed = [e["path"] for e in entries if current[e["path"]] != e["base"]]
         if changed or any(index.get(e["path"]) != e["base"] for e in entries):
@@ -454,6 +470,7 @@ def apply(session, result_id):
             )
         receipt["state"] = "applying"
         worktrees.durable(journal, receipt)
+        record_result(session, manifest, "applying")
         written = []
         try:
             # Deletions first, so a removed file can become a directory.
@@ -463,6 +480,7 @@ def apply(session, result_id):
         except (CaptainError, OSError) as exc:
             receipt.update(state="partial", written=written, error=str(exc))
             worktrees.durable(journal, receipt)
+            record_result(session, manifest, "partial", written=written, error=str(exc))
             raise CaptainError(
                 f"[transfer-partial] {exc}; wrote {len(written)} of {len(entries)} files. "
                 f"Recover manually from {directory / 'manifest.json'}."
@@ -473,9 +491,11 @@ def apply(session, result_id):
         ):
             receipt.update(state="partial", written=written, error="changed after write")
             worktrees.durable(journal, receipt)
+            record_result(session, manifest, "partial", written=written, error=receipt["error"])
             raise CaptainError("[transfer-partial] Destination changed after write; retain result.")
         receipt["state"] = "applied"
         worktrees.durable(journal, receipt)
+        record_result(session, manifest, "applied")
         return receipt
 
 
@@ -494,6 +514,7 @@ def discard(session, result_id, reason):
             "reason": reason,
         }
         worktrees.durable(path, receipt)
+        record_result(session, manifest, "discarded", reason=reason)
         return receipt
 
 

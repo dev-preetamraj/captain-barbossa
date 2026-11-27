@@ -256,7 +256,7 @@ class ModelTierTests(unittest.TestCase):
         """A picker row is only the model asked for when the version matches: "opus"
         alone also names an "Opus 4.7" row, and that row once took the keypress."""
         labels = [models.claude_label(model) for model in models.model_ids("claude")]
-        self.assertEqual(labels, ["haiku 5.5", "sonnet 5.5", "opus 5.5", "fable 5.1"])
+        self.assertEqual(labels, ["haiku 5.5", "sonnet 5.5", "opus 5.5", "fable 5.1", "fable 5.2"])
         self.assertFalse("opus 4.7".startswith(models.claude_label("claude-opus-5-5")))
         self.assertTrue("opus 5.5.1".startswith(models.claude_label("claude-opus-5-5")))
 
@@ -268,7 +268,7 @@ class ModelTextTests(unittest.TestCase):
             ("claude", "opus", "claude-opus-5-5"),
             ("claude", "Claude Sonnet 5 5", "claude-sonnet-5-5"),
             ("claude", "haiku_5_5", "claude-haiku-5-5"),
-            ("claude", "fable 5.1", "claude-fable-5-1"),
+            ("claude", "fable", "claude-fable-5-2"),
             ("claude", "sonet", "claude-sonnet-5-5"),
             ("codex", "gpt-6-sol", "gpt-6-sol"),
             ("codex", "gpt-6-astra", "gpt-6-astra"),

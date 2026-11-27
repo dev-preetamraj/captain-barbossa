@@ -13,7 +13,7 @@ Fork the repository on GitHub, then clone your fork:
 git clone git@github.com:YOUR_USERNAME/captain-barbossa.git
 cd captain-barbossa
 git remote add upstream git@github.com:dev-preetamraj/captain-barbossa.git
-uv sync --locked
+uv sync --locked --extra app
 uv run --locked pre-commit install
 git switch -c fix/describe-the-change
 ```

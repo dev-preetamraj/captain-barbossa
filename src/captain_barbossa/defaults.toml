@@ -42,6 +42,20 @@ terminate_timeout = 5.0
 # Seconds allowed to observe complete group shutdown after escalation.
 shutdown_timeout = 5.0
 
+[supervisor]
+# Seconds one request to `captain supervise` may take. A supervised crew's turn is untimed.
+request_timeout = 10.0
+# Seconds a supervised crew's native CLI may take to start and finish its handshake.
+startup_timeout = 30.0
+# Seconds a stop waits for the crew's process group to be confirmed gone. It must cover
+# [lifetime] terminate_timeout plus shutdown_timeout.
+stop_timeout = 15.0
+# Seconds a relayed `captain hook` call may run before it is stopped.
+hook_timeout = 30.0
+# Where the supervisor's socket lives. Never /tmp or the OS temp directory, which crew
+# share as scratch, and the whole socket path must stay under 104 bytes.
+socket_dir = "~/.captain/run"
+
 [dashboard]
 # Open the crew token-usage pane below the captain at launch.
 # `captain --no-dashboard` skips it even when this is true, and

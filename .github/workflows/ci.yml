@@ -65,6 +65,21 @@ jobs:
       - run: uv sync --locked
       - run: uv run --locked python -m unittest discover -s tests -v
 
+  app-extra:
+    name: Tests with the app extra
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: "0.12.5"
+          python-version: "3.11"
+      - run: uv sync --locked --extra app
+      - run: uv run --locked --extra app python -m unittest discover -s tests -v
+
   package:
     name: Build and install wheel
     runs-on: ubuntu-latest

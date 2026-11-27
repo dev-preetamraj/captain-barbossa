@@ -5,23 +5,42 @@ import json
 import os
 import re
 import shlex
+import stat
 import subprocess
+import tempfile
 import time
 from contextlib import contextmanager
 from pathlib import Path
 from uuid import uuid4
 
 from . import background_state, lifetime
-from .approval import REASONS, Request, Verdict, decide, protected, recipe_flag
+from .approval import (
+    FLAGGED,
+    REASONS,
+    SHELL_TOOLS,
+    Request,
+    Verdict,
+    decide,
+    protected,
+    recipe_flag,
+)
 from .crew import Crew, event_status
-from .eventlog import MAX_EVENT_BYTES, read_events
+from .eventlog import MAX_EVENT_BYTES, read_events, record_action
 from .execution import root
 from .models import HOOK_DELIVERED, HOOKLESS
-from .pane import DRAFT_GATE, HOLD_EXPIRY, UNREADABLE_EXPIRY, UNREADABLE_GATE
+from .pane import DRAFT_GATE, HOLD_EXPIRY, UNREADABLE_EXPIRY, UNREADABLE_GATE, inbox_line
 from .processes import TARGET, capture, makefile_targets
 from .runtime import HERDR_ERRORS, CaptainError, check_text, inside_project
 from .sessions import session_directories
-from .store import lock, read_json, state_root, state_storage, temp_root, write_json
+from .store import (
+    lock,
+    private_dir,
+    read_json,
+    state_root,
+    state_storage,
+    temp_root,
+    write_json,
+)
 
 ACTIONS = ("read", "search", "edit", "test", "build", "format", "commit", "version", "delete")
 WRITE_ACTIONS = ("edit", "format", "commit", "version", "delete")
@@ -78,6 +97,14 @@ PLACEHOLDER = re.compile(
 )
 PATH_PLACEHOLDER = re.compile(r"\b(?:TODO|TBD|FIXME)\b|<[^<>]+>|\{\{[^{}]+\}\}", re.I)
 GIT_TIMEOUT = 5
+# A whole-tree snapshot hashes every changed file, so it gets longer than a status read.
+SNAPSHOT_TIMEOUT = 60
+# Review snapshots run no fsmonitor, hooks or untracked cache of the user's.
+SNAPSHOT_CONFIG = ("-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null")
+SNAPSHOT_CONFIG += ("-c", "core.untrackedCache=false")
+# A supervised session's own object store for review snapshots, beside its other state.
+SNAPSHOTS = "snapshots"
+DIFF_CHARS = 1024 * 1024
 # Enough of a --verify run's output to see why it failed; the full log is on disk.
 VERIFY_LINES = 15
 VERIFY_MARK = "[verify]"
@@ -324,8 +351,141 @@ def begin(
             "native_status": None,
             "verify": verify,
         }
+        if supervised(crew):
+            # Read back by receipt, which a delivery hook calls with no session metadata.
+            assignment["supervised"] = True
         state["assignments"][assignment["id"]] = assignment
         state["active"][crew.crew_id] = assignment["id"]
+    if supervised(crew):
+        assignment = take_baseline(crew, assignment["id"], execution_root)
+    record_action(
+        crew.session.directory,
+        "assign" if previous else "recruit",
+        crew.crew_id,
+        assignment["id"],
+        supervised=supervised(crew),
+        task=task,
+        paths=paths,
+        actions=actions,
+        verify=verify,
+        handoff=handoff,
+        **(
+            {
+                "provider": crew.record.get("provider"),
+                "model": crew.record.get("model"),
+                "checkout": crew.record.get("checkout"),
+                "sources": crew.record.get("sources", {}),
+            }
+            if not previous
+            else {}
+        ),
+    )
+    return assignment
+
+
+def supervised(crew):
+    """Whether the crew's session logs protocol actions, from metadata already loaded."""
+    return crew.session.meta.get("transport") == "supervisor"
+
+
+def waiting_on(question, captain_idle_at):
+    """`captain` until the question is escalated, or the captain ended a turn after receiving it."""
+    if question.get("waiting_on") == "human" or question.get("escalated"):
+        return "human"
+    delivered = question.get("delivered_at")
+    if delivered is not None and captain_idle_at is not None and captain_idle_at > delivered:
+        return "human"
+    return "captain"
+
+
+def route_questions(directory, routes):
+    """Record each question's new waitingOn; `routes` maps (crew id, question id) to it."""
+    moved = []
+    with checkpoint(directory) as state:
+        for (crew_id, question_id), target in routes.items():
+            assignment = state["assignments"].get(state["active"].get(crew_id))
+            question = assignment and assignment["question"]
+            if question and question["id"] == question_id and question.get("waiting_on") != target:
+                question["waiting_on"] = target
+                moved.append((crew_id, assignment["id"], question_id, target))
+    for crew_id, assignment_id, question_id, target in moved:
+        record_action(
+            directory,
+            "question",
+            crew_id,
+            assignment_id,
+            supervised=True,
+            question=question_id,
+            state="routed",
+            waiting_on=target,
+        )
+    return moved
+
+
+def escalate(crew, question_id):
+    """The captain routes a crew's pending question to the user, for good."""
+    if not supervised(crew):
+        raise CaptainError(
+            "[escalate-supervised] Only an app session routes questions to the user."
+        )
+    with checkpoint(crew.session.directory) as state:
+        assignment = active(state, crew)
+        question = assignment["question"]
+        if not question or question["id"] != question_id:
+            raise CaptainError(f"[stale-question-id] {question_id} is not the pending question.")
+        question.update(waiting_on="human", escalated_by="captain")
+        assignment_id = assignment["id"]
+    record_action(
+        crew.session.directory,
+        "question",
+        crew.crew_id,
+        assignment_id,
+        supervised=True,
+        question=question_id,
+        state="routed",
+        waiting_on="human",
+        by="captain",
+    )
+    return {"crew": crew.display_name, "question": question_id, "waiting_on": "human"}
+
+
+def mark_reviewed(directory, assignment_id, result_id=None, note=None):
+    """Record that a report, or one isolated result of it, was reviewed."""
+    if note is not None:
+        check_text(note, "note")
+    with checkpoint(directory) as state:
+        assignment = state["assignments"].get(assignment_id)
+        if assignment is None:
+            raise CaptainError(f"[review-assignment] No assignment {assignment_id}.")
+        if result_id is None and not assignment.get("report"):
+            raise CaptainError(f"[review-no-report] Assignment {assignment_id} has no report yet.")
+        mark = {"at": time.time(), "note": note}
+        if result_id is None:
+            assignment["reviewed"] = mark
+        else:
+            assignment.setdefault("reviewed_results", {})[result_id] = mark
+        crew, logged = assignment.get("crew"), bool(assignment.get("supervised"))
+    record_action(
+        directory,
+        "review",
+        crew,
+        assignment_id,
+        supervised=logged,
+        result=result_id,
+        note=note,
+    )
+    return {"assignment": assignment_id, "result": result_id, **mark}
+
+
+def take_baseline(crew, assignment_id, execution_root):
+    """Snapshot a validated, reserved assignment's tree before its crew gets the task."""
+    try:
+        fields = {"baseline": snapshot(execution_root, crew.session.directory / SNAPSHOTS)}
+    except (CaptainError, OSError) as exc:
+        fields = {"baseline": None, "baseline_error": str(exc)}
+    with checkpoint(crew.session.directory) as state:
+        assignment = state["assignments"][assignment_id]
+        assignment.update(fields)
     return assignment
 
 
@@ -371,22 +531,191 @@ def check_action(assignment, project, action, paths, held=lambda paths: False):
             raise CaptainError(f"[outside-grant] Path is not owned by this assignment: {path}")
 
 
-def _git(project, *args):
-    """Read-only git in the project, or None when there is no readable work tree."""
+def _git(project, *args, timeout=GIT_TIMEOUT, index=None, extra=None, input=None):
+    """Git in the project, or None when it cannot run; `index` and `extra` add environment."""
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
     env["GIT_OPTIONAL_LOCKS"] = "0"
+    if index is not None:
+        env["GIT_INDEX_FILE"] = str(index)
+    env.update(extra or {})
     try:
         result = subprocess.run(
             ["git", "-C", str(project), *args],
             capture_output=True,
             text=True,
-            timeout=GIT_TIMEOUT,
-            stdin=subprocess.DEVNULL,
+            timeout=timeout,
+            input=input,
+            stdin=subprocess.DEVNULL if input is None else None,
             env=env,
         )
     except (OSError, subprocess.TimeoutExpired):
         return None
     return result
+
+
+def _run(root, *args, **options):
+    """A snapshot's git step, refused with the step named when it fails."""
+    done = _git(root, *SNAPSHOT_CONFIG, *args, timeout=SNAPSHOT_TIMEOUT, **options)
+    if done is None or done.returncode:
+        detail = done.stderr.strip()[-500:] if done is not None else "did not run"
+        raise CaptainError(f"[snapshot-git] git {args[0]} failed in {root}: {detail}")
+    return done.stdout
+
+
+def _snapshot_env(root, objects, alternates=()):
+    """Write new objects to the session's own store, reading the repository's through alternates."""
+    common = _run(root, "rev-parse", "--path-format=absolute", "--git-common-dir").strip()
+    private_dir(objects)
+    return {
+        "GIT_OBJECT_DIRECTORY": str(objects),
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES": os.pathsep.join(
+            str(path) for path in (*alternates, Path(common) / "objects")
+        ),
+        "GIT_LITERAL_PATHSPECS": "1",
+    }
+
+
+def _file_rows(top, paths, extra):
+    """--index-info rows for the files and symlinks among top-relative `paths`, unfiltered."""
+    rows, files = [], []
+    for path in paths:
+        if not path or "\n" in path:
+            continue  # cannot cross --stdin-paths
+        try:
+            info = (top / path).lstat()
+        except FileNotFoundError:
+            continue
+        if stat.S_ISLNK(info.st_mode):
+            target = os.readlink(top / path)
+            blob = _run(top, "hash-object", "-w", "--stdin", extra=extra, input=target)
+            rows.append(f"120000 {blob.strip()}\t{path}")
+        elif stat.S_ISREG(info.st_mode):
+            files.append(("100755" if info.st_mode & 0o111 else "100644", path))
+    if files:
+        listing = "".join(f"{path}\n" for _, path in files)
+        blobs = _run(
+            top, "hash-object", "-w", "--no-filters", "--stdin-paths", extra=extra, input=listing
+        ).split()
+        rows += [f"{mode} {blob}\t{path}" for (mode, path), blob in zip(files, blobs)]
+    return rows
+
+
+def _worktree_rows(root, top, extra, paths=()):
+    """Reuse clean index blobs and hash only modified or untracked files without filters."""
+    keys = _run(root, "config", "--null", "--name-only", "--list").split("\0")
+    filters = []
+    for key in keys:
+        if key.startswith("filter.") and key.rsplit(".", 1)[-1] in ("clean", "process", "required"):
+            value = "false" if key.endswith(".required") else ""
+            filters.extend(("-c", f"{key}={value}"))
+    options = (*filters, "ls-files", "-z", "--full-name")
+    changed = set(
+        _run(root, *options, "-m", "-o", "--exclude-standard", "--", *paths, extra=extra).split(
+            "\0"
+        )
+    )
+    rows = []
+    staged = _run(root, *options, "-s", "--", *paths, extra=extra)
+    for entry in staged.split("\0"):
+        if not entry:
+            continue
+        metadata, path = entry.split("\t", 1)
+        mode, blob, stage = metadata.split()
+        if stage == "0" and path not in changed and "\n" not in path:
+            rows.append(f"{mode} {blob}\t{path}")
+        elif stage != "0":
+            changed.add(path)
+    return rows + _file_rows(top, sorted(changed), extra)
+
+
+def snapshot(root, objects, base=None, paths=(), alternates=()):
+    """A review tree reusing clean index blobs and capturing changed files without filters."""
+    inside = _git(root, "rev-parse", "--show-toplevel")
+    if inside is None or inside.returncode:
+        raise CaptainError(f"[no-git] {root} is not a Git work tree.")
+    top = Path(inside.stdout.strip())
+    extra = _snapshot_env(root, objects, alternates)
+    width = 64 if _run(top, "rev-parse", "--show-object-format").strip() == "sha256" else 40
+    with tempfile.TemporaryDirectory(prefix="captain-snapshot-") as scratch:
+        index = Path(scratch) / "index"
+        if base is None:
+            _run(top, "read-tree", "--empty", index=index, extra=extra)
+            rows = _worktree_rows(top, top, extra)
+        else:
+            _run(top, "read-tree", base, index=index, extra=extra)
+            held = _run(
+                root, "ls-files", "-z", "--full-name", "--", *paths, index=index, extra=extra
+            )
+            gone = [f"0 {'0' * width}\t{path}" for path in held.split("\0") if path]
+            rows = gone + _worktree_rows(root, top, extra, paths)
+        if rows:
+            _run(
+                top,
+                "update-index",
+                "--index-info",
+                index=index,
+                extra=extra,
+                input="\n".join(rows) + "\n",
+            )
+        return _run(top, "write-tree", index=index, extra=extra).strip()
+
+
+def assignment_diff(directory, assignment_id):
+    """The changes to one assignment's paths since its baseline, from a fresh snapshot."""
+    state = read_json(directory / "protocol.json") if (directory / "protocol.json").exists() else {}
+    assignment = state.get("assignments", {}).get(assignment_id)
+    if assignment is None:
+        raise CaptainError(f"[diff-assignment] No assignment {assignment_id}.")
+    base = assignment.get("baseline")
+    if not base:
+        reason = assignment.get("baseline_error") or "none was taken"
+        raise CaptainError(
+            f"[diff-no-baseline] Assignment {assignment_id} has no baseline: {reason}"
+        )
+    root = assignment["execution_root"]
+    paths = sorted(
+        {
+            path
+            for path in (*assignment["paths"], *assignment.get("claimed", ()))
+            if not Path(path).is_absolute()
+        }
+    )
+    view = {"assignment": assignment_id, "baseline": base, "root": root, "paths": paths}
+    if not paths:
+        return {**view, "current": base, "files": [], "diff": "", "truncated": False}
+    with tempfile.TemporaryDirectory(prefix="captain-diff-") as scratch:
+        objects = Path(scratch) / "objects"
+        alternates = (directory / SNAPSHOTS,)
+        current = snapshot(root, objects, base, paths, alternates)
+        extra = _snapshot_env(root, objects, alternates)
+        options = (
+            "diff",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--no-color",
+            "--no-renames",
+            "--relative",
+        )
+        numstat = _run(root, *options, "--numstat", base, current, "--", *paths, extra=extra)
+        patch = _run(root, *options, base, current, "--", *paths, extra=extra)
+    files = []
+    for line in numstat.splitlines():
+        added, deleted, path = line.split("\t", 2)
+        files.append(
+            {
+                "path": path,
+                "added": None if added == "-" else int(added),
+                "deleted": None if deleted == "-" else int(deleted),
+            }
+        )
+    text = patch
+    return {
+        **view,
+        "current": current,
+        "files": files,
+        "diff": text[:DIFF_CHARS],
+        "truncated": len(text) > DIFF_CHARS,
+    }
 
 
 def unlanded(project, assignment, *, ignore_uncommitted=False):
@@ -432,9 +761,8 @@ def unlanded(project, assignment, *, ignore_uncommitted=False):
     return reasons
 
 
-def grant(crew, assignment_id, command):
-    """Captain-only: let this assignment run one exact command text once. The gate spends it
-    on the first exact match; a handoff starts a new assignment, so it is never inherited."""
+def grant(crew, assignment_id, command, request=None):
+    """Grant one exact command once, scoped to this assignment."""
     if os.environ.get("CAPTAIN_ROLE") == "crew":
         raise CaptainError("grant is captain-only; crew run captain ask instead.")
     if not isinstance(command, str) or not command.strip():
@@ -445,9 +773,32 @@ def grant(crew, assignment_id, command):
         if assignment["state"] == "done":
             raise CaptainError("Assignment is done; grant on its live successor instead.")
         grants = assignment.setdefault("grants", [])
-        if not any(entry["command"] == command for entry in grants):
+        added = not any(entry["command"] == command for entry in grants)
+        if added:
             grants.append({"command": command, "at": time.time()})
-        return {"assignment_id": assignment["id"], "grants": len(grants)}
+        response = {"assignment_id": assignment["id"], "grants": len(grants)}
+        linked = next(
+            (row for row in assignment.get("grant_requests", ()) if row["id"] == request),
+            {},
+        )
+        denial = assignment.get("denial", {})
+        question = assignment.get("question") or {}
+        gate_reason = linked.get("reason") or REASONS.get(denial.get("code"), (None, None))[1]
+        words = linked.get("words") or question.get("text")
+    if added or request:
+        record_action(
+            crew.session.directory,
+            "grant",
+            crew.crew_id,
+            response["assignment_id"],
+            supervised=supervised(crew),
+            state="granted",
+            command=command,
+            request=request,
+            gate_reason=gate_reason,
+            words=words,
+        )
+    return response
 
 
 def change(crew, args, project):
@@ -500,8 +851,29 @@ def change(crew, args, project):
             }
             assignment["question"] = question
             assignment["state"] = "asked"
-            notice(assignment, "asked", f"{question['id']}: {args.question}")
-            return {"assignment_id": assignment["id"], "question_id": question["id"]}
+            summary = f"{question['id']}: {args.question}"
+            response = {"assignment_id": assignment["id"], "question_id": question["id"]}
+            request = grant_request(crew, assignment, question) if crew.is_supervised else None
+            if request:
+                summary += (
+                    f"\n[grant-request {request['id']}] {request['code']} "
+                    f"({request['category']}): {request['command']}"
+                )
+                response["grant_request"] = request["id"]
+            notice(assignment, "asked", summary)
+            record_action(
+                crew.session.directory,
+                "question",
+                crew.crew_id,
+                assignment["id"],
+                supervised=supervised(crew),
+                defer=True,
+                question=question["id"],
+                state="asked",
+                text=args.question,
+                request=request["id"] if request else None,
+            )
+            return response
         if assignment["question"]:
             raise CaptainError("Answer the pending question before done.")
         if any(message["delivery"] == "prepared" for message in assignment["messages"]):
@@ -517,7 +889,141 @@ def change(crew, args, project):
         response = {"assignment_id": assignment["id"], "status": "done"}
         if receipt:
             response["verification"] = receipt
+        record_action(
+            crew.session.directory,
+            "report",
+            crew.crew_id,
+            assignment["id"],
+            supervised=supervised(crew),
+            defer=True,
+            report=args.report,
+            verification=receipt,
+        )
         return response
+
+
+def note_denial(crew, event):
+    """Keep a supervised crew's latest gate denial, so the ask it prompts can carry it."""
+    inputs = event.get("tool_input")
+    command = inputs.get("command") if isinstance(inputs, dict) else None
+    if isinstance(command, list) and all(isinstance(word, str) for word in command):
+        command = shlex.join(command)
+    with checkpoint(crew.session.directory) as state:
+        assignment = state["assignments"].get(state["active"].get(crew.crew_id))
+        if not assignment or assignment["state"] == "done" or not isinstance(command, str):
+            return
+        assignment["denial"] = {
+            "tool": event.get("tool_name"),
+            "command": command,
+            "cwd": event.get("cwd"),
+            "code": event["approval"]["code"],
+            "seq": event.get("seq"),
+        }
+
+
+def grant_request(crew, assignment, question):
+    """Link the latest gate denial to the question just asked; the caller holds the checkpoint."""
+    denial = assignment.pop("denial", None)
+    if not denial:
+        return None
+    code = denial["code"]
+    verdict, reason = REASONS.get(code, (Verdict.DENY, "denied"))
+    request = {
+        "id": uuid4().hex,
+        "crew": crew.crew_id,
+        "assignment": assignment["id"],
+        "question": question["id"],
+        "tool": denial["tool"],
+        "command": denial["command"],
+        "cwd": denial["cwd"],
+        "code": code,
+        "reason": reason,
+        "category": "flagged"
+        if code in FLAGGED
+        else "not-granted"
+        if verdict == Verdict.DENY
+        else "no-policy",
+        "words": question["text"],
+        "state": "open",
+        "at": time.time(),
+    }
+    assignment.setdefault("grant_requests", []).append(request)
+    question["grant_request"] = request["id"]
+    record_action(
+        crew.session.directory,
+        "grant",
+        crew.crew_id,
+        assignment["id"],
+        supervised=supervised(crew),
+        defer=True,
+        state="requested",
+        **{key: request[key] for key in ("command", "tool", "cwd", "code", "category", "words")},
+        gate_reason=request["reason"],
+        request=request["id"],
+        question=question["id"],
+    )
+    return request
+
+
+def resolve_request(crew, request_id, decision, reason=None):
+    """Grant a request's exact command once, or deny it; either way the crew is told why."""
+    if decision not in ("grant", "deny"):
+        raise CaptainError("[grant-request-decision] Decide grant or deny.")
+    if decision == "deny" and not (reason or "").strip():
+        raise CaptainError("[grant-request-reason] A denial needs a reason the crew can read.")
+    with checkpoint(crew.session.directory) as state:
+        assignment = active(state, crew)
+        request = next(
+            (r for r in assignment.get("grant_requests", ()) if r["id"] == request_id), None
+        )
+        if request is None:
+            raise CaptainError(f"[grant-request-unknown] No open request {request_id}.")
+        if request["state"] != "open" or assignment["state"] == "done":
+            raise CaptainError(
+                f"[grant-request-closed] Request {request_id} is {request['state']}."
+            )
+        if decision == "grant" and request["tool"] not in SHELL_TOOLS:
+            raise CaptainError(
+                f"[grant-request-unsupported] A {request['tool']} call cannot be granted; deny it."
+            )
+        pending = assignment["question"]
+        question_id = (
+            request["question"] if pending and pending["id"] == request["question"] else None
+        )
+        request.update(
+            state="granted" if decision == "grant" else "denied",
+            reason_given=reason,
+            resolved_at=time.time(),
+        )
+        assignment_id = assignment["id"]
+    if decision == "grant":
+        grant(crew, assignment_id, request["command"], request_id)
+        text = f"Granted once: run exactly this command again, unchanged:\n{request['command']}"
+    else:
+        record_action(
+            crew.session.directory,
+            "grant",
+            crew.crew_id,
+            assignment_id,
+            supervised=supervised(crew),
+            state="denied",
+            command=request["command"],
+            request=request_id,
+            reason=reason.strip(),
+            gate_reason=request["reason"],
+            words=request["words"],
+        )
+        text = (
+            f"Denied: {reason.strip()}\nDo not run it or try another route; "
+            "carry on without it, or report why you cannot."
+        )
+    message_id = deliver(crew, text, assignment_id=assignment_id, question_id=question_id)
+    return {
+        "request": request_id,
+        "crew": crew.crew_id,
+        "state": request["state"],
+        "message_id": message_id,
+    }
 
 
 def check_target(root, target):
@@ -707,13 +1213,27 @@ def receipt(session_directory, crew_id, ids):
                 receipts.setdefault(message.get("assignment_id"), []).append(message_id)
     # checkpoint takes protocol.lock too, so mirror the receipt after the mail writes, like bounce.
     if receipts:
+        logged = set()
         with checkpoint(session_directory) as state:
             for assignment_id, read_ids in receipts.items():
                 assignment = state["assignments"].get(assignment_id)
+                if assignment and assignment.get("supervised"):
+                    logged.add(assignment_id)
                 for message in assignment["messages"] if assignment else ():
                     # A second read finds the mail already off "queued", so nothing to mirror.
                     if message["id"] in read_ids and message["delivery"] == "sent":
                         message["delivery"] = "read"
+        for assignment_id in logged:
+            for message_id in receipts[assignment_id]:
+                record_action(
+                    session_directory,
+                    "mail",
+                    crew_id,
+                    assignment_id,
+                    supervised=True,
+                    message=message_id,
+                    state="read",
+                )
 
 
 def render(session_directory, messages):
@@ -747,6 +1267,16 @@ def bounce(crew, message_id, reason):
         message["state"] = "bounced"
         message["reason"] = reason
         write_json(path, message)
+    record_action(
+        directory,
+        "mail",
+        crew.crew_id,
+        message.get("assignment_id"),
+        supervised=supervised(crew),
+        message=message_id,
+        state="bounced",
+        reason=reason,
+    )
     with checkpoint(directory) as state:
         assignment = state["assignments"].get(state["active"].get(crew.crew_id))
         if assignment:
@@ -806,41 +1336,71 @@ def ring(crew, message_id):
     bounce the mail. A broken nudge is the harness, not the crew, so it holds instead.
     Mail is already durable, so no outcome here can lose the message.
     """
+    if crew.is_supervised:
+        if crew.record.get("status") == "starting":
+            return None  # the supervisor has no link yet; launch_supervised rings once it does
+        # Ticks, turn ends and commands ring at once; a stale prior would erase a landing.
+        with lock(mail_dir(crew.session.directory, crew.crew_id) / ".ring.lock"):
+            return _ring(crew, message_id)
+    return _ring(crew, message_id)
+
+
+def _ring(crew, message_id):
     prior = last_ring(crew)
     provider = crew.record.get("provider")
     landed, unreachable, gate, draft, held = False, None, None, None, None
     # A hook-delivered crew gets the bare wake line; its own hook supplies the body. A
     # landed retry is content-free too, so the 600s drain never retypes work.
-    text = None
+    text, riders = None, []
     if provider not in HOOK_DELIVERED and not (
         prior and prior["id"] == message_id and prior["landed"]
     ):
         # The ring is this crew's only channel, so it carries the rendered body: it may
         # act straight off the ring without ever running `inbox`.
-        message = next((m for m in unread(crew) if m["id"] == message_id), None)
-        text = render(crew.session.directory, [message] if message else [])
+        waiting = unread(crew)
+        message = next((m for m in waiting if m["id"] == message_id), None)
+        if message and crew.is_supervised:
+            # A requeued bounce rides ahead of the mail that requeued it, until it lands.
+            skip = {message_id, *(prior.get("bodies", ()) if prior else ())}
+            riders = [
+                m
+                for m in waiting
+                if m.get("requeued_at")
+                and m["assignment_id"] == message["assignment_id"]
+                and m["id"] not in skip
+            ]
+        text = render(crew.session.directory, [*riders, message] if message else [])
     try:
-        pane = crew.pane
-        gate = pane.nudge_block(crew)
-        # Codex's update and hook-trust screens hide the composer; name that hold so it is
-        # reported once, and drain retries it like any other.
-        if gate is not None and provider == "codex" and (screen := pane.startup_screen()):
-            gate = STARTUP_GATE
-            if "update" in screen.casefold():
-                once(crew, "startup_update", UPDATE_PROMPT)
-            else:
-                once(crew, "hooks_untrusted", HOOKS_UNTRUSTED)
-        if gate == DRAFT_GATE and echoing(prior):
-            # Our own echo, not a human. Leave the prior stamp alone and let drain retry,
-            # rather than starting a hold clock against a crew that has its doorbell.
-            return
-        if gate in HOLD_EXPIRY:
-            held, draft = gate, pane.draft(provider)
-        if gate is None:
-            pane.nudge(crew, text)
-            landed = True
+        if crew.is_supervised:
+            # The same text a pane nudge types, started as a turn by the supervisor.
+            body = f"{text}\n{inbox_line(crew)}" if text else inbox_line(crew)
+            # Local: Herdr crew and hook processes never load the supervisor door.
+            from . import supervision
+
+            rung = supervision.ring(crew, message_id, body)
+            landed, gate = bool(rung.get("landed")), rung.get("gate")
+        else:
+            pane = crew.pane
+            gate = pane.nudge_block(crew)
+            # Codex's update and hook-trust screens hide the composer; name that hold so it
+            # is reported once, and drain retries it like any other.
+            if gate is not None and provider == "codex" and (screen := pane.startup_screen()):
+                gate = STARTUP_GATE
+                if "update" in screen.casefold():
+                    once(crew, "startup_update", UPDATE_PROMPT)
+                else:
+                    once(crew, "hooks_untrusted", HOOKS_UNTRUSTED)
+            if gate == DRAFT_GATE and echoing(prior):
+                # Our own echo, not a human. Leave the prior stamp alone and let drain retry,
+                # rather than starting a hold clock against a crew that has its doorbell.
+                return
+            if gate in HOLD_EXPIRY:
+                held, draft = gate, pane.draft(provider)
+            if gate is None:
+                pane.nudge(crew, text)
+                landed = True
     except HERDR_ERRORS as exc:
-        if awaiting_registration(crew, message_id, prior, exc):
+        if not crew.is_supervised and awaiting_registration(crew, message_id, prior, exc):
             gate = "awaiting registration"
         else:
             unreachable = str(exc)
@@ -851,8 +1411,10 @@ def ring(crew, message_id):
     record = {"id": message_id, "at": now, "landed": landed, "gate": gate}
     # Every body that landed, carried forward so a later held ring cannot erase one.
     bodies = list(prior.get("bodies", ())) if prior else []
-    if landed and text and message_id not in bodies:
-        bodies.append(message_id)
+    if landed and text:
+        for landed_id in (*(m["id"] for m in riders), message_id):
+            if landed_id not in bodies:
+                bodies.append(landed_id)
     if bodies:
         record["bodies"] = bodies
     if held is not None:
@@ -875,6 +1437,23 @@ def ring(crew, message_id):
         ):
             record["noticed"] = held_notice(crew, message_id, gate, now - record["held_since"])
     write_json(drain_stamp(crew), record)
+    if (
+        crew.is_supervised
+        and not landed
+        and unreachable is None
+        and (not prior or prior["id"] != message_id or prior["landed"] or prior.get("gate") != gate)
+    ):
+        assignment = active_assignment(crew)
+        record_action(
+            crew.session.directory,
+            "mail",
+            crew.crew_id,
+            assignment["id"] if assignment else None,
+            supervised=True,
+            message=message_id,
+            state="held",
+            gate=gate,
+        )
     if unreachable is not None:
         bounce(crew, message_id, unreachable)
 
@@ -995,6 +1574,15 @@ def landed_bodies(crew):
     return set(record.get("bodies", ())) | ({record["id"]} if record["landed"] else set())
 
 
+def turn_ended(crew):
+    """A supervised turn just ended: ring the oldest mail whose body has not landed, now
+    rather than after the drain cooldown."""
+    landed = landed_bodies(crew)
+    waiting = [message for message in unread(crew) if message["id"] not in landed]
+    if waiting:
+        ring(crew, waiting[0]["id"])
+
+
 def drain(crew):
     """Retry a held doorbell; rate-limited so a polling loop never hammers it.
 
@@ -1004,6 +1592,10 @@ def drain(crew):
     if crew.is_background:
         return  # no doorbell: its owner reads the one message it runs
     messages = unread(crew)
+    if crew.is_supervised:
+        # Each ring starts a whole turn, so a body that already landed is never resent.
+        landed = landed_bodies(crew)
+        messages = [message for message in messages if message["id"] not in landed]
     record = last_ring(crew)
     stall = False
     if messages:
@@ -1085,6 +1677,11 @@ def deliver(
                 "kind": kind,
                 "question_id": question_id,
                 "delivery": "prepared",
+                **(
+                    {"actor": "captain" if os.environ.get("CAPTAIN_ROLE") == "captain" else "human"}
+                    if supervised(crew)
+                    else {}
+                ),
             }
             assignment["messages"].append(message)
         assignment_id = assignment["id"]
@@ -1094,12 +1691,56 @@ def deliver(
         message = next(m for m in assignment["messages"] if m["id"] == message_id)
         if message["delivery"] != "prepared":
             return message_id
+        requeued = requeue_bounced(crew, assignment) if crew.is_supervised else None
         enqueue(crew, text, kind, assignment_id, message_id)
         message["delivery"] = "sent"
         mark_sent(assignment, message)
+    if requeued:
+        record_action(
+            crew.session.directory,
+            "mail",
+            crew.crew_id,
+            assignment_id,
+            supervised=supervised(crew),
+            message=requeued["id"],
+            state="sent",
+            mail_kind=requeued["kind"],
+            question=None,
+            text=requeued["text"],
+        )
+    record_action(
+        crew.session.directory,
+        "mail",
+        crew.crew_id,
+        assignment_id,
+        supervised=supervised(crew),
+        message=message_id,
+        state="sent",
+        mail_kind=message["kind"],
+        question=message["question_id"],
+        text=text,
+        actor=message.get("actor"),
+    )
     if not queue_only:
         ring(crew, message_id)
     return message_id
+
+
+def requeue_bounced(crew, assignment):
+    """Requeue a supervised crew's bounced assignment mail; the caller holds protocol.lock."""
+    original = next((m for m in assignment["messages"] if m.get("kind") == "assignment"), None)
+    path = original and mail_dir(crew.session.directory, crew.crew_id) / f"{original['id']}.json"
+    if not path or not path.exists():
+        return None
+    mail = read_json(path)
+    if mail["state"] != "bounced" or mail.get("incarnation_id") != crew.record.get(
+        "incarnation_id"
+    ):
+        return None
+    mail.pop("reason", None)
+    mail.update(state="queued", requeued_at=time.time())
+    write_json(path, mail)
+    return mail
 
 
 def mark_sent(assignment, message):
@@ -1186,6 +1827,10 @@ def poll(crew, ack=None, modal=True):
         pending, acked = assignment["pending"], False
         if ack:
             if pending and ack == pending["result"]["delivery_id"]:
+                question = assignment["question"]
+                if assignment.get("supervised") and question:
+                    if pending["result"]["status"] == "asked":
+                        question["delivered_at"] = time.time()
                 assignment["ack_seq"] = pending["seq"]
                 assignment["offset"] = pending["offset"]
                 assignment["scan_offset"] = pending["offset"]
@@ -1212,9 +1857,11 @@ def poll(crew, ack=None, modal=True):
             if pending["result"]["status"] == "done" and assignment["report"]:
                 pending["result"]["summary"] = done_summary(assignment)
             return pending["result"]
-        paneless = crew.is_background
-        if paneless:
+        paneless = crew.is_background or crew.is_supervised
+        if crew.is_background:
             reconcile_background(crew, assignment)
+        elif crew.is_supervised:
+            reconcile_supervised(crew, assignment)
         seq, offset = assignment["ack_seq"], assignment.get("scan_offset", assignment["offset"])
         native_status, cleared, blocked_id = assignment["native_status"], False, ""
         if seq < len(assignment["notices"]):
@@ -1235,7 +1882,7 @@ def poll(crew, ack=None, modal=True):
                 # Liveness is a started turn, never a delivered body; this is committed
                 # outside the ack dance because it only ever goes one way.
                 assignment["turn_started"] = True
-            if crew.record.get("provider") == "codex":
+            if crew.record.get("provider") == "codex" and not crew.is_supervised:
                 hooks_live(crew, assignment, events)
             held = assignment.get("blocked_notice")
             if held is not None and any(
@@ -1434,6 +2081,48 @@ def close_unreported(assignment, outcome, summary):
     """End an assignment that produced no report: visibly an error, never a done."""
     notice(assignment, "error", summary)
     assignment.update(state="done", outcome=outcome, report=summary)
+
+
+def reconcile_supervised(crew, assignment):
+    """Close an unfinished assignment whose crew has stopped, alone or with its supervisor."""
+    record = crew.record
+    if assignment["state"] == "done" or not record.get("lifetime_id"):
+        return
+    from . import supervision  # local: Herdr sessions never load the supervisor door
+
+    alive = supervision.alive(crew.session.directory)
+    stopped = lifetime.check(
+        crew.session,
+        record["lifetime_id"],
+        crew_id=crew.crew_id,
+        incarnation_id=record.get("incarnation_id"),
+        root=record.get("execution_root") or crew.session.meta["project"],
+        worktree=record.get("worktree_id"),
+        closure=False,
+        scope="group",
+        require_revoked=False,
+    )
+    # While the supervisor lives, a launch it has not claimed yet is starting, not gone.
+    if not stopped.ok or (alive and stopped.reason == "never-launched"):
+        return
+    summary = (
+        "[supervised-crew-exited] The crew's native CLI exited without a report; "
+        "nothing was restarted."
+        if alive
+        else "[supervisor-lost] The supervisor ended and its crew stopped with it; "
+        "nothing was restarted."
+    )
+    close_unreported(assignment, "lost", summary)
+    record_action(
+        crew.session.directory,
+        "lifecycle",
+        crew.crew_id,
+        assignment.get("id"),
+        supervised=supervised(crew),
+        defer=True,
+        state="lost",
+        detail=summary,
+    )
 
 
 def reconcile_background(crew, assignment):

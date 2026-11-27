@@ -80,6 +80,10 @@ class Crew:
         return self.record.get("execution") == "background"
 
     @property
+    def is_supervised(self):
+        return self.record.get("execution") == "supervised"
+
+    @property
     def events(self):
         incarnation = self.record.get("incarnation_id")
         return self.session.events(f"{self.crew_id}-{incarnation}" if incarnation else self.crew_id)
@@ -110,7 +114,13 @@ class Crew:
             return CrewState(*describe(self, assignment))
         pane_status = None
         try:
-            pane_status = self.pane.agent_status()
+            if self.is_supervised:
+                # Local: Herdr crew and hook processes never load the supervisor door.
+                from . import supervision
+
+                pane_status = supervision.state(self)
+            else:
+                pane_status = self.pane.agent_status()
             if pane_status is None:
                 reasons.append("pane missing or agent no longer registered")
         except HERDR_ERRORS:
@@ -140,19 +150,26 @@ class Crew:
             if status in ("done", "idle"):
                 reasons.append("hook reports inactivity, not assignment completion")
                 break
-        try:
-            status = pane_status
-            # A native startup screen reads as blocked or idle; it is not a tool approval.
-            screen = self.pane.startup_screen() if status in ("blocked", "idle") else None
-            if screen:
-                return CrewState("blocked", "pane", f"startup attention, not approval: {screen}")
-            if status in ("working", "blocked"):
-                return CrewState(status, "pane", "native agent status")
-            if status is not None and modal_start(self.pane.lines()) is not None:
-                return CrewState("blocked", "pane", "approval prompt")
-            reasons.append(f"pane state {status or 'missing'} does not prove assignment state")
-        except HERDR_ERRORS:
-            reasons.append("pane unreadable")
+        if self.is_supervised:
+            if pane_status in ("working", "blocked"):
+                return CrewState(pane_status, "supervisor", "native state")
+            reasons.append(f"supervisor state {pane_status or 'missing'} proves no outcome")
+        else:
+            try:
+                status = pane_status
+                # A native startup screen reads as blocked or idle; it is not a tool approval.
+                screen = self.pane.startup_screen() if status in ("blocked", "idle") else None
+                if screen:
+                    return CrewState(
+                        "blocked", "pane", f"startup attention, not approval: {screen}"
+                    )
+                if status in ("working", "blocked"):
+                    return CrewState(status, "pane", "native agent status")
+                if status is not None and modal_start(self.pane.lines()) is not None:
+                    return CrewState("blocked", "pane", "approval prompt")
+                reasons.append(f"pane state {status or 'missing'} does not prove assignment state")
+            except HERDR_ERRORS:
+                reasons.append("pane unreadable")
         if assignment:
             if assignment.get("state") == "done":
                 return CrewState("done", "mail", assignment.get("report") or "assignment completed")

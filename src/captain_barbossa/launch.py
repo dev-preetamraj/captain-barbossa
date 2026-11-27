@@ -19,7 +19,7 @@ from . import (
 from .crew import Crew
 from .dashboard import dashboard_pane, start_dashboard
 from .memory import add_memory
-from .models import PROVIDERS, resolve_model
+from .models import PROVIDERS, TRANSPORTS, resolve_model
 from .pi_captain import captain_extension
 from .prompts import choose
 from .retention import prune_sessions
@@ -31,6 +31,10 @@ from .update_check import check_for_update
 # How often the exit watcher checks whether the captain's CLI is still its parent. A pane
 # that outlives the captain by a second costs nothing.
 EXIT_POLL_SECONDS = 1.0
+
+# Structured transports a captain can be driven over; a provider's first TRANSPORTS entry must
+# be one of them for `launch-plan` and the supervisor to start it.
+CAPTAIN_TRANSPORTS = ("app-server", "sdk", "rpc")
 
 # The launch digest rides in one argv string, which Linux caps at 128 KiB.
 RECOVERY_CHARS = 32_000
@@ -142,8 +146,10 @@ def close_panes_on_exit(session_id, project):
         os._exit(0)
 
 
-def prepare_launch(current, project, provider, binary, model, plugins=True):
-    """Build the native captain command and environment overlay for either transport."""
+def prepare_launch(
+    current, project, provider, binary, model, plugins=True, transport="tui", bridge=True
+):
+    """The native captain command and env overlay; `bridge` False omits pi's own delivery bridge."""
     model = resolve_model(provider, model) if model else None
     with crew_meta(current.directory) as meta:
         meta["captain_provider"] = provider
@@ -154,8 +160,10 @@ def prepare_launch(current, project, provider, binary, model, plugins=True):
             bound = meta["plugins"] = portal.binding()
         else:
             meta.pop("plugins", None)
+    # A Herdr launch calls exactly as it always has; only an app session passes the flag.
+    app = {"supervised": True} if meta.get("transport") == "supervisor" else {}
     instruction_text = instructions.agent_instructions(
-        current.directory, "Captain Barbossa", provider
+        current.directory, "Captain Barbossa", provider, **app
     )
     # Delivered, not requested: a resumed captain that skips `recover` still knows its session.
     # Preferences serialise first, so the cut below only ever takes the session's tail.
@@ -170,8 +178,14 @@ def prepare_launch(current, project, provider, binary, model, plugins=True):
     add_memory(current.graph, f"session:{meta['id']}", "captain", provider)
     events = current.events("captain")
     private_dir(events.parent)
-    command = [binary, *instructions.native_args(provider, instruction_text, model, events=events)]
-    if provider == "pi":
+    own = [instructions.captain_command(meta["id"])] if transport == "sdk" else []
+    command = [
+        *instructions.native_command(binary, transport),
+        *instructions.native_args(
+            provider, instruction_text, model, events=events, transport=transport, allow=own
+        ),
+    ]
+    if provider == "pi" and bridge:
         command.extend(["--extension", str(captain_extension(current.directory))])
     env = {
         "CAPTAIN_SESSION": meta["id"],
@@ -192,8 +206,13 @@ def launch_plan(args, project):
     provider = args.agent or config.text("captain", "agent")
     if not provider:
         raise LaunchPlanError("missing-choice", "Choose --agent.")
-    if provider != "pi":
-        raise LaunchPlanError("unsupported-transport", "Only pi RPC is supported.")
+    transport = next(iter(TRANSPORTS.get(provider, ())), None)
+    if transport not in CAPTAIN_TRANSPORTS:
+        raise LaunchPlanError(
+            "unsupported-transport", f"{provider} has no structured transport for a captain."
+        )
+    if args.effort and provider != "pi":
+        raise LaunchPlanError("invalid-arguments", "--effort applies to pi only.")
     identity = None
     current = None
     if args.session:
@@ -202,7 +221,10 @@ def launch_plan(args, project):
         except CaptainError as exc:
             raise LaunchPlanError("invalid-session", str(exc)) from exc
         if current.meta.get("captain_provider") != provider:
-            raise LaunchPlanError("session-provider-mismatch", "Session provider is not pi.")
+            raise LaunchPlanError(
+                "session-provider-mismatch", f"Session provider is not {provider}."
+            )
+    if current is not None and provider == "pi":
         path = current.directory / "pi-session.json"
         recorded = read_json(path) if path.is_file() else {}
         identity = recorded.get("sessionFile") if isinstance(recorded, dict) else None
@@ -221,9 +243,14 @@ def launch_plan(args, project):
     binary = executable(provider)
     current = current or session(project, None, create=True)
     command, env = prepare_launch(
-        current, project, provider, binary, model, plugins=not getattr(args, "no_plugins", False)
+        current,
+        project,
+        provider,
+        binary,
+        model,
+        plugins=not getattr(args, "no_plugins", False),
+        transport=transport,
     )
-    command[1:1] = ["--mode", "rpc"]
     if args.effort:
         command.extend(["--thinking", args.effort])
     if identity:
@@ -237,7 +264,7 @@ def launch_plan(args, project):
     return {
         "version": 1,
         "provider": provider,
-        "transport": "rpc",
+        "transport": transport,
         "argv": command,
         "cwd": str(project.resolve()),
         "env": env,
