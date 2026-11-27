@@ -113,6 +113,23 @@ def delivered(directory, delivery):
     write_json(path, {**read_json(path), "delivered": True, "delivered_at": time.time()})
 
 
+def delivery_records(directory):
+    """Recorded crew deliveries in claim order, excluding user prompts."""
+    folder = directory / CLAIMS
+    rows = []
+    for path in folder.glob("*.json") if folder.is_dir() else ():
+        found = _read_claim(path)
+        delivery = found.get("delivery")
+        if not isinstance(delivery, dict) or not all(
+            isinstance(delivery.get(key), str)
+            for key in ("crew", "status", "delivery_id", "summary")
+        ):
+            continue
+        at = found.get("at")
+        rows.append((at if isinstance(at, int | float) else 0, delivery))
+    return [delivery for _, delivery in sorted(rows, key=lambda row: row[0])]
+
+
 def render(delivery, directory):
     head = f"{DELIVERY_HEAD}{delivery['crew']} ({delivery['status']}):\n"
     foot = (
@@ -300,6 +317,37 @@ def queue_message(directory, message_id, text, attached=None):
 def _messages(directory):
     path = directory / "protocol.json"
     return read_json(path).get("captain_messages", []) if path.exists() else []
+
+
+def cancel_message(directory, message_id):
+    """Cancel one queued prompt, refusing delivered, uncertain or unknown ids."""
+    if not MESSAGE_ID.fullmatch(message_id):
+        raise CaptainError("[captain-message-id] message_id is 1 to 128 of A-Z, a-z, 0-9, - or _.")
+    records = []
+    with protocol.checkpoint(directory) as state:
+        rows = state.setdefault("captain_messages", [])
+        row = next((row for row in rows if row["id"] == message_id), None)
+        if row is None:
+            raise CaptainError(f"[captain-message-unknown] No captain message {message_id}.")
+        if row["delivered_at"] is not None:
+            raise CaptainError(f"[captain-message-delivered] Message {message_id} was delivered.")
+        if _claim_path(directory, USER + message_id).exists():
+            raise CaptainError(
+                f"[captain-message-uncertain] Message {message_id} may have been delivered."
+            )
+        records = row.get("attachments", [])
+        state["captain_messages"] = [item for item in rows if item is not row]
+    record_action(
+        directory,
+        "prompt",
+        "captain",
+        None,
+        supervised=True,
+        message=message_id,
+        state="cancelled",
+        attachments=records,
+    )
+    return {"message_id": message_id, "state": "cancelled"}
 
 
 def message_state(directory, message_id):

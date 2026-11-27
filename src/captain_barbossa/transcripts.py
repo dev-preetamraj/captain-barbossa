@@ -94,6 +94,11 @@ def _block(role, kind, text, tool=None, call=None, origin=None, message=None):
         "message": message,
         "attachments": [],
         "label": None,
+        "crew": None,
+        "status": None,
+        "assignment_id": None,
+        "delivery_id": None,
+        "question_id": None,
     }
 
 
@@ -194,6 +199,22 @@ def _message_queues(directory):
     return messages
 
 
+def _delivery_queues(directory):
+    deliveries = {}
+    for row in captain_bridge.delivery_records(directory):
+        text = captain_bridge.render(row, directory)
+        digest = hashlib.sha256(text.strip().encode()).hexdigest()
+        deliveries.setdefault(digest, deque()).append(row)
+    return deliveries
+
+
+def _delivery_fields(row):
+    return {
+        key: row.get(key) if isinstance(row.get(key), str) else None
+        for key in ("crew", "status", "assignment_id", "delivery_id", "question_id")
+    }
+
+
 def _context(provider, record, text):
     """The label of context the native injected as a user message, else None."""
     head = text.lstrip()
@@ -207,8 +228,8 @@ def _context(provider, record, text):
     return None
 
 
-def _captain(parse, provider, prompts, messages, record):
-    """Split captain input and pair delivered prompts with their message ids in order."""
+def _captain(parse, provider, prompts, messages, deliveries, record):
+    """Split captain input and pair recorded prompts and deliveries in order."""
     blocks = []
     for block in parse(record):
         if block["role"] != "user" or block["kind"] != "text":
@@ -216,8 +237,11 @@ def _captain(parse, provider, prompts, messages, record):
             continue
         for origin, text in captain_bridge.parts(block["text"], prompts):
             label = _context(provider, record, text) if origin == "native" else None
-            ids = messages.get(hashlib.sha256(text.strip().encode()).hexdigest())
+            digest = hashlib.sha256(text.strip().encode()).hexdigest()
+            ids = messages.get(digest)
             message, attached = ids.popleft() if origin == "user" and ids else (None, [])
+            recorded = deliveries.get(digest)
+            delivery = recorded.popleft() if origin == "delivery" and recorded else {}
             blocks.append(
                 {
                     **block,
@@ -226,6 +250,7 @@ def _captain(parse, provider, prompts, messages, record):
                     "message": message,
                     "attachments": attached,
                     "label": label,
+                    **_delivery_fields(delivery),
                 }
             )
     return blocks
@@ -328,9 +353,10 @@ def _sources(session, agent, incarnation):
         return provider, [Source(Path(file), root, provider, parse) for file in files]
     prompts = captain_bridge.prompt_digests(session.directory)
     messages = _message_queues(session.directory)
+    deliveries = _delivery_queues(session.directory)
     sources, previous = [], None
     for provider, file, root in usage.captain_conversations(path):
-        parse = partial(_captain, PARSERS[provider], provider, prompts, messages)
+        parse = partial(_captain, PARSERS[provider], provider, prompts, messages, deliveries)
         switched = previous if previous not in (None, provider) else None
         sources.append(Source(Path(file) if file else None, root, provider, parse, switched))
         previous = provider

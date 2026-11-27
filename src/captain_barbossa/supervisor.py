@@ -1180,11 +1180,11 @@ def message_captain(supervisor, params):
     message_id = uuid4().hex if message_id is None else message_id
     if not isinstance(message_id, str):
         raise CaptainError("[supervisor-params] message_id must be a string.")
-    captain_bridge.queue_message(
-        directory, message_id, _text(params, "text"), params.get("attachments")
-    )
     error = None
     with supervisor.bridge_lock:
+        captain_bridge.queue_message(
+            directory, message_id, _text(params, "text"), params.get("attachments")
+        )
         try:
             captain_bridge.send_messages(
                 directory,
@@ -1205,6 +1205,14 @@ def message_captain(supervisor, params):
     if error:
         reply["error"] = {"code": error["data"]["code"], "message": error["message"]}
     return reply
+
+
+def cancel_captain_message(supervisor, params):
+    """Withdraw one prompt that has not reached the captain."""
+    with supervisor.bridge_lock:
+        return captain_bridge.cancel_message(
+            supervisor.session.directory, _text(params, "message_id")
+        )
 
 
 def interrupt_captain(supervisor, params):
@@ -2269,6 +2277,7 @@ METHODS = {
     "start_captain": start_captain,
     "captain_state": captain_state,
     "message_captain": message_captain,
+    "cancel_captain_message": cancel_captain_message,
     "interrupt_captain": interrupt_captain,
     "stop_captain": stop_captain,
     "answer_captain": answer_captain,
