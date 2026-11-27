@@ -55,10 +55,50 @@ class CodexCaptainApprovalTests(SessionCase):
                 self.assertEqual(self.answer(text), "accept")
                 self.link.relay.assert_not_called()
 
+    def test_own_command_and_chain_accepts_without_relay(self) -> None:
+        first = f"{self.command} --rename 'Review approvals' --if-unnamed"
+        second = f"{self.command} memory add --label 'a b'"
+        third = f"{self.command} status"
+        for command in (f"{first} && {second}", f"{first} && {second} && {third}"):
+            for text in (command, shlex.join(["/bin/zsh", "-lc", command])):
+                with self.subTest(command=text):
+                    self.assertEqual(self.answer(text), "accept")
+                    self.link.relay.assert_not_called()
+
     def test_unsafe_or_different_commands_reach_user(self) -> None:
         own = f"{self.command} status"
         other = instructions.captain_command("other-session")
         attempts = [
+            f"{own} && {other} status",
+            f"{own} && {self.command} --session other-session status",
+            f"{own} && {self.command} --sess=other-session status",
+            f"{own} && echo hello",
+            f"echo hello && {own}",
+            f"{own} && {own} && touch /tmp/escaped",
+            f"{own} && {own}; touch /tmp/escaped",
+            f"{own} && {own} | tee /tmp/escaped",
+            f"{own} && {own} || touch /tmp/escaped",
+            f"{own} || {own}",
+            f"{own} && {own} &",
+            f"{own} && {own} & touch /tmp/escaped",
+            f"{own} && {own} > /tmp/escaped",
+            f"{own} && {own} < /tmp/input",
+            f"{own} && {self.command} --rename $(touch /tmp/escaped)",
+            f"{own} && {self.command} --rename `touch /tmp/escaped`",
+            f"{own} && {self.command} --rename $NAME",
+            f"{own} && {self.command} --rename *",
+            f"{own} && {own}\ntouch /tmp/escaped",
+            f"{own} &&& {own}",
+            f"{own}&&{own}",
+            f"{own} && ",
+            f"&& {own}",
+            f"{own} && && {own}",
+            f"{self.command} --rename 'a && b'",
+            f"{self.command} --rename 'a && touch /tmp/escaped && b'",
+            f'{self.command} --rename "a\\" && touch /tmp/escaped && \\"b"',
+            f"{own} && /bin/zsh -lc {shlex.quote(own)}",
+            shlex.join(["/bin/zsh", "-lc", f"{own} && {own}"]) + " && touch /tmp/escaped",
+            shlex.join(["/bin/zsh", "-lc", f"{own} && /bin/zsh -lc {shlex.quote(own)}"]),
             f"{own} && touch /tmp/escaped",
             f"{own}; touch /tmp/escaped",
             f"{own} | tee /tmp/escaped",

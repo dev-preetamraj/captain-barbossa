@@ -449,8 +449,8 @@ def _patch(item):
 
 
 def _own_command(command: str, session_id: str | None) -> bool:
-    """Match one literal session CLI invocation, optionally inside a standard shell's -lc."""
-    if not session_id or any(char in command for char in ";&|<>$`(){}*?[]~#\n\r\x00"):
+    """Match own session CLI invocations joined only by ` && `, optionally in one standard -lc."""
+    if not session_id or any(char in command for char in ";|<>$`(){}*?[]~#\n\r\x00"):
         return False
     try:
         words = shlex.split(command)
@@ -459,17 +459,22 @@ def _own_command(command: str, session_id: str | None) -> bool:
             for directory in ("/bin", "/usr/bin")
             for shell in ("sh", "bash", "zsh", "dash", "ksh")
         }
+        script = command
         if len(words) == 3 and words[0] in shells and words[1] == "-lc":
-            words = shlex.split(words[2])
+            script = words[2]
         prefix = shlex.split(instructions.captain_command(session_id))
+        pieces = script.split(" && ")
+        parts = [shlex.split(piece) for piece in pieces if "&" not in piece]
     except ValueError:
         return False
-    if words[: len(prefix)] != prefix:
-        return False
-    return not any(
-        option.startswith("--") and option != "--" and "--session".startswith(option)
-        for word in words[len(prefix) :]
-        for option in (word.split("=", 1)[0],)
+    return len(parts) == len(pieces) and all(
+        part[: len(prefix)] == prefix
+        and not any(
+            option.startswith("--") and option != "--" and "--session".startswith(option)
+            for word in part[len(prefix) :]
+            for option in (word.split("=", 1)[0],)
+        )
+        for part in parts
     )
 
 
