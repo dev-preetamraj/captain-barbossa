@@ -46,6 +46,8 @@ class WaitTailTests(SessionCase):
                 return screen
             if args[:2] == ("agent", "get"):
                 return {"agent": {"agent_status": "idle"}}
+            if args[:2] == ("pane", "get"):
+                return {"pane": {"agent": "codex", "agent_status": "idle"}}
             raise AssertionError(f"unexpected herdr call: {args}")
 
         with (
@@ -115,8 +117,8 @@ class WaitTailTests(SessionCase):
 
         def api(*args, **kwargs):
             reads.append(args)
-            if args[:2] == ("agent", "get"):
-                return {"agent": {"agent_status": "working"}}
+            if args[:2] == ("pane", "get"):
+                return {"pane": {"agent": "pi", "agent_status": "working"}}
             if "--source" not in args:
                 raise runtime.CaptainError(
                     'Herdr: {"code":"agent_not_idle","message":"alternate-screen history"}'
@@ -135,7 +137,7 @@ class WaitTailTests(SessionCase):
         self.assertEqual(
             reads,
             [
-                ("agent", "get", "jack"),
+                ("pane", "get", "w1:p2"),
                 ("agent", "read", "jack", "--lines", "40"),
                 ("agent", "read", "jack", "--source", "visible", "--lines", "40"),
             ],

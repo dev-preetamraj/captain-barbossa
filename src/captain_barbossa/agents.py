@@ -1026,7 +1026,10 @@ def create_crew(args, pane, project):
             runtime.herdr(
                 "pane", "run", new_pane, '/bin/sh "$CAPTAIN_CREW_LAUNCHER"', expect_output=False
             )
-            crew.pane.wait_for_crew(new_pane, provider)
+            if crew.pane.wait_for_crew(new_pane, provider) == "blocked":
+                # Running but held at a screen: the pane stays, and the captain's wait gets
+                # the one needs_attention it would raise itself; the held ring adds none.
+                protocol.attend_startup(crew)
             protocol.ring(crew, message_id)
             record["status"] = "started"
             if tab_id != pane["tab_id"]:

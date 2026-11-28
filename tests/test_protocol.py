@@ -9,7 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from captain_barbossa import agents, eventlog, protocol, sessions, store
+from captain_barbossa import agents, eventlog, events, protocol, sessions, store
 from captain_barbossa.crew import Crew
 from captain_barbossa.pane import DRAFT_GATE, UNREADABLE_EXPIRY, UNREADABLE_GATE, Pane
 from captain_barbossa.runtime import CaptainError
@@ -463,13 +463,13 @@ class ProtocolTests(SessionCase):
         except CaptainError as error:
             return error
 
-    def test_native_finish_is_idle_and_offsets_wait_for_ack(self):
-        self.event({"hook_event_name": "Stop"})
+    def test_native_approval_is_delivered_once_and_offsets_wait_for_ack(self):
+        self.event({"hook_event_name": "PermissionRequest"})
         with ThreadPoolExecutor(max_workers=2) as pool:
             outcomes = list(pool.map(lambda _: self.attempt(), range(2)))
         left, right = outcomes
         self.assertEqual(left, right)
-        self.assertEqual(left["status"], "idle")
+        self.assertEqual(left["status"], "awaiting_approval")
         self.assertEqual(self.saved()["state"], "working")
         self.assertEqual(self.saved()["offset"], 0)
         with self.assertRaises(CaptainError):
@@ -478,24 +478,23 @@ class ProtocolTests(SessionCase):
         self.assertEqual(self.saved()["offset"], self.crew.events.stat().st_size)
         self.assertIsNone(protocol.poll(self.crew, left["delivery_id"])["delivery_id"])
 
-    def test_native_working_is_silent_and_idle_notifies_once_per_message(self):
+    def test_native_inactivity_never_notifies_and_done_is_the_one_completion(self):
+        """Regression: an empty `idle` from Stop woke the captain before the crew's done."""
         self.event({"hook_event_name": "SessionStart"})
-        self.assertEqual(protocol.poll(self.crew)["status"], "working")
-        self.event({"hook_event_name": "Stop"})
-        first = protocol.poll(self.crew)
-        self.assertEqual(first["status"], "idle")
-        protocol.poll(self.crew, first["delivery_id"])
-        self.event({"hook_event_name": "Stop"})
+        self.event({"hook_event_name": "Stop", "last_assistant_message": ""})
         self.assertIsNone(protocol.poll(self.crew)["delivery_id"])
         protocol.deliver(self.crew, "followup")
         self.event({"hook_event_name": "Stop"})
-        self.assertEqual(protocol.poll(self.crew)["status"], "idle")
+        self.event({"type": "agent-turn-complete"})
+        self.assertIsNone(protocol.poll(self.crew)["delivery_id"])
+        self.command("done", report="src/a.py changed; checks pass; nothing left")
+        report = protocol.poll(self.crew)
+        self.assertEqual(report["status"], "done")
+        final = protocol.poll(self.crew, report["delivery_id"])
+        self.assertEqual((final["status"], final["delivery_id"]), ("idle", None))
+        self.assertEqual(self.saved()["generation"], 1)
 
     def test_wait_holds_through_quiet_idle_and_refuses_a_finished_assignment(self):
-        self.event({"hook_event_name": "Stop"})
-        idle = protocol.wait(self.crew, 0)
-        self.assertEqual(idle["status"], "idle")
-        protocol.poll(self.crew, idle["delivery_id"])
         self.event({"hook_event_name": "Stop"})
         self.assertEqual(protocol.wait(self.crew, 0)["status"], "timeout")
         self.command("done", report="src/a.py changed; checks pass; nothing left")
@@ -818,8 +817,8 @@ class ProtocolTests(SessionCase):
         self.assertEqual(protocol.poll(self.crew)["status"], "working")
         self.assertEqual(protocol.active_assignment(self.crew)["scan_offset"], 0)
         with self.crew.events.open("ab") as stream:
-            stream.write(b'\n{"hook_event_name":"Stop"}\n')
-        self.assertEqual(protocol.poll(self.crew)["status"], "idle")
+            stream.write(b'\n{"hook_event_name":"PermissionRequest"}\n')
+        self.assertEqual(protocol.poll(self.crew)["status"], "awaiting_approval")
 
     def test_timeout_has_fixed_json_shape_and_no_delivery(self):
         response = protocol.wait(self.crew, 0)
@@ -1121,6 +1120,13 @@ class StalledCrewTests(unittest.TestCase):
     def setUp(self):
         ProtocolTests.setUp(self)
         self.crew.record["provider"] = "claude"
+        store.write_json(self.current.meta_path, self.current.meta)
+
+    def hook(self, kind):
+        """Claude's own hook entry: the event is appended, then the mail it carries receipted."""
+        self.crew.events.parent.mkdir(exist_ok=True)
+        with contextlib.redirect_stdout(io.StringIO()):
+            events.append_event([str(self.crew.events), json.dumps({"hook_event_name": kind})])
 
     def hand_over(self, gate=UNREADABLE_GATE):
         """Deliver mail behind a held doorbell, then let the crew's own hook stamp the receipt."""
@@ -1143,25 +1149,56 @@ class StalledCrewTests(unittest.TestCase):
         store.write_json(stamp, record)
         return stamp
 
+    def later(self, seconds=protocol.ACTIVATION_WINDOW):
+        return patch.object(protocol.time, "time", return_value=time.time() + seconds)
+
     def test_a_delivered_body_with_no_turn_is_reported_once(self):
         self.hand_over()
-        stalled = protocol.poll(self.crew)
-        self.assertEqual(stalled["status"], "error")
-        self.assertIn("no turn has ever started", stalled["summary"])
-        protocol.poll(self.crew, stalled["delivery_id"])
-        self.assertIsNone(protocol.poll(self.crew)["delivery_id"])
+        self.assertIsNone(protocol.poll(self.crew)["delivery_id"])  # inside the window
+        with self.later():
+            stalled = protocol.poll(self.crew)
+            self.assertEqual(stalled["status"], "needs_attention")
+            self.assertIn("has started no turn", stalled["summary"])
+            protocol.poll(self.crew, stalled["delivery_id"])
+            self.assertIsNone(protocol.poll(self.crew)["delivery_id"])
 
     def test_a_started_turn_is_what_clears_the_report(self):
         self.hand_over()
         self.event({"hook_event_name": "UserPromptSubmit"})
-        self.assertIsNone(protocol.poll(self.crew)["delivery_id"])
-        self.assertTrue(self.saved()["turn_started"])
+        with self.later():
+            self.assertIsNone(protocol.poll(self.crew)["delivery_id"])
+        self.assertTrue(self.saved()["messages"][0]["activated"])
 
     def test_a_session_start_alone_is_not_a_started_turn(self):
-        self.hand_over()
-        self.event({"hook_event_name": "SessionStart"})
-        self.assertEqual(protocol.poll(self.crew)["status"], "error")
-        self.assertFalse(self.saved().get("turn_started"))
+        protocol.deliver(self.crew, "original", initial=True)
+        self.hook("SessionStart")
+        self.assertEqual(self.saved()["messages"][0]["delivery"], "read")
+        with self.later():
+            self.assertEqual(protocol.poll(self.crew)["status"], "needs_attention")
+        self.assertNotIn("activated", self.saved()["messages"][0])
+
+    def test_mail_a_prompt_hook_delivers_has_started_its_turn(self):
+        """Regression: the hook appends UserPromptSubmit before its receipt, so the landed
+        offset sat after the turn's own start and a long first thought read as stalled."""
+        protocol.deliver(self.crew, "original", initial=True)
+        self.hook("UserPromptSubmit")
+        with self.later():
+            self.assertIsNone(protocol.poll(self.crew)["delivery_id"])
+        self.assertTrue(self.saved()["messages"][0]["activated"])
+        self.assertFalse(protocol.stalled(self.crew, self.saved()))
+
+    def test_a_followup_needs_a_turn_of_its_own(self):
+        """Regression: one assignment-wide turn flag vouched for every later message."""
+        self.crew.record["provider"] = "codex"
+        protocol.deliver(self.crew, "original", initial=True)
+        self.event({"hook_event_name": "PreToolUse"})
+        protocol.poll(self.crew)
+        protocol.deliver(self.crew, "followup")
+        with self.later():
+            stalled = protocol.poll(self.crew)
+        self.assertEqual(stalled["status"], "needs_attention")
+        first, second = self.saved()["messages"]
+        self.assertEqual((first.get("activated"), second.get("activated")), (True, None))
 
     def test_a_held_doorbell_is_still_retried_after_the_receipt(self):
         """Delivery is not liveness: a stamped receipt must not end the retries."""
@@ -1323,8 +1360,8 @@ class ApprovalDedupeTests(unittest.TestCase):
                 self.assertEqual(records[0][key], value)
         self.assertEqual(protocol.wait(self.crew, 0)["status"], "timeout")
         self.assertEqual(protocol.active_assignment(self.crew)["scan_offset"], offset)
-        self.event({"hook_event_name": "Stop"})
-        self.assertEqual(protocol.wait(self.crew, 0)["status"], "idle")
+        self.event({"hook_event_name": "PermissionRequest"})
+        self.assertEqual(protocol.wait(self.crew, 0)["status"], "awaiting_approval")
 
     def test_legacy_oversized_line_is_skipped_with_bounded_poll_progress(self):
         self.crew.events.parent.mkdir(exist_ok=True)
@@ -1341,7 +1378,7 @@ class ApprovalDedupeTests(unittest.TestCase):
     def test_event_backlog_is_bounded_per_poll(self):
         self.crew.events.parent.mkdir(exist_ok=True)
         line = b'{"hook_event_name":"PostToolUse"}\n'
-        self.crew.events.write_bytes(line * 5000 + b'{"hook_event_name":"Stop"}\n')
+        self.crew.events.write_bytes(line * 5000 + b'{"hook_event_name":"PermissionRequest"}\n')
         previous = 0
         for _ in range(10):
             response = protocol.wait(self.crew, 0)
@@ -1354,7 +1391,7 @@ class ApprovalDedupeTests(unittest.TestCase):
             self.assertGreater(offset, previous)
             self.assertLessEqual(offset - previous, 65536)
             previous = offset
-            if response["status"] == "idle":
+            if response["status"] == "awaiting_approval":
                 break
             self.assertEqual(response["status"], "timeout")
         else:
@@ -1505,7 +1542,8 @@ class CoordinationContractTests(unittest.TestCase):
     def test_old_ack_cannot_consume_a_new_generation(self):
         self.event({"hook_event_name": "PermissionRequest"})
         first = protocol.poll(self.crew)
-        self.event({"hook_event_name": "Stop"})
+        self.event({"hook_event_name": "PostToolUse"})
+        self.event({"hook_event_name": "PermissionRequest"})
         self.assertEqual(protocol.poll(self.crew), first)
         second = protocol.poll(self.crew, first["delivery_id"])
         self.assertNotEqual(first["delivery_id"], second["delivery_id"])
@@ -1516,9 +1554,10 @@ class CoordinationContractTests(unittest.TestCase):
 
     def test_quiet_events_do_not_advance_acknowledged_cursor(self):
         self.event({"hook_event_name": "SessionStart"})
+        self.event({"hook_event_name": "Stop"})
         protocol.poll(self.crew)
         self.assertEqual(self.saved()["offset"], 0)
-        self.event({"hook_event_name": "Stop"})
+        self.event({"hook_event_name": "PermissionRequest"})
         pending = protocol.poll(self.crew)
         protocol.poll(self.crew, pending["delivery_id"])
         self.assertEqual(self.saved()["offset"], self.crew.events.stat().st_size)

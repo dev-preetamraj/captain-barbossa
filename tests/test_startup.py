@@ -210,55 +210,83 @@ class StartupTests(SessionCase):
                 )
                 sleep.assert_not_called()
 
-    def test_blocked_or_timed_out_startup_never_submits_the_task(self):
-        for status, name in (("blocked", "jack"), ("unknown", "gibbs")):
-            with self.subTest(status=status):
-                args = self.args(
-                    "crew",
-                    name,
-                    "--agent",
-                    "codex",
-                    "--task",
-                    "build",
-                    "--placement",
-                    "pane",
-                    "--direction",
-                    "vertical",
-                    "--split-pane",
-                    "w1:p1",
-                )
-                created = {
-                    "pane": {
-                        "pane_id": "w1:p2",
-                        "terminal_id": "crew-terminal",
-                        "agent": "codex",
-                        "agent_status": status,
-                    }
-                }
-                created["agent"] = {"name": f"c-{self.meta['id'][:8]}-{name}"}
-                elapsed = [0]
+    def codex_pane(self, status, name="jack"):
+        """What Herdr answers for the new codex pane and its registered agent."""
+        return {
+            "pane": {
+                "pane_id": "w1:p2",
+                "terminal_id": "crew-terminal",
+                "agent": "codex",
+                "agent_status": status,
+            },
+            "agent": {"name": f"c-{self.meta['id'][:8]}-{name}"},
+        }
 
-                def advance(_seconds):
-                    elapsed[0] += 31
+    def codex_args(self, name="jack"):
+        return self.args(
+            "crew",
+            name,
+            "--agent",
+            "codex",
+            "--task",
+            "build",
+            "--placement",
+            "pane",
+            "--direction",
+            "vertical",
+            "--split-pane",
+            "w1:p1",
+        )
 
-                with (
-                    patch.object(runtime, "herdr", side_effect=pane_stub(created)) as calls,
-                    patch.object(agents, "executable", return_value="/bin/codex"),
-                    patch.object(agents, "shell_ready_for_input", return_value=True),
-                    patch.object(panes.time, "monotonic", side_effect=lambda: elapsed[0]),
-                    patch.object(panes.time, "sleep", side_effect=advance),
-                ):
-                    message = "input or approval" if status == "blocked" else "did not become ready"
-                    with self.assertRaisesRegex(runtime.CaptainError, message):
-                        agents.create_crew(args, self.pane, self.project)
-                self.assertFalse(
-                    any(call.args[:2] == ("agent", "prompt") for call in calls.call_args_list)
-                )
-                self.assertFalse(
-                    any(call.args[:2] == ("pane", "close") for call in calls.call_args_list)
-                )
-                saved = store.read_json(self.directory / "session.json")["crew"][name]
-                self.assertEqual(saved["status"], "needs_attention")
+    def test_timed_out_startup_never_submits_the_task(self):
+        elapsed = [0]
+
+        def advance(_seconds):
+            elapsed[0] += 31
+
+        with (
+            patch.object(
+                runtime, "herdr", side_effect=pane_stub(self.codex_pane("unknown"))
+            ) as calls,
+            patch.object(agents, "executable", return_value="/bin/codex"),
+            patch.object(agents, "shell_ready_for_input", return_value=True),
+            patch.object(panes.time, "monotonic", side_effect=lambda: elapsed[0]),
+            patch.object(panes.time, "sleep", side_effect=advance),
+        ):
+            with self.assertRaisesRegex(runtime.CaptainError, "did not become ready"):
+                agents.create_crew(self.codex_args(), self.pane, self.project)
+        self.assertFalse(any(call.args[:2] == ("agent", "prompt") for call in calls.call_args_list))
+        self.assertFalse(any(call.args[:2] == ("pane", "close") for call in calls.call_args_list))
+        saved = store.read_json(self.directory / "session.json")["crew"]["jack"]
+        self.assertEqual(saved["status"], "needs_attention")
+
+    def test_a_blocked_startup_keeps_the_pane_and_queues_one_needs_attention(self):
+        """Recruitment, the held ring and wait share one episode for a startup block."""
+        created = self.codex_pane("blocked")
+        with (
+            patch.object(runtime, "herdr", side_effect=pane_stub(created)) as calls,
+            patch.object(agents, "executable", return_value="/bin/codex"),
+            patch.object(agents, "shell_ready_for_input", return_value=True),
+            patch.object(panes.time, "sleep"),
+            patch.object(Pane, "nudge_block", return_value="approval prompt"),
+            patch.object(Pane, "startup_screen", return_value="Codex hook trust prompt"),
+        ):
+            agents.create_crew(self.codex_args(), self.pane, self.project)
+        self.assertFalse(any(call.args[:2] == ("agent", "prompt") for call in calls.call_args_list))
+        self.assertFalse(any(call.args[:2] == ("pane", "close") for call in calls.call_args_list))
+        meta = store.read_json(self.directory / "session.json")
+        self.assertEqual(meta["crew"]["jack"]["status"], "started")
+        crew = Crew("jack", meta["crew"]["jack"], sessions.Session(self.directory, meta))
+        notices = protocol.active_assignment(crew)["notices"]
+        self.assertEqual([notice["status"] for notice in notices], ["needs_attention"])
+        self.assertIn("Herdr: blocked", notices[0]["summary"])
+        with (
+            patch.object(Pane, "pane_record", return_value=created["pane"]),
+            patch.object(Pane, "screen", return_value=[]),
+        ):
+            first = protocol.poll(crew)
+            self.assertEqual(first["status"], "needs_attention")
+            self.assertIsNone(protocol.poll(crew, first["delivery_id"])["delivery_id"])
 
     def crew_status_api(self, statuses):
         agent_name = f"c-{self.meta['id'][:8]}-jack"

@@ -229,9 +229,10 @@ captain wait --all --json --timeout 0
 
 For protocol crew, `wait` returns a notification with `status`, `delivery_id`,
 `crew`, `assignment_id`, and the full, untruncated summary. `--json`
-selects JSON output. Statuses distinguish `working`, `idle`, `asked`,
-`awaiting_approval`, `done`, `held`, `bounced`, `timeout`, and `error`. Native
-idle is activity evidence only; assignment completion requires explicit `done`.
+selects JSON output. Statuses distinguish `working`, `asked`, `awaiting_approval`,
+`needs_attention`, `done`, `held`, `bounced`, `timeout`, and `error`; `idle` is only
+the reply to acknowledging the final `done`. Native idle is activity evidence only;
+assignment completion requires explicit `done`.
 Crew never stop at a native permission prompt, so there is nothing to approve by
 keystroke. Claude crew launch with `--permission-mode auto`; the PreToolUse hook
 passes the tool, command/paths, cwd, and active assignment grants to
@@ -273,12 +274,27 @@ scratch across crew (a known ceiling). Hook and captain commands are written wit
 `python3` sibling of the interpreter, since Codex trust hashes the literal command.
 See the [native hook contract](https://code.claude.com/docs/en/hooks#pretooluse-decision-control).
 
-`wait` returns only when a notification carries a delivery ID. Native `working`
-never notifies, and a native idle notifies at most once per message delivered, so
-quiet work runs the timeout out instead of waking the captain every turn. Claude
-Code crew are read from their event file alone, since their approvals arrive as
-hooks; Codex and pi crew, whose CLIs report no approval, also have their pane
-checked for a modal, once when a wait starts and then every 30 seconds.
+`wait` returns only when a notification carries a delivery ID. Native work and
+inactivity (Stop, turn complete) never notify, so healthy quiet runs the timeout out
+and `done` is the one completion delivery. Every tick reads Herdr's agent status by
+pane ID, so a crew not yet registered by name still reads. A `blocked` status is one
+`needs_attention` delivery with the visible screen and the sampled Herdr status or
+read error; it is not reported again until a successful non-blocked read ends that
+block, even one read while an earlier delivery awaits its ack, and a failed read never
+does. A crew blocked during recruitment keeps its pane and starts with that same
+queued delivery; the held ring's startup-screen notice and `wait` then add none. Each
+delivered message must start its own turn: Claude mail handed over by
+`UserPromptSubmit` or a blocking `Stop`, a native turn event after it landed, or for a
+ring-delivered body the crew's own receipt or Herdr `working`. Mail handed over at
+`SessionStart` is not a turn, nor is Codex's own title-generation turn. Landed mail with no turn after 60 seconds is the same
+`needs_attention` once, whatever the provider and whether or not Herdr calls the
+screen blocked. A crew Herdr confirms gone (pane missing, or no agent in it) after it
+started on its mail is one `error` delivery tagged `[crew-gone]`; an unreadable status
+is never taken as gone. Codex, pi and grok crew, whose CLIs report no approval, also
+have their pane checked for a known modal, once when a wait starts and then every 30
+seconds, unless Herdr says the agent is gone. Every Herdr read happens before the
+session's protocol lock is taken, and is dropped if a handoff replaced the assignment
+meanwhile.
 
 A notification repeats with its existing delivery ID until acknowledged.
 `wait --all` returns every protocol crew's current delivery in a `deliveries` array

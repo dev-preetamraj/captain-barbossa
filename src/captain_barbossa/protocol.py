@@ -17,7 +17,13 @@ from .crew import Crew, event_status
 from .eventlog import MAX_EVENT_BYTES, read_events
 from .execution import root
 from .models import HOOK_DELIVERED, HOOKLESS
-from .pane import DRAFT_GATE, HOLD_EXPIRY, UNREADABLE_EXPIRY, UNREADABLE_GATE
+from .pane import (
+    DRAFT_GATE,
+    HOLD_EXPIRY,
+    UNREADABLE_EXPIRY,
+    UNREADABLE_GATE,
+    startup_screen_name,
+)
 from .processes import TARGET, capture, makefile_targets
 from .runtime import HERDR_ERRORS, CaptainError, check_text, inside_project
 from .sessions import session_directories
@@ -27,9 +33,11 @@ ACTIONS = ("read", "search", "edit", "test", "build", "format", "commit", "versi
 WRITE_ACTIONS = ("edit", "format", "commit", "version", "delete")
 # Our own ring is still painting for about this long, so a draft seen inside it is ours.
 ECHO_GRACE = 2
-# Native "working" is a wake, not news: it fires at recruit and at every crew turn end.
-NOTIFIED = {"done": "idle", "idle": "idle", "blocked": "awaiting_approval"}
 TOOL_EVENTS = ("PreToolUse", "PostToolUse", "PermissionDecision")
+# Landed mail that has started no turn by then needs a look, whatever the provider.
+ACTIVATION_WINDOW = 60
+ATTENTION_LINES = 20
+GONE = re.compile(r"\b(pane_not_found|agent_not_found)\b")
 # Claude reports approvals through its PermissionRequest hook; these have no such event.
 MODAL_PROVIDERS = ("codex", *HOOKLESS)
 MODAL_INTERVAL = 30
@@ -57,12 +65,6 @@ HOOKS_NOT_LIVE = (
     "[codex-hooks-not-live] Codex hooks not live: a turn ran with no SessionStart, so the "
     "permission gate and Stop hook are off and the crew falls back to native prompts. "
     "The user must review and trust the hooks in the pane."
-)
-# A hook-delivered body lands in the crew's context without starting a turn, and the receipt
-# the hook stamps then empties drain's queue, so nothing else ever reports this crew.
-STALLED_SUMMARY = (
-    "Mail was handed over but no turn has ever started; the doorbell is being retried, "
-    "so read the pane before sending anything else."
 )
 # A report's commit hashes: hex with a digit and a letter, so prose numbers stay out. Length 32
 # is skipped because every captain id is a uuid4 hex of exactly that length.
@@ -692,8 +694,12 @@ def unread(crew):
     return queued(crew.session.directory, crew.crew_id)
 
 
-def receipt(session_directory, crew_id, ids):
-    """The one writer of `read`, for the crew's own `inbox` and for a delivery hook."""
+def receipt(session_directory, crew_id, ids, started=False):
+    """The one writer of `read`, for the crew's own `inbox` and for a delivery hook.
+
+    started: the delivering hook itself began or continued a turn (UserPromptSubmit, a
+    blocking Stop). Its event precedes this receipt, so the log after landing cannot show it.
+    """
     directory = mail_dir(session_directory, crew_id)
     receipts = {}
     with lock(session_directory / "protocol.lock"):
@@ -714,6 +720,15 @@ def receipt(session_directory, crew_id, ids):
                     # A second read finds the mail already off "queued", so nothing to mirror.
                     if message["id"] in read_ids and message["delivery"] == "sent":
                         message["delivery"] = "read"
+                        events = f"{crew_id}-{assignment['incarnation_id']}.jsonl"
+                        message.setdefault("landed", landing(session_directory / "events" / events))
+                        if started:
+                            message["activated"] = True
+
+
+def landing(events):
+    """When a body reached the crew and how far its event log ran: later turns are its own."""
+    return {"at": time.time(), "offset": events.stat().st_size if events.exists() else 0}
 
 
 def render(session_directory, messages):
@@ -788,7 +803,6 @@ def awaiting_registration(crew, message_id, prior, error, assignment=None):
         and assignment
         and assignment["id"] == message["assignment_id"]
         and assignment["incarnation_id"] == crew.record.get("incarnation_id")
-        and not assignment.get("turn_started")
         and 0 <= time.time() - message["queued_at"] < REGISTRATION_GRACE
         and not any(
             turn_event(event)
@@ -875,6 +889,12 @@ def ring(crew, message_id):
         ):
             record["noticed"] = held_notice(crew, message_id, gate, now - record["held_since"])
     write_json(drain_stamp(crew), record)
+    if landed and text:
+        with checkpoint(crew.session.directory) as state:
+            assignment = state["assignments"].get(state["active"].get(crew.crew_id))
+            for message in assignment["messages"] if assignment else ():
+                if message["id"] == message_id:
+                    message.setdefault("landed", landing(crew.events))
     if unreachable is not None:
         bounce(crew, message_id, unreachable)
 
@@ -906,12 +926,25 @@ def hooks_live(crew, assignment, events):
 
 
 def once(crew, key, summary):
-    """Post one error notice per assignment for a startup condition, never a second."""
+    """Post one error notice per assignment for a startup condition, never a second, and
+    none while a needs_attention episode has already shown the captain this screen."""
     with checkpoint(crew.session.directory) as state:
         assignment = state["assignments"].get(state["active"].get(crew.crew_id))
         if assignment and not assignment.get(key):
             assignment[key] = True
-            notice(assignment, "error", summary)
+            if not assignment.get("attention"):
+                notice(assignment, "error", summary)
+
+
+def attend_startup(crew):
+    """Recruitment found the native agent blocked: queue the needs_attention a wait would,
+    opening the same episode, so neither wait nor the held ring reports it again."""
+    sample, screen = herdr_status(crew), visible(crew)
+    with checkpoint(crew.session.directory) as state:
+        assignment = active(state, crew)
+        attention = attend(crew, assignment, sample, time.time(), screen)
+        if attention:
+            notice(assignment, *attention)
 
 
 def held_notice(crew, message_id, gate, held):
@@ -943,28 +976,56 @@ def turn_event(event):
     return event.get("hook_event_name", event.get("type")) not in (None, "SessionStart")
 
 
+def started(crew, message, live=None, at=0):
+    """Whether the crew began a turn after this message landed. Each message needs its own:
+    a turn for an earlier one proves nothing about a follow-up.
+
+    A ring-delivered body also counts the crew's own receipt (inbox, done) and Herdr's
+    working since it landed. A delivery hook stamps its receipt with no turn, and Claude
+    can read working while it boots, so a hook-delivered crew needs a native turn event.
+    """
+    landed = message["landed"]
+    if crew.record.get("provider") not in HOOK_DELIVERED and (
+        message["delivery"] == "read" or (live == "working" and at >= landed["at"])
+    ):
+        return True
+    events, _ = read_events(crew.events, landed["offset"], max_bytes=MAX_EVENT_BYTES)
+    # Codex's own title-generation turn is not the crew's; event_status drops it too.
+    return any(
+        turn_event(event)
+        and not (event.get("type") == "agent-turn-complete" and event_status(event) is None)
+        for event in events
+    )
+
+
+def bank(crew, assignment, live, at):
+    """Record each landed message's turn evidence once; it is never undone."""
+    if assignment["state"] == "done":
+        return
+    for message in assignment["messages"]:
+        if (
+            message.get("landed")
+            and not message.get("activated")
+            and started(crew, message, live, at)
+        ):
+            message["activated"] = True
+
+
 def stalled(crew, assignment):
-    """Whether a hook-delivered body reached the crew without ever starting a turn.
+    """Whether a hook-delivered body reached the crew without starting a turn.
 
     A delivery hook stamps the receipt as it injects the body, which proves the text is in
     the crew's context and nothing more: injected context starts no turn. That receipt also
     empties drain's unread queue, so this is the only thing left that can tell a crew which
-    never woke from one that is working, whatever its doorbell did.
+    never woke from one that is working, whatever its doorbell did. `drain` also runs from
+    every captain command, where poll's banked flag may lag, so the event log decides.
     """
-    if crew.record.get("provider") not in HOOK_DELIVERED:
+    if crew.record.get("provider") not in HOOK_DELIVERED or not assignment:
         return False
-    if not assignment or assignment.get("turn_started"):
-        return False
-    messages = assignment["messages"]
-    if not messages or any(message["delivery"] != "read" for message in messages):
-        return False
-    # turn_started is written by `poll` alone, while `drain` also runs from every captain
-    # command, so the flag alone called a crew that had long since woken and emptied its
-    # queue stalled, and rang it once a command for the rest of the session. The crew's own
-    # event file is the same proof poll uses; read from the assignment's baseline and not
-    # consumed, so a turn poll has already banked stays visible here.
-    events, _ = read_events(crew.events, assignment.get("offset", 0), max_bytes=MAX_EVENT_BYTES)
-    return not any(turn_event(event) for event in events)
+    return any(
+        message.get("landed") and not message.get("activated") and not started(crew, message)
+        for message in assignment["messages"]
+    )
 
 
 def drain_stamp(crew):
@@ -1103,8 +1164,7 @@ def deliver(
 
 
 def mark_sent(assignment, message):
-    """A delivered message re-arms the single native idle notification it may produce."""
-    assignment["idle_seen"] = False
+    """A sent answer settles its question."""
     question = assignment["question"]
     if question and question["id"] == message["question_id"]:
         assignment["question"] = None
@@ -1157,11 +1217,99 @@ def startup_attention(crew):
 
 
 def herdr_status(crew):
-    """Herdr's own agent status, None when unreadable; hooks stay the fast path."""
+    """One Herdr sample as (liveness, status, evidence), read by pane ID when recorded so a
+    crew not yet registered by name still reads.
+
+    liveness is alive, gone (Herdr names the pane or agent missing, or the pane runs no
+    agent) or unknown; any other read error is unknown, never gone.
+    """
+    pane_id = crew.record.get("pane")
     try:
-        return crew.pane.agent_status()
+        if pane_id:
+            pane = crew.pane.pane_record(pane_id)
+            if not pane.get("agent"):
+                return "gone", None, f"Herdr: no agent in pane {pane_id}"
+            status = pane.get("agent_status")
+        else:
+            status = crew.pane.agent_status()
+    except HERDR_ERRORS as exc:
+        return ("gone" if GONE.search(str(exc)) else "unknown"), None, f"Herdr read failed: {exc}"
+    return ("unknown" if status in (None, "unknown") else "alive"), status, f"Herdr: {status}"
+
+
+def visible(crew):
+    try:
+        return crew.pane.screen(crew.record.get("pane"))
     except HERDR_ERRORS:
         return None
+
+
+def unstarted(assignment, at=None):
+    """Landed messages with no turn yet and no attention notice; past the window if at is given."""
+    return [
+        message
+        for message in assignment["messages"]
+        if message.get("landed")
+        and not message.get("activated")
+        and not message.get("attention")
+        and (at is None or at - message["landed"]["at"] >= ACTIVATION_WINDOW)
+    ]
+
+
+def owes_attention(assignment, live, at):
+    """Whether this tick may owe a needs_attention, so its screen is read before the lock."""
+    if not assignment or assignment["state"] == "done" or assignment.get("attention"):
+        return False
+    return live == "blocked" or bool(unstarted(assignment, at))
+
+
+def attend(crew, assignment, sample, at, screen):
+    """The needs_attention or crew-gone notice this tick owes, else None; each is owed once.
+
+    Herdr's blocked opens one episode, which only a successful non-blocked read ends. Landed
+    mail that started no turn within ACTIVATION_WINDOW is the provider-neutral fallback for
+    a screen no recognizer knows and Herdr may never call blocked.
+    """
+    liveness, live, herdr = sample
+    if (
+        liveness == "gone"
+        and not assignment.get("gone")
+        and any(message.get("activated") for message in assignment["messages"])
+    ):
+        assignment["gone"] = herdr
+        return (
+            "error",
+            f"[crew-gone] {crew.display_name}'s native agent is gone ({herdr}) after it "
+            "started on its mail, with the assignment unfinished. Check its owned paths, "
+            "then dismiss it and recruit a replacement.",
+        )
+    if assignment.get("attention"):
+        return None
+    waiting, stuck = unstarted(assignment), unstarted(assignment, at)
+    if live != "blocked" and not stuck:
+        return None
+    for message in waiting:
+        message["attention"] = True
+    if live == "blocked":
+        assignment["attention"] = {"at": at, "herdr": herdr}
+        # A hook approval, or a held ring's startup-screen notice, already reported it.
+        if assignment.get("blocked_notice") is not None or (
+            startup_screen_name(screen or [])
+            and (assignment.get("hooks_untrusted") or assignment.get("startup_update"))
+        ):
+            return None
+        reason = "is blocked"
+    else:
+        reason = (
+            f"has started no turn {round(at - stuck[0]['landed']['at'])}s after its mail landed"
+        )
+    pane = crew.record.get("pane") or crew.record["agent"]
+    text = "\n".join(screen[-ATTENTION_LINES:]) if screen else "(unreadable)"
+    return (
+        "needs_attention",
+        f"[needs-attention] {crew.display_name} {reason} ({herdr}). Ask the user to look at "
+        f"pane {pane}; do not type into it.\nVisible screen:\n{text}",
+    )
 
 
 def modal_summary(crew, assignment):
@@ -1178,11 +1326,72 @@ def modal_summary(crew, assignment):
     return None
 
 
-def poll(crew, ack=None, modal=True):
+def ends_block(sample):
+    """Only a successful non-blocked read ends a block; a failed read never does."""
+    return sample[0] == "alive" and sample[1] != "blocked"
 
+
+def screen_due(crew, assignment, ack):
+    """Whether this poll reaches the screen heuristics: no delivery, queued notice or native
+    approval event is ahead of them, so a pane that cannot be read is never read for nothing."""
+    pending = assignment["pending"]
+    if pending and pending["result"]["delivery_id"] != ack:
+        return False
+    seq = pending["seq"] if pending else assignment["ack_seq"]
+    if assignment["state"] == "done" or seq < len(assignment["notices"]):
+        return False
+    offset = pending["offset"] if pending else assignment.get("scan_offset", assignment["offset"])
+    events, _ = read_events(crew.events, offset, max_bytes=MAX_EVENT_BYTES)
+    return not any(event_status(event) == "blocked" for event in events)
+
+
+def heuristics(crew, assignment):
+    """The throttled screen reads for modals Herdr calls idle: a Codex startup screen, else
+    a choice modal's summary. A read error is returned, to raise where it is used."""
+    if crew.record.get("provider") == "codex" and (startup := startup_attention(crew)):
+        return startup, None
+    try:
+        return None, modal_summary(crew, assignment)
+    except HERDR_ERRORS as exc:
+        return None, exc
+
+
+def poll(crew, ack=None, modal=True):
     drain(crew)
+    paneless = crew.is_background
+    # Every Herdr read happens here, before the lock: a slow read must not hold up other
+    # protocol verbs. Status is read every tick; the screen heuristics are throttled and
+    # skipped for an agent Herdr confirms gone or a block the captain already has.
+    sample, at, screen, looked = (None, None, None), time.time(), None, None
+    peek = None if paneless else active_assignment(crew)
+    if not paneless:
+        sample = herdr_status(crew)
+        at = time.time()
+        if owes_attention(peek, sample[1], at):
+            screen = visible(crew)
+        if (
+            modal
+            and peek
+            and sample[0] != "gone"
+            and crew.record.get("provider") in MODAL_PROVIDERS
+            and (ends_block(sample) or not peek.get("attention"))
+            and screen_due(crew, peek, ack)
+        ):
+            looked = peek["id"], *heuristics(crew, peek)
     with checkpoint(crew.session.directory) as state:
         assignment = active(state, crew)
+        if not peek or (peek["id"], peek["incarnation_id"]) != (
+            assignment["id"],
+            assignment["incarnation_id"],
+        ):
+            # A handoff while Herdr was read: that evidence belongs to the old assignment.
+            sample, screen, looked = (None, None, None), None, None
+        if not paneless:
+            bank(crew, assignment, sample[1], at)
+            if ends_block(sample):
+                # Even behind an unacknowledged delivery, or the next block is never news.
+                assignment.pop("blocked_notice", None)
+                assignment.pop("attention", None)
         pending, acked = assignment["pending"], False
         if ack:
             if pending and ack == pending["result"]["delivery_id"]:
@@ -1212,7 +1421,6 @@ def poll(crew, ack=None, modal=True):
             if pending["result"]["status"] == "done" and assignment["report"]:
                 pending["result"]["summary"] = done_summary(assignment)
             return pending["result"]
-        paneless = crew.is_background
         if paneless:
             reconcile_background(crew, assignment)
         seq, offset = assignment["ack_seq"], assignment.get("scan_offset", assignment["offset"])
@@ -1231,10 +1439,6 @@ def poll(crew, ack=None, modal=True):
             )
         else:
             events, offset = read_events(crew.events, offset, max_bytes=MAX_EVENT_BYTES)
-            if any(turn_event(event) for event in events):
-                # Liveness is a started turn, never a delivered body; this is committed
-                # outside the ack dance because it only ever goes one way.
-                assignment["turn_started"] = True
             if crew.record.get("provider") == "codex":
                 hooks_live(crew, assignment, events)
             held = assignment.get("blocked_notice")
@@ -1244,110 +1448,91 @@ def poll(crew, ack=None, modal=True):
                 for e in events
             ):
                 assignment.pop("blocked_notice")
-            notified = [
-                (i, NOTIFIED[s], e)
-                for i, e in enumerate(events)
-                if (s := event_status(e)) in NOTIFIED
-            ]
+            # Native inactivity (Stop, turn complete) is evidence, never a delivery.
+            notified = [(i, e) for i, e in enumerate(events) if event_status(e) == "blocked"]
             last = notified[-1][0] if notified else len(events)
-            tools = [
+            answered = [
                 i
                 for i, e in enumerate(events)
-                if e.get("hook_event_name") in TOOL_EVENTS and event_status(e) != "blocked"
+                if (s := event_status(e)) in ("done", "idle")
+                or (e.get("hook_event_name") in TOOL_EVENTS and s != "blocked")
             ]
-            # A later tool call proves the earlier approval was answered.
-            if any(i < last for i in tools):
+            # A later tool call or turn end proves the earlier approval was answered.
+            if any(i < last for i in answered):
                 native_status = assignment["native_status"] = None
-            cleared = any(i > last for i in tools)
+            cleared = any(i > last for i in answered)
             if notified:
-                _, status, event = notified[-1]
-                summary = str(event.get("message") or event.get("last-assistant-message") or "")
-                if status == "awaiting_approval":
-                    # A parallel tool event can follow a still-open escalation; Herdr knows.
-                    if (
-                        cleared
-                        and native_status != status
-                        and modal
-                        and not paneless
-                        and herdr_status(crew) == "blocked"
-                    ):
-                        cleared = False
-                    # One approval arrives twice, as a PermissionRequest hook and a
-                    # permission_prompt Notification, usually in separate polls.
-                    new_ask = any(e.get("hook_event_name") == "PreToolUse" for _, _, e in notified)
-                    if cleared or (native_status == status and not new_ask):
-                        assignment["scan_offset"] = offset
-                        if cleared:
-                            assignment["native_status"] = None
-                        return result(crew, assignment, "working")
-                    detail = next(
-                        (
-                            e
-                            for _, s, e in reversed(notified)
-                            if s == status and e.get("tool_input")
-                        ),
-                        event,
-                    )
-                    blocked_id = str(detail.get("tool_use_id") or "")
-                    inputs = detail.get("tool_input")
-                    command = inputs.get("command") if isinstance(inputs, dict) else None
-                    command = (
-                        command or detail.get("message") or json.dumps(inputs, ensure_ascii=False)
-                    )
-                    approval = detail.get("approval") or {}
-                    code = approval.get("code")
-                    reason = REASONS[code][1] if code in REASONS else "native permission prompt"
-                    summary = f"{detail.get('tool_name', 'Approval')} [{code or 'native'}]: {reason}\n{command}"
-                    native_status = status
-                elif assignment.get("idle_seen"):
+                status, event = "awaiting_approval", notified[-1][1]
+                # A parallel tool event can follow a still-open escalation; Herdr knows.
+                if cleared and native_status != status and sample[1] == "blocked":
+                    cleared = False
+                # One approval arrives twice, as a PermissionRequest hook and a
+                # permission_prompt Notification, usually in separate polls.
+                new_ask = any(e.get("hook_event_name") == "PreToolUse" for _, e in notified)
+                if cleared or (native_status == status and not new_ask):
                     assignment["scan_offset"] = offset
-                    # A turn that ran proves the approval cleared.
-                    assignment["native_status"] = None
+                    if cleared:
+                        assignment["native_status"] = None
                     return result(crew, assignment, "working")
-                else:
-                    # One idle per delivered message; every later crew turn also ends idle.
-                    assignment["idle_seen"] = True
-                    native_status = None
+                detail = next((e for _, e in reversed(notified) if e.get("tool_input")), event)
+                blocked_id = str(detail.get("tool_use_id") or "")
+                inputs = detail.get("tool_input")
+                command = inputs.get("command") if isinstance(inputs, dict) else None
+                command = command or detail.get("message") or json.dumps(inputs, ensure_ascii=False)
+                approval = detail.get("approval") or {}
+                code = approval.get("code")
+                reason = REASONS[code][1] if code in REASONS else "native permission prompt"
+                summary = f"{detail.get('tool_name', 'Approval')} [{code or 'native'}]: {reason}\n{command}"
+                native_status = status
             else:
-                # Live state rather than a consumed event, so native_status is its only dedupe.
-                read_pane = (
-                    modal and not paneless and crew.record.get("provider") in MODAL_PROVIDERS
+                failed = (
+                    not crew.record.get("pane") and crew.record.get("status") == "needs_attention"
                 )
-                live = herdr_status(crew) if modal and not paneless else None
-                if live not in (None, "blocked"):
-                    assignment.pop("blocked_notice", None)
-                if not crew.record.get("pane") and crew.record.get("status") == "needs_attention":
+                attention = (
+                    None
+                    if paneless or failed or sample[0] is None
+                    else attend(crew, assignment, sample, at, screen)
+                )
+                # The screen read before the lock counts only for this assignment, and not
+                # once an attention episode has shown the captain this screen.
+                read_pane = (
+                    looked is not None
+                    and looked[0] == assignment["id"]
+                    and not assignment.get("attention")
+                )
+                if failed:
                     status, summary = (
                         "error",
                         "Crew startup failed; inspect before explicit done/handoff.",
                     )
-                elif (
-                    live == "blocked" or (read_pane and crew.record.get("provider") == "codex")
-                ) and (screen := startup_attention(crew)):
+                elif attention:
+                    # A notice, so its Herdr evidence outlives the acknowledgement. One this
+                    # poll queued first (hooks_live) is the older, so it is delivered first.
+                    notice(assignment, *attention)
+                    entry = assignment["notices"][seq]
+                    status, summary = entry["status"], entry["summary"]
+                    seq += 1
+                elif read_pane and looked[1]:
                     # A ring held at this screen already posted its own notice.
                     held = assignment.get("hooks_untrusted") or assignment.get("startup_update")
                     status = None if held else "error"
-                    summary = screen
-                elif live == "blocked":
-                    # One notice per block, even if a tool event cleared native_status.
-                    held = assignment.get("blocked_notice") is not None
-                    status = None if held else "awaiting_approval"
-                    summary = prompt_summary(crew) if status and native_status != status else ""
-                elif read_pane and (summary := modal_summary(crew, assignment)) is not None:
-                    status = "awaiting_approval"
-                elif not paneless and stalled(crew, assignment):
-                    status, summary = "error", STALLED_SUMMARY
+                    summary = looked[1]
+                elif read_pane and looked[2] is not None:
+                    if isinstance(looked[2], Exception):
+                        raise looked[2]
+                    status, summary = "awaiting_approval", looked[2]
                 else:
                     status = None
-                if status is None or status == native_status:
+                if not attention and (status is None or status == native_status):
                     assignment["scan_offset"] = offset
-                    if status is None and (read_pane or live not in (None, "blocked")):
+                    if status is None and (read_pane or ends_block(sample)):
                         # Only a pane we actually looked at clears the dedupe. Clearing on
                         # the absence of a read wiped it every poll for event-driven
                         # providers, which is how one approval surfaced once per event.
                         assignment["native_status"] = None
                     return result(crew, assignment, "working")
-                native_status = status
+                if not attention:
+                    native_status = status
         if status == "awaiting_approval":
             assignment["blocked_notice"] = blocked_id
         generation = assignment.get("generation", 0) + 1
@@ -1411,7 +1596,7 @@ def wait_all(current, timeout):
 
 
 def wait(crew, timeout, ack=None):
-    """Poll on native signals; the one pane read a hookless provider needs is throttled.
+    """Poll native signals and Herdr status every tick; only screen heuristics are throttled.
 
     A wait that reaches its deadline with nothing to report returns `timeout`, and a
     captain reading that is a model turn spent to learn nothing. `timeout` therefore
