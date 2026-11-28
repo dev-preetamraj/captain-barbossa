@@ -454,6 +454,29 @@ class Pane:
         agent = runtime.herdr("agent", "get", self.agent_name, timeout=5).get("agent", {})
         return agent.get("agent_status")
 
+    def pane_record(self, pane_id):
+        """Herdr's record of a pane, readable before its agent is registered by name.
+
+        `agent` is absent while no native agent runs in it."""
+        return runtime.herdr("pane", "get", pane_id, timeout=5).get("pane", {})
+
+    def screen(self, pane_id=None):
+        """The visible screen's non-blank lines, by pane ID when known."""
+        if not pane_id:
+            return self.lines(keep_status=True, source="visible")
+        output = runtime.herdr(
+            "pane",
+            "read",
+            pane_id,
+            "--source",
+            "visible",
+            "--lines",
+            str(TAIL_LINES),
+            raw=True,
+            timeout=10,
+        )
+        return [line.strip() for line in output.splitlines() if line.strip()]
+
     def nudge_block(self, crew):
         """Return the live pane gate holding a mail nudge, if any."""
         status = self.agent_status()
@@ -495,7 +518,8 @@ class Pane:
         """Wait for the native CLI to hold a settled idle state, not just to be detected.
 
         A TUI that has only just drawn itself silently drops a submitted prompt, so idle is
-        trusted only after READY_POLLS consecutive polls.
+        trusted only after READY_POLLS consecutive polls. Returns the status it settled on;
+        a blocked agent is running and registered, held at a screen that needs the user.
         """
         deadline = time.monotonic() + timeout
         idle_polls = 0
@@ -514,9 +538,7 @@ class Pane:
                             f"Agent rename failed for pane {pane_id}: "
                             f"expected {self.agent_name!r}, got {actual_name!r}."
                         )
-                    if status == "blocked":
-                        raise CaptainError("The native agent is waiting for input or approval.")
-                    return
+                    return status
             time.sleep(POLL_INTERVAL)
         raise CaptainError(f"{provider} did not become ready within {timeout} seconds.")
 

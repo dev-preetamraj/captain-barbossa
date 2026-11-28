@@ -45,6 +45,12 @@ class DrainPumpTests(SessionCase):
         # A reported draft gate makes ring read the composer to age it; these fakes do not
         # model a screen, and an unpatched read would reach for the real herdr.
         self.draft = self.enterContext(patch.object(Pane, "draft", return_value="held draft"))
+        # The pane by ID: present and idle even while the agent name is unregistered.
+        self.enterContext(
+            patch.object(
+                Pane, "pane_record", return_value={"agent": "codex", "agent_status": "idle"}
+            )
+        )
         assignment = protocol.begin(self.crew, self.project, "original", ["src"], ["edit"])
         self.assignment = assignment["id"]
 
@@ -223,9 +229,10 @@ class DrainPumpTests(SessionCase):
             with patch.object(protocol.time, "sleep", side_effect=tick):
                 code, result = self.wait_command(timeout=protocol.DRAIN_INTERVAL + 1)
             self.assertEqual(code, 0)
-            self.assertEqual(result["status"], "idle")
+            # Delivered and acted on: the crew's own Stop is inactivity, so nothing to report.
+            self.assertEqual(result["status"], "timeout")
             self.assertEqual(result["assignment_id"], self.assignment)
-            self.assertTrue(result["delivery_id"])
+            self.assertIsNone(result["delivery_id"])
             self.nudge.assert_called_once()
             self.assertIn("original", self.nudge.call_args.args[1])
             self.assertEqual(protocol.unread(self.crew), [])
@@ -288,10 +295,9 @@ class DrainPumpTests(SessionCase):
         variants = [
             {**original, "incarnation_id": "other"},
             {**original, "id": "replacement"},
-            {**original, "turn_started": True},
         ]
         for assignment in variants:
-            with self.subTest(assignment=assignment["id"], turn=assignment.get("turn_started")):
+            with self.subTest(assignment=assignment["id"]):
                 self.assertFalse(
                     protocol.awaiting_registration(
                         self.crew,
@@ -308,7 +314,6 @@ class DrainPumpTests(SessionCase):
         error = CaptainError("agent_not_found")
         self.assertTrue(protocol.awaiting_registration(self.crew, message_id, None, error))
         self.native_event("PostToolUse")
-        self.assertFalse(protocol.active_assignment(self.crew).get("turn_started"))
         self.assertFalse(protocol.awaiting_registration(self.crew, message_id, None, error))
         protocol.ring(self.crew, message_id)
         self.assertEqual(protocol.unread(self.crew), [])

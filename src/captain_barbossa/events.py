@@ -151,12 +151,12 @@ def mail_context(events_path):
     return render(directory, messages), [message["id"] for message in messages]
 
 
-def receipt_for(events_path, message_ids):
+def receipt_for(events_path, message_ids, started=False):
     """Stamp the receipt for whatever mail_context just rendered and flushed."""
     from .protocol import receipt
 
     directory, crew_id, _ = crew_for_events(events_path)
-    receipt(directory, crew_id, message_ids)
+    receipt(directory, crew_id, message_ids, started)
 
 
 def stop_reason(events_path):
@@ -669,5 +669,6 @@ def deliver_mail(events_path, hook):
         payload["reason"] = "Mail from the captain arrived; act on it before finishing."
     print(json.dumps(payload))
     sys.stdout.flush()
-    # Only after the flush: at-least-once, since a duplicate beats a silent loss.
-    receipt_for(events_path, message_ids)
+    # Only after the flush: at-least-once, since a duplicate beats a silent loss. A prompt
+    # or a blocked Stop runs a turn on this body; SessionStart only hands it over.
+    receipt_for(events_path, message_ids, started=hook != "SessionStart")

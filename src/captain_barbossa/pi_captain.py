@@ -16,7 +16,7 @@ import { setTimeout as delay } from "node:timers/promises";
 const LIMIT = 2000;
 const FLOOR = 60;
 const STATUSES = new Set(["timeout", "working", "idle", "asked", "awaiting_approval",
-  "done", "error", "bounced", "held"]);
+  "needs_attention", "done", "error", "bounced", "held"]);
 
 // Assignment watches reconcile at tool boundaries and on this fallback interval.
 const SWEEP = 5000;

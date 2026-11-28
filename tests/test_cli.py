@@ -258,21 +258,10 @@ class CliCommandTests(SessionCase):
             "wait", "Jack", "--json", "--ack", event["delivery_id"], "--timeout", "0"
         )
         self.assertEqual(code, 0)
-        native = json.loads(output)
-        self.assertEqual(native["status"], "idle")
-        self.assertNotEqual(native["delivery_id"], event["delivery_id"])
-        self.assertEqual(self.saved()["ack_seq"], 1)
-        self.assertEqual(self.saved()["offset"], 0)
-        code, repeated = self.run_cli("wait", "Jack", "--json", "--timeout", "0")
-        self.assertEqual(code, 0)
-        self.assertEqual(json.loads(repeated), native)
-        self.assertEqual(self.saved()["offset"], 0)
-        code, output = self.run_cli(
-            "wait", "Jack", "--json", "--ack", native["delivery_id"], "--timeout", "0"
-        )
-        self.assertEqual(code, 0)
+        # The crew's native Stop is inactivity, never a delivery.
         self.assertIsNone(json.loads(output)["delivery_id"])
-        self.assertEqual(self.saved()["offset"], self.crew.events.stat().st_size)
+        self.assertEqual(self.saved()["ack_seq"], 1)
+        self.assertEqual(self.saved()["scan_offset"], self.crew.events.stat().st_size)
         with patch.dict(
             os.environ,
             {"CAPTAIN_ROLE": "crew", "CAPTAIN_CREW": "jack", "CAPTAIN_INCARNATION": "first"},
